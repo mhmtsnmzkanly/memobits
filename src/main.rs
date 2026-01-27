@@ -11,23 +11,14 @@ use std::io::{self, BufRead, Write};
 use memobits::{Interpreter, Lexer, NativeRegistry, Parser};
 
 fn main() {
+    println!("Memobits interpreter\n");
     let mut args = env::args().skip(1);
     if let Some(path) = args.next() {
         run_file(&path);
-    } else {
-        repl();
+        return;
     }
-}
 
-fn run_file(path: &str) {
-    let src = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("okunamadı {}: {}", path, e);
-        std::process::exit(1);
-    });
-    run(&src);
-}
-
-fn repl() {
+    println!("[ repl mode on ]");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut interp = Interpreter::new(NativeRegistry::new());
@@ -46,6 +37,15 @@ fn repl() {
         run_with_interp(&mut interp, line);
     }
 }
+
+fn run_file(path: &str) {
+    let src = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("okunamadı {}: {}", path, e);
+        std::process::exit(1);
+    });
+    run(&src);
+}
+
 
 fn run(src: &str) {
     let native = NativeRegistry::new();
