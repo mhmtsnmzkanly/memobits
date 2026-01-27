@@ -16,6 +16,7 @@ impl NativeRegistry {
     pub fn new() -> Self {
         let mut fns = HashMap::new();
         fns.insert("print".into(), native_print as NativeFnType);
+        fns.insert("debug".into(), native_debug as NativeFnType);
         fns.insert("input".into(), native_input as NativeFnType);
         fns.insert("return".into(), native_return as NativeFnType);
         Self { fns }
@@ -37,6 +38,13 @@ fn native_print(args: &[Value]) -> EvalResult {
         }
         print!("{}", value_to_string(a));
     }
+    println!();
+    io::stdout().flush().map_err(|e| RuntimeError(e.to_string()))?;
+    Ok(Value::Unit)
+}
+
+fn native_debug(args: &[Value]) -> EvalResult {
+    dbg!(args);
     println!();
     io::stdout().flush().map_err(|e| RuntimeError(e.to_string()))?;
     Ok(Value::Unit)

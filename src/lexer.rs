@@ -569,7 +569,8 @@ impl<'a> Lexer<'a> {
             self.push(tok, lo, hi);
         }
 
-        self.tokens.push((Token::Eof, self.span(self.start_pos(), self.start_pos())));
+        self.tokens
+            .push((Token::Eof, self.span(self.start_pos(), self.start_pos())));
 
         if !self.errs.is_empty() {
             return Err(self.errs);
