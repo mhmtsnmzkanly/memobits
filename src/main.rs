@@ -18,7 +18,7 @@ fn main() {
         return;
     }
 
-    println!("[ repl mode on ]");
+    println!("[ repl mode on ]\nfor quitting repl mode use \";q\" command");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut interp = Interpreter::new(NativeRegistry::new());
