@@ -14,7 +14,13 @@ fn main() {
     println!("Memobits interpreter\n");
     let mut args = env::args().skip(1);
     if let Some(path) = args.next() {
-        run_file(&path);
+        let src = fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("okunamadı {}: {}", path, e);
+            std::process::exit(1);
+        });
+        let native = NativeRegistry::new();
+        let mut interp = Interpreter::new(native);
+        run_with_interp(&mut interp, &src);
         return;
     }
 
@@ -40,21 +46,6 @@ fn main() {
         }
         run_with_interp(&mut interp, line);
     }
-}
-
-fn run_file(path: &str) {
-    let src = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("okunamadı {}: {}", path, e);
-        std::process::exit(1);
-    });
-    run(&src);
-}
-
-
-fn run(src: &str) {
-    let native = NativeRegistry::new();
-    let mut interp = Interpreter::new(native);
-    run_with_interp(&mut interp, src);
 }
 
 fn run_with_interp(interp: &mut Interpreter, src: &str) {
