@@ -1,0 +1,29 @@
+// Fonksiyonlar: fn, lambda, first-class, cagri
+
+fn add(a: Int, b: Int) -> Int {
+    (a + b)
+}
+
+fn greet(name: String) -> String {
+    `Merhaba, {name}`
+}
+
+let double = x => x * 2;
+let triple = x => x * 3;
+
+let a = add(3, 7);
+native::print(`add(3, 7) = {a}`);
+
+let g = greet("Memobits");
+native::print(g);
+
+let d21 = double(21);
+let t11 = triple(11);
+native::print(`double(21) = {d21}`);
+native::print(`triple(11) = {t11}`);
+
+fn mul(a: Int, b: Int) -> Int {
+    (a * b)
+}
+let m67 = mul(6, 7);
+native::print(`mul(6, 7) = {m67}`);

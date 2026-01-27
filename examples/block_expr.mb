@@ -1,0 +1,14 @@
+// Block expression: { stmts } son deger
+
+let x = {
+    let a = 1;
+    let b = 2;
+    (a + b)
+};
+native::print(`block result: {x}`);
+
+let y = {
+    let t = 10;
+    (t * 2)
+};
+native::print(`y = {y}`);

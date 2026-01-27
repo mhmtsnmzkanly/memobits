@@ -1,0 +1,14 @@
+// var: mutable binding, assign
+
+var counter = 0;
+native::print(`start: {counter}`);
+
+counter = (counter + 1);
+counter = (counter + 1);
+native::print(`after +2: {counter}`);
+
+var x = 10;
+var y = 20;
+x = y;
+y = 0;
+native::print(`x={x} y={y}`);

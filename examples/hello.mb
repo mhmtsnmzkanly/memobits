@@ -1,0 +1,2 @@
+// Memobits örnek: hello world
+native::print("Merhaba, dunya!");

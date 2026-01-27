@@ -1,0 +1,22 @@
+// Option benzeri: Maybe enum, match (exhaustive). Match top-level.
+
+enum Maybe {
+    Nothing,
+    Just(Int)
+}
+
+match Maybe::Nothing {
+    Maybe::Nothing => native::print("yok"),
+    Maybe::Just(x) => {
+        let v = x;
+        native::print(`Just: {v}`)
+    }
+}
+
+match Maybe::Just(42) {
+    Maybe::Nothing => native::print("bos"),
+    Maybe::Just(y) => {
+        let d = (y * 2);
+        native::print(`iki kat: {d}`)
+    }
+}

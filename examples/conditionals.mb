@@ -1,0 +1,26 @@
+// if / else, ic ice
+
+let x = 5;
+if (x > 0) {
+    native::print("x pozitif")
+} else {
+    native::print("x negatif veya sifir")
+}
+
+let y = 0;
+if (y == 0) {
+    native::print("y sifir")
+} else {
+    if (y > 0) {
+        native::print("y pozitif")
+    } else {
+        native::print("y negatif")
+    }
+}
+
+let b = true;
+if (b) {
+    native::print("dogru")
+} else {
+    native::print("yanlis")
+}

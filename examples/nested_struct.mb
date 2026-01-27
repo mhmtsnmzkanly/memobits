@@ -1,0 +1,24 @@
+// Ici ice struct, alan erisimi
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+struct Rect {
+    top_left: Point,
+    bottom_right: Point
+}
+
+let p = Point { x: 1, y: 2 };
+let q = Point { x: 3, y: 4 };
+let r = Rect { top_left: p, bottom_right: q };
+
+let tl = r.top_left;
+let tx = tl.x;
+let ty = tl.y;
+native::print(`top_left: x={tx} y={ty}`);
+
+let br = r.bottom_right;
+let bx = br.x;
+native::print(`bottom_right x={bx}`);

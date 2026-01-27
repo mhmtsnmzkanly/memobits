@@ -1,0 +1,11 @@
+struct Player {
+name: String,
+points: Int,
+}
+
+fn Player_new() -> Player {
+    Player {
+    name: "Anon",
+    points: 0
+    }
+}

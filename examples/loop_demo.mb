@@ -1,0 +1,9 @@
+// loop, break, continue
+var i = 0;
+loop {
+    if i >= 5 { break; }
+    if i % 2 == 0 { i = i + 1; continue; }
+    native::print(`odd: {i}`);
+    i = i + 1;
+}
+native::print("done");

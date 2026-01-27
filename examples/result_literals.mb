@@ -1,0 +1,12 @@
+// Result<T,E>: Ok, Err literal, native::print ile
+
+let ok = Ok(42);
+native::print(ok);
+
+let err = Err("hata");
+native::print(err);
+
+let o = Ok(100);
+let e = Err("fail");
+native::print(o);
+native::print(e);
