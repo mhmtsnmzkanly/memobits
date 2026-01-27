@@ -31,8 +31,12 @@ fn main() {
             break;
         }
         let line = line.trim_end();
+
         if line.is_empty() {
             continue;
+        } else if line.starts_with(";q") {
+            println!("Quitting repl mode");
+            break;
         }
         run_with_interp(&mut interp, line);
     }
