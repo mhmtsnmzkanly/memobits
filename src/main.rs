@@ -8,16 +8,25 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 
-use memobits::{Interpreter, Lexer, NativeRegistry, Parser};
+use memobits::{Interpreter, Lexer, NativeRegistry, Parser, SyntaxAnalyzer, SyntaxError};
 
 fn main() {
-    println!("Memobits interpreter\n");
     let mut args = env::args().skip(1);
     if let Some(path) = args.next() {
         let src = fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("okunamadı {}: {}", path, e);
             std::process::exit(1);
         });
+
+        // SYNTAX ANALYZER CHECK
+        if let Some(check) = args.next() {
+            if check.starts_with("-sa") {
+                let mut sa = SyntaxAnalyzer::new(&src);
+                println!("{:#?}", sa.analyz());
+            }
+            return;
+        }
+
         let native = NativeRegistry::new();
         let mut interp = Interpreter::new(native);
         run_with_interp(&mut interp, &src);
@@ -59,6 +68,8 @@ fn run_with_interp(interp: &mut Interpreter, src: &str) {
             return;
         }
     };
+
+    println!("{:#?}", tokens);
 
     let program = match Parser::new(tokens).parse() {
         Ok(p) => p,

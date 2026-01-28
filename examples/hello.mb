@@ -1,2 +1,3 @@
 // Memobits örnek: hello world
-native::print("Merhaba, dunya!");
+let message : String = "Merhaba, dunya!";
+native::print(message);

@@ -57,7 +57,8 @@ impl Parser {
     }
 
     fn err(&mut self, msg: String) {
-        self.errs.push(ParseError(msg, Some(self.last_span.clone())));
+        self.errs
+            .push(ParseError(msg, Some(self.last_span.clone())));
     }
 
     fn is(&mut self, t: &Token) -> bool {
@@ -328,7 +329,9 @@ impl Parser {
                 let value = self.parse_expr()?;
                 return Some(Stmt::Assign { name, value });
             }
-            return Some(Stmt::Expr(self.parse_expr_postfix(Some(Expr::Ident(name)))?));
+            return Some(Stmt::Expr(
+                self.parse_expr_postfix(Some(Expr::Ident(name)))?,
+            ));
         }
         // Expression statement
         let e = self.parse_expr()?;
@@ -390,10 +393,7 @@ impl Parser {
                         break;
                     }
                 }
-                return Some(Pattern::StructLiteral {
-                    name,
-                    fields,
-                });
+                return Some(Pattern::StructLiteral { name, fields });
             }
             return Some(Pattern::Ident(name));
         }
@@ -402,7 +402,12 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Option<String> {
-        let (t, _) = self.advance().ok_or_else(|| { self.err("expected identifier".into()); }).ok()?;
+        let (t, _) = self
+            .advance()
+            .ok_or_else(|| {
+                self.err("expected identifier".into());
+            })
+            .ok()?;
         match t {
             Token::Ident(s) => Some(s),
             _ => {
@@ -494,7 +499,12 @@ impl Parser {
     }
 
     fn expect_int_lit(&mut self) -> Option<usize> {
-        let (t, _) = self.advance().ok_or_else(|| { self.err("expected integer".into()); }).ok()?;
+        let (t, _) = self
+            .advance()
+            .ok_or_else(|| {
+                self.err("expected integer".into());
+            })
+            .ok()?;
         match t {
             Token::IntLit(i) if i >= 0 => Some(i as usize),
             _ => {
@@ -668,7 +678,10 @@ impl Parser {
         self.bump_while_semi();
 
         // Template: TemplatePart | TemplateInterp ... TemplateEnd
-        if matches!(self.peek(), Some(Token::TemplatePart(_)) | Some(Token::TemplateInterp(_))) {
+        if matches!(
+            self.peek(),
+            Some(Token::TemplatePart(_)) | Some(Token::TemplateInterp(_))
+        ) {
             return self.parse_template();
         }
 
@@ -778,10 +791,7 @@ impl Parser {
                         break;
                     }
                 }
-                return Some(Expr::StructLiteral {
-                    name,
-                    fields,
-                });
+                return Some(Expr::StructLiteral { name, fields });
             }
             if self.eat(&Token::ColonColon) {
                 let variant = self.expect_ident()?;
