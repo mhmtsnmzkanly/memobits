@@ -1,3 +1,0 @@
-native::debug("12321", "223", 14521);
-let name : String = "Memo";
-native::debug("Merhaba dünya! Merhaba ", name, " !");

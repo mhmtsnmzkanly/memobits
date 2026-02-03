@@ -1,0 +1,14 @@
+// native::debug ornegi: runtime degerlerini ham gor
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+let p = Point { x: 3, y: 4 };
+let xs = [1, 2, 3];
+let name: String = "Memo";
+
+native::debug(p);
+native::debug(xs);
+native::debug("Merhaba dunya!", name, 14521);

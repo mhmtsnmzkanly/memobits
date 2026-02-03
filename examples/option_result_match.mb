@@ -1,0 +1,13 @@
+// Option ve Result icin match ornegi
+
+let a = Some(10);
+match a {
+    None => native::print("bos"),
+    Some(x) => native::print(`Some: {x}`)
+}
+
+let r = Ok(42);
+match r {
+    Ok(v) => native::print(`Ok: {v}`),
+    Err(e) => native::print(`Err: {e}`)
+}

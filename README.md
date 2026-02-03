@@ -35,13 +35,20 @@ cargo run --   # REPL
 | **var_mutation.mb** | `var`, atama |
 | **lists.mb** | list literal, index |
 | **arithmetic.mb** | Int/Float, aritmetik, karşılaştırma, mantık (`&&`, `\|\|`, `!`) |
-| **conditionals.mb** | `if` / `else`, iç içe |
-| **result_literals.mb** | `Ok`, `Err`, `native::print` |
+| **if_match_expr.mb** | `if` / `match` statement + expression |
 | **chars_floats.mb** | `Char`, `Float` |
 | **block_expr.mb** | block expression, son değer |
 | **fizzbuzz.mb** | FizzBuzz (`loop`, `if`, `%`) |
 | **nested_struct.mb** | iç içe struct, alan erişimi |
 | **comprehensive.mb** | struct, enum, fn, lambda, match, loop, list |
+| **option_result_match.mb** | `Some` / `None` / `Ok` / `Err` ile match |
+| **struct_match.mb** | struct pattern match |
+| **native_input.mb** | `native::input` |
+| **native_debug.mb** | `native::debug` (string ve struct dahil) |
+| **native_return.mb** | `native::return` (exit) |
+| **return_statement.mb** | `return` statement + `Ok`/`Err` literal |
+| **if_match_expr.mb** | `if` / `match` expression |
+| **map_hash.mb** | `Map` (HashMap) literal |
 
 ## Teknik dokümantasyon
 
@@ -53,14 +60,14 @@ Ayrıntılı dil spesifikasyonu, tip sistemi ve interpreter mimarisi için:
 
 ```
 src/
-  lexer.rs      — Tokenizer
-  parser.rs     — Recursive descent → AST
+  syntax_analyzer.rs — Lexer + Parser + hata raporlama
   ast.rs        — AST tanımları
   types.rs      — Tip sistemi
   value.rs      — Runtime Value
   environment.rs — Scope, binding
   native.rs     — native:: registry (print, input, return)
   interpreter.rs — AST-walking eval
+  type_checker.rs — Tip denetimi (taslak)
   main.rs       — Dosya / REPL girişi
 ```
 

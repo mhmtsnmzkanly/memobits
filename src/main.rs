@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 
-use memobits::{Interpreter, Lexer, NativeRegistry, Parser, SyntaxAnalyzer, SyntaxError};
+use memobits::{Interpreter, NativeRegistry, SyntaxAnalyzer};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -17,15 +17,6 @@ fn main() {
             eprintln!("okunamadı {}: {}", path, e);
             std::process::exit(1);
         });
-
-        // SYNTAX ANALYZER CHECK
-        if let Some(check) = args.next() {
-            if check.starts_with("-sa") {
-                let mut sa = SyntaxAnalyzer::new(&src);
-                println!("{:#?}", sa.analyz());
-            }
-            return;
-        }
 
         let native = NativeRegistry::new();
         let mut interp = Interpreter::new(native);
@@ -58,31 +49,19 @@ fn main() {
 }
 
 fn run_with_interp(interp: &mut Interpreter, src: &str) {
-    let tokens = match Lexer::new(src).lex() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("lex hatası:");
-            for m in e {
-                eprintln!("  {}", m);
+    // NOTE: Ana yol artik SyntaxAnalyzer -> AST -> Interpreter.
+    let mut sa = SyntaxAnalyzer::new(src);
+    match sa.analyz() {
+        Ok(program) => {
+            if let Err(e) = interp.run(&program) {
+                eprintln!("runtime hatası: {}", e);
             }
-            return;
         }
-    };
-
-    println!("{:#?}", tokens);
-
-    let program = match Parser::new(tokens).parse() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("parse hatası:");
-            for m in e {
-                eprintln!("  {}: {:?}", m.0, m.1);
+        Err(errs) => {
+            eprintln!("syntax hatası:");
+            for e in errs {
+                eprintln!("  {}", e);
             }
-            return;
         }
-    };
-
-    if let Err(e) = interp.run(&program) {
-        eprintln!("runtime hatası: {}", e);
     }
 }

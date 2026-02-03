@@ -1,0 +1,10 @@
+// Map(HashMap) ornegi: key'ler Int/Bool/Char/String olabilir
+
+let m = { "a" => 1, "b" => 2, "c" => 3 };
+native::print(m);
+
+let flags = { true => "yes", false => "no" };
+native::print(flags);
+
+let codes = { 'a' => 97, 'b' => 98 };
+native::print(codes);

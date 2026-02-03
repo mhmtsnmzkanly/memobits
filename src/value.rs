@@ -15,15 +15,12 @@ pub enum Value {
     String(Rc<str>),
     Unit,
 
-    Option(Option<Box<Value>>),
-    Result(Result<Box<Value>, Box<Value>>),
-
     Struct { name: String, fields: HashMap<String, Value> },
     Variant { enum_name: String, variant: String, data: Option<Box<Value>> },
 
     List(Rc<RefCell<Vec<Value>>>),
     Array(Rc<[Value]>),
-    Map(Rc<RefCell<Vec<(Value, Value)>>>),
+    Map(Rc<RefCell<HashMap<MapKey, Value>>>),
 
     NativeFn(String, NativeFn),
     Lambda(LambdaClosure),
@@ -61,5 +58,25 @@ impl std::error::Error for RuntimeError {}
 impl Value {
     pub fn string(s: impl Into<String>) -> Self {
         Value::String(Rc::from(s.into().as_str()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MapKey {
+    Int(i64),
+    Bool(bool),
+    Char(char),
+    String(String),
+}
+
+impl MapKey {
+    pub fn from_value(v: &Value) -> Option<Self> {
+        match v {
+            Value::Int(i) => Some(MapKey::Int(*i)),
+            Value::Bool(b) => Some(MapKey::Bool(*b)),
+            Value::Char(c) => Some(MapKey::Char(*c)),
+            Value::String(s) => Some(MapKey::String(s.to_string())),
+            _ => None,
+        }
     }
 }

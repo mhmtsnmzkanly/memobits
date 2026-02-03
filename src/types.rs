@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
+    // NOTE: Tip cikarimi asamasinda gecici olarak kullanilan tip.
+    Unknown,
     Int,
     Float,
     Bool,

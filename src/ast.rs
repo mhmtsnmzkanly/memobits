@@ -66,6 +66,8 @@ pub enum Stmt {
     If { cond: Expr, then_b: Vec<Stmt>, else_b: Option<Vec<Stmt>> },
     Loop(Vec<Stmt>),
     Match { scrutinee: Expr, arms: Vec<MatchArm> },
+    /// return expr;  (expr opsiyonel)
+    Return(Option<Expr>),
     Break,
     Continue,
 }

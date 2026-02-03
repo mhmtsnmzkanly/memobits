@@ -8,6 +8,7 @@ use crate::ast::*;
 use crate::environment::Environment;
 use crate::native::NativeRegistry;
 use crate::value::{Value, EvalResult, RuntimeError, LambdaClosure};
+use crate::value::MapKey;
 
 #[derive(Clone)]
 pub struct Interpreter {
@@ -22,6 +23,7 @@ pub enum Flow {
     Next,
     Break,
     Continue,
+    Return(Value),
 }
 
 impl Interpreter {
@@ -80,6 +82,7 @@ impl Interpreter {
                     Flow::Next => Ok(Value::Unit),
                     Flow::Break => Err(RuntimeError("break outside loop".into())),
                     Flow::Continue => Err(RuntimeError("continue outside loop".into())),
+                    Flow::Return(_) => Err(RuntimeError("return outside function".into())),
                 }
             }
         }
@@ -137,6 +140,7 @@ impl Interpreter {
                 match self.run_stmts(body) {
                     Ok(Flow::Break) => return Ok(Flow::Next),
                     Ok(Flow::Continue) | Ok(Flow::Next) => {}
+                    Ok(Flow::Return(v)) => return Ok(Flow::Return(v)),
                     Err(e) => {
                         if e.0.starts_with("exit:") {
                             let code = e.0.strip_prefix("exit:").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -159,6 +163,13 @@ impl Interpreter {
                 }
                 Err(RuntimeError("non-exhaustive match".into()))
             }
+            Stmt::Return(expr) => {
+                let v = match expr {
+                    Some(e) => self.eval(e)?,
+                    None => Value::Unit,
+                };
+                Ok(Flow::Return(v))
+            }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
         }
@@ -169,30 +180,69 @@ impl Interpreter {
         p: &Pattern,
         v: &Value,
     ) -> Result<Option<Rc<RefCell<Environment>>>, RuntimeError> {
+        // NOTE: Tek bir env uzerinde birden fazla binding'i biriktirebilmek icin
+        // her eslesmede yeni bir child env olusturuyoruz.
+        let ext = Rc::new(RefCell::new(Environment::with_parent(self.env.clone())));
+        if self.match_pattern_into(p, v, ext.clone())? {
+            Ok(Some(ext))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn match_pattern_into(
+        &mut self,
+        p: &Pattern,
+        v: &Value,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<bool, RuntimeError> {
         match (p, v) {
-            (Pattern::Wildcard, _) => Ok(Some(self.env.clone())),
+            (Pattern::Wildcard, _) => Ok(true),
             (Pattern::Ident(name), _) => {
-                let ext = Rc::new(RefCell::new(Environment::with_parent(self.env.clone())));
-                ext.borrow_mut().define(name.clone(), v.clone(), false);
-                Ok(Some(ext))
+                env.borrow_mut().define(name.clone(), v.clone(), false);
+                Ok(true)
             }
-            (Pattern::Literal(Literal::Int(i)), Value::Int(j)) if *i == *j => Ok(Some(self.env.clone())),
-            (Pattern::Literal(Literal::Bool(a)), Value::Bool(b)) if *a == *b => Ok(Some(self.env.clone())),
-            (Pattern::Literal(Literal::None), Value::Option(None)) => Ok(Some(self.env.clone())),
-            (Pattern::Variant { enum_name, variant, inner }, _) if enum_name == "Option" && variant == "Some" => {
-                let Value::Option(Some(ref d)) = v else { return Ok(None) };
-                let Some(pat) = inner else { return Ok(Some(self.env.clone())) };
-                self.match_pattern(pat, d)
+            (Pattern::Literal(Literal::Int(i)), Value::Int(j)) => Ok(*i == *j),
+            (Pattern::Literal(Literal::Float(a)), Value::Float(b)) => Ok(*a == *b),
+            (Pattern::Literal(Literal::Bool(a)), Value::Bool(b)) => Ok(*a == *b),
+            (Pattern::Literal(Literal::Char(a)), Value::Char(b)) => Ok(*a == *b),
+            (Pattern::Literal(Literal::String(a)), Value::String(b)) => Ok(a.as_str() == b.as_ref()),
+            // NOTE: Option degerleri Variant(Option::Some/None) olarak temsil ediliyor.
+            (Pattern::Literal(Literal::None), Value::Variant { enum_name, variant, data })
+                if enum_name == "Option" && variant == "None" && data.is_none() =>
+            {
+                Ok(true)
             }
-            (Pattern::Variant { enum_name, variant, inner }, Value::Variant { enum_name: en, variant: vn, data }) if enum_name == en && variant == vn => {
-                let ext = Rc::new(RefCell::new(Environment::with_parent(self.env.clone())));
-                match (inner, data) {
-                    (Some(pat), Some(d)) => self.match_pattern(pat, d),
-                    (None, None) => Ok(Some(ext)),
-                    _ => Ok(None),
+            (Pattern::StructLiteral { name, fields }, Value::Struct { name: vn, fields: vals }) => {
+                if name != vn {
+                    return Ok(false);
+                }
+                self.validate_struct_pattern(name, fields)?;
+                for (fname, pat) in fields {
+                    let Some(fv) = vals.get(fname) else { return Ok(false) };
+                    if !self.match_pattern_into(pat, fv, env.clone())? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Pattern::Variant { enum_name, variant, inner }, Value::Variant { enum_name: en, variant: vn, data })
+                if enum_name == en && variant == vn =>
+            {
+                let expects_data = self.enum_variant_expects_data(enum_name, variant)?;
+                match (expects_data, inner, data) {
+                    (Some(true), Some(pat), Some(d)) => self.match_pattern_into(pat, d, env),
+                    (Some(true), None, Some(_)) => Ok(true),
+                    (Some(true), _, None) => Ok(false),
+                    (Some(false), None, None) => Ok(true),
+                    (Some(false), Some(_), _) => Err(RuntimeError(format!(
+                        "pattern has data but variant `{}`::`{}` has no data",
+                        enum_name, variant
+                    ))),
+                    _ => Ok(false),
                 }
             }
-            _ => Ok(None),
+            _ => Ok(false),
         }
     }
 
@@ -230,19 +280,10 @@ impl Interpreter {
                 self.call(&f, &arg_vals)
             }
             Expr::Block(stmts) => {
-                let prev = self.env.clone();
-                self.env = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
-                let mut last = Value::Unit;
-                for s in stmts {
-                    match s {
-                        Stmt::Expr(e) => last = self.eval(e)?,
-                        _ => { self.run_stmt(s)?; }
-                    }
-                }
-                self.env = prev;
-                Ok(last)
+                self.eval_block_value(stmts)
             }
             Expr::StructLiteral { name, fields } => {
+                self.validate_struct_literal(name, fields)?;
                 let mut map = HashMap::new();
                 for (f, ex) in fields {
                     map.insert(f.clone(), self.eval(ex)?);
@@ -250,7 +291,11 @@ impl Interpreter {
                 Ok(Value::Struct { name: name.clone(), fields: map })
             }
             Expr::VariantLiteral { enum_name, variant, data } => {
-                let d = data.as_ref().map(|e| Box::new(self.eval(e).unwrap()));
+                self.validate_variant_literal(enum_name, variant, data.as_deref())?;
+                let d = match data {
+                    Some(e) => Some(Box::new(self.eval(e)?)),
+                    None => None,
+                };
                 Ok(Value::Variant { enum_name: enum_name.clone(), variant: variant.clone(), data: d })
             }
             Expr::FieldAccess { base, field } => {
@@ -306,14 +351,75 @@ impl Interpreter {
                 }))
             }
             Expr::MapLiteral(pairs) => {
-                let v: Vec<(Value, Value)> = pairs
-                    .iter()
-                    .map(|(k, v)| Ok((self.eval(k)?, self.eval(v)?)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Map(Rc::new(RefCell::new(v))))
+                let mut m = HashMap::new();
+                for (k, v) in pairs {
+                    let key_val = self.eval(k)?;
+                    let key = MapKey::from_value(&key_val).ok_or_else(|| {
+                        RuntimeError("map key must be Int/Bool/Char/String".into())
+                    })?;
+                    let val = self.eval(v)?;
+                    m.insert(key, val);
+                }
+                Ok(Value::Map(Rc::new(RefCell::new(m))))
             }
-            Expr::If { .. } | Expr::Match { .. } => Err(RuntimeError("if/match as expression not implemented".into())),
+            Expr::If { cond, then_b, else_b } => {
+                let c = self.eval(cond)?;
+                let b = match &c {
+                    Value::Bool(true) => true,
+                    Value::Bool(false) => false,
+                    _ => return Err(RuntimeError("if condition must be Bool".into())),
+                };
+                if b {
+                    self.eval_block_value(then_b)
+                } else if let Some(eb) = else_b {
+                    self.eval_block_value(eb)
+                } else {
+                    Ok(Value::Unit)
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                let v = self.eval(scrutinee)?;
+                for arm in arms {
+                    if let Some(env_ext) = self.match_pattern(&arm.pattern, &v)? {
+                        let prev = self.env.clone();
+                        self.env = env_ext;
+                        let r = self.eval_block_value(&arm.body);
+                        self.env = prev;
+                        return r;
+                    }
+                }
+                Err(RuntimeError("non-exhaustive match".into()))
+            }
         }
+    }
+
+    fn eval_block_value(&mut self, stmts: &[Stmt]) -> EvalResult {
+        // NOTE: Block expression icin yeni scope olusturulur.
+        let prev = self.env.clone();
+        self.env = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
+        let mut last = Value::Unit;
+        for s in stmts {
+            match s {
+                Stmt::Expr(e) => last = self.eval(e)?,
+                _ => match self.run_stmt(s)? {
+                    Flow::Next => {}
+                    Flow::Break => {
+                        self.env = prev;
+                        return Err(RuntimeError("break in expression block".into()));
+                    }
+                    Flow::Continue => {
+                        self.env = prev;
+                        return Err(RuntimeError("continue in expression block".into()));
+                    }
+                    Flow::Return(_) => {
+                        self.env = prev;
+                        return Err(RuntimeError("return in expression block".into()));
+                    }
+                },
+            }
+        }
+        self.env = prev;
+        Ok(last)
     }
 
     fn eval_literal(&mut self, l: &Literal) -> EvalResult {
@@ -324,11 +430,141 @@ impl Interpreter {
             Literal::Char(c) => Ok(Value::Char(*c)),
             Literal::String(s) => Ok(Value::String((*s).clone().into())),
             Literal::Unit => Ok(Value::Unit),
-            Literal::None => Ok(Value::Option(None)),
-            Literal::Some(e) => Ok(Value::Option(Some(Box::new(self.eval(e)?)))),
-            Literal::Ok(e) => Ok(Value::Result(Ok(Box::new(self.eval(e)?)))),
-            Literal::Err(e) => Ok(Value::Result(Err(Box::new(self.eval(e)?)))),
+            // NOTE: Option/Result literal'leri de Variant olarak temsili ediliyor.
+            Literal::None => Ok(Value::Variant {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                data: None,
+            }),
+            Literal::Some(e) => Ok(Value::Variant {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                data: Some(Box::new(self.eval(e)?)),
+            }),
+            Literal::Ok(e) => Ok(Value::Variant {
+                enum_name: "Result".to_string(),
+                variant: "Ok".to_string(),
+                data: Some(Box::new(self.eval(e)?)),
+            }),
+            Literal::Err(e) => Ok(Value::Variant {
+                enum_name: "Result".to_string(),
+                variant: "Err".to_string(),
+                data: Some(Box::new(self.eval(e)?)),
+            }),
         }
+    }
+
+    fn validate_struct_literal(&self, name: &str, fields: &[(String, Expr)]) -> Result<(), RuntimeError> {
+        let def = self
+            .struct_defs
+            .get(name)
+            .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
+        let mut def_fields: std::collections::HashSet<&str> =
+            def.fields.iter().map(|(n, _)| n.as_str()).collect();
+        for (f, _) in fields {
+            if !def_fields.remove(f.as_str()) {
+                return Err(RuntimeError(format!(
+                    "unknown field `{}` for struct `{}`",
+                    f, name
+                )));
+            }
+        }
+        if !def_fields.is_empty() {
+            let missing: Vec<&str> = def_fields.into_iter().collect();
+            return Err(RuntimeError(format!(
+                "missing field(s) for struct `{}`: {}",
+                name,
+                missing.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_struct_pattern(
+        &self,
+        name: &str,
+        fields: &[(String, Pattern)],
+    ) -> Result<(), RuntimeError> {
+        let def = self
+            .struct_defs
+            .get(name)
+            .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
+        let def_fields: std::collections::HashSet<&str> =
+            def.fields.iter().map(|(n, _)| n.as_str()).collect();
+        for (f, _) in fields {
+            if !def_fields.contains(f.as_str()) {
+                return Err(RuntimeError(format!(
+                    "unknown field `{}` in pattern for struct `{}`",
+                    f, name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_variant_literal(
+        &self,
+        enum_name: &str,
+        variant: &str,
+        data: Option<&Expr>,
+    ) -> Result<(), RuntimeError> {
+        let expects_data = self.enum_variant_expects_data(enum_name, variant)?;
+        match (expects_data, data) {
+            (Some(true), Some(_)) => Ok(()),
+            (Some(true), None) => Err(RuntimeError(format!(
+                "variant `{}`::`{}` expects data",
+                enum_name, variant
+            ))),
+            (Some(false), None) => Ok(()),
+            (Some(false), Some(_)) => Err(RuntimeError(format!(
+                "variant `{}`::`{}` does not take data",
+                enum_name, variant
+            ))),
+            (None, _) => Err(RuntimeError(format!(
+                "unknown enum `{}`",
+                enum_name
+            ))),
+        }
+    }
+
+    fn enum_variant_expects_data(
+        &self,
+        enum_name: &str,
+        variant: &str,
+    ) -> Result<Option<bool>, RuntimeError> {
+        if enum_name == "Option" {
+            return match variant {
+                "Some" => Ok(Some(true)),
+                "None" => Ok(Some(false)),
+                _ => Err(RuntimeError(format!(
+                    "unknown variant `{}` for enum `Option`",
+                    variant
+                ))),
+            };
+        }
+        if enum_name == "Result" {
+            return match variant {
+                "Ok" => Ok(Some(true)),
+                "Err" => Ok(Some(true)),
+                _ => Err(RuntimeError(format!(
+                    "unknown variant `{}` for enum `Result`",
+                    variant
+                ))),
+            };
+        }
+        let def = self
+            .enum_defs
+            .get(enum_name)
+            .ok_or_else(|| RuntimeError(format!("unknown enum `{}`", enum_name)))?;
+        let v = def
+            .variants
+            .iter()
+            .find(|v| v.name == variant)
+            .ok_or_else(|| RuntimeError(format!(
+                "unknown variant `{}` for enum `{}`",
+                variant, enum_name
+            )))?;
+        Ok(Some(v.data.is_some()))
     }
 
     fn eval_binop(&mut self, op: BinOp, l: &Value, r: &Value) -> EvalResult {
@@ -401,7 +637,12 @@ impl Interpreter {
                         for s in stmts {
                             match s {
                                 Stmt::Expr(e) => last = interp.eval(e)?,
-                                _ => { interp.run_stmt(s)?; }
+                                _ => match interp.run_stmt(s)? {
+                                    Flow::Next => {}
+                                    Flow::Return(v) => return Ok(v),
+                                    Flow::Break => return Err(RuntimeError("break outside loop".into())),
+                                    Flow::Continue => return Err(RuntimeError("continue outside loop".into())),
+                                },
                             }
                         }
                         Ok(last)

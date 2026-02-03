@@ -1,5 +1,6 @@
-// if / else, ic ice
+// if/else statement ve if/match expression ornegi
 
+// Statement olarak if/else
 let x = 5;
 if (x > 0) {
     native::print("x pozitif")
@@ -24,3 +25,17 @@ if (b) {
 } else {
     native::print("yanlis")
 }
+
+// Expression olarak if
+let n = 7;
+let label = if (n % 2 == 0) { "even" } else { "odd" };
+native::print(`n is {label}`);
+
+// Expression olarak match
+let v = Some(3);
+let doubled = match v {
+    None => 0,
+    Some(k) => (k * 2)
+};
+
+native::print(`doubled = {doubled}`);

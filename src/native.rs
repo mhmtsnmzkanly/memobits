@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::value::{Value, EvalResult, RuntimeError};
+use crate::value::{MapKey, Value, EvalResult, RuntimeError};
 
 #[derive(Clone)]
 pub struct NativeRegistry {
@@ -58,10 +58,6 @@ pub fn value_to_string(v: &Value) -> String {
         Value::Char(c) => c.to_string(),
         Value::String(s) => s.to_string(),
         Value::Unit => "()".to_string(),
-        Value::Option(Some(x)) => value_to_string(x),
-        Value::Option(None) => "None".to_string(),
-        Value::Result(Ok(x)) => format!("Ok({})", value_to_string(x)),
-        Value::Result(Err(e)) => format!("Err({})", value_to_string(e)),
         Value::Struct { name, fields } => {
             let fs: Vec<_> = fields
                 .iter()
@@ -69,10 +65,28 @@ pub fn value_to_string(v: &Value) -> String {
                 .collect();
             format!("{} {{ {} }}", name, fs.join(", "))
         }
-        Value::Variant { enum_name, variant, data } => match data {
-            Some(d) => format!("{}::{}({})", enum_name, variant, value_to_string(d.as_ref())),
-            None => format!("{}::{}", enum_name, variant),
-        },
+        // NOTE: Option/Result degerleri de Variant olarak temsili ediliyor.
+        // Kullaniciya eski, kisa gorunumu veriyoruz.
+        Value::Variant { enum_name, variant, data } => {
+            if enum_name == "Option" {
+                return match (variant.as_str(), data) {
+                    ("None", None) => "None".to_string(),
+                    ("Some", Some(d)) => format!("Some({})", value_to_string(d.as_ref())),
+                    _ => format!("{}::{}", enum_name, variant),
+                };
+            }
+            if enum_name == "Result" {
+                return match (variant.as_str(), data) {
+                    ("Ok", Some(d)) => format!("Ok({})", value_to_string(d.as_ref())),
+                    ("Err", Some(d)) => format!("Err({})", value_to_string(d.as_ref())),
+                    _ => format!("{}::{}", enum_name, variant),
+                };
+            }
+            match data {
+                Some(d) => format!("{}::{}({})", enum_name, variant, value_to_string(d.as_ref())),
+                None => format!("{}::{}", enum_name, variant),
+            }
+        }
         Value::List(vec) => {
             let inner: Vec<_> = vec.borrow().iter().map(value_to_string).collect();
             format!("[{}]", inner.join(", "))
@@ -85,7 +99,7 @@ pub fn value_to_string(v: &Value) -> String {
             let inner: Vec<_> = m
                 .borrow()
                 .iter()
-                .map(|(k, v)| format!("{} => {}", value_to_string(k), value_to_string(v)))
+                .map(|(k, v)| format!("{} => {}", map_key_to_string(k), value_to_string(v)))
                 .collect();
             format!("{{ {} }}", inner.join(", "))
         }
@@ -111,4 +125,13 @@ fn native_return(args: &[Value]) -> EvalResult {
         _ => 0,
     };
     Err(RuntimeError(format!("exit:{}", code)))
+}
+
+fn map_key_to_string(k: &MapKey) -> String {
+    match k {
+        MapKey::Int(i) => i.to_string(),
+        MapKey::Bool(b) => b.to_string(),
+        MapKey::Char(c) => c.to_string(),
+        MapKey::String(s) => s.clone(),
+    }
 }

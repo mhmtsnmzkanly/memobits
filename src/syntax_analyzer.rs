@@ -1,16 +1,109 @@
-use crate::ast::*;
-//use crate::types::Type;
-use logos::*;
+//! SyntaxAnalyzer: logos tabanli lexer + parser + hata raporlama.
+//! Not: Lexer/Parser artik burada birlesik. Disarida ayri moduller yok.
 
-#[derive(Default, Clone)]
-pub struct Helper {
-    line: usize,
-    column: usize,
+use logos::Logos;
+
+use crate::ast::*;
+use crate::types::Type;
+
+#[derive(Clone, Debug)]
+pub struct Span {
+    pub lo: usize,
+    pub hi: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Token {
+    // Keywords
+    Let,
+    Var,
+    Fn,
+    Struct,
+    Enum,
+    Match,
+    If,
+    Else,
+    Loop,
+    Return,
+    Break,
+    Continue,
+    True,
+    False,
+    Option,
+    Result,
+    Ok,
+    Err,
+    Some,
+    None,
+    Array,
+    List,
+    Map,
+    IntKw,
+    FloatKw,
+    BoolKw,
+    CharKw,
+    StringKw,
+    Native,
+
+    // Identifiers & names
+    Ident(String),
+    /// native::ident
+    NativeIdent(String),
+
+    // Literals
+    IntLit(i64),
+    FloatLit(f64),
+    CharLit(char),
+    /// "..." — no interpolation
+    StringLit(String),
+    /// `...` template: (literal, optional interp id) segments
+    TemplatePart(String),
+    TemplateInterp(String),
+    TemplateEnd,
+
+    // Operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Eq,
+    EqEq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    Not,
+    Arrow,    // ->
+    FatArrow, // =>
+
+    // Delimiters
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Colon,
+    Semi,
+    Dot,
+    ColonColon,
+
+    Eof,
+}
+
+impl Token {
+    pub fn is_eof(&self) -> bool {
+        matches!(self, Token::Eof)
+    }
 }
 
 #[derive(Logos, Debug, Clone, PartialEq)]
-#[logos(extras = Helper)]
-pub enum Token {
+enum SAToken {
     // ===== Keywords =====
     #[token("let")]
     Let,
@@ -18,16 +111,20 @@ pub enum Token {
     Var,
     #[token("fn")]
     Fn,
-    #[token("return")]
-    Return,
     #[token("struct")]
     Struct,
+    #[token("enum")]
+    Enum,
+    #[token("match")]
+    Match,
     #[token("if")]
     If,
     #[token("else")]
     Else,
     #[token("loop")]
     Loop,
+    #[token("return")]
+    Return,
     #[token("break")]
     Break,
     #[token("continue")]
@@ -37,6 +134,26 @@ pub enum Token {
     True,
     #[token("false")]
     False,
+
+    #[token("Option")]
+    Option,
+    #[token("Result")]
+    Result,
+    #[token("Ok")]
+    Ok,
+    #[token("Err")]
+    Err,
+    #[token("Some")]
+    Some,
+    #[token("None")]
+    None,
+
+    #[token("Array")]
+    Array,
+    #[token("List")]
+    List,
+    #[token("Map")]
+    Map,
 
     #[token("Int")]
     IntKw,
@@ -48,28 +165,29 @@ pub enum Token {
     CharKw,
     #[token("String")]
     StringKw,
+    #[token("native")]
+    Native,
 
     // ===== Operators (ORDER MATTERS) =====
+    #[token("&&")]
+    And,
+    #[token("||")]
+    Or,
     #[token("==")]
     EqEq,
     #[token("!=")]
-    NotEq,
+    Ne,
     #[token("<=")]
-    LtEq,
+    Le,
     #[token(">=")]
-    GtEq,
-    #[token("<")]
-    Lt,
-    #[token(">")]
-    Gt,
-
+    Ge,
     #[token("=>")]
     FatArrow,
     #[token("->")]
     Arrow,
 
     #[token("=")]
-    Assign,
+    Eq,
 
     #[token("+")]
     Plus,
@@ -79,8 +197,18 @@ pub enum Token {
     Star,
     #[token("/")]
     Slash,
+    #[token("%")]
+    Percent,
+    #[token("!")]
+    Not,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
 
     // ===== Delimiters =====
+    #[token("::")]
+    ColonColon,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -103,31 +231,28 @@ pub enum Token {
     Dot,
 
     // ===== Literals =====
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
+    #[regex(r"-?(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)", |lex| lex.slice().parse::<f64>().ok())]
     FloatLit(f64),
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    #[regex(r"-?\d+", |lex| lex.slice().parse::<i64>().ok())]
     IntLit(i64),
 
-    #[regex(r"'([^'\\]|\\.)'", |lex| {
-    lex.slice().chars().nth(1)
-    })]
+    #[regex(r"'([^'\\]|\\.)'", |lex| parse_char_literal(lex.slice()))]
     CharLit(char),
 
-    #[regex(r"`([^`\\]|\\.)*`", |lex| {
-    let s = lex.slice();
-    Some(s[1..s.len() - 1].to_string())
-    })]
-    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#, |lex| {
-    let s = lex.slice();
-    Some(s[1..s.len() - 1].to_string())
-    })]
+    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#, |lex| parse_string_literal(lex.slice()))]
     StringLit(String),
 
+    // Backtick template raw: iceri parse edilecek.
+    #[regex(r"`([^`\\]|\\.)*`", |lex| parse_template_literal(lex.slice()))]
+    TemplateRaw(String),
+
+    // ===== Native Identifier =====
+    #[regex(r"native::[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[8..].to_string())]
+    NativeIdent(String),
+
     // ===== Identifier =====
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| {
-    Some(lex.slice().to_string())
-    })]
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
 
     // ===== Skip =====
@@ -137,187 +262,10 @@ pub enum Token {
     Error,
 }
 
-impl Token {
-    // ===== Keywords =====
-    pub fn is_let(&self) -> bool {
-        matches!(self, Token::Let)
-    }
-    pub fn is_var(&self) -> bool {
-        matches!(self, Token::Var)
-    }
-    pub fn is_fn(&self) -> bool {
-        matches!(self, Token::Fn)
-    }
-    pub fn is_return(&self) -> bool {
-        matches!(self, Token::Return)
-    }
-    pub fn is_struct(&self) -> bool {
-        matches!(self, Token::Struct)
-    }
-    pub fn is_if(&self) -> bool {
-        matches!(self, Token::If)
-    }
-    pub fn is_else(&self) -> bool {
-        matches!(self, Token::Else)
-    }
-    pub fn is_loop(&self) -> bool {
-        matches!(self, Token::Loop)
-    }
-    pub fn is_break(&self) -> bool {
-        matches!(self, Token::Break)
-    }
-    pub fn is_continue(&self) -> bool {
-        matches!(self, Token::Continue)
-    }
-
-    pub fn is_true(&self) -> bool {
-        matches!(self, Token::True)
-    }
-    pub fn is_false(&self) -> bool {
-        matches!(self, Token::False)
-    }
-
-    pub fn is_int_kw(&self) -> bool {
-        matches!(self, Token::IntKw)
-    }
-    pub fn is_float_kw(&self) -> bool {
-        matches!(self, Token::FloatKw)
-    }
-    pub fn is_bool_kw(&self) -> bool {
-        matches!(self, Token::BoolKw)
-    }
-    pub fn is_char_kw(&self) -> bool {
-        matches!(self, Token::CharKw)
-    }
-    pub fn is_string_kw(&self) -> bool {
-        matches!(self, Token::StringKw)
-    }
-
-    // ===== Operators =====
-    pub fn is_eq_eq(&self) -> bool {
-        matches!(self, Token::EqEq)
-    }
-    pub fn is_not_eq(&self) -> bool {
-        matches!(self, Token::NotEq)
-    }
-    pub fn is_lt_eq(&self) -> bool {
-        matches!(self, Token::LtEq)
-    }
-    pub fn is_gt_eq(&self) -> bool {
-        matches!(self, Token::GtEq)
-    }
-    pub fn is_lt(&self) -> bool {
-        matches!(self, Token::Lt)
-    }
-    pub fn is_gt(&self) -> bool {
-        matches!(self, Token::Gt)
-    }
-
-    pub fn is_fat_arrow(&self) -> bool {
-        matches!(self, Token::FatArrow)
-    }
-    pub fn is_arrow(&self) -> bool {
-        matches!(self, Token::Arrow)
-    }
-
-    pub fn is_assign(&self) -> bool {
-        matches!(self, Token::Assign)
-    }
-
-    pub fn is_plus(&self) -> bool {
-        matches!(self, Token::Plus)
-    }
-    pub fn is_minus(&self) -> bool {
-        matches!(self, Token::Minus)
-    }
-    pub fn is_star(&self) -> bool {
-        matches!(self, Token::Star)
-    }
-    pub fn is_slash(&self) -> bool {
-        matches!(self, Token::Slash)
-    }
-
-    // ===== Delimiters =====
-    pub fn is_lparen(&self) -> bool {
-        matches!(self, Token::LParen)
-    }
-    pub fn is_rparen(&self) -> bool {
-        matches!(self, Token::RParen)
-    }
-    pub fn is_lbrace(&self) -> bool {
-        matches!(self, Token::LBrace)
-    }
-    pub fn is_rbrace(&self) -> bool {
-        matches!(self, Token::RBrace)
-    }
-    pub fn is_lbracket(&self) -> bool {
-        matches!(self, Token::LBracket)
-    }
-    pub fn is_rbracket(&self) -> bool {
-        matches!(self, Token::RBracket)
-    }
-    pub fn is_comma(&self) -> bool {
-        matches!(self, Token::Comma)
-    }
-    pub fn is_colon(&self) -> bool {
-        matches!(self, Token::Colon)
-    }
-    pub fn is_semi(&self) -> bool {
-        matches!(self, Token::Semi)
-    }
-    pub fn is_dot(&self) -> bool {
-        matches!(self, Token::Dot)
-    }
-
-    // ===== Literals =====
-    pub fn is_int_lit(&self) -> bool {
-        matches!(self, Token::IntLit(_))
-    }
-    pub fn is_float_lit(&self) -> bool {
-        matches!(self, Token::FloatLit(_))
-    }
-    pub fn is_char_lit(&self) -> bool {
-        matches!(self, Token::CharLit(_))
-    }
-    pub fn is_string_lit(&self) -> bool {
-        matches!(self, Token::StringLit(_))
-    }
-
-    // ===== Identifier =====
-    pub fn is_ident(&self) -> bool {
-        matches!(self, Token::Ident(_))
-    }
-
-    // ===== Error =====
-    pub fn is_error(&self) -> bool {
-        matches!(self, Token::Error)
-    }
-
-    // ==== Update position ====
-    pub fn update_position(lex: &mut logos::Lexer<Token>) {
-        let slice = lex.slice();
-
-        for ch in slice.chars() {
-            if ch == '\n' {
-                lex.extras.line += 1;
-                lex.extras.column = 0;
-            } else {
-                lex.extras.column += 1;
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SpannedToken {
-    pub token: Token,
-    pub span: (usize, usize),
-}
-
 #[derive(Debug, Clone)]
 pub struct SyntaxError {
-    pub pos: (usize, usize), // Error row-column
-    pub detail: String,      // Error info
+    pub pos: (usize, usize), // line-column (1-based)
+    pub detail: String,
 }
 
 impl SyntaxError {
@@ -328,61 +276,1312 @@ impl SyntaxError {
 
 impl std::fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Error on ({}:{}): {}",
-            self.pos.0, self.pos.1, self.detail
-        )
+        write!(f, "Error on ({}:{}): {}", self.pos.0, self.pos.1, self.detail)
     }
 }
+
 #[derive(Debug)]
 pub struct SyntaxAnalyzer {
-    tokens: Vec<SpannedToken>,
-    errors: Vec<SyntaxError>, // Errors from lexer or parser
-    cursor: usize,            // Position of cursor (max value is lenght of tokens)
+    source: String,
+    tokens: Vec<(Token, Span)>,
+    errors: Vec<SyntaxError>,
 }
 
 impl SyntaxAnalyzer {
     pub fn new(source: &str) -> Self {
-        let mut tokens: Vec<SpannedToken> = Vec::new();
-        let mut errors: Vec<SyntaxError> = Vec::new();
-
-        let mut lexer = Token::lexer(source);
-
-        while let Some(result) = lexer.next() {
-            let span = lexer.span();
-            let range = (span.start, span.end);
-
-            match result {
-                Err(_) | Ok(Token::Error) => {
-                    errors.push(SyntaxError::new(
-                        range,
-                        format!("Lexical error: `{}`", lexer.slice()),
-                    ));
-                }
-                Ok(token) => {
-                    tokens.push(SpannedToken { token, span: range });
-                }
-            }
-        }
-
-        Self {
-            tokens,
-            errors,
-            cursor: 0,
-        }
+        let mut sa = Self {
+            source: source.to_string(),
+            tokens: Vec::new(),
+            errors: Vec::new(),
+        };
+        sa.lex();
+        sa
     }
+
+    /// Tum analiz akisi: lex + parse, sonuc olarak AST ya da hatalar.
     pub fn analyz(&mut self) -> Result<Program, Vec<SyntaxError>> {
-        // AST Items for Interpreter
-        let mut items: Vec<Item> = Vec::new();
-
-        // AST Items from Tokens
-        for token in &self.tokens {}
-
         if !self.errors.is_empty() {
             return Err(self.errors.clone());
         }
 
+        let parse = Parser::new(self.tokens.clone()).parse();
+        match parse {
+            Ok(program) => Ok(program),
+            Err(errs) => {
+                let mut out = Vec::new();
+                for e in errs {
+                    let pos = match e.1 {
+                        Some(span) => line_col(&self.source, span.lo),
+                        None => (1, 1),
+                    };
+                    out.push(SyntaxError::new(pos, e.0));
+                }
+                Err(out)
+            }
+        }
+    }
+
+    fn lex(&mut self) {
+        let src = self.source.clone();
+        let mut lexer = SAToken::lexer(&src);
+        let mut tokens: Vec<(Token, Span)> = Vec::new();
+        let mut errors: Vec<SyntaxError> = Vec::new();
+
+        while let Some(result) = lexer.next() {
+            let span = lexer.span();
+            match result {
+                Ok(SAToken::Error) | Err(_) => {
+                    errors.push(SyntaxError::new(
+                        line_col(&src, span.start),
+                        format!("Lexical error: `{}`", &src[span.start..span.end]),
+                    ));
+                }
+                Ok(tok) => {
+                    if let Err(e) = push_token(&src, &mut tokens, tok, span.start, span.end) {
+                        errors.push(e);
+                    }
+                }
+            }
+        }
+
+        tokens.push((
+            Token::Eof,
+            Span {
+                lo: src.len(),
+                hi: src.len(),
+            },
+        ));
+
+        self.tokens = tokens;
+        self.errors = errors;
+    }
+}
+
+fn push_token(
+    src: &str,
+    tokens: &mut Vec<(Token, Span)>,
+    tok: SAToken,
+    lo: usize,
+    hi: usize,
+) -> Result<(), SyntaxError> {
+    let span = Span { lo, hi };
+    match tok {
+        SAToken::Let => tokens.push((Token::Let, span)),
+        SAToken::Var => tokens.push((Token::Var, span)),
+        SAToken::Fn => tokens.push((Token::Fn, span)),
+        SAToken::Struct => tokens.push((Token::Struct, span)),
+        SAToken::Enum => tokens.push((Token::Enum, span)),
+        SAToken::Match => tokens.push((Token::Match, span)),
+        SAToken::If => tokens.push((Token::If, span)),
+        SAToken::Else => tokens.push((Token::Else, span)),
+        SAToken::Loop => tokens.push((Token::Loop, span)),
+        SAToken::Return => tokens.push((Token::Return, span)),
+        SAToken::Break => tokens.push((Token::Break, span)),
+        SAToken::Continue => tokens.push((Token::Continue, span)),
+
+        SAToken::True => tokens.push((Token::True, span)),
+        SAToken::False => tokens.push((Token::False, span)),
+
+        SAToken::Option => tokens.push((Token::Option, span)),
+        SAToken::Result => tokens.push((Token::Result, span)),
+        SAToken::Ok => tokens.push((Token::Ok, span)),
+        SAToken::Err => tokens.push((Token::Err, span)),
+        SAToken::Some => tokens.push((Token::Some, span)),
+        SAToken::None => tokens.push((Token::None, span)),
+
+        SAToken::Array => tokens.push((Token::Array, span)),
+        SAToken::List => tokens.push((Token::List, span)),
+        SAToken::Map => tokens.push((Token::Map, span)),
+
+        SAToken::IntKw => tokens.push((Token::IntKw, span)),
+        SAToken::FloatKw => tokens.push((Token::FloatKw, span)),
+        SAToken::BoolKw => tokens.push((Token::BoolKw, span)),
+        SAToken::CharKw => tokens.push((Token::CharKw, span)),
+        SAToken::StringKw => tokens.push((Token::StringKw, span)),
+        SAToken::Native => tokens.push((Token::Native, span)),
+
+        SAToken::And => tokens.push((Token::And, span)),
+        SAToken::Or => tokens.push((Token::Or, span)),
+        SAToken::EqEq => tokens.push((Token::EqEq, span)),
+        SAToken::Ne => tokens.push((Token::Ne, span)),
+        SAToken::Le => tokens.push((Token::Le, span)),
+        SAToken::Ge => tokens.push((Token::Ge, span)),
+        SAToken::FatArrow => tokens.push((Token::FatArrow, span)),
+        SAToken::Arrow => tokens.push((Token::Arrow, span)),
+
+        SAToken::Eq => tokens.push((Token::Eq, span)),
+        SAToken::Plus => tokens.push((Token::Plus, span)),
+        SAToken::Minus => tokens.push((Token::Minus, span)),
+        SAToken::Star => tokens.push((Token::Star, span)),
+        SAToken::Slash => tokens.push((Token::Slash, span)),
+        SAToken::Percent => tokens.push((Token::Percent, span)),
+        SAToken::Not => tokens.push((Token::Not, span)),
+        SAToken::Lt => tokens.push((Token::Lt, span)),
+        SAToken::Gt => tokens.push((Token::Gt, span)),
+
+        SAToken::ColonColon => tokens.push((Token::ColonColon, span)),
+        SAToken::LParen => tokens.push((Token::LParen, span)),
+        SAToken::RParen => tokens.push((Token::RParen, span)),
+        SAToken::LBrace => tokens.push((Token::LBrace, span)),
+        SAToken::RBrace => tokens.push((Token::RBrace, span)),
+        SAToken::LBracket => tokens.push((Token::LBracket, span)),
+        SAToken::RBracket => tokens.push((Token::RBracket, span)),
+        SAToken::Comma => tokens.push((Token::Comma, span)),
+        SAToken::Colon => tokens.push((Token::Colon, span)),
+        SAToken::Semi => tokens.push((Token::Semi, span)),
+        SAToken::Dot => tokens.push((Token::Dot, span)),
+
+        SAToken::NativeIdent(name) => tokens.push((Token::NativeIdent(name), span)),
+        SAToken::Ident(name) => tokens.push((Token::Ident(name), span)),
+        SAToken::IntLit(i) => tokens.push((Token::IntLit(i), span)),
+        SAToken::FloatLit(f) => tokens.push((Token::FloatLit(f), span)),
+        SAToken::CharLit(c) => tokens.push((Token::CharLit(c), span)),
+        SAToken::StringLit(s) => tokens.push((Token::StringLit(s), span)),
+        SAToken::TemplateRaw(raw) => {
+            // NOTE: Template string, ici parser'a uygun sekilde parcalaniyor.
+            push_template_tokens(src, tokens, &raw, lo, hi)?;
+        }
+        SAToken::Error => {
+            return Err(SyntaxError::new(
+                line_col(src, lo),
+                format!("Lexical error: `{}`", &src[lo..hi]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn push_template_tokens(
+    src: &str,
+    tokens: &mut Vec<(Token, Span)>,
+    raw: &str,
+    lo: usize,
+    _hi: usize,
+) -> Result<(), SyntaxError> {
+    // NOTE: raw icerigi backtick'ler olmadan gelir. Span hesaplari icin
+    // baslangic offset'i `lo + 1` olarak alinmistir.
+    let base = lo + 1;
+    let bytes = raw.as_bytes();
+    let mut lit = String::new();
+    let mut lit_start = 0usize;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' => {
+                i += 1;
+                if i >= bytes.len() {
+                    return Err(SyntaxError::new(
+                        line_col(src, lo),
+                        "unexpected eof after \\\\ in template".into(),
+                    ));
+                }
+                let e = bytes[i] as char;
+                match e {
+                    'n' => lit.push('\n'),
+                    'r' => lit.push('\r'),
+                    't' => lit.push('\t'),
+                    '0' => lit.push('\0'),
+                    '`' => lit.push('`'),
+                    '\\' => lit.push('\\'),
+                    '{' => lit.push('{'),
+                    _ => {
+                        return Err(SyntaxError::new(
+                            line_col(src, lo),
+                            format!("unknown escape \\\\{}", e),
+                        ))
+                    }
+                }
+            }
+            b'{' => {
+                if !lit.is_empty() {
+                    let lit_end = i;
+                    tokens.push((
+                        Token::TemplatePart(std::mem::take(&mut lit)),
+                        Span {
+                            lo: base + lit_start,
+                            hi: base + lit_end,
+                        },
+                    ));
+                }
+                let brace_start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    i += 1;
+                }
+                let ident_start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                if ident_start == i {
+                    return Err(SyntaxError::new(
+                        line_col(src, lo),
+                        "expected identifier in template interpolation".into(),
+                    ));
+                }
+                let id = std::str::from_utf8(&bytes[ident_start..i])
+                    .unwrap_or("")
+                    .to_string();
+                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'}' {
+                    return Err(SyntaxError::new(
+                        line_col(src, lo),
+                        "expected } to close template interpolation".into(),
+                    ));
+                }
+                let brace_end = i + 1;
+                tokens.push((
+                    Token::TemplateInterp(id),
+                    Span {
+                        lo: base + brace_start,
+                        hi: base + brace_end,
+                    },
+                ));
+                lit_start = brace_end;
+            }
+            _ => {
+                lit.push(b as char);
+            }
+        }
+        i += 1;
+    }
+
+    if !lit.is_empty() {
+        let lit_end = bytes.len();
+        tokens.push((
+            Token::TemplatePart(std::mem::take(&mut lit)),
+            Span {
+                lo: base + lit_start,
+                hi: base + lit_end,
+            },
+        ));
+    }
+    tokens.push((
+        Token::TemplateEnd,
+        Span {
+            lo: base + bytes.len(),
+            hi: base + bytes.len(),
+        },
+    ));
+    Ok(())
+}
+
+fn parse_string_literal(slice: &str) -> Option<String> {
+    if slice.len() < 2 {
+        return None;
+    }
+    let inner = &slice[1..slice.len() - 1];
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let esc = chars.next()?;
+        match esc {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn parse_char_literal(slice: &str) -> Option<char> {
+    if slice.len() < 3 {
+        return None;
+    }
+    let inner = &slice[1..slice.len() - 1];
+    let mut chars = inner.chars();
+    let c = chars.next()?;
+    let out = if c == '\\' {
+        let esc = chars.next()?;
+        match esc {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '0' => '\0',
+            '\'' => '\'',
+            '\\' => '\\',
+            _ => return None,
+        }
+    } else {
+        c
+    };
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(out)
+}
+
+fn parse_template_literal(slice: &str) -> Option<String> {
+    if slice.len() < 2 {
+        return None;
+    }
+    Some(slice[1..slice.len() - 1].to_string())
+}
+
+fn line_col(src: &str, idx: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in src.char_indices() {
+        if i >= idx {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+// ===== Parser (SyntaxAnalyzer icinde) =====
+
+type TokenStream = std::iter::Peekable<std::vec::IntoIter<(Token, Span)>>;
+
+#[derive(Debug)]
+struct ParseError(pub String, pub Option<Span>);
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse error: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+struct Parser {
+    tokens: TokenStream,
+    last_span: Span,
+    errs: Vec<ParseError>,
+}
+
+impl Parser {
+    fn new(tokens: Vec<(Token, Span)>) -> Self {
+        Self {
+            tokens: tokens.into_iter().peekable(),
+            last_span: Span { lo: 0, hi: 0 },
+            errs: Vec::new(),
+        }
+    }
+
+    fn peek(&mut self) -> Option<&Token> {
+        self.tokens.peek().map(|(t, _)| t)
+    }
+
+    fn advance(&mut self) -> Option<(Token, Span)> {
+        let next = self.tokens.next()?;
+        self.last_span = next.1.clone();
+        Some(next)
+    }
+
+    fn expect(&mut self, want: Token) -> Result<Span, ()> {
+        let (t, span) = self
+            .advance()
+            .ok_or_else(|| self.err(format!("expected {:?}, got eof", want)))?;
+        if std::mem::discriminant(&t) != std::mem::discriminant(&want) {
+            self.err(format!("expected {:?}, got {:?}", want, t));
+            return Err(());
+        }
+        Ok(span)
+    }
+
+    fn err(&mut self, msg: String) {
+        self.errs
+            .push(ParseError(msg, Some(self.last_span.clone())));
+    }
+
+    fn is(&mut self, t: &Token) -> bool {
+        match (self.peek(), t) {
+            (Some(a), b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+            _ => false,
+        }
+    }
+
+    fn eat(&mut self, t: &Token) -> bool {
+        if self.is(t) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_ident(&mut self) -> Option<String> {
+        match self.peek() {
+            Some(Token::Ident(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn eat_ident_eq(&mut self, s: &str) -> bool {
+        if self.peek_ident().as_deref() == Some(s) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse(mut self) -> Result<Program, Vec<ParseError>> {
+        let mut items = Vec::new();
+        while !self.is(&Token::Eof) {
+            self.bump_while_semi();
+            if self.is(&Token::Eof) {
+                break;
+            }
+            match self.parse_item() {
+                Some(it) => items.push(it),
+                None => break,
+            }
+        }
+        if !self.errs.is_empty() {
+            return Err(self.errs);
+        }
         Ok(Program { items })
+    }
+
+    fn bump_while_semi(&mut self) {
+        while self.eat(&Token::Semi) {}
+    }
+
+    fn parse_item(&mut self) -> Option<Item> {
+        if self.eat(&Token::Struct) {
+            return Some(Item::StructDef(self.parse_struct_def()?));
+        }
+        if self.eat(&Token::Enum) {
+            return Some(Item::EnumDef(self.parse_enum_def()?));
+        }
+        if self.eat(&Token::Fn) {
+            return Some(Item::FnDef(self.parse_fn_def()?));
+        }
+        if self.eat(&Token::Let) {
+            return Some(Item::GlobalLet(self.parse_let_binding()?));
+        }
+        if self.eat(&Token::Var) {
+            return Some(Item::GlobalVar(self.parse_var_binding()?));
+        }
+        if let Some(s) = self.parse_stmt() {
+            return Some(Item::TopLevelStmt(s));
+        }
+        None
+    }
+
+    fn parse_struct_def(&mut self) -> Option<StructDef> {
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace).ok()?;
+        let mut fields = Vec::new();
+        loop {
+            self.bump_while_semi();
+            if self.eat(&Token::RBrace) {
+                break;
+            }
+            let fname = self.expect_ident()?;
+            self.expect(Token::Colon).ok()?;
+            let ty = self.parse_type()?;
+            fields.push((fname, ty));
+            self.bump_while_semi();
+            if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                self.err("expected , or }".into());
+                break;
+            }
+        }
+        Some(StructDef { name, fields })
+    }
+
+    fn parse_enum_def(&mut self) -> Option<EnumDef> {
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace).ok()?;
+        let mut variants = Vec::new();
+        loop {
+            self.bump_while_semi();
+            if self.eat(&Token::RBrace) {
+                break;
+            }
+            let vname = self.expect_ident()?;
+            let data = if self.eat(&Token::LParen) {
+                let ty = self.parse_type()?;
+                self.expect(Token::RParen).ok()?;
+                Some(ty)
+            } else {
+                None
+            };
+            variants.push(EnumVariantDef { name: vname, data });
+            self.bump_while_semi();
+            if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                break;
+            }
+        }
+        Some(EnumDef { name, variants })
+    }
+
+    fn parse_fn_def(&mut self) -> Option<FnDef> {
+        let name = self.expect_ident()?;
+        self.expect(Token::LParen).ok()?;
+        let mut params = Vec::new();
+        loop {
+            self.bump_while_semi();
+            if self.eat(&Token::RParen) {
+                break;
+            }
+            let pname = self.expect_ident()?;
+            self.expect(Token::Colon).ok()?;
+            let ty = self.parse_type()?;
+            params.push((pname, ty));
+            if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                break;
+            }
+        }
+        self.expect(Token::Arrow).ok()?;
+        let ret = self.parse_type()?;
+        self.expect(Token::LBrace).ok()?;
+        let body = self.parse_block_stmts()?;
+        self.expect(Token::RBrace).ok()?;
+        Some(FnDef {
+            name,
+            params,
+            ret,
+            body,
+        })
+    }
+
+    fn parse_let_binding(&mut self) -> Option<LetBinding> {
+        let name = self.expect_ident()?;
+        let typ = if self.eat(&Token::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(Token::Eq).ok()?;
+        let init = self.parse_expr()?;
+        Some(LetBinding { name, typ, init })
+    }
+
+    fn parse_var_binding(&mut self) -> Option<VarBinding> {
+        let name = self.expect_ident()?;
+        let typ = if self.eat(&Token::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(Token::Eq).ok()?;
+        let init = self.parse_expr()?;
+        Some(VarBinding { name, typ, init })
+    }
+
+    fn parse_block_stmts(&mut self) -> Option<Vec<Stmt>> {
+        let mut stmts = Vec::new();
+        loop {
+            self.bump_while_semi();
+            if self.is(&Token::RBrace) {
+                break;
+            }
+            if let Some(s) = self.parse_stmt() {
+                stmts.push(s);
+            } else {
+                break;
+            }
+        }
+        Some(stmts)
+    }
+
+    fn parse_stmt(&mut self) -> Option<Stmt> {
+        self.bump_while_semi();
+        if self.eat(&Token::Let) {
+            return Some(Stmt::Let(self.parse_let_binding()?));
+        }
+        if self.eat(&Token::Var) {
+            return Some(Stmt::Var(self.parse_var_binding()?));
+        }
+        if self.eat(&Token::Break) {
+            return Some(Stmt::Break);
+        }
+        if self.eat(&Token::Continue) {
+            return Some(Stmt::Continue);
+        }
+        if self.eat(&Token::If) {
+            let cond = self.parse_expr()?;
+            self.expect(Token::LBrace).ok()?;
+            let then_b = self.parse_block_stmts()?;
+            self.expect(Token::RBrace).ok()?;
+            let else_b = if self.eat(&Token::Else) {
+                self.expect(Token::LBrace).ok()?;
+                let b = self.parse_block_stmts()?;
+                self.expect(Token::RBrace).ok()?;
+                Some(b)
+            } else {
+                None
+            };
+            return Some(Stmt::If {
+                cond,
+                then_b,
+                else_b,
+            });
+        }
+        if self.eat(&Token::Loop) {
+            self.expect(Token::LBrace).ok()?;
+            let body = self.parse_block_stmts()?;
+            self.expect(Token::RBrace).ok()?;
+            return Some(Stmt::Loop(body));
+        }
+        if self.eat(&Token::Return) {
+            // NOTE: return ifadesi opsiyonel olabilir.
+            if self.is(&Token::Semi) || self.is(&Token::RBrace) {
+                return Some(Stmt::Return(None));
+            }
+            let val = self.parse_expr()?;
+            return Some(Stmt::Return(Some(val)));
+        }
+        if self.eat(&Token::Match) {
+            let scrutinee = self.parse_expr()?;
+            self.expect(Token::LBrace).ok()?;
+            let mut arms = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RBrace) {
+                    break;
+                }
+                let pattern = self.parse_pattern()?;
+                self.expect(Token::FatArrow).ok()?;
+                let body = if self.is(&Token::LBrace) {
+                    self.advance();
+                    let b = self.parse_block_stmts()?;
+                    self.expect(Token::RBrace).ok()?;
+                    b
+                } else {
+                    let e = self.parse_expr()?;
+                    vec![Stmt::Expr(e)]
+                };
+                arms.push(MatchArm { pattern, body });
+                self.bump_while_semi();
+                if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                    break;
+                }
+            }
+            return Some(Stmt::Match { scrutinee, arms });
+        }
+        // Assign: ident = expr, or expression statement starting with ident
+        if let Some(name) = self.peek_ident() {
+            self.advance();
+            if self.eat(&Token::Eq) {
+                let value = self.parse_expr()?;
+                return Some(Stmt::Assign { name, value });
+            }
+            return Some(Stmt::Expr(
+                self.parse_expr_postfix(Some(Expr::Ident(name)))?,
+            ));
+        }
+        // Expression statement
+        let e = self.parse_expr()?;
+        Some(Stmt::Expr(e))
+    }
+
+    fn parse_pattern(&mut self) -> Option<Pattern> {
+        self.bump_while_semi();
+        if self.eat_ident_eq("_") {
+            return Some(Pattern::Wildcard);
+        }
+        if let Some(Token::IntLit(i)) = self.peek().cloned() {
+            self.advance();
+            return Some(Pattern::Literal(Literal::Int(i)));
+        }
+        if let Some(Token::FloatLit(f)) = self.peek().cloned() {
+            self.advance();
+            return Some(Pattern::Literal(Literal::Float(f)));
+        }
+        if let Some(Token::CharLit(c)) = self.peek().cloned() {
+            self.advance();
+            return Some(Pattern::Literal(Literal::Char(c)));
+        }
+        if let Some(Token::StringLit(s)) = self.peek().cloned() {
+            self.advance();
+            return Some(Pattern::Literal(Literal::String(s)));
+        }
+        if self.eat(&Token::True) {
+            return Some(Pattern::Literal(Literal::Bool(true)));
+        }
+        if self.eat(&Token::False) {
+            return Some(Pattern::Literal(Literal::Bool(false)));
+        }
+        if self.eat(&Token::None) {
+            return Some(Pattern::Literal(Literal::None));
+        }
+        if self.eat(&Token::Some) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_pattern()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Pattern::Variant {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                inner: Some(Box::new(inner)),
+            });
+        }
+        if self.eat(&Token::Ok) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_pattern()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Pattern::Variant {
+                enum_name: "Result".to_string(),
+                variant: "Ok".to_string(),
+                inner: Some(Box::new(inner)),
+            });
+        }
+        if self.eat(&Token::Err) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_pattern()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Pattern::Variant {
+                enum_name: "Result".to_string(),
+                variant: "Err".to_string(),
+                inner: Some(Box::new(inner)),
+            });
+        }
+        if let Some(Token::Ident(ref name)) = self.peek() {
+            let name = name.clone();
+            self.advance();
+            if self.eat(&Token::ColonColon) {
+                let variant = self.expect_ident()?;
+                let inner = if self.eat(&Token::LParen) {
+                    let p = self.parse_pattern()?;
+                    self.expect(Token::RParen).ok()?;
+                    Some(Box::new(p))
+                } else {
+                    None
+                };
+                return Some(Pattern::Variant {
+                    enum_name: name,
+                    variant,
+                    inner,
+                });
+            }
+            if self.eat(&Token::LBrace) {
+                let mut fields = Vec::new();
+                loop {
+                    self.bump_while_semi();
+                    if self.eat(&Token::RBrace) {
+                        break;
+                    }
+                    let f = self.expect_ident()?;
+                    self.expect(Token::Colon).ok()?;
+                    let pat = self.parse_pattern()?;
+                    fields.push((f, pat));
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                        break;
+                    }
+                }
+                return Some(Pattern::StructLiteral { name, fields });
+            }
+            return Some(Pattern::Ident(name));
+        }
+        self.err("expected pattern".into());
+        None
+    }
+
+    fn expect_ident(&mut self) -> Option<String> {
+        let (t, _) = self
+            .advance()
+            .ok_or_else(|| {
+                self.err("expected identifier".into());
+            })
+            .ok()?;
+        match t {
+            Token::Ident(s) => Some(s),
+            _ => {
+                self.err("expected identifier".into());
+                None
+            }
+        }
+    }
+
+    fn parse_type(&mut self) -> Option<Type> {
+        if self.eat(&Token::IntKw) {
+            return Some(Type::Int);
+        }
+        if self.eat(&Token::FloatKw) {
+            return Some(Type::Float);
+        }
+        if self.eat(&Token::BoolKw) {
+            return Some(Type::Bool);
+        }
+        if self.eat(&Token::CharKw) {
+            return Some(Type::Char);
+        }
+        if self.eat(&Token::StringKw) {
+            return Some(Type::String);
+        }
+        if self.eat(&Token::Option) {
+            self.expect(Token::Lt).ok()?;
+            let inner = self.parse_type()?;
+            self.expect(Token::Gt).ok()?;
+            return Some(Type::Option(Box::new(inner)));
+        }
+        if self.eat(&Token::Result) {
+            self.expect(Token::Lt).ok()?;
+            let ok = self.parse_type()?;
+            self.expect(Token::Comma).ok()?;
+            let err = self.parse_type()?;
+            self.expect(Token::Gt).ok()?;
+            return Some(Type::Result(Box::new(ok), Box::new(err)));
+        }
+        if self.eat(&Token::Array) {
+            self.expect(Token::Lt).ok()?;
+            let inner = self.parse_type()?;
+            self.expect(Token::Comma).ok()?;
+            let n = self.expect_int_lit()?;
+            self.expect(Token::Gt).ok()?;
+            return Some(Type::Array(Box::new(inner), n));
+        }
+        if self.eat(&Token::List) {
+            self.expect(Token::Lt).ok()?;
+            let inner = self.parse_type()?;
+            self.expect(Token::Gt).ok()?;
+            return Some(Type::List(Box::new(inner)));
+        }
+        if self.eat(&Token::Map) {
+            self.expect(Token::Lt).ok()?;
+            let k = self.parse_type()?;
+            self.expect(Token::Comma).ok()?;
+            let v = self.parse_type()?;
+            self.expect(Token::Gt).ok()?;
+            return Some(Type::Map(Box::new(k), Box::new(v)));
+        }
+        if self.eat(&Token::Fn) {
+            self.expect(Token::LParen).ok()?;
+            let mut params = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RParen) {
+                    break;
+                }
+                params.push(self.parse_type()?);
+                if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                    break;
+                }
+            }
+            self.expect(Token::Arrow).ok()?;
+            let ret = self.parse_type()?;
+            return Some(Type::Fn(params, Box::new(ret)));
+        }
+        if let Some(Token::Ident(ref s)) = self.peek() {
+            let name = s.clone();
+            self.advance();
+            return Some(Type::Struct {
+                name,
+                fields: std::collections::HashMap::new(),
+            });
+        }
+        self.err("expected type".into());
+        None
+    }
+
+    fn expect_int_lit(&mut self) -> Option<usize> {
+        let (t, _) = self
+            .advance()
+            .ok_or_else(|| {
+                self.err("expected integer".into());
+            })
+            .ok()?;
+        match t {
+            Token::IntLit(i) if i >= 0 => Some(i as usize),
+            _ => {
+                self.err("expected non-negative integer".into());
+                None
+            }
+        }
+    }
+
+    fn parse_expr(&mut self) -> Option<Expr> {
+        self.parse_expr_or()
+    }
+
+    fn parse_expr_or(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_expr_and()?;
+        while self.eat(&Token::Or) {
+            let rhs = self.parse_expr_and()?;
+            lhs = Expr::Binary {
+                op: BinOp::Or,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_expr_and(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_expr_cmp()?;
+        while self.eat(&Token::And) {
+            let rhs = self.parse_expr_cmp()?;
+            lhs = Expr::Binary {
+                op: BinOp::And,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_expr_cmp(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_expr_add()?;
+        loop {
+            let op = if self.eat(&Token::EqEq) {
+                BinOp::Eq
+            } else if self.eat(&Token::Ne) {
+                BinOp::Ne
+            } else if self.eat(&Token::Lt) {
+                BinOp::Lt
+            } else if self.eat(&Token::Le) {
+                BinOp::Le
+            } else if self.eat(&Token::Gt) {
+                BinOp::Gt
+            } else if self.eat(&Token::Ge) {
+                BinOp::Ge
+            } else {
+                break;
+            };
+            let rhs = self.parse_expr_add()?;
+            lhs = Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_expr_add(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_expr_mul()?;
+        loop {
+            let op = if self.eat(&Token::Plus) {
+                BinOp::Add
+            } else if self.eat(&Token::Minus) {
+                BinOp::Sub
+            } else {
+                break;
+            };
+            let rhs = self.parse_expr_mul()?;
+            lhs = Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_expr_mul(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_expr_unary()?;
+        loop {
+            let op = if self.eat(&Token::Star) {
+                BinOp::Mul
+            } else if self.eat(&Token::Slash) {
+                BinOp::Div
+            } else if self.eat(&Token::Percent) {
+                BinOp::Rem
+            } else {
+                break;
+            };
+            let rhs = self.parse_expr_unary()?;
+            lhs = Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            };
+        }
+        Some(lhs)
+    }
+
+    fn parse_expr_unary(&mut self) -> Option<Expr> {
+        if self.eat(&Token::Minus) {
+            let inner = self.parse_expr_unary()?;
+            return Some(Expr::Unary {
+                op: UnaryOp::Neg,
+                inner: Box::new(inner),
+            });
+        }
+        if self.eat(&Token::Not) {
+            let inner = self.parse_expr_unary()?;
+            return Some(Expr::Unary {
+                op: UnaryOp::Not,
+                inner: Box::new(inner),
+            });
+        }
+        self.parse_expr_postfix(None)
+    }
+
+    fn parse_expr_postfix(&mut self, initial: Option<Expr>) -> Option<Expr> {
+        let mut e = match initial {
+            Some(x) => x,
+            None => self.parse_expr_primary()?,
+        };
+        loop {
+            if self.eat(&Token::LParen) {
+                let mut args = Vec::new();
+                loop {
+                    self.bump_while_semi();
+                    if self.eat(&Token::RParen) {
+                        break;
+                    }
+                    args.push(self.parse_expr()?);
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                        break;
+                    }
+                }
+                e = Expr::Call {
+                    callee: Box::new(e),
+                    args,
+                };
+            } else if self.eat(&Token::Dot) {
+                let field = self.expect_ident()?;
+                e = Expr::FieldAccess {
+                    base: Box::new(e),
+                    field,
+                };
+            } else if self.eat(&Token::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect(Token::RBracket).ok()?;
+                e = Expr::Index {
+                    base: Box::new(e),
+                    index: Box::new(index),
+                };
+            } else {
+                break;
+            }
+        }
+        Some(e)
+    }
+
+    fn parse_expr_primary(&mut self) -> Option<Expr> {
+        self.bump_while_semi();
+
+        // Template: TemplatePart | TemplateInterp ... TemplateEnd
+        if matches!(
+            self.peek(),
+            Some(Token::TemplatePart(_)) | Some(Token::TemplateInterp(_))
+        ) {
+            return self.parse_template();
+        }
+
+        if self.eat(&Token::LParen) {
+            self.bump_while_semi();
+            if self.eat(&Token::RParen) {
+                return Some(Expr::Literal(Literal::Unit));
+            }
+            let e = self.parse_expr()?;
+            self.bump_while_semi();
+            self.expect(Token::RParen).ok()?;
+            return Some(e);
+        }
+
+        if self.eat(&Token::LBrace) {
+            let body = self.parse_block_stmts()?;
+            self.expect(Token::RBrace).ok()?;
+            return Some(Expr::Block(body));
+        }
+
+        if self.eat(&Token::If) {
+            let cond = Box::new(self.parse_expr()?);
+            self.expect(Token::LBrace).ok()?;
+            let then_b = self.parse_block_stmts()?;
+            self.expect(Token::RBrace).ok()?;
+            let else_b = if self.eat(&Token::Else) {
+                self.expect(Token::LBrace).ok()?;
+                let b = self.parse_block_stmts()?;
+                self.expect(Token::RBrace).ok()?;
+                Some(b)
+            } else {
+                None
+            };
+            return Some(Expr::If {
+                cond,
+                then_b,
+                else_b,
+            });
+        }
+
+        if self.eat(&Token::Match) {
+            let scrutinee = Box::new(self.parse_expr()?);
+            self.expect(Token::LBrace).ok()?;
+            let mut arms = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RBrace) {
+                    break;
+                }
+                let pattern = self.parse_pattern()?;
+                self.expect(Token::FatArrow).ok()?;
+                let body = if self.is(&Token::LBrace) {
+                    self.advance();
+                    let b = self.parse_block_stmts()?;
+                    self.expect(Token::RBrace).ok()?;
+                    b
+                } else {
+                    let e = self.parse_expr()?;
+                    vec![Stmt::Expr(e)]
+                };
+                arms.push(MatchArm { pattern, body });
+                self.bump_while_semi();
+                if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                    break;
+                }
+            }
+            return Some(Expr::Match { scrutinee, arms });
+        }
+
+        if self.eat(&Token::None) {
+            return Some(Expr::Literal(Literal::None));
+        }
+        if self.eat(&Token::True) {
+            return Some(Expr::Literal(Literal::Bool(true)));
+        }
+        if self.eat(&Token::False) {
+            return Some(Expr::Literal(Literal::Bool(false)));
+        }
+        if let Some(Token::IntLit(i)) = self.peek().cloned() {
+            self.advance();
+            return Some(Expr::Literal(Literal::Int(i)));
+        }
+        if let Some(Token::FloatLit(f)) = self.peek().cloned() {
+            self.advance();
+            return Some(Expr::Literal(Literal::Float(f)));
+        }
+        if let Some(Token::CharLit(c)) = self.peek().cloned() {
+            self.advance();
+            return Some(Expr::Literal(Literal::Char(c)));
+        }
+        if let Some(Token::StringLit(s)) = self.peek().cloned() {
+            self.advance();
+            return Some(Expr::Literal(Literal::String(s)));
+        }
+        if self.eat(&Token::Some) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_expr()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Expr::Literal(Literal::Some(Box::new(inner))));
+        }
+        if self.eat(&Token::Ok) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_expr()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Expr::Literal(Literal::Ok(Box::new(inner))));
+        }
+        if self.eat(&Token::Err) {
+            self.expect(Token::LParen).ok()?;
+            let inner = self.parse_expr()?;
+            self.expect(Token::RParen).ok()?;
+            return Some(Expr::Literal(Literal::Err(Box::new(inner))));
+        }
+
+        if let Some(Token::NativeIdent(ref name)) = self.peek() {
+            let name = name.clone();
+            self.advance();
+            self.expect(Token::LParen).ok()?;
+            let mut args = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RParen) {
+                    break;
+                }
+                args.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                    break;
+                }
+            }
+            return Some(Expr::NativeCall(name, args));
+        }
+
+        if let Some(Token::Ident(ref name)) = self.peek() {
+            let name = name.clone();
+            self.advance();
+            if self.eat(&Token::FatArrow) {
+                let mut params = vec![(name.clone(), None)];
+                while self.eat(&Token::Comma) {
+                    let n = self.expect_ident()?;
+                    params.push((n, None));
+                }
+                let body = Box::new(self.parse_expr()?);
+                return Some(Expr::Lambda { params, body });
+            }
+            if self.eat(&Token::LBrace) {
+                let mut fields = Vec::new();
+                loop {
+                    self.bump_while_semi();
+                    if self.eat(&Token::RBrace) {
+                        break;
+                    }
+                    let f = self.expect_ident()?;
+                    self.expect(Token::Colon).ok()?;
+                    let val = self.parse_expr()?;
+                    fields.push((f, val));
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RBrace) {
+                        break;
+                    }
+                }
+                return Some(Expr::StructLiteral { name, fields });
+            }
+            if self.eat(&Token::ColonColon) {
+                let variant = self.expect_ident()?;
+                let data = if self.eat(&Token::LParen) {
+                    let e = self.parse_expr()?;
+                    self.expect(Token::RParen).ok()?;
+                    Some(Box::new(e))
+                } else {
+                    None
+                };
+                return Some(Expr::VariantLiteral {
+                    enum_name: name,
+                    variant,
+                    data,
+                });
+            }
+            return Some(Expr::Ident(name));
+        }
+
+        if self.eat(&Token::LBracket) {
+            let mut elems = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RBracket) {
+                    break;
+                }
+                elems.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) && !self.is(&Token::RBracket) {
+                    break;
+                }
+            }
+            return Some(Expr::ListLiteral(elems));
+        }
+
+        self.err("expected expression".into());
+        None
+    }
+
+    fn parse_template(&mut self) -> Option<Expr> {
+        let mut parts = Vec::new();
+        loop {
+            if let Some(Token::TemplatePart(s)) = self.peek().cloned() {
+                self.advance();
+                parts.push(TemplatePart::Lit(s));
+            } else if let Some(Token::TemplateInterp(id)) = self.peek().cloned() {
+                self.advance();
+                parts.push(TemplatePart::Interp(id));
+            } else if self.eat(&Token::TemplateEnd) {
+                break;
+            } else {
+                self.err("expected template part or end".into());
+                break;
+            }
+        }
+        Some(Expr::Template { parts })
     }
 }
