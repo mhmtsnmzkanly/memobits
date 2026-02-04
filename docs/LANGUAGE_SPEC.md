@@ -66,6 +66,7 @@ String: "hello", `Merhaba {name}`
 ```
 ) string’lerde geçerlidir.
 - v1’de interpolasyon sadece `{id}` biçimindedir.
+- **String birleştirme** `+` ile yapılabilir: `"a" + "b"`.
 
 ### 2.4 Değişkenler ve Mutability
 
@@ -107,6 +108,9 @@ match m {
 - **Exhaustive match** zorunludur.
 - `_` wildcard kullanılabilir.
 - `Some/None` ve `Ok/Err` pattern’leri desteklenir.
+- v1 sınırlaması: `match` scrutinee içinde **struct literal** doğrudan kullanılamaz.
+  - Çözüm: önce `let tmp = Type { ... };` sonra `match tmp { ... }`,
+    **veya** parantez içinde yaz: `match (Type { ... }) { ... }`.
 
 ### 2.7 Fonksiyonlar ve Return
 
@@ -121,6 +125,7 @@ fn greet(name: String) -> String {
 ```
 
 - `return expr;` desteklenir. `return;` → `()` döner.
+- **Lambda** v1’de tek parametreli: `x => expr`.
 
 ### 2.8 Kontrol Yapıları (Statement ve Expression)
 
@@ -129,6 +134,8 @@ fn greet(name: String) -> String {
 ```memobits
 let label = if (x % 2 == 0) { "even" } else { "odd" };
 ```
+
+- `if` statement, doğrudan değer döndürmez. Değer gerekiyorsa `let` ile alınmalı veya `return` kullanılmalıdır.
 
 **match expression olarak kullanılabilir:**
 
@@ -163,6 +170,15 @@ let m: Map<String, Int> = {"x" => 1, "y" => 2};
 - **Array<T, N>:** sabit boyut.
 - **List<T>:** dinamik boyut.
 - **Map<K, V>:** runtime’da HashMap. v1’de **key tipi sınırlı**: `Int`, `Bool`, `Char`, `String`.
+- **Map index:** `m["x"]` ile okuma, `m["x"] = 2` ile güncelleme.
+- **Map literal / Block ayrımı:** Expression bağlamında `{ key => value }` map literal, statement/if/match gövdelerinde `{ ... }` block olarak yorumlanır.
+
+### 2.12 Compile-Time Güvenlik (v1)
+
+- **Sabit ifadeler** compile-time'da değerlendirilebilir.
+- **Bölme/Mod**: `1 / 0` ve `1 % 0` gibi sabit ifadeler compile-time error.
+- **Array index**: sabit index out-of-bounds ise compile-time error.
+- **Ulaşılamayan kod**: `return` sonrası ifadeler compile-time warning (satır/sütun ile).
 
 ### 2.10 Hata Modeli: Option ve Result
 
@@ -242,6 +258,8 @@ let _ = native::return(0);
 
 - Statement veya expression olarak kullanılabilir.
 - **Exhaustive** olması beklenir; TypeChecker basit kontrol uygular.
+- Pattern kapsamı: literal, `_`, `None/Some`, `Ok/Err`, `Enum::Variant`.
+- v1 sınırlaması: `match` scrutinee içinde **struct literal** doğrudan kullanılamaz.
 
 ---
 

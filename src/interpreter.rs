@@ -16,6 +16,7 @@ pub struct Interpreter {
     pub native: NativeRegistry,
     struct_defs: HashMap<String, StructDef>,
     enum_defs: HashMap<String, EnumDef>,
+    source: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,7 +34,12 @@ impl Interpreter {
             native,
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
+            source: None,
         }
+    }
+
+    pub fn set_source(&mut self, src: &str) {
+        self.source = Some(src.to_string());
     }
 
     pub fn run(&mut self, program: &Program) -> EvalResult {
@@ -41,6 +47,32 @@ impl Interpreter {
             self.run_item(item)?;
         }
         Ok(Value::Unit)
+    }
+
+    fn with_span(&self, span: &Span, err: RuntimeError) -> RuntimeError {
+        let suffix = if let Some(src) = &self.source {
+            let (line, col) = line_col(src, span.lo);
+            format!(" (at {}:{})", line, col)
+        } else {
+            format!(" (at {}..{})", span.lo, span.hi)
+        };
+        if err.0.contains("(at ") {
+            err
+        } else {
+            RuntimeError(format!("{}{}", err.0, suffix))
+        }
+    }
+
+    fn block_span(stmts: &[Stmt]) -> Span {
+        if let Some(first) = stmts.first() {
+            let last = stmts.last().unwrap();
+            Span {
+                lo: first.span.lo,
+                hi: last.span.hi,
+            }
+        } else {
+            Span { lo: 0, hi: 0 }
+        }
     }
 
     fn run_item(&mut self, item: &Item) -> EvalResult {
@@ -58,9 +90,13 @@ impl Interpreter {
                 let params: Vec<String> = d.params.iter().map(|(p, _)| p.clone()).collect();
                 let body = d.body.clone();
                 let env = self.env.clone();
+                let body_span = Interpreter::block_span(&body);
                 let f = Value::Lambda(LambdaClosure {
                     params,
-                    body: Expr::Block(body),
+                    body: Expr {
+                        node: ExprKind::Block(body),
+                        span: body_span,
+                    },
                     env,
                 });
                 self.env.borrow_mut().define(name, f, false);
@@ -99,29 +135,54 @@ impl Interpreter {
     }
 
     fn run_stmt(&mut self, s: &Stmt) -> Result<Flow, RuntimeError> {
-        match s {
-            Stmt::Let(b) => {
+        let res = match &s.node {
+            StmtKind::Let(b) => {
                 let v = self.eval(&b.init)?;
                 self.env.borrow_mut().define(b.name.clone(), v, false);
                 Ok(Flow::Next)
             }
-            Stmt::Var(b) => {
+            StmtKind::Var(b) => {
                 let v = self.eval(&b.init)?;
                 self.env.borrow_mut().define(b.name.clone(), v, true);
                 Ok(Flow::Next)
             }
-            Stmt::Assign { name, value } => {
+            StmtKind::Assign { name, value } => {
                 let v = self.eval(value)?;
                 if !self.env.borrow_mut().set(name, v) {
                     return Err(RuntimeError(format!("cannot assign to immutable binding `{}`", name)));
                 }
                 Ok(Flow::Next)
             }
-            Stmt::Expr(e) => {
+            StmtKind::AssignIndex { base, index, value } => {
+                let b = self.eval(base)?;
+                let i = self.eval(index)?;
+                let v = self.eval(value)?;
+                match (b, i) {
+                    (Value::List(vec), Value::Int(idx)) => {
+                        let idx = idx as usize;
+                        let mut guard = vec.borrow_mut();
+                        if idx >= guard.len() {
+                            return Err(RuntimeError("index out of bounds".into()));
+                        }
+                        guard[idx] = v;
+                        Ok(Flow::Next)
+                    }
+                    (Value::Map(map), key_val) => {
+                        let key = MapKey::from_value(&key_val).ok_or_else(|| {
+                            RuntimeError("map key must be Int/Bool/Char/String".into())
+                        })?;
+                        map.borrow_mut().insert(key, v);
+                        Ok(Flow::Next)
+                    }
+                    (Value::Array(_), _) => Err(RuntimeError("cannot assign to array index".into())),
+                    _ => Err(RuntimeError("invalid index assignment".into())),
+                }
+            }
+            StmtKind::Expr(e) => {
                 self.eval(e)?;
                 Ok(Flow::Next)
             }
-            Stmt::If { cond, then_b, else_b } => {
+            StmtKind::If { cond, then_b, else_b } => {
                 let c = self.eval(cond)?;
                 let b = match &c {
                     Value::Bool(true) => true,
@@ -136,7 +197,7 @@ impl Interpreter {
                     Ok(Flow::Next)
                 }
             }
-            Stmt::Loop(body) => loop {
+            StmtKind::Loop(body) => loop {
                 match self.run_stmts(body) {
                     Ok(Flow::Break) => return Ok(Flow::Next),
                     Ok(Flow::Continue) | Ok(Flow::Next) => {}
@@ -150,7 +211,7 @@ impl Interpreter {
                     }
                 }
             },
-            Stmt::Match { scrutinee, arms } => {
+            StmtKind::Match { scrutinee, arms } => {
                 let v = self.eval(scrutinee)?;
                 for arm in arms {
                     if let Some(env_ext) = self.match_pattern(&arm.pattern, &v)? {
@@ -163,16 +224,17 @@ impl Interpreter {
                 }
                 Err(RuntimeError("non-exhaustive match".into()))
             }
-            Stmt::Return(expr) => {
+            StmtKind::Return(expr) => {
                 let v = match expr {
                     Some(e) => self.eval(e)?,
                     None => Value::Unit,
                 };
                 Ok(Flow::Return(v))
             }
-            Stmt::Break => Ok(Flow::Break),
-            Stmt::Continue => Ok(Flow::Continue),
-        }
+            StmtKind::Break => Ok(Flow::Break),
+            StmtKind::Continue => Ok(Flow::Continue),
+        };
+        res.map_err(|e| self.with_span(&s.span, e))
     }
 
     fn match_pattern(
@@ -247,13 +309,13 @@ impl Interpreter {
     }
 
     pub fn eval(&mut self, e: &Expr) -> EvalResult {
-        match e {
-            Expr::Literal(l) => self.eval_literal(l),
-            Expr::Ident(name) => self.env
+        let res = match &e.node {
+            ExprKind::Literal(l) => self.eval_literal(l),
+            ExprKind::Ident(name) => self.env
                 .borrow()
                 .get(name)
                 .ok_or_else(|| RuntimeError(format!("undefined variable `{}`", name))),
-            Expr::NativeCall(name, args) => {
+            ExprKind::NativeCall(name, args) => {
                 let f = self.native.get(name).ok_or_else(|| RuntimeError(format!("unknown native `{}`", name)))?;
                 let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
                 let r = f(&vals);
@@ -265,24 +327,50 @@ impl Interpreter {
                 }
                 r
             }
-            Expr::Binary { op, left, right } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                self.eval_binop(*op, &l, &r)
+            ExprKind::Binary { op, left, right } => {
+                match op {
+                    BinOp::And => {
+                        let l = self.eval(left)?;
+                        match l {
+                            Value::Bool(false) => Ok(Value::Bool(false)),
+                            Value::Bool(true) => {
+                                let r = self.eval(right)?;
+                                self.eval_binop(*op, &l, &r)
+                            }
+                            _ => Err(RuntimeError("&& expects Bool operands".into())),
+                        }
+                    }
+                    BinOp::Or => {
+                        let l = self.eval(left)?;
+                        match l {
+                            Value::Bool(true) => Ok(Value::Bool(true)),
+                            Value::Bool(false) => {
+                                let r = self.eval(right)?;
+                                self.eval_binop(*op, &l, &r)
+                            }
+                            _ => Err(RuntimeError("|| expects Bool operands".into())),
+                        }
+                    }
+                    _ => {
+                        let l = self.eval(left)?;
+                        let r = self.eval(right)?;
+                        self.eval_binop(*op, &l, &r)
+                    }
+                }
             }
-            Expr::Unary { op, inner } => {
+            ExprKind::Unary { op, inner } => {
                 let v = self.eval(inner)?;
                 self.eval_unop(*op, &v)
             }
-            Expr::Call { callee, args } => {
+            ExprKind::Call { callee, args } => {
                 let f = self.eval(callee)?;
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
                 self.call(&f, &arg_vals)
             }
-            Expr::Block(stmts) => {
+            ExprKind::Block(stmts) => {
                 self.eval_block_value(stmts)
             }
-            Expr::StructLiteral { name, fields } => {
+            ExprKind::StructLiteral { name, fields } => {
                 self.validate_struct_literal(name, fields)?;
                 let mut map = HashMap::new();
                 for (f, ex) in fields {
@@ -290,7 +378,7 @@ impl Interpreter {
                 }
                 Ok(Value::Struct { name: name.clone(), fields: map })
             }
-            Expr::VariantLiteral { enum_name, variant, data } => {
+            ExprKind::VariantLiteral { enum_name, variant, data } => {
                 self.validate_variant_literal(enum_name, variant, data.as_deref())?;
                 let d = match data {
                     Some(e) => Some(Box::new(self.eval(e)?)),
@@ -298,23 +386,23 @@ impl Interpreter {
                 };
                 Ok(Value::Variant { enum_name: enum_name.clone(), variant: variant.clone(), data: d })
             }
-            Expr::FieldAccess { base, field } => {
+            ExprKind::FieldAccess { base, field } => {
                 let b = self.eval(base)?;
                 match &b {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| RuntimeError(format!("no field `{}`", field))),
                     _ => Err(RuntimeError("field access on non-struct".into())),
                 }
             }
-            Expr::ListLiteral(elems) => {
+            ExprKind::ListLiteral(elems) => {
                 let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::List(Rc::new(RefCell::new(v))))
             }
-            Expr::ArrayLiteral(elems) => {
+            ExprKind::ArrayLiteral(elems) => {
                 let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
                 let a: Rc<[Value]> = v.into();
                 Ok(Value::Array(a))
             }
-            Expr::Template { parts } => {
+            ExprKind::Template { parts } => {
                 let mut s = String::new();
                 for p in parts {
                     match p {
@@ -327,7 +415,7 @@ impl Interpreter {
                 }
                 Ok(Value::String(Rc::from(s.into_boxed_str())))
             }
-            Expr::Index { base, index } => {
+            ExprKind::Index { base, index } => {
                 let b = self.eval(base)?;
                 let i = self.eval(index)?;
                 match (&b, &i) {
@@ -339,10 +427,16 @@ impl Interpreter {
                         let idx = *idx as usize;
                         arr.get(idx).cloned().ok_or_else(|| RuntimeError("index out of bounds".into()))
                     }
+                    (Value::Map(map), key_val) => {
+                        let key = MapKey::from_value(key_val).ok_or_else(|| {
+                            RuntimeError("map key must be Int/Bool/Char/String".into())
+                        })?;
+                        map.borrow().get(&key).cloned().ok_or_else(|| RuntimeError("key not found".into()))
+                    }
                     _ => Err(RuntimeError("invalid index".into())),
                 }
             }
-            Expr::Lambda { params, body } => {
+            ExprKind::Lambda { params, body } => {
                 let ps: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
                 Ok(Value::Lambda(LambdaClosure {
                     params: ps,
@@ -350,7 +444,7 @@ impl Interpreter {
                     env: self.env.clone(),
                 }))
             }
-            Expr::MapLiteral(pairs) => {
+            ExprKind::MapLiteral(pairs) => {
                 let mut m = HashMap::new();
                 for (k, v) in pairs {
                     let key_val = self.eval(k)?;
@@ -362,7 +456,7 @@ impl Interpreter {
                 }
                 Ok(Value::Map(Rc::new(RefCell::new(m))))
             }
-            Expr::If { cond, then_b, else_b } => {
+            ExprKind::If { cond, then_b, else_b } => {
                 let c = self.eval(cond)?;
                 let b = match &c {
                     Value::Bool(true) => true,
@@ -377,7 +471,7 @@ impl Interpreter {
                     Ok(Value::Unit)
                 }
             }
-            Expr::Match { scrutinee, arms } => {
+            ExprKind::Match { scrutinee, arms } => {
                 let v = self.eval(scrutinee)?;
                 for arm in arms {
                     if let Some(env_ext) = self.match_pattern(&arm.pattern, &v)? {
@@ -390,7 +484,8 @@ impl Interpreter {
                 }
                 Err(RuntimeError("non-exhaustive match".into()))
             }
-        }
+        };
+        res.map_err(|err| self.with_span(&e.span, err))
     }
 
     fn eval_block_value(&mut self, stmts: &[Stmt]) -> EvalResult {
@@ -399,8 +494,8 @@ impl Interpreter {
         self.env = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
         let mut last = Value::Unit;
         for s in stmts {
-            match s {
-                Stmt::Expr(e) => last = self.eval(e)?,
+            match &s.node {
+                StmtKind::Expr(e) => last = self.eval(e)?,
                 _ => match self.run_stmt(s)? {
                     Flow::Next => {}
                     Flow::Break => {
@@ -572,6 +667,7 @@ impl Interpreter {
         match (op, l, r) {
             (Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+            (Add, Value::String(a), Value::String(b)) => Ok(Value::string(format!("{}{}", a, b))),
             (Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
             (Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
@@ -584,9 +680,11 @@ impl Interpreter {
             (Eq, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a == b)),
+            (Eq, Value::String(a), Value::String(b)) => Ok(Value::Bool(a.as_ref() == b.as_ref())),
             (Ne, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
+            (Ne, Value::String(a), Value::String(b)) => Ok(Value::Bool(a.as_ref() != b.as_ref())),
             (Lt, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
             (Lt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
             (Le, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
@@ -630,13 +728,14 @@ impl Interpreter {
                     native: self.native.clone(),
                     struct_defs: self.struct_defs.clone(),
                     enum_defs: self.enum_defs.clone(),
+                    source: self.source.clone(),
                 };
-                match &cl.body {
-                    Expr::Block(stmts) => {
+                match &cl.body.node {
+                    ExprKind::Block(stmts) => {
                         let mut last = Value::Unit;
                         for s in stmts {
-                            match s {
-                                Stmt::Expr(e) => last = interp.eval(e)?,
+                            match &s.node {
+                                StmtKind::Expr(e) => last = interp.eval(e)?,
                                 _ => match interp.run_stmt(s)? {
                                     Flow::Next => {}
                                     Flow::Return(v) => return Ok(v),
@@ -653,4 +752,21 @@ impl Interpreter {
             _ => Err(RuntimeError("calling non-function".into())),
         }
     }
+}
+
+fn line_col(src: &str, idx: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in src.char_indices() {
+        if i >= idx {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }

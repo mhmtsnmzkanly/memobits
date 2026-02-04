@@ -11,6 +11,9 @@ Rust ve Haskell’den ilham alan, statik tipli, tip çıkarımlı bir programlam
 - **if** / **else**, **loop** / **break** / **continue**
 - **Option** / **Result** benzeri hata modeli
 - Template string: `` `Merhaba {id}` `` (v1’de yalnızca `{id}`)
+- `Map` index okuma/atama (`m[key]`, `m[key] = v`)
+- String birleştirme (`"a" + "b"`)
+- REPL: multiline + history
 
 ## Kurulum ve çalıştırma
 

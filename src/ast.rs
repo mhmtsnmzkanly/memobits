@@ -3,6 +3,24 @@
 use crate::types::Type;
 
 #[derive(Clone, Debug)]
+pub struct Span {
+    pub lo: usize,
+    pub hi: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Expr {
+    pub node: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stmt {
+    pub node: StmtKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub struct Program {
     pub items: Vec<Item>,
 }
@@ -58,10 +76,11 @@ pub struct VarBinding {
 }
 
 #[derive(Clone, Debug)]
-pub enum Stmt {
+pub enum StmtKind {
     Let(LetBinding),
     Var(VarBinding),
     Assign { name: String, value: Expr },
+    AssignIndex { base: Expr, index: Expr, value: Expr },
     Expr(Expr),
     If { cond: Expr, then_b: Vec<Stmt>, else_b: Option<Vec<Stmt>> },
     Loop(Vec<Stmt>),
@@ -102,7 +121,7 @@ pub enum Literal {
 }
 
 #[derive(Clone, Debug)]
-pub enum Expr {
+pub enum ExprKind {
     Literal(Literal),
     Ident(String),
     NativeCall(String, Vec<Expr>),
