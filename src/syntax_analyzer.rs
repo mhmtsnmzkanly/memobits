@@ -19,6 +19,9 @@ pub enum Token {
     From,
     Type,
     Label,
+    Property,
+    Get,
+    Set,
     Match,
     If,
     Else,
@@ -38,6 +41,7 @@ pub enum Token {
     List,
     Map,
     IntKw,
+    UIntKw,
     FloatKw,
     BoolKw,
     CharKw,
@@ -53,6 +57,7 @@ pub enum Token {
 
     // Literals
     IntLit(i64),
+    UIntLit(u64),
     FloatLit(f64),
     CharLit(char),
     /// "..." — no interpolation
@@ -93,6 +98,7 @@ pub enum Token {
     Semi,
     Dot,
     ColonColon,
+    At,
 
     Eof,
 }
@@ -124,6 +130,12 @@ enum SAToken {
     Type,
     #[token("label")]
     Label,
+    #[token("property")]
+    Property,
+    #[token("Get")]
+    Get,
+    #[token("Set")]
+    Set,
     #[token("match")]
     Match,
     #[token("if")]
@@ -166,6 +178,8 @@ enum SAToken {
 
     #[token("Int")]
     IntKw,
+    #[token("UInt")]
+    UIntKw,
     #[token("Float")]
     FloatKw,
     #[token("Bool")]
@@ -238,12 +252,17 @@ enum SAToken {
     Semi,
     #[token(".")]
     Dot,
+    #[token("@")]
+    At,
 
     // ===== Literals =====
-    #[regex(r"-?(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)", |lex| lex.slice().parse::<f64>().ok())]
+    #[regex(r"(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)", |lex| lex.slice().parse::<f64>().ok())]
     FloatLit(f64),
 
-    #[regex(r"-?\d+", |lex| lex.slice().parse::<i64>().ok())]
+    #[regex(r"\d+[uU]", |lex| parse_uint_literal(lex.slice()))]
+    UIntLit(u64),
+
+    #[regex(r"\d+", |lex| lex.slice().parse::<i64>().ok())]
     IntLit(i64),
 
     #[regex(r"'([^'\\]|\\.)'", |lex| parse_char_literal(lex.slice()))]
@@ -388,6 +407,9 @@ fn push_token(
         SAToken::From => tokens.push((Token::From, span)),
         SAToken::Type => tokens.push((Token::Type, span)),
         SAToken::Label => tokens.push((Token::Label, span)),
+        SAToken::Property => tokens.push((Token::Property, span)),
+        SAToken::Get => tokens.push((Token::Get, span)),
+        SAToken::Set => tokens.push((Token::Set, span)),
         SAToken::Match => tokens.push((Token::Match, span)),
         SAToken::If => tokens.push((Token::If, span)),
         SAToken::Else => tokens.push((Token::Else, span)),
@@ -411,6 +433,7 @@ fn push_token(
         SAToken::Map => tokens.push((Token::Map, span)),
 
         SAToken::IntKw => tokens.push((Token::IntKw, span)),
+        SAToken::UIntKw => tokens.push((Token::UIntKw, span)),
         SAToken::FloatKw => tokens.push((Token::FloatKw, span)),
         SAToken::BoolKw => tokens.push((Token::BoolKw, span)),
         SAToken::CharKw => tokens.push((Token::CharKw, span)),
@@ -447,11 +470,13 @@ fn push_token(
         SAToken::Colon => tokens.push((Token::Colon, span)),
         SAToken::Semi => tokens.push((Token::Semi, span)),
         SAToken::Dot => tokens.push((Token::Dot, span)),
+        SAToken::At => tokens.push((Token::At, span)),
 
         SAToken::NativeIdent(name) => tokens.push((Token::NativeIdent(name), span)),
         SAToken::PathIdent((a, b)) => tokens.push((Token::PathIdent(a, b), span)),
         SAToken::Ident(name) => tokens.push((Token::Ident(name), span)),
         SAToken::IntLit(i) => tokens.push((Token::IntLit(i), span)),
+        SAToken::UIntLit(u) => tokens.push((Token::UIntLit(u), span)),
         SAToken::FloatLit(f) => tokens.push((Token::FloatLit(f), span)),
         SAToken::CharLit(c) => tokens.push((Token::CharLit(c), span)),
         SAToken::StringLit(s) => tokens.push((Token::StringLit(s), span)),
@@ -613,6 +638,11 @@ fn parse_string_literal(slice: &str) -> Option<String> {
     Some(out)
 }
 
+fn parse_uint_literal(slice: &str) -> Option<u64> {
+    let s = slice.trim_end_matches(|c: char| c == 'u' || c == 'U');
+    s.parse::<u64>().ok()
+}
+
 fn parse_char_literal(slice: &str) -> Option<char> {
     if slice.len() < 3 {
         return None;
@@ -772,6 +802,18 @@ impl Parser {
         Span { lo: a.lo, hi: b.hi }
     }
 
+    fn block_span(stmts: &[Stmt]) -> Span {
+        if let Some(first) = stmts.first() {
+            let last = stmts.last().unwrap();
+            Span {
+                lo: first.span.lo,
+                hi: last.span.hi,
+            }
+        } else {
+            Span { lo: 0, hi: 0 }
+        }
+    }
+
     fn make_expr(&self, span: Span, node: ExprKind) -> Expr {
         Expr { node, span }
     }
@@ -817,6 +859,9 @@ impl Parser {
                 self.err("expected ; after type alias".into());
             }
             return Some(Item::TypeAlias(TypeAlias { name, target }));
+        }
+        if self.eat(&Token::Property) {
+            return Some(Item::PropertyDef(self.parse_property_def()?));
         }
         if self.eat(&Token::Mod) {
             let name = self.expect_ident()?;
@@ -926,6 +971,111 @@ impl Parser {
             params,
             ret,
             body,
+        })
+    }
+
+    fn parse_property_def(&mut self) -> Option<PropertyDef> {
+        self.expect(Token::Lt).ok()?;
+        let typ = self.parse_type()?;
+        self.expect(Token::Gt).ok()?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace).ok()?;
+
+        let mut getter: Option<PropertyGetter> = None;
+        let mut setter: Option<PropertySetter> = None;
+
+        loop {
+            self.bump_while_semi();
+            if self.eat(&Token::RBrace) {
+                break;
+            }
+            if self.eat(&Token::Get) {
+                if getter.is_some() {
+                    self.err("duplicate Get in property".into());
+                }
+                if self.eat(&Token::Semi) {
+                    getter = Some(PropertyGetter {
+                        value_param: "value".into(),
+                        body: Expr {
+                            node: ExprKind::Ident("value".into()),
+                            span: self.last_span.clone(),
+                        },
+                    });
+                    continue;
+                }
+                self.expect(Token::Colon).ok()?;
+                let value_param = self.expect_ident()?;
+                let body = if self.eat(&Token::FatArrow) {
+                    self.parse_expr()?
+                } else if self.eat(&Token::LBrace) {
+                    let b = self.parse_block_stmts()?;
+                    self.expect(Token::RBrace).ok()?;
+                    let span = Parser::block_span(&b);
+                    Expr { node: ExprKind::Block(b), span }
+                } else {
+                    self.err("expected => or { after Get:".into());
+                    return None;
+                };
+                getter = Some(PropertyGetter { value_param, body });
+                if self.eat(&Token::Semi) {
+                    continue;
+                }
+                continue;
+            }
+            if self.eat(&Token::Set) {
+                if self.eat(&Token::Semi) {
+                    setter = None;
+                    continue;
+                }
+                self.expect(Token::Colon).ok()?;
+                let value_param = self.expect_ident()?;
+                self.expect(Token::Comma).ok()?;
+                let input_param = self.expect_ident()?;
+                let body = if self.eat(&Token::FatArrow) {
+                    self.parse_expr()?
+                } else if self.eat(&Token::LBrace) {
+                    let b = self.parse_block_stmts()?;
+                    self.expect(Token::RBrace).ok()?;
+                    let span = Parser::block_span(&b);
+                    Expr { node: ExprKind::Block(b), span }
+                } else {
+                    self.err("expected => or { after Set:".into());
+                    return None;
+                };
+                setter = Some(PropertySetter {
+                    value_param,
+                    input_param,
+                    body,
+                });
+                if self.eat(&Token::Semi) {
+                    continue;
+                }
+                continue;
+            }
+            self.err("expected Get or Set in property".into());
+            break;
+        }
+
+        let getter = getter.unwrap_or(PropertyGetter {
+            value_param: "value".into(),
+            body: Expr {
+                node: ExprKind::Ident("value".into()),
+                span: self.last_span.clone(),
+            },
+        });
+
+        self.expect(Token::Eq).ok()?;
+        let default = self.parse_expr()?;
+        if !self.eat(&Token::Semi) && !self.is(&Token::Eof) {
+            self.err("expected ; after property".into());
+        }
+
+        Some(PropertyDef {
+            name,
+            typ,
+            default,
+            getter,
+            setter,
         })
     }
 
@@ -1124,6 +1274,10 @@ impl Parser {
             self.advance();
             return Some(Pattern::Literal(Literal::Int(i)));
         }
+        if let Some(Token::UIntLit(u)) = self.peek().cloned() {
+            self.advance();
+            return Some(Pattern::Literal(Literal::UInt(u)));
+        }
         if let Some(Token::FloatLit(f)) = self.peek().cloned() {
             self.advance();
             return Some(Pattern::Literal(Literal::Float(f)));
@@ -1284,6 +1438,9 @@ impl Parser {
         if self.eat(&Token::IntKw) {
             return Some(Type::Int);
         }
+        if self.eat(&Token::UIntKw) {
+            return Some(Type::UInt);
+        }
         if self.eat(&Token::FloatKw) {
             return Some(Type::Float);
         }
@@ -1370,6 +1527,7 @@ impl Parser {
             .ok()?;
         match t {
             Token::IntLit(i) if i >= 0 => Some(i as usize),
+            Token::UIntLit(u) => Some(u as usize),
             _ => {
                 self.err("expected non-negative integer".into());
                 None
@@ -1657,6 +1815,42 @@ impl Parser {
             return Some(first);
         }
 
+        if self.eat(&Token::At) {
+            let start = self.last_span.clone();
+            self.expect(Token::LBracket).ok()?;
+            let mut elems = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RBracket) {
+                    break;
+                }
+                elems.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) && !self.is(&Token::RBracket) {
+                    break;
+                }
+            }
+            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
+        }
+
+        if self.eat(&Token::Array) {
+            let start = self.last_span.clone();
+            self.expect(Token::LParen).ok()?;
+            let mut elems = Vec::new();
+            loop {
+                self.bump_while_semi();
+                if self.eat(&Token::RParen) {
+                    break;
+                }
+                elems.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                    break;
+                }
+            }
+            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
+        }
+
         if self.eat(&Token::LBrace) {
             let start = self.last_span.clone();
             self.bump_while_semi();
@@ -1805,6 +1999,11 @@ impl Parser {
             let span = self.last_span.clone();
             return Some(self.make_expr(span, ExprKind::Literal(Literal::Int(i))));
         }
+        if let Some(Token::UIntLit(u)) = self.peek().cloned() {
+            self.advance();
+            let span = self.last_span.clone();
+            return Some(self.make_expr(span, ExprKind::Literal(Literal::UInt(u))));
+        }
         if let Some(Token::FloatLit(f)) = self.peek().cloned() {
             self.advance();
             let span = self.last_span.clone();
@@ -1899,6 +2098,21 @@ impl Parser {
             let name = name.clone();
             self.advance();
             let start = self.last_span.clone();
+            if name == "array" && self.eat(&Token::LBracket) {
+                let mut elems = Vec::new();
+                loop {
+                    self.bump_while_semi();
+                    if self.eat(&Token::RBracket) {
+                        break;
+                    }
+                    elems.push(self.parse_expr()?);
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RBracket) {
+                        break;
+                    }
+                }
+                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
+            }
             if self.eat(&Token::FatArrow) {
                 let mut params = vec![(name.clone(), None)];
                 while self.eat(&Token::Comma) {

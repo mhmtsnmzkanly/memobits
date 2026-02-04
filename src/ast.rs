@@ -36,6 +36,7 @@ pub enum Item {
     FnDef(FnDef),
     GlobalLet(LetBinding),
     GlobalVar(VarBinding),
+    PropertyDef(PropertyDef),
     ModuleDecl(ModuleDecl),
     TypeAlias(TypeAlias),
     TopLevelStmt(Stmt),
@@ -94,6 +95,28 @@ pub struct VarBinding {
 }
 
 #[derive(Clone, Debug)]
+pub struct PropertyDef {
+    pub name: String,
+    pub typ: Type,
+    pub default: Expr,
+    pub getter: PropertyGetter,
+    pub setter: Option<PropertySetter>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PropertyGetter {
+    pub value_param: String,
+    pub body: Expr,
+}
+
+#[derive(Clone, Debug)]
+pub struct PropertySetter {
+    pub value_param: String,
+    pub input_param: String,
+    pub body: Expr,
+}
+
+#[derive(Clone, Debug)]
 pub enum StmtKind {
     Let(LetBinding),
     Var(VarBinding),
@@ -127,6 +150,7 @@ pub enum Pattern {
 #[derive(Clone, Debug)]
 pub enum Literal {
     Int(i64),
+    UInt(u64),
     Float(f64),
     Bool(bool),
     Char(char),

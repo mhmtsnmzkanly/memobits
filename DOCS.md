@@ -17,8 +17,8 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 
 ### Açık Noktalar / Yapılabilirler (Öncelikli)
 1. **Hata örneklerini doğrulama**: `examples/errors/*_all.mb` içindeki her `// expected:` satırının gerçekten üretilip üretilmediğini otomatik doğrulayan bir script eklenebilir.
-2. **Array literal eksikliği**: `Array<T,N>` tipi destekleniyor ama array literal sözdizimi yok. Bu nedenle array ile ilgili bazı hata örnekleri “unreachable” durumda.
-3. **Kurulum/çalıştırma**: Bilinçli boş bırakıldı; istenirse `DOCS.md` ve/veya `README.md` içinde minimal komutlar eklenebilir.
+2. **Array literal**: `Array<T,N>` tipi ve literal sözdizimi mevcut (`@[a,b]`, `array[a,b]`, `Array(a,b)`).
+3. **Kurulum/çalıştırma**: README’ye temel komutlar eklendi; istenirse genişletilebilir.
 4. **Doc doğruluk notu**: Kod gerçek kaynak; doc‑code uyuşmazlığı olursa `src/` önceliklidir (mevcut).
 
 ### Dosya ve İçerik Durumu (Agent İçin)
@@ -52,8 +52,11 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 - REPL: çok satır + geçmiş.
 - Tuple (`(a, b)`), label’lı tuple tipi (`(Int label x, Int label y)`) ve `.0`/`.x` erişimi.
 - Method call sugar: `p.len()` → `len(p)`.
+- Primitive methods: `x.method(...)` for temel tipler desteklenir; desteklenmeyenler `unsupported primitive method` hatası verir.
+- Property: `property<T> Name { Get: v => v; Set: v, input => ... } = default;`
 - Type alias: `type Alias = Type;`.
-- Not: `Array<T,N>` tipi ve runtime desteği var, ama array literal sözdizimi parser’da yok.
+- Performans ölçümü: `--performance` (load/opt/typecheck/runtime süreleri ve bellek).
+- Not: `Array<T,N>` tipi ve runtime desteği var, array literal sözdizimi desteklenir.
 
 ## Sözdizimi Kısa Rehber (Gerçek Uygulama)
 - Statement ayırıcı `;` (opsiyonel yerlerde parser toleranslı).
@@ -63,6 +66,7 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 - Blok ifadesi: `{ stmt* }` değer üretir (son expression üzerinden).
 - Map literal: `{ key => value, ... }` (ilk `=>` görünürse map; yoksa block).
 - List literal: `[a, b, c]`.
+- Array literal: `@[a, b, c]`, `array[a, b, c]`, `Array(a, b, c)`.
 - Tuple literal: `(a, b)` ve tek elemanlı tuple: `(a,)`. Unit: `()`.
 - Struct literal: `TypeName { field: expr, ... }`.
 - Enum literal: `Enum::Variant` veya `Enum::Variant(expr)`.
@@ -71,6 +75,7 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 - Template string: `` `Merhaba {id}` `` yalnız identifier interpolasyonu (whitespace serbest).
 - Normal string: `"..."` (escape: `\\`, `\"`, `\n`, `\r`, `\t`, `\0`).
 - Char literal: `'a'` (escape: `\\`, `\'`, `\n`, `\r`, `\t`, `\0`).
+- `UInt` literal: `123u` veya `123U`.
 - Lambda: `x => expr` veya `a, b => expr` (param tipleri yok).
 - Match pattern: `_`, literal, `ident` (binding), `Type { field: pat }`, `Enum::Variant` veya `Enum::Variant(pat)`, `Some(p)`, `Ok(p)`, `Err(p)`.
 
@@ -81,7 +86,7 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 - `let` immutable, `var` mutable.
 
 ### Tipler
-- Temel: `Int`, `Float`, `Bool`, `Char`, `String`, `Unit`.
+- Temel: `Int`, `UInt`, `Float`, `Bool`, `Char`, `String`, `Unit`.
 - Koleksiyonlar: `List<T>`, `Array<T,N>`, `Map<K,V>`.
 - `Option<T>`, `Result<T,E>`.
 - Tuple: `(T1, T2, ...)`.
@@ -91,6 +96,8 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 - `fn name(a: Int) -> Int { ... }`
 - Lambda: `x => expr` veya `a, b => expr` (param tipleri yok).
 - Method call sugar: `p.len()` → `len(p)`.
+- Primitive conversion: `to_int(x)`, `to_uint(x)` (ayrıca `x.to_int()` / `x.to_uint()`).
+- String methods: `chars()`, `repeat(n)`, `slice(start, len)`.
 
 ### Struct / Enum / Match
 - `struct` ve `enum` tanımları.
@@ -106,6 +113,7 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 ### String
 - Template string: `` `Merhaba {name}` `` (v1’de yalnızca `{id}`).
 - Normal string: `"..."` (escape: `\\`, `\"`, `\n`, `\r`, `\t`, `\0`).
+- `UInt` literal: `123u` veya `123U`.
 
 ## Bellek Mimarisi
 ### Özet
@@ -115,7 +123,7 @@ Bu dosya `README.md` + `docs/*` içeriğinin tek yerde, agent odaklı özeti. H�
 
 ### Value
 ```rust
-Value::Int | Float | Bool | Char | Unit | HeapRef(Rc<HeapObject>)
+Value::Int | UInt | Float | Bool | Char | Unit | HeapRef(Rc<HeapObject>)
 ```
 
 ### HeapObject
@@ -136,7 +144,7 @@ Value::Int | Float | Bool | Char | Unit | HeapRef(Rc<HeapObject>)
 - `no_std` modunda `Map` `BTreeMap` tabanlıdır.
 
 ## Runtime Kısıtları ve Notlar
-- Map key’leri yalnız `Int/Bool/Char/String` olabilir (aksi runtime error).
+- Map key’leri yalnız `Int/UInt/Bool/Char/String` olabilir (aksi runtime error).
 - Array indeks ataması desteklenmez (`list`/`map` için destek var).
 - Tuple label’ları yalnızca type annotation üzerinden uygulanır; literal tuple label üretmez.
 - `native::` fonksiyonları (std): `print`, `debug`, `input`, `return`. `no_std` modunda registry boş başlar.
@@ -148,13 +156,14 @@ Value::Int | Float | Bool | Char | Unit | HeapRef(Rc<HeapObject>)
 - Const error:
   - `1/0`, `1%0`
   - array/list index OOB
-  - map key not found (const)
+  - map key not found (const) artık runtime’a bırakılır (hard‑error değil)
 - `if`/`match` sabit koşulda sadece erişilebilir branch kontrol edilir.
 - Exhaustiveness: `Option`, `Result`, `Enum`, `Bool`, `Unit`.
 
 ## Örnekler
 - `examples/simple/` → her özellik için kısa örnekler.
 - `examples/complex/` → birleşik senaryolar.
+- `examples/complex/05_validation_suite.mb` → tek dosyada kapsamlı doğrulama.
 - `examples/errors/` → hata mesajı örnekleri (tek dosyada birleşik).
 
 ## Dil Sözdizimi Örnekleri

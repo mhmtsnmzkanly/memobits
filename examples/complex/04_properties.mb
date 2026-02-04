@@ -1,0 +1,44 @@
+// property demo (complex)
+property<UInt> Health {
+    Get: v => v;
+    Set: v, input {
+        if input > 100u { 100u }
+        else { if input < 0u { 0u } else { input } }
+    }
+} = 100u;
+
+property<Int> Score {
+    Get: v => v;
+    Set: v, input {
+        if input < 0 { 0 } else { input }
+    }
+} = 0;
+
+property<String> Status {
+    Get: v => v;
+    Set: v, input {
+        if input.len() == 0u { "idle" }
+        else { input }
+    }
+} = "idle";
+
+let h0 = Health;
+let s0 = Score;
+let st0 = Status;
+native::print(`init {h0} {s0} {st0}`);
+
+Health = 250u;
+Score = 25;
+Status = "running";
+
+native::print(`after1 {Health} {Score} {Status}`);
+
+Health = 5u;
+Score = -5;
+Status = "";
+
+native::print(`after2 {Health} {Score} {Status}`);
+
+// Interaction with UInt conversions
+let clamped = Health.to_int();
+native::print(`clamped {clamped}`);

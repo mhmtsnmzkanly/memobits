@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 //! Memobits — SyntaxAnalyzer (lexer+parser), AST, AST-walking Interpreter.
 //!
-//! Bkz. `docs/LANGUAGE_SPEC.md` için teknik spesifikasyon.
+//! Bkz. `DOCS.md` için teknik spesifikasyon.
 
 extern crate alloc;
 
@@ -10,6 +10,8 @@ pub mod collections;
 pub mod environment;
 pub mod interpreter;
 pub mod native;
+pub mod optimizer;
+pub mod primitive;
 #[cfg(feature = "std")]
 pub mod module_loader;
 #[cfg(feature = "std")]

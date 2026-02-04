@@ -67,6 +67,7 @@ fn native_debug(args: &[Value]) -> EvalResult {
 pub fn value_to_string(v: &Value) -> String {
     match v {
         Value::Int(i) => i.to_string(),
+        Value::UInt(u) => u.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Char(c) => c.to_string(),

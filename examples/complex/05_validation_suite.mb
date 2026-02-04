@@ -1,0 +1,63 @@
+// Validation suite (advanced example)
+// This file exercises many language features in a single run.
+
+// --- Property
+property<UInt> Health {
+    Get: v => v;
+    Set: v, input {
+        if input > 100u { 100u }
+        else { if input < 0u { 0u } else { input } }
+    }
+} = 0u;
+
+Health = 150u;
+native::print(`health {Health}`); // expect 100
+
+// --- UInt + conversions
+let u = 42u;
+let i = u.to_int();
+native::print(`u {u} i {i}`); // expect 42 42
+
+// --- Array literal / list / map
+let arr = @[1, 2, 3];
+let lst = [4, 5, 6];
+let mp = { "a" => 1, "b" => 2 };
+let arr0 = arr[0];
+let lst1 = lst[1];
+let mpb = mp["b"];
+native::print(`arr0 {arr0} lst1 {lst1} mpb {mpb}`);
+
+// --- String methods
+let s = "hello";
+let chars = s.chars();
+let rep = s.repeat(2u);
+let sl = s.slice(1u, 3u);
+let c0 = chars[0];
+native::print(`chars0 {c0} rep {rep} sl {sl}`);
+
+// --- Primitive math / bit ops
+let x = 10;
+let y = x.wrapping_add(5);
+let z = x.count_ones();
+native::print(`y {y} z {z}`);
+
+// --- Match / enum
+enum Flag { On, Off }
+let f = Flag::On;
+let out = match f {
+    Flag::On => "on",
+    Flag::Off => "off",
+};
+native::print(`flag {out}`);
+
+// --- Option / Result
+let opt = Some(7);
+let r = match opt {
+    Some(v) => v + 1,
+    None => 0,
+};
+native::print(`opt {r}`);
+
+// --- If expression
+let msg = if 1 < 2 { "ok" } else { "no" };
+native::print(`if {msg}`);

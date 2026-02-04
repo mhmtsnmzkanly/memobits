@@ -1,0 +1,26 @@
+// property demo (simple)
+property<UInt> Health {
+    Get: value => value;
+    Set: value, input {
+        if input > 100u {
+            100u
+        } else {
+            if input < 0u {
+                0u
+            } else {
+                input
+            }
+        }
+    }
+} = 0u;
+
+let h0 = Health;
+native::print(`h0 {h0}`);
+
+Health = 150u;
+let h1 = Health;
+native::print(`h1 {h1}`);
+
+Health = 42u;
+let h2 = Health;
+native::print(`h2 {h2}`);

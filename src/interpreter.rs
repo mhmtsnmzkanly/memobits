@@ -20,6 +20,7 @@ pub struct Interpreter {
     struct_defs: HashMap<String, StructDef>,
     enum_defs: HashMap<String, EnumDef>,
     functions: Rc<RefCell<Vec<FunctionDef>>>,
+    properties: HashMap<String, PropertyRuntime>,
     source: Option<String>,
 }
 
@@ -39,6 +40,13 @@ struct FunctionDef {
     body: Expr,
 }
 
+#[derive(Clone)]
+struct PropertyRuntime {
+    value: Value,
+    getter: PropertyGetter,
+    setter: Option<PropertySetter>,
+}
+
 impl Interpreter {
     pub fn new(native: NativeRegistry) -> Self {
         Self {
@@ -47,6 +55,7 @@ impl Interpreter {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             functions: Rc::new(RefCell::new(Vec::new())),
+            properties: HashMap::new(),
             source: None,
         }
     }
@@ -113,6 +122,18 @@ impl Interpreter {
             }
             Item::TypeAlias(_) => Ok(Value::Unit),
             Item::ModuleDecl(_) => Ok(Value::Unit),
+            Item::PropertyDef(def) => {
+                let v = self.eval(&def.default)?;
+                self.properties.insert(
+                    def.name.clone(),
+                    PropertyRuntime {
+                        value: v,
+                        getter: def.getter.clone(),
+                        setter: def.setter.clone(),
+                    },
+                );
+                Ok(Value::Unit)
+            }
             Item::FnDef(d) => {
                 let name = d.name.clone();
                 let params: Vec<String> = d.params.iter().map(|(p, _)| p.clone()).collect();
@@ -178,7 +199,10 @@ impl Interpreter {
             }
             StmtKind::Assign { name, value } => {
                 let v = self.eval(value)?;
-                if !self.env.borrow_mut().set(name, v) {
+                if !self.env.borrow_mut().set(name, v.clone()) {
+                    if self.set_property_value(name, v)? {
+                        return Ok(Flow::Next);
+                    }
                     return Err(RuntimeError(format!("cannot assign to immutable binding `{}`", name)));
                 }
                 Ok(Flow::Next)
@@ -187,10 +211,10 @@ impl Interpreter {
                 let b = self.eval(base)?;
                 let i = self.eval(index)?;
                 let v = self.eval(value)?;
-                match (b, i) {
+                match (&b, &i) {
                     (Value::HeapRef(h), Value::Int(idx)) => match h.as_ref() {
                         HeapObject::List(vec) => {
-                            let idx = idx as usize;
+                            let idx = *idx as usize;
                             let mut guard = vec.borrow_mut();
                             if idx >= guard.len() {
                                 return Err(RuntimeError(format!(
@@ -208,8 +232,29 @@ impl Interpreter {
                             value_type_name(&b)
                         ))),
                     },
-                    (Value::HeapRef(h), key_val) => match h.as_ref() {
+                    (Value::HeapRef(h), Value::UInt(idx)) => match h.as_ref() {
+                        HeapObject::List(vec) => {
+                            let idx = *idx as usize;
+                            let mut guard = vec.borrow_mut();
+                            if idx >= guard.len() {
+                                return Err(RuntimeError(format!(
+                                    "list index out of bounds: {} (len {})",
+                                    idx,
+                                    guard.len()
+                                )));
+                            }
+                            guard[idx] = v;
+                            Ok(Flow::Next)
+                        }
+                        HeapObject::Array(_) => Err(RuntimeError("cannot assign to array index (arrays are immutable at runtime)".into())),
+                        _ => Err(RuntimeError(format!(
+                            "index assignment on non-list/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    (Value::HeapRef(h), _) => match h.as_ref() {
                         HeapObject::Map(map) => {
+                            let key_val = i.clone();
                             self.ensure_map_key(&key_val)?;
                             map.borrow_mut().insert(key_val, v);
                             Ok(Flow::Next)
@@ -319,6 +364,7 @@ impl Interpreter {
                 Ok(true)
             }
             (Pattern::Literal(Literal::Int(i)), Value::Int(j)) => Ok(*i == *j),
+            (Pattern::Literal(Literal::UInt(i)), Value::UInt(j)) => Ok(*i == *j),
             (Pattern::Literal(Literal::Float(a)), Value::Float(b)) => Ok(*a == *b),
             (Pattern::Literal(Literal::Bool(a)), Value::Bool(b)) => Ok(*a == *b),
             (Pattern::Literal(Literal::Char(a)), Value::Char(b)) => Ok(*a == *b),
@@ -376,10 +422,16 @@ impl Interpreter {
     pub fn eval(&mut self, e: &Expr) -> EvalResult {
         let res = match &e.node {
             ExprKind::Literal(l) => self.eval_literal(l),
-            ExprKind::Ident(name) => self.env
-                .borrow()
-                .get(name)
-                .ok_or_else(|| RuntimeError(format!("undefined variable `{}`", name))),
+            ExprKind::Ident(name) => {
+                let env_val = { self.env.borrow().get(name) };
+                if let Some(v) = env_val {
+                    Ok(v)
+                } else if let Ok(v) = self.get_property_value(name) {
+                    Ok(v)
+                } else {
+                    Err(RuntimeError(format!("undefined variable `{}`", name)))
+                }
+            }
             ExprKind::NativeCall(name, args) => {
                 let f = self.native.get(name).ok_or_else(|| RuntimeError(format!("unknown native `{}`", name)))?;
                 let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
@@ -435,6 +487,18 @@ impl Interpreter {
                 self.eval_unop(*op, &v)
             }
             ExprKind::Call { callee, args } => {
+                if let ExprKind::Ident(name) = &callee.node {
+                    let f_opt = { self.env.borrow().get(name) };
+                    if let Some(f) = f_opt {
+                        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                        return self.call(&f, &arg_vals);
+                    }
+                    let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                    if let Some(res) = crate::primitive::call_primitive(name, &arg_vals) {
+                        return res;
+                    }
+                    return Err(RuntimeError(format!("undefined function `{}`", name)));
+                }
                 let f = self.eval(callee)?;
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
                 self.call(&f, &arg_vals)
@@ -538,7 +602,13 @@ impl Interpreter {
                     match p {
                         TemplatePart::Lit(l) => s.push_str(l),
                         TemplatePart::Interp(id) => {
-                            let v = self.env.borrow().get(id).ok_or_else(|| RuntimeError(format!("undefined `{}` in template", id)))?;
+                            let env_val = { self.env.borrow().get(id) };
+                            let v = if let Some(v) = env_val {
+                                v
+                            } else {
+                                self.get_property_value(id)
+                                    .map_err(|_| RuntimeError(format!("undefined `{}` in template", id)))?
+                            };
                             s.push_str(&crate::native::value_to_string(&v));
                         }
                     }
@@ -550,6 +620,26 @@ impl Interpreter {
                 let i = self.eval(index)?;
                 match (&b, &i) {
                     (Value::HeapRef(h), Value::Int(idx)) => match h.as_ref() {
+                        HeapObject::List(vec) => {
+                            let idx = *idx as usize;
+                            let guard = vec.borrow();
+                            guard
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!("list index out of bounds: {} (len {})", idx, guard.len())))
+                        }
+                        HeapObject::Array(arr) => {
+                            let idx = *idx as usize;
+                            arr.get(idx)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!("array index out of bounds: {} (len {})", idx, arr.len())))
+                        }
+                        _ => Err(RuntimeError(format!(
+                            "index on non-list/array/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    (Value::HeapRef(h), Value::UInt(idx)) => match h.as_ref() {
                         HeapObject::List(vec) => {
                             let idx = *idx as usize;
                             let guard = vec.borrow();
@@ -682,6 +772,7 @@ impl Interpreter {
     fn eval_literal(&mut self, l: &Literal) -> EvalResult {
         match l {
             Literal::Int(i) => Ok(Value::Int(*i)),
+            Literal::UInt(u) => Ok(Value::UInt(*u)),
             Literal::Float(f) => Ok(Value::Float(*f)),
             Literal::Bool(b) => Ok(Value::Bool(*b)),
             Literal::Char(c) => Ok(Value::Char(*c)),
@@ -787,7 +878,7 @@ impl Interpreter {
 
     fn ensure_map_key(&self, v: &Value) -> Result<(), RuntimeError> {
         match v {
-            Value::Int(_) | Value::Bool(_) | Value::Char(_) => Ok(()),
+            Value::Int(_) | Value::UInt(_) | Value::Bool(_) | Value::Char(_) => Ok(()),
             Value::HeapRef(h) => match h.as_ref() {
                 HeapObject::String(_) => Ok(()),
                 _ => Err(RuntimeError(format!(
@@ -873,6 +964,7 @@ impl Interpreter {
         use crate::ast::BinOp::*;
         match (op, l, r) {
             (Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+            (Add, Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a + b)),
             (Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
             (Add, Value::HeapRef(a), Value::HeapRef(b)) => match (a.as_ref(), b.as_ref()) {
                 (HeapObject::String(sa), HeapObject::String(sb)) => {
@@ -881,14 +973,49 @@ impl Interpreter {
                 _ => Err(RuntimeError(format!("type error: {:?} {:?} {:?}", op, l, r))),
             },
             (Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
+            (Sub, Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a - b)),
             (Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
             (Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+            (Mul, Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a * b)),
             (Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-            (Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
-            (Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-            (Rem, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
-            (Rem, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+            (Div, Value::Int(a), Value::Int(b)) => {
+                if *b == 0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::Int(a / b))
+            },
+            (Div, Value::UInt(a), Value::UInt(b)) => {
+                if *b == 0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::UInt(a / b))
+            },
+            (Div, Value::Float(a), Value::Float(b)) => {
+                if *b == 0.0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::Float(a / b))
+            },
+            (Rem, Value::Int(a), Value::Int(b)) => {
+                if *b == 0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::Int(a % b))
+            },
+            (Rem, Value::UInt(a), Value::UInt(b)) => {
+                if *b == 0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::UInt(a % b))
+            },
+            (Rem, Value::Float(a), Value::Float(b)) => {
+                if *b == 0.0 {
+                    return Err(RuntimeError("division by zero".into()));
+                }
+                Ok(Value::Float(a % b))
+            },
             (Eq, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a == b)),
+            (Eq, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a == b)),
@@ -897,6 +1024,7 @@ impl Interpreter {
                 _ => Ok(Value::Bool(false)),
             },
             (Ne, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a != b)),
+            (Ne, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::HeapRef(a), Value::HeapRef(b)) => match (a.as_ref(), b.as_ref()) {
@@ -904,12 +1032,16 @@ impl Interpreter {
                 _ => Ok(Value::Bool(true)),
             },
             (Lt, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
+            (Lt, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a < b)),
             (Lt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
             (Le, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
+            (Le, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a <= b)),
             (Le, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
             (Gt, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
+            (Gt, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a > b)),
             (Gt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
             (Ge, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
+            (Ge, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a >= b)),
             (Ge, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
             (And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
             (Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
@@ -958,6 +1090,7 @@ impl Interpreter {
                         struct_defs: self.struct_defs.clone(),
                         enum_defs: self.enum_defs.clone(),
                         functions: self.functions.clone(),
+                        properties: self.properties.clone(),
                         source: self.source.clone(),
                     };
                     match &def.body.node {
@@ -983,6 +1116,121 @@ impl Interpreter {
             },
             _ => Err(RuntimeError("calling non-function".into())),
         }
+    }
+
+    fn get_property_value(&mut self, name: &str) -> Result<Value, RuntimeError> {
+        let Some(prop) = self.properties.get(name).cloned() else {
+            return Err(RuntimeError(format!("unknown property `{}`", name)));
+        };
+        let current = prop.value;
+        self.eval_property_body(&prop.getter.body, &[(&prop.getter.value_param, current)])
+    }
+
+    fn set_property_value(&mut self, name: &str, input: Value) -> Result<bool, RuntimeError> {
+        let Some(mut prop) = self.properties.remove(name) else {
+            return Ok(false);
+        };
+        let Some(setter) = prop.setter.clone() else {
+            self.properties.insert(name.to_string(), prop);
+            return Err(RuntimeError(format!("property `{}` is read-only", name)));
+        };
+        let current = prop.value.clone();
+        let out = self.eval_property_body(
+            &setter.body,
+            &[(&setter.value_param, current), (&setter.input_param, input)],
+        )?;
+        prop.value = out;
+        self.properties.insert(name.to_string(), prop);
+        Ok(true)
+    }
+
+    fn eval_property_body(
+        &mut self,
+        body: &Expr,
+        params: &[(&str, Value)],
+    ) -> EvalResult {
+        let prev = self.env.clone();
+        let child = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
+        {
+            let mut env = child.borrow_mut();
+            for (name, val) in params {
+                env.define((*name).to_string(), val.clone(), false);
+            }
+        }
+        self.env = child;
+        let out = match &body.node {
+            ExprKind::Block(stmts) => self.eval_property_block(stmts),
+            _ => self.eval(body),
+        };
+        self.env = prev;
+        out
+    }
+
+    fn eval_property_block(&mut self, stmts: &[Stmt]) -> EvalResult {
+        // Similar to eval_block_value, but allows a trailing if/match statement
+        // to yield a value for property getter/setter bodies.
+        let prev = self.env.clone();
+        self.env = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
+        let mut last = Value::Unit;
+        for (idx, s) in stmts.iter().enumerate() {
+            let is_last = idx + 1 == stmts.len();
+            match &s.node {
+                StmtKind::Expr(e) => last = self.eval(e)?,
+                StmtKind::If { cond, then_b, else_b } if is_last => {
+                    let c = self.eval(cond)?;
+                    let b = match &c {
+                        Value::Bool(true) => true,
+                        Value::Bool(false) => false,
+                        _ => {
+                            self.env = prev;
+                            return Err(RuntimeError("if condition must be Bool".into()));
+                        }
+                    };
+                    if b {
+                        last = self.eval_property_block(then_b)?;
+                    } else if let Some(eb) = else_b {
+                        last = self.eval_property_block(eb)?;
+                    } else {
+                        last = Value::Unit;
+                    }
+                }
+                StmtKind::Match { scrutinee, arms } if is_last => {
+                    let v = self.eval(scrutinee)?;
+                    let mut matched = false;
+                    for arm in arms {
+                        if let Some(env_ext) = self.match_pattern(&arm.pattern, &v)? {
+                            let prev_env = self.env.clone();
+                            self.env = env_ext;
+                            last = self.eval_property_block(&arm.body)?;
+                            self.env = prev_env;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
+                        self.env = prev;
+                        return Err(RuntimeError("non-exhaustive match".into()));
+                    }
+                }
+                _ => match self.run_stmt(s)? {
+                    Flow::Next => {}
+                    Flow::Break => {
+                        self.env = prev;
+                        return Err(RuntimeError("break in property block".into()));
+                    }
+                    Flow::Continue => {
+                        self.env = prev;
+                        return Err(RuntimeError("continue in property block".into()));
+                    }
+                    Flow::Return(_) => {
+                        self.env = prev;
+                        return Err(RuntimeError("return in property block".into()));
+                    }
+                },
+            }
+        }
+        self.env = prev;
+        Ok(last)
     }
 }
 

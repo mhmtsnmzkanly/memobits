@@ -10,6 +10,7 @@ pub enum Type {
     // NOTE: Tip cikarimi asamasinda gecici olarak kullanilan tip.
     Unknown,
     Int,
+    UInt,
     Float,
     Bool,
     Char,

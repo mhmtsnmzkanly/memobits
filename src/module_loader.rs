@@ -192,6 +192,13 @@ fn shift_program(program: &mut Program, offset: usize) {
 fn shift_item(item: &mut Item, offset: usize) {
     match item {
         Item::StructDef(_) | Item::EnumDef(_) | Item::ModuleDecl(_) | Item::TypeAlias(_) => {}
+        Item::PropertyDef(def) => {
+            shift_expr(&mut def.default, offset);
+            shift_expr(&mut def.getter.body, offset);
+            if let Some(setter) = def.setter.as_mut() {
+                shift_expr(&mut setter.body, offset);
+            }
+        }
         Item::FnDef(def) => {
             for s in &mut def.body {
                 shift_stmt(s, offset);

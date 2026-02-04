@@ -28,6 +28,7 @@ pub type EnvRef = Rc<HashMap<String, Value>>;
 #[derive(Clone)]
 pub enum Value {
     Int(i64),
+    UInt(u64),
     Float(f64),
     Bool(bool),
     Char(char),
@@ -39,6 +40,7 @@ impl core::fmt::Debug for Value {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Value::Int(i) => write!(f, "Int({})", i),
+            Value::UInt(u) => write!(f, "UInt({})", u),
             Value::Float(x) => write!(f, "Float({})", x),
             Value::Bool(b) => write!(f, "Bool({})", b),
             Value::Char(c) => write!(f, "Char({})", c),
@@ -71,6 +73,7 @@ impl Value {
 pub fn value_type_name(v: &Value) -> String {
     match v {
         Value::Int(_) => "Int".into(),
+        Value::UInt(_) => "UInt".into(),
         Value::Float(_) => "Float".into(),
         Value::Bool(_) => "Bool".into(),
         Value::Char(_) => "Char".into(),
@@ -122,6 +125,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::UInt(a), Value::UInt(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
@@ -153,6 +157,7 @@ impl Ord for Value {
         }
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::UInt(a), Value::UInt(b)) => a.cmp(b),
             (Value::Float(a), Value::Float(b)) => a.to_bits().cmp(&b.to_bits()),
             (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
             (Value::Char(a), Value::Char(b)) => a.cmp(b),
@@ -173,11 +178,12 @@ impl Ord for Value {
 fn variant_rank(v: &Value) -> u8 {
     match v {
         Value::Int(_) => 0,
-        Value::Float(_) => 1,
-        Value::Bool(_) => 2,
-        Value::Char(_) => 3,
-        Value::Unit => 4,
-        Value::HeapRef(_) => 5,
+        Value::UInt(_) => 1,
+        Value::Float(_) => 2,
+        Value::Bool(_) => 3,
+        Value::Char(_) => 4,
+        Value::Unit => 5,
+        Value::HeapRef(_) => 6,
     }
 }
 
@@ -186,6 +192,7 @@ impl Hash for Value {
         mem::discriminant(self).hash(state);
         match self {
             Value::Int(i) => i.hash(state),
+            Value::UInt(u) => u.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
             Value::Bool(b) => b.hash(state),
             Value::Char(c) => c.hash(state),
