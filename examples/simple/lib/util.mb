@@ -1,0 +1,4 @@
+// Subdir modül (from ile)
+fn twice(x: Int) -> Int {
+    x * 2
+}

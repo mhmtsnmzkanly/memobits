@@ -1,0 +1,5 @@
+// Modül yükleme (aynı dizin)
+mod math;
+
+let r = add(2, 3);
+native::print(`r: {r}`);

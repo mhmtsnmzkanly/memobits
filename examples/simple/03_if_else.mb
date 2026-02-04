@@ -1,0 +1,11 @@
+// if / else (statement ve expression)
+let x = 7;
+
+if x > 5 {
+    native::print("x büyük");
+} else {
+    native::print("x küçük veya eşit");
+}
+
+let label = if (x % 2 == 0) { "even" } else { "odd" };
+native::print(`label: {label}`);

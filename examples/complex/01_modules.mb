@@ -1,0 +1,11 @@
+// mod + from + alt dizin
+mod math from "lib/math.mb";
+mod io from "lib/io.mb";
+
+let a = add(1, 2);
+let b = sum3(1, 2, 3);
+let title = banner("calc");
+
+native::print(title);
+native::print(`a: {a}`);
+native::print(`b: {b}`);

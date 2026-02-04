@@ -1,5 +1,0 @@
-// native::input ornegi: kullanicidan isim al ve selamla
-
-native::print("Ismin nedir?");
-let name = native::input();
-native::print(`Merhaba {name}`);

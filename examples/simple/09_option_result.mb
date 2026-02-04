@@ -1,0 +1,13 @@
+// Option / Result benzeri kullanım
+let o: Option<Int> = Some(10);
+
+match o {
+    None => native::print("none"),
+    Some(v) => native::print(`some: {v}`)
+}
+
+let r: Result<Int, String> = Ok(5);
+match r {
+    Ok(v) => native::print(`ok: {v}`),
+    Err(e) => native::print(`err: {e}`)
+}

@@ -1,5 +1,9 @@
 //! AST: soyut sözdizim ağacı tanımları.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::types::Type;
 
 #[derive(Clone, Debug)]
@@ -32,7 +36,21 @@ pub enum Item {
     FnDef(FnDef),
     GlobalLet(LetBinding),
     GlobalVar(VarBinding),
+    ModuleDecl(ModuleDecl),
+    TypeAlias(TypeAlias),
     TopLevelStmt(Stmt),
+}
+
+#[derive(Clone, Debug)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TypeAlias {
+    pub name: String,
+    pub target: Type,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +157,7 @@ pub enum ExprKind {
     ListLiteral(Vec<Expr>),
     ArrayLiteral(Vec<Expr>),
     MapLiteral(Vec<(Expr, Expr)>),
+    TupleLiteral(Vec<Expr>),
     Template { parts: Vec<TemplatePart> },
 }
 

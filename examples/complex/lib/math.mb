@@ -1,0 +1,7 @@
+fn add(a: Int, b: Int) -> Int {
+    a + b
+}
+
+fn sum3(a: Int, b: Int, c: Int) -> Int {
+    a + b + c
+}

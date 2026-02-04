@@ -1,0 +1,8 @@
+// Tuple literal + index + label
+let t: (Int, String) = (7, "ok");
+
+native::print(`t0: {t.0}`);
+
+let point: (Int label x, Int label y) = (0, 0);
+native::print(`x: {point.x}`);
+native::print(`y: {point.1}`);

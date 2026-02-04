@@ -1,0 +1,64 @@
+// Bellek modeli stres testi: closure + list/map/struct/enum
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+enum Msg {
+    Empty,
+    One(Int)
+}
+
+fn make_counter(start: Int) -> fn(Int) -> Int {
+    // state list ile paylaşım
+    let state: List<Int> = [start];
+    let inc = x => {
+        0;
+        state[0] = state[0] + 1;
+        state[0]
+    };
+    inc
+}
+
+fn sum_list(xs: List<Int>) -> Int {
+    var i = 0;
+    var s = 0;
+    loop {
+        if i >= 3 { break; }
+        s = s + xs[i];
+        i = i + 1;
+    }
+    s
+}
+
+fn main() -> Int {
+    let p = Point { x: 2, y: 3 };
+    let msg = Msg::One(p.x + p.y);
+
+    let xs: List<Int> = [1, 2, 3];
+    xs[1] = 40;
+
+    let m: Map<String, Int> = {"a" => 10, "b" => 20};
+    m["c"] = 30;
+
+    let f = make_counter(5);
+    let a = f(0);
+    let b = f(0);
+
+    let s = sum_list(xs);
+
+    match msg {
+        Msg::Empty => native::print("none"),
+        Msg::One(v) => native::print(`sum: {v}`)
+    }
+
+    native::print(`counter: {a}, {b}`);
+    native::print(`list sum: {s}`);
+    let mc = m["c"];
+    native::print(`map c: {mc}`);
+
+    0
+}
+
+main();

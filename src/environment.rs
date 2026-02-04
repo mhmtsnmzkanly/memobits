@@ -1,15 +1,17 @@
 //! Scope zinciri ve binding yönetimi.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
+use alloc::rc::Rc;
+use alloc::string::String;
+use core::cell::RefCell;
+use crate::collections::HashMap;
 
-use crate::value::Value;
+use crate::value::{EnvRef, Value};
 
 #[derive(Clone, Default)]
 pub struct Environment {
     bindings: HashMap<String, Binding>,
     parent: Option<Rc<RefCell<Environment>>>,
+    captured: Option<EnvRef>,
 }
 
 #[derive(Clone)]
@@ -24,9 +26,19 @@ impl Environment {
     }
 
     pub fn with_parent(parent: Rc<RefCell<Environment>>) -> Self {
+        let captured = parent.borrow().captured.clone();
         Self {
             bindings: HashMap::new(),
             parent: Some(parent),
+            captured,
+        }
+    }
+
+    pub fn with_captured(captured: EnvRef) -> Self {
+        Self {
+            bindings: HashMap::new(),
+            parent: None,
+            captured: Some(captured),
         }
     }
 
@@ -48,15 +60,46 @@ impl Environment {
         if let Some(ref p) = self.parent {
             return p.borrow_mut().set(name, value);
         }
+        if let Some(ref cap) = self.captured {
+            if cap.contains_key(name) {
+                return false;
+            }
+        }
         false
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
-        self.bindings.get(name).map(|b| b.value.clone()).or_else(|| {
-            self.parent
-                .as_ref()
-                .and_then(|p| p.borrow().get(name))
-        })
+        if let Some(b) = self.bindings.get(name) {
+            return Some(b.value.clone());
+        }
+        if let Some(ref p) = self.parent {
+            if let Some(v) = p.borrow().get(name) {
+                return Some(v);
+            }
+        }
+        if let Some(ref cap) = self.captured {
+            return cap.get(name).cloned();
+        }
+        None
     }
 
+    pub fn snapshot(&self) -> EnvRef {
+        let mut out = HashMap::new();
+        self.fill_snapshot(&mut out);
+        Rc::new(out)
+    }
+
+    fn fill_snapshot(&self, out: &mut HashMap<String, Value>) {
+        if let Some(ref p) = self.parent {
+            p.borrow().fill_snapshot(out);
+        }
+        if let Some(ref cap) = self.captured {
+            for (k, v) in cap.iter() {
+                out.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        for (k, b) in self.bindings.iter() {
+            out.insert(k.clone(), b.value.clone());
+        }
+    }
 }

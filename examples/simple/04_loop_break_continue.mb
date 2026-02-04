@@ -1,0 +1,15 @@
+// loop / break / continue
+var i = 0;
+var sum = 0;
+
+loop {
+    if i == 5 { break; }
+    if i % 2 == 0 {
+        i = i + 1;
+        continue;
+    }
+    sum = sum + i;
+    i = i + 1;
+}
+
+native::print(`sum: {sum}`);

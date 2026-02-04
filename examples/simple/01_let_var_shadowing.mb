@@ -1,0 +1,11 @@
+// let (immutable) ve var (mutable)
+let a = 10;
+var b = 1;
+
+// shadowing
+let a = 20;
+
+b = b + 4;
+
+native::print(`a: {a}`);
+native::print(`b: {b}`);

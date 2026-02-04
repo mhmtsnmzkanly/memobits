@@ -1,0 +1,239 @@
+// ===== type_alias_cycle.mb =====
+// expected: type alias cycle detected: A
+type A = B;
+type B = A;
+let x: A = 1;
+
+// ===== type_arity_mismatch.mb =====
+// expected: arity mismatch: expected 1, got 2
+fn f(a: Int) -> Int { return a; }
+f(1, 2);
+
+// ===== type_array_index_oob_const_unreachable.mb =====
+// expected: array index out of bounds (const)
+// NOTE: Array literal syntax is not implemented yet; this is currently unreachable.
+// Placeholder for future Array literal examples.
+
+// ===== type_calling_non_function.mb =====
+// expected: calling non-function (got Int)
+let x = 1;
+x(2);
+
+// ===== type_cannot_assign_immutable.mb =====
+// expected: cannot assign to immutable binding `x`
+let x = 1;
+x = 2;
+
+// ===== type_div_by_zero_const.mb =====
+// expected: division by zero (const)
+let x = 1 / 0;
+
+// ===== type_duplicate_tuple_label.mb =====
+// expected: duplicate tuple label `x`
+let t: (Int label x, Int label x) = (1, 2);
+
+// ===== type_duplicate_type_name.mb =====
+// expected: duplicate type name `A`
+type A = Int;
+type A = Int;
+
+// ===== type_expected_bool.mb =====
+// expected: expected Bool, got Int
+if 1 { 1 } else { 2 }
+
+// ===== type_field_access_non_struct_tuple.mb =====
+// expected: field access on non-struct/tuple (got Int)
+let x = 1;
+x.a;
+
+// ===== type_field_access_unknown_field.mb =====
+// expected: unknown field `b`
+struct S { a: Int }
+let s = S { a: 1 };
+s.b;
+
+// ===== type_fn_error_wrapped.mb =====
+// expected: fn `f`: type mismatch ...
+fn f(a: Int) -> Int { return "x"; }
+
+// ===== type_index_assign_non_list.mb =====
+// expected: index assignment on non-list/array/map (got Int)
+let x = 1;
+x[0] = 2;
+
+// ===== type_index_non_list_map.mb =====
+// expected: index on non-list/array/map (got Int)
+let x = 1;
+x[0];
+
+// ===== type_list_index_oob_const.mb =====
+// expected: list index out of bounds (const)
+let l = [1];
+l[2];
+
+// ===== type_map_key_not_found_const.mb =====
+// expected: map key not found (const)
+let m = { "a" => 1 };
+m["b"];
+
+// ===== type_missing_field_struct_literal.mb =====
+// expected: missing field(s) for struct `S`: b
+struct S { a: Int, b: Int }
+let s = S { a: 1 };
+
+// ===== type_non_exhaustive_bool.mb =====
+// expected: non-exhaustive match on Bool
+match true {
+  true => 1
+}
+
+// ===== type_non_exhaustive_enum.mb =====
+// expected: non-exhaustive match on enum `E`
+enum E { A, B }
+match E::A {
+  E::A => 1
+}
+
+// ===== type_non_exhaustive_option.mb =====
+// expected: non-exhaustive match on Option
+match Some(1) {
+  Some(x) => x
+}
+
+// ===== type_non_exhaustive_result.mb =====
+// expected: non-exhaustive match on Result
+match Ok(1) {
+  Ok(x) => x
+}
+
+// ===== type_operator_comparison.mb =====
+// expected: comparison `Lt` expects number, got String
+"a" < "b";
+
+// ===== type_operator_numeric.mb =====
+// expected: operator `Sub` expects number, got String
+"a" - "b";
+
+// ===== type_pattern_expects_option.mb =====
+// expected: pattern expects Option
+match 1 {
+  Some(x) => x
+}
+
+// ===== type_pattern_expects_result.mb =====
+// expected: pattern expects Result
+match 1 {
+  Ok(x) => x
+}
+
+// ===== type_pattern_unknown_enum.mb =====
+// expected: unknown enum `E`
+match 1 {
+  E::A => 1
+}
+
+// ===== type_pattern_unknown_field.mb =====
+// expected: unknown field `b` in pattern
+struct S { a: Int }
+match S { a: 1 } {
+  S { b: _ } => 1
+}
+
+// ===== type_pattern_unknown_struct.mb =====
+// expected: unknown struct `S`
+match 1 {
+  S { a: _ } => 1
+}
+
+// ===== type_pattern_unknown_variant_enum.mb =====
+// expected: unknown variant `B` for enum `E`
+enum E { A }
+match E::A {
+  E::B => 1
+}
+
+// ===== type_pattern_unknown_variant_option.mb =====
+// expected: unknown variant `Foo` for enum `Option`
+match Some(1) {
+  Option::Foo => 1
+}
+
+// ===== type_pattern_unknown_variant_result.mb =====
+// expected: unknown variant `Foo` for enum `Result`
+match Ok(1) {
+  Result::Foo => 1
+}
+
+// ===== type_pattern_variant_no_data.mb =====
+// expected: variant `E`::`A` has no data
+enum E { A }
+match E::A {
+  E::A(x) => x
+}
+
+// ===== type_return_outside_function.mb =====
+// expected: return outside function
+return 1;
+
+// ===== type_tuple_index_out_of_bounds.mb =====
+// expected: tuple index out of bounds: 3 (len 2)
+let t = (1, 2);
+t.3;
+
+// ===== type_tuple_label_mismatch.mb =====
+// expected: tuple label mismatch: `y` vs `z`
+let t: (Int label x, Int label y) = (1, 2);
+let u: (Int label x, Int label z) = t;
+
+// ===== type_tuple_type_mismatch.mb =====
+// expected: tuple type mismatch
+let t: (Int, Int) = (1, 2, 3);
+
+// ===== type_type_mismatch.mb =====
+// expected: type mismatch: Int vs String
+let x: Int = "a";
+
+// ===== type_unary_negation.mb =====
+// expected: negation expects number, got Bool
+-true;
+
+// ===== type_undefined_binding_assignment.mb =====
+// expected: undefined binding `x`
+x = 1;
+
+// ===== type_undefined_variable.mb =====
+// expected: undefined variable `x`
+let y = x + 1;
+
+// ===== type_unknown_enum_literal.mb =====
+// expected: unknown enum `E`
+let v = E::A;
+
+// ===== type_unknown_field_struct_literal.mb =====
+// expected: unknown field `b` for `S`
+struct S { a: Int }
+let s = S { b: 1 };
+
+// ===== type_unknown_struct_literal.mb =====
+// expected: unknown struct `Foo`
+let s = Foo { a: 1 };
+
+// ===== type_unknown_tuple_label.mb =====
+// expected: unknown tuple label `z`
+let t: (Int label x, Int label y) = (1, 2);
+t.z;
+
+// ===== type_unknown_variant_literal.mb =====
+// expected: unknown variant `B` for enum `E`
+enum E { A }
+let v = E::B;
+
+// ===== type_variant_expects_data.mb =====
+// expected: variant `E`::`A` expects data
+enum E { A(Int) }
+let v = E::A;
+
+// ===== type_variant_no_data.mb =====
+// expected: variant `E`::`A` does not take data
+enum E { A }
+let v = E::A(1);

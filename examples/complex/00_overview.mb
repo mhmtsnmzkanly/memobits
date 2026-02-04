@@ -1,0 +1,59 @@
+// Karmaşık örnek: Birçok özelliği birlikte kullanır
+
+// Type alias
+
+type UserId = Int;
+
+// Struct + Enum
+struct User {
+    id: Int,
+    name: String
+}
+
+enum Status {
+    Active,
+    Banned(String)
+}
+
+// Tuple (label'lı)
+
+type Point = (Int label x, Int label y);
+
+fn make_user(id: UserId, name: String) -> User {
+    User { id: id, name: name }
+}
+
+fn is_even(n: Int) -> Bool {
+    n % 2 == 0
+}
+
+// Fonksiyon (çok parametre)
+fn clamp(x: Int, min: Int, max: Int) -> Int {
+    if x < min { min } else if x > max { max } else { x }
+}
+
+let u = make_user(1, "Ada");
+let st = Status::Active;
+let p: Point = (3, 4);
+
+// List / Map
+let scores: List<Int> = [10, 20, 30];
+let flags: Map<String, Bool> = {"ok" => true};
+flags["ok"] = is_even(u.id);
+
+// match
+match st {
+    Status::Active => native::print("active"),
+    Status::Banned(msg) => native::print(`banned: {msg}`)
+}
+
+// tuple erişimi
+native::print(`point x: {p.x}`);
+
+// map erişimi
+let ok = flags["ok"];
+native::print(`ok: {ok}`);
+
+// fonksiyon kullanım
+let c = clamp(120, 0, 100);
+native::print(`clamp: {c}`);

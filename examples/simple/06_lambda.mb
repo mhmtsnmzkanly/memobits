@@ -1,0 +1,9 @@
+// Lambda ve çağrı (tek parametre)
+let inc = x => x + 1;
+let twice = x => x * 2;
+
+let a = inc(5);
+let b = twice(7);
+
+native::print(`a: {a}`);
+native::print(`b: {b}`);

@@ -1,0 +1,5 @@
+// Modül yükleme (from ile)
+mod util from "lib/util.mb";
+
+let v = twice(7);
+native::print(`v: {v}`);

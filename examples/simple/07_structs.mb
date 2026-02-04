@@ -1,0 +1,10 @@
+// Struct ve field erişimi
+struct Point {
+    x: Int,
+    y: Int
+}
+
+let p = Point { x: 2, y: 3 };
+let sum = p.x + p.y;
+
+native::print(`sum: {sum}`);

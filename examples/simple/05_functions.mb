@@ -1,0 +1,7 @@
+// Fonksiyon, return
+fn add(a: Int, b: Int) -> Int {
+    return a + b;
+}
+
+let r = add(3, 4);
+native::print(`r: {r}`);

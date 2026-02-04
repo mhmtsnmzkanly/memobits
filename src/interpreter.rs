@@ -1,14 +1,17 @@
 //! AST-walking interpreter.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
+use alloc::{format, vec};
+use alloc::rc::Rc;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::cell::RefCell;
+use crate::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::environment::Environment;
-use crate::native::NativeRegistry;
-use crate::value::{Value, EvalResult, RuntimeError, LambdaClosure};
-use crate::value::MapKey;
+use crate::native::{NativeRegistry, value_to_string};
+use crate::types::Type;
+use crate::value::{EvalResult, FunctionId, HeapObject, RuntimeError, Value, value_type_name};
 
 #[derive(Clone)]
 pub struct Interpreter {
@@ -16,6 +19,7 @@ pub struct Interpreter {
     pub native: NativeRegistry,
     struct_defs: HashMap<String, StructDef>,
     enum_defs: HashMap<String, EnumDef>,
+    functions: Rc<RefCell<Vec<FunctionDef>>>,
     source: Option<String>,
 }
 
@@ -27,6 +31,14 @@ pub enum Flow {
     Return(Value),
 }
 
+#[derive(Clone)]
+struct FunctionDef {
+    name: Option<String>,
+    params: Vec<String>,
+    param_types: Vec<Option<Type>>,
+    body: Expr,
+}
+
 impl Interpreter {
     pub fn new(native: NativeRegistry) -> Self {
         Self {
@@ -34,6 +46,7 @@ impl Interpreter {
             native,
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
+            functions: Rc::new(RefCell::new(Vec::new())),
             source: None,
         }
     }
@@ -75,6 +88,19 @@ impl Interpreter {
         }
     }
 
+    fn register_function(
+        &mut self,
+        name: Option<String>,
+        params: Vec<String>,
+        param_types: Vec<Option<Type>>,
+        body: Expr,
+    ) -> FunctionId {
+        let mut funcs = self.functions.borrow_mut();
+        let id = funcs.len();
+        funcs.push(FunctionDef { name, params, param_types, body });
+        id
+    }
+
     fn run_item(&mut self, item: &Item) -> EvalResult {
         match item {
             Item::StructDef(d) => {
@@ -85,20 +111,20 @@ impl Interpreter {
                 self.enum_defs.insert(d.name.clone(), d.clone());
                 Ok(Value::Unit)
             }
+            Item::TypeAlias(_) => Ok(Value::Unit),
+            Item::ModuleDecl(_) => Ok(Value::Unit),
             Item::FnDef(d) => {
                 let name = d.name.clone();
                 let params: Vec<String> = d.params.iter().map(|(p, _)| p.clone()).collect();
-                let body = d.body.clone();
-                let env = self.env.clone();
-                let body_span = Interpreter::block_span(&body);
-                let f = Value::Lambda(LambdaClosure {
-                    params,
-                    body: Expr {
-                        node: ExprKind::Block(body),
-                        span: body_span,
-                    },
-                    env,
-                });
+                let param_types: Vec<Option<Type>> = d.params.iter().map(|(_, t)| Some(t.clone())).collect();
+                let body_span = Interpreter::block_span(&d.body);
+                let body_expr = Expr {
+                    node: ExprKind::Block(d.body.clone()),
+                    span: body_span,
+                };
+                let fn_id = self.register_function(Some(name.clone()), params, param_types, body_expr);
+                let captured = self.env.borrow().snapshot();
+                let f = Value::heap(HeapObject::Closure { fn_id, env: captured });
                 self.env.borrow_mut().define(name, f, false);
                 Ok(Value::Unit)
             }
@@ -137,12 +163,16 @@ impl Interpreter {
     fn run_stmt(&mut self, s: &Stmt) -> Result<Flow, RuntimeError> {
         let res = match &s.node {
             StmtKind::Let(b) => {
+                let typ = b.typ.clone();
                 let v = self.eval(&b.init)?;
+                let v = self.apply_tuple_labels(typ.as_ref(), v);
                 self.env.borrow_mut().define(b.name.clone(), v, false);
                 Ok(Flow::Next)
             }
             StmtKind::Var(b) => {
+                let typ = b.typ.clone();
                 let v = self.eval(&b.init)?;
+                let v = self.apply_tuple_labels(typ.as_ref(), v);
                 self.env.borrow_mut().define(b.name.clone(), v, true);
                 Ok(Flow::Next)
             }
@@ -158,24 +188,41 @@ impl Interpreter {
                 let i = self.eval(index)?;
                 let v = self.eval(value)?;
                 match (b, i) {
-                    (Value::List(vec), Value::Int(idx)) => {
-                        let idx = idx as usize;
-                        let mut guard = vec.borrow_mut();
-                        if idx >= guard.len() {
-                            return Err(RuntimeError("index out of bounds".into()));
+                    (Value::HeapRef(h), Value::Int(idx)) => match h.as_ref() {
+                        HeapObject::List(vec) => {
+                            let idx = idx as usize;
+                            let mut guard = vec.borrow_mut();
+                            if idx >= guard.len() {
+                                return Err(RuntimeError(format!(
+                                    "list index out of bounds: {} (len {})",
+                                    idx,
+                                    guard.len()
+                                )));
+                            }
+                            guard[idx] = v;
+                            Ok(Flow::Next)
                         }
-                        guard[idx] = v;
-                        Ok(Flow::Next)
-                    }
-                    (Value::Map(map), key_val) => {
-                        let key = MapKey::from_value(&key_val).ok_or_else(|| {
-                            RuntimeError("map key must be Int/Bool/Char/String".into())
-                        })?;
-                        map.borrow_mut().insert(key, v);
-                        Ok(Flow::Next)
-                    }
-                    (Value::Array(_), _) => Err(RuntimeError("cannot assign to array index".into())),
-                    _ => Err(RuntimeError("invalid index assignment".into())),
+                        HeapObject::Array(_) => Err(RuntimeError("cannot assign to array index (arrays are immutable at runtime)".into())),
+                        _ => Err(RuntimeError(format!(
+                            "index assignment on non-list/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    (Value::HeapRef(h), key_val) => match h.as_ref() {
+                        HeapObject::Map(map) => {
+                            self.ensure_map_key(&key_val)?;
+                            map.borrow_mut().insert(key_val, v);
+                            Ok(Flow::Next)
+                        }
+                        _ => Err(RuntimeError(format!(
+                            "index assignment on non-list/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    _ => Err(RuntimeError(format!(
+                        "index assignment on non-list/map (got {})",
+                        value_type_name(&b)
+                    ))),
                 }
             }
             StmtKind::Expr(e) => {
@@ -205,7 +252,14 @@ impl Interpreter {
                     Err(e) => {
                         if e.0.starts_with("exit:") {
                             let code = e.0.strip_prefix("exit:").and_then(|s| s.parse().ok()).unwrap_or(0);
-                            std::process::exit(code);
+                            #[cfg(feature = "std")]
+                            {
+                                std::process::exit(code);
+                            }
+                            #[cfg(not(feature = "std"))]
+                            {
+                                let _code = code;
+                            }
                         }
                         return Err(e);
                     }
@@ -268,42 +322,53 @@ impl Interpreter {
             (Pattern::Literal(Literal::Float(a)), Value::Float(b)) => Ok(*a == *b),
             (Pattern::Literal(Literal::Bool(a)), Value::Bool(b)) => Ok(*a == *b),
             (Pattern::Literal(Literal::Char(a)), Value::Char(b)) => Ok(*a == *b),
-            (Pattern::Literal(Literal::String(a)), Value::String(b)) => Ok(a.as_str() == b.as_ref()),
-            // NOTE: Option degerleri Variant(Option::Some/None) olarak temsil ediliyor.
-            (Pattern::Literal(Literal::None), Value::Variant { enum_name, variant, data })
-                if enum_name == "Option" && variant == "None" && data.is_none() =>
-            {
-                Ok(true)
-            }
-            (Pattern::StructLiteral { name, fields }, Value::Struct { name: vn, fields: vals }) => {
-                if name != vn {
-                    return Ok(false);
+            (Pattern::Literal(Literal::String(a)), Value::HeapRef(h)) => match h.as_ref() {
+                HeapObject::String(b) => Ok(a.as_str() == b.as_str()),
+                _ => Ok(false),
+            },
+            (Pattern::Literal(Literal::None), Value::HeapRef(h)) => match h.as_ref() {
+                HeapObject::Enum { type_id, variant_id, payload } => {
+                    Ok(type_id == "Option" && *variant_id == 0 && payload.is_empty())
                 }
-                self.validate_struct_pattern(name, fields)?;
-                for (fname, pat) in fields {
-                    let Some(fv) = vals.get(fname) else { return Ok(false) };
-                    if !self.match_pattern_into(pat, fv, env.clone())? {
+                _ => Ok(false),
+            },
+            (Pattern::StructLiteral { name, fields }, Value::HeapRef(h)) => match h.as_ref() {
+                HeapObject::Struct { type_id, fields: vals } => {
+                    if name != type_id {
                         return Ok(false);
                     }
+                    self.validate_struct_pattern(name, fields)?;
+                    for (fname, pat) in fields {
+                        let idx = self.struct_field_index(type_id, fname)?;
+                        let Some(fv) = vals.get(idx) else { return Ok(false) };
+                        if !self.match_pattern_into(pat, fv, env.clone())? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
                 }
-                Ok(true)
-            }
-            (Pattern::Variant { enum_name, variant, inner }, Value::Variant { enum_name: en, variant: vn, data })
-                if enum_name == en && variant == vn =>
-            {
-                let expects_data = self.enum_variant_expects_data(enum_name, variant)?;
-                match (expects_data, inner, data) {
-                    (Some(true), Some(pat), Some(d)) => self.match_pattern_into(pat, d, env),
-                    (Some(true), None, Some(_)) => Ok(true),
-                    (Some(true), _, None) => Ok(false),
-                    (Some(false), None, None) => Ok(true),
-                    (Some(false), Some(_), _) => Err(RuntimeError(format!(
-                        "pattern has data but variant `{}`::`{}` has no data",
-                        enum_name, variant
-                    ))),
-                    _ => Ok(false),
+                _ => Ok(false),
+            },
+            (Pattern::Variant { enum_name, variant, inner }, Value::HeapRef(h)) => match h.as_ref() {
+                HeapObject::Enum { type_id, variant_id, payload } if enum_name == type_id => {
+                    let (vid, expects_data) = self.enum_variant_id(enum_name, variant)?;
+                    if *variant_id != vid {
+                        return Ok(false);
+                    }
+                    match (expects_data, inner, payload.as_slice()) {
+                        (true, Some(pat), [d]) => self.match_pattern_into(pat, d, env),
+                        (true, None, [_]) => Ok(true),
+                        (true, _, []) => Ok(false),
+                        (false, None, []) => Ok(true),
+                        (false, Some(_), _) => Err(RuntimeError(format!(
+                            "pattern has data but variant `{}`::`{}` has no data",
+                            enum_name, variant
+                        ))),
+                        _ => Ok(false),
+                    }
                 }
-            }
+                _ => Ok(false),
+            },
             _ => Ok(false),
         }
     }
@@ -322,7 +387,14 @@ impl Interpreter {
                 if let Err(ref e) = r {
                     if e.0.starts_with("exit:") {
                         let code = e.0.strip_prefix("exit:").and_then(|s| s.parse().ok()).unwrap_or(0);
-                        std::process::exit(code);
+                        #[cfg(feature = "std")]
+                        {
+                            std::process::exit(code);
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            let _code = code;
+                        }
                     }
                 }
                 r
@@ -371,36 +443,94 @@ impl Interpreter {
                 self.eval_block_value(stmts)
             }
             ExprKind::StructLiteral { name, fields } => {
-                self.validate_struct_literal(name, fields)?;
-                let mut map = HashMap::new();
-                for (f, ex) in fields {
-                    map.insert(f.clone(), self.eval(ex)?);
-                }
-                Ok(Value::Struct { name: name.clone(), fields: map })
+                let vals = self.build_struct_fields(name, fields)?;
+                Ok(Value::heap(HeapObject::Struct {
+                    type_id: name.clone(),
+                    fields: vals,
+                }))
             }
             ExprKind::VariantLiteral { enum_name, variant, data } => {
-                self.validate_variant_literal(enum_name, variant, data.as_deref())?;
-                let d = match data {
-                    Some(e) => Some(Box::new(self.eval(e)?)),
-                    None => None,
-                };
-                Ok(Value::Variant { enum_name: enum_name.clone(), variant: variant.clone(), data: d })
+                let (variant_id, expects_data) = self.enum_variant_id(enum_name, variant)?;
+                match (expects_data, data) {
+                    (true, Some(expr)) => {
+                        let v = self.eval(expr)?;
+                        Ok(Value::heap(HeapObject::Enum {
+                            type_id: enum_name.clone(),
+                            variant_id,
+                            payload: vec![v],
+                        }))
+                    }
+                    (true, None) => Err(RuntimeError(format!(
+                        "variant `{}`::`{}` expects data",
+                        enum_name, variant
+                    ))),
+                    (false, Some(_)) => Err(RuntimeError(format!(
+                        "variant `{}`::`{}` does not take data",
+                        enum_name, variant
+                    ))),
+                    (false, None) => Ok(Value::heap(HeapObject::Enum {
+                        type_id: enum_name.clone(),
+                        variant_id,
+                        payload: Vec::new(),
+                    })),
+                }
             }
             ExprKind::FieldAccess { base, field } => {
                 let b = self.eval(base)?;
                 match &b {
-                    Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| RuntimeError(format!("no field `{}`", field))),
-                    _ => Err(RuntimeError("field access on non-struct".into())),
+                    Value::HeapRef(h) => match h.as_ref() {
+                        HeapObject::Struct { type_id, fields } => {
+                            let idx = self.struct_field_index(type_id, field)?;
+                            fields
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!("no field `{}`", field)))
+                        }
+                        HeapObject::Tuple { labels, values } => {
+                            if let Ok(idx) = field.parse::<usize>() {
+                                return values
+                                    .get(idx)
+                                    .cloned()
+                                    .ok_or_else(|| RuntimeError(format!(
+                                        "tuple index out of bounds: {} (len {})",
+                                        idx,
+                                        values.len()
+                                    )));
+                            }
+                            let pos = labels
+                                .iter()
+                                .position(|l| l.as_deref() == Some(field.as_str()));
+                            if let Some(idx) = pos {
+                                values
+                                    .get(idx)
+                                    .cloned()
+                                    .ok_or_else(|| RuntimeError(format!(
+                                        "tuple index out of bounds: {} (len {})",
+                                        idx,
+                                        values.len()
+                                    )))
+                            } else {
+                                Err(RuntimeError(format!("unknown tuple label `{}`", field)))
+                            }
+                        }
+                        _ => Err(RuntimeError(format!(
+                            "field access on non-struct/tuple (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    _ => Err(RuntimeError(format!(
+                        "field access on non-struct/tuple (got {})",
+                        value_type_name(&b)
+                    ))),
                 }
             }
             ExprKind::ListLiteral(elems) => {
                 let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::List(Rc::new(RefCell::new(v))))
+                Ok(Value::heap(HeapObject::List(RefCell::new(v))))
             }
             ExprKind::ArrayLiteral(elems) => {
                 let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
-                let a: Rc<[Value]> = v.into();
-                Ok(Value::Array(a))
+                Ok(Value::heap(HeapObject::Array(v)))
             }
             ExprKind::Template { parts } => {
                 let mut s = String::new();
@@ -413,48 +543,80 @@ impl Interpreter {
                         }
                     }
                 }
-                Ok(Value::String(Rc::from(s.into_boxed_str())))
+                Ok(Value::string(s))
             }
             ExprKind::Index { base, index } => {
                 let b = self.eval(base)?;
                 let i = self.eval(index)?;
                 match (&b, &i) {
-                    (Value::List(vec), Value::Int(idx)) => {
-                        let idx = *idx as usize;
-                        vec.borrow().get(idx).cloned().ok_or_else(|| RuntimeError("index out of bounds".into()))
-                    }
-                    (Value::Array(arr), Value::Int(idx)) => {
-                        let idx = *idx as usize;
-                        arr.get(idx).cloned().ok_or_else(|| RuntimeError("index out of bounds".into()))
-                    }
-                    (Value::Map(map), key_val) => {
-                        let key = MapKey::from_value(key_val).ok_or_else(|| {
-                            RuntimeError("map key must be Int/Bool/Char/String".into())
-                        })?;
-                        map.borrow().get(&key).cloned().ok_or_else(|| RuntimeError("key not found".into()))
-                    }
-                    _ => Err(RuntimeError("invalid index".into())),
+                    (Value::HeapRef(h), Value::Int(idx)) => match h.as_ref() {
+                        HeapObject::List(vec) => {
+                            let idx = *idx as usize;
+                            let guard = vec.borrow();
+                            guard
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!("list index out of bounds: {} (len {})", idx, guard.len())))
+                        }
+                        HeapObject::Array(arr) => {
+                            let idx = *idx as usize;
+                            arr.get(idx)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!("array index out of bounds: {} (len {})", idx, arr.len())))
+                        }
+                        _ => Err(RuntimeError(format!(
+                            "index on non-list/array/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    (Value::HeapRef(h), key_val) => match h.as_ref() {
+                        HeapObject::Map(map) => {
+                            self.ensure_map_key(key_val)?;
+                            map.borrow()
+                                .get(key_val)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError(format!(
+                                    "map key not found: {}",
+                                    value_to_string(key_val)
+                                )))
+                        }
+                        _ => Err(RuntimeError(format!(
+                            "index on non-list/array/map (got {})",
+                            value_type_name(&b)
+                        ))),
+                    },
+                    _ => Err(RuntimeError(format!(
+                        "index on non-list/array/map (got {})",
+                        value_type_name(&b)
+                    ))),
                 }
             }
             ExprKind::Lambda { params, body } => {
                 let ps: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
-                Ok(Value::Lambda(LambdaClosure {
-                    params: ps,
-                    body: body.as_ref().clone(),
-                    env: self.env.clone(),
-                }))
+                let param_types: Vec<Option<Type>> = params.iter().map(|(_, t)| t.clone()).collect();
+                let fn_id = self.register_function(None, ps, param_types, body.as_ref().clone());
+                let captured = self.env.borrow().snapshot();
+                Ok(Value::heap(HeapObject::Closure { fn_id, env: captured }))
             }
             ExprKind::MapLiteral(pairs) => {
                 let mut m = HashMap::new();
                 for (k, v) in pairs {
                     let key_val = self.eval(k)?;
-                    let key = MapKey::from_value(&key_val).ok_or_else(|| {
-                        RuntimeError("map key must be Int/Bool/Char/String".into())
-                    })?;
+                    self.ensure_map_key(&key_val)?;
                     let val = self.eval(v)?;
-                    m.insert(key, val);
+                    m.insert(key_val, val);
                 }
-                Ok(Value::Map(Rc::new(RefCell::new(m))))
+                Ok(Value::heap(HeapObject::Map(RefCell::new(m))))
+            }
+            ExprKind::TupleLiteral(elems) => {
+                let vals = elems
+                    .iter()
+                    .map(|e| self.eval(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::heap(HeapObject::Tuple {
+                    labels: vec![None; vals.len()],
+                    values: vals,
+                }))
             }
             ExprKind::If { cond, then_b, else_b } => {
                 let c = self.eval(cond)?;
@@ -523,56 +685,71 @@ impl Interpreter {
             Literal::Float(f) => Ok(Value::Float(*f)),
             Literal::Bool(b) => Ok(Value::Bool(*b)),
             Literal::Char(c) => Ok(Value::Char(*c)),
-            Literal::String(s) => Ok(Value::String((*s).clone().into())),
+            Literal::String(s) => Ok(Value::string((*s).clone())),
             Literal::Unit => Ok(Value::Unit),
             // NOTE: Option/Result literal'leri de Variant olarak temsili ediliyor.
-            Literal::None => Ok(Value::Variant {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                data: None,
-            }),
-            Literal::Some(e) => Ok(Value::Variant {
-                enum_name: "Option".to_string(),
-                variant: "Some".to_string(),
-                data: Some(Box::new(self.eval(e)?)),
-            }),
-            Literal::Ok(e) => Ok(Value::Variant {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                data: Some(Box::new(self.eval(e)?)),
-            }),
-            Literal::Err(e) => Ok(Value::Variant {
-                enum_name: "Result".to_string(),
-                variant: "Err".to_string(),
-                data: Some(Box::new(self.eval(e)?)),
-            }),
+            Literal::None => Ok(Value::heap(HeapObject::Enum {
+                type_id: "Option".to_string(),
+                variant_id: 0,
+                payload: Vec::new(),
+            })),
+            Literal::Some(e) => Ok(Value::heap(HeapObject::Enum {
+                type_id: "Option".to_string(),
+                variant_id: 1,
+                payload: vec![self.eval(e)?],
+            })),
+            Literal::Ok(e) => Ok(Value::heap(HeapObject::Enum {
+                type_id: "Result".to_string(),
+                variant_id: 0,
+                payload: vec![self.eval(e)?],
+            })),
+            Literal::Err(e) => Ok(Value::heap(HeapObject::Enum {
+                type_id: "Result".to_string(),
+                variant_id: 1,
+                payload: vec![self.eval(e)?],
+            })),
         }
     }
 
-    fn validate_struct_literal(&self, name: &str, fields: &[(String, Expr)]) -> Result<(), RuntimeError> {
-        let def = self
-            .struct_defs
-            .get(name)
-            .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
-        let mut def_fields: std::collections::HashSet<&str> =
-            def.fields.iter().map(|(n, _)| n.as_str()).collect();
-        for (f, _) in fields {
-            if !def_fields.remove(f.as_str()) {
+    fn build_struct_fields(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let (field_names, field_count) = {
+            let def = self
+                .struct_defs
+                .get(name)
+                .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
+            let names = def.fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+            (names, def.fields.len())
+        };
+        let mut out: Vec<Option<Value>> = vec![None; field_count];
+        let mut seen = HashSet::new();
+        for (f, ex) in fields {
+            if !seen.insert(f.as_str()) {
                 return Err(RuntimeError(format!(
-                    "unknown field `{}` for struct `{}`",
+                    "duplicate field `{}` for struct `{}`",
                     f, name
                 )));
             }
+            let idx = self.struct_field_index(name, f)?;
+            out[idx] = Some(self.eval(ex)?);
         }
-        if !def_fields.is_empty() {
-            let missing: Vec<&str> = def_fields.into_iter().collect();
+        let mut missing = Vec::new();
+        for (i, val) in out.iter().enumerate() {
+            if val.is_none() {
+                missing.push(field_names[i].clone());
+            }
+        }
+        if !missing.is_empty() {
             return Err(RuntimeError(format!(
                 "missing field(s) for struct `{}`: {}",
                 name,
                 missing.join(", ")
             )));
         }
-        Ok(())
+        Ok(out.into_iter().map(|v| v.unwrap()).collect())
     }
 
     fn validate_struct_pattern(
@@ -584,7 +761,7 @@ impl Interpreter {
             .struct_defs
             .get(name)
             .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
-        let def_fields: std::collections::HashSet<&str> =
+        let def_fields: HashSet<&str> =
             def.fields.iter().map(|(n, _)| n.as_str()).collect();
         for (f, _) in fields {
             if !def_fields.contains(f.as_str()) {
@@ -597,40 +774,69 @@ impl Interpreter {
         Ok(())
     }
 
-    fn validate_variant_literal(
-        &self,
-        enum_name: &str,
-        variant: &str,
-        data: Option<&Expr>,
-    ) -> Result<(), RuntimeError> {
-        let expects_data = self.enum_variant_expects_data(enum_name, variant)?;
-        match (expects_data, data) {
-            (Some(true), Some(_)) => Ok(()),
-            (Some(true), None) => Err(RuntimeError(format!(
-                "variant `{}`::`{}` expects data",
-                enum_name, variant
-            ))),
-            (Some(false), None) => Ok(()),
-            (Some(false), Some(_)) => Err(RuntimeError(format!(
-                "variant `{}`::`{}` does not take data",
-                enum_name, variant
-            ))),
-            (None, _) => Err(RuntimeError(format!(
-                "unknown enum `{}`",
-                enum_name
+    fn struct_field_index(&self, name: &str, field: &str) -> Result<usize, RuntimeError> {
+        let def = self
+            .struct_defs
+            .get(name)
+            .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
+        def.fields
+            .iter()
+            .position(|(n, _)| n == field)
+            .ok_or_else(|| RuntimeError(format!("unknown field `{}` for struct `{}`", field, name)))
+    }
+
+    fn ensure_map_key(&self, v: &Value) -> Result<(), RuntimeError> {
+        match v {
+            Value::Int(_) | Value::Bool(_) | Value::Char(_) => Ok(()),
+            Value::HeapRef(h) => match h.as_ref() {
+                HeapObject::String(_) => Ok(()),
+                _ => Err(RuntimeError(format!(
+                    "map key must be Int/Bool/Char/String (got {})",
+                    value_type_name(v)
+                ))),
+            },
+            _ => Err(RuntimeError(format!(
+                "map key must be Int/Bool/Char/String (got {})",
+                value_type_name(v)
             ))),
         }
     }
 
-    fn enum_variant_expects_data(
+    fn apply_tuple_labels(&self, typ: Option<&Type>, v: Value) -> Value {
+        let Some(Type::Tuple(fields)) = typ else {
+            return v;
+        };
+        let Value::HeapRef(h) = v else {
+            return v;
+        };
+        match h.as_ref() {
+            HeapObject::Tuple { labels, values } => {
+                let has_any_label = labels.iter().any(|l| l.is_some());
+                if has_any_label {
+                    return Value::HeapRef(h);
+                }
+                if values.len() != fields.len() {
+                    return Value::HeapRef(h);
+                }
+                let new_labels = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>();
+                Value::heap(HeapObject::Tuple {
+                    labels: new_labels,
+                    values: values.clone(),
+                })
+            }
+            _ => Value::HeapRef(h),
+        }
+    }
+
+    fn enum_variant_id(
         &self,
         enum_name: &str,
         variant: &str,
-    ) -> Result<Option<bool>, RuntimeError> {
+    ) -> Result<(usize, bool), RuntimeError> {
         if enum_name == "Option" {
             return match variant {
-                "Some" => Ok(Some(true)),
-                "None" => Ok(Some(false)),
+                "None" => Ok((0, false)),
+                "Some" => Ok((1, true)),
                 _ => Err(RuntimeError(format!(
                     "unknown variant `{}` for enum `Option`",
                     variant
@@ -639,8 +845,8 @@ impl Interpreter {
         }
         if enum_name == "Result" {
             return match variant {
-                "Ok" => Ok(Some(true)),
-                "Err" => Ok(Some(true)),
+                "Ok" => Ok((0, true)),
+                "Err" => Ok((1, true)),
                 _ => Err(RuntimeError(format!(
                     "unknown variant `{}` for enum `Result`",
                     variant
@@ -651,15 +857,16 @@ impl Interpreter {
             .enum_defs
             .get(enum_name)
             .ok_or_else(|| RuntimeError(format!("unknown enum `{}`", enum_name)))?;
-        let v = def
+        let (idx, v) = def
             .variants
             .iter()
-            .find(|v| v.name == variant)
+            .enumerate()
+            .find(|(_, v)| v.name == variant)
             .ok_or_else(|| RuntimeError(format!(
                 "unknown variant `{}` for enum `{}`",
                 variant, enum_name
             )))?;
-        Ok(Some(v.data.is_some()))
+        Ok((idx, v.data.is_some()))
     }
 
     fn eval_binop(&mut self, op: BinOp, l: &Value, r: &Value) -> EvalResult {
@@ -667,7 +874,12 @@ impl Interpreter {
         match (op, l, r) {
             (Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-            (Add, Value::String(a), Value::String(b)) => Ok(Value::string(format!("{}{}", a, b))),
+            (Add, Value::HeapRef(a), Value::HeapRef(b)) => match (a.as_ref(), b.as_ref()) {
+                (HeapObject::String(sa), HeapObject::String(sb)) => {
+                    Ok(Value::string(format!("{}{}", sa, sb)))
+                }
+                _ => Err(RuntimeError(format!("type error: {:?} {:?} {:?}", op, l, r))),
+            },
             (Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
             (Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
@@ -680,11 +892,17 @@ impl Interpreter {
             (Eq, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a == b)),
-            (Eq, Value::String(a), Value::String(b)) => Ok(Value::Bool(a.as_ref() == b.as_ref())),
+            (Eq, Value::HeapRef(a), Value::HeapRef(b)) => match (a.as_ref(), b.as_ref()) {
+                (HeapObject::String(sa), HeapObject::String(sb)) => Ok(Value::Bool(sa == sb)),
+                _ => Ok(Value::Bool(false)),
+            },
             (Ne, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
             (Ne, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
-            (Ne, Value::String(a), Value::String(b)) => Ok(Value::Bool(a.as_ref() != b.as_ref())),
+            (Ne, Value::HeapRef(a), Value::HeapRef(b)) => match (a.as_ref(), b.as_ref()) {
+                (HeapObject::String(sa), HeapObject::String(sb)) => Ok(Value::Bool(sa != sb)),
+                _ => Ok(Value::Bool(true)),
+            },
             (Lt, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
             (Lt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
             (Le, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
@@ -711,44 +929,58 @@ impl Interpreter {
 
     fn call(&mut self, f: &Value, args: &[Value]) -> EvalResult {
         match f {
-            Value::NativeFn(name, _) => {
-                let ptr = self.native.get(name).ok_or_else(|| RuntimeError(format!("native `{}` not found", name)))?;
-                ptr(args)
-            }
-            Value::Lambda(cl) => {
-                if cl.params.len() != args.len() {
-                    return Err(RuntimeError("arity mismatch".into()));
-                }
-                let child = Rc::new(RefCell::new(Environment::with_parent(cl.env.clone())));
-                for (p, a) in cl.params.iter().zip(args) {
-                    child.borrow_mut().define(p.clone(), a.clone(), false);
-                }
-                let mut interp = Interpreter {
-                    env: child,
-                    native: self.native.clone(),
-                    struct_defs: self.struct_defs.clone(),
-                    enum_defs: self.enum_defs.clone(),
-                    source: self.source.clone(),
-                };
-                match &cl.body.node {
-                    ExprKind::Block(stmts) => {
-                        let mut last = Value::Unit;
-                        for s in stmts {
-                            match &s.node {
-                                StmtKind::Expr(e) => last = interp.eval(e)?,
-                                _ => match interp.run_stmt(s)? {
-                                    Flow::Next => {}
-                                    Flow::Return(v) => return Ok(v),
-                                    Flow::Break => return Err(RuntimeError("break outside loop".into())),
-                                    Flow::Continue => return Err(RuntimeError("continue outside loop".into())),
-                                },
-                            }
-                        }
-                        Ok(last)
+            Value::HeapRef(h) => match h.as_ref() {
+                HeapObject::Closure { fn_id, env } => {
+                    let def = {
+                        let funcs = self.functions.borrow();
+                        funcs
+                            .get(*fn_id)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError("unknown function id".into()))?
+                    };
+                    if def.params.len() != args.len() {
+                        return Err(RuntimeError("arity mismatch".into()));
                     }
-                    _ => interp.eval(&cl.body),
+                    let captured_env = Environment::with_captured(env.clone());
+                    let child = Rc::new(RefCell::new(captured_env));
+                    for ((p, ty), a) in def.params.iter().zip(def.param_types.iter()).zip(args) {
+                        let v = self.apply_tuple_labels(ty.as_ref(), a.clone());
+                        child.borrow_mut().define(p.clone(), v, false);
+                    }
+                    if let Some(ref name) = def.name {
+                        if child.borrow().get(name).is_none() {
+                            child.borrow_mut().define(name.clone(), f.clone(), false);
+                        }
+                    }
+                    let mut interp = Interpreter {
+                        env: child,
+                        native: self.native.clone(),
+                        struct_defs: self.struct_defs.clone(),
+                        enum_defs: self.enum_defs.clone(),
+                        functions: self.functions.clone(),
+                        source: self.source.clone(),
+                    };
+                    match &def.body.node {
+                        ExprKind::Block(stmts) => {
+                            let mut last = Value::Unit;
+                            for s in stmts {
+                                match &s.node {
+                                    StmtKind::Expr(e) => last = interp.eval(e)?,
+                                    _ => match interp.run_stmt(s)? {
+                                        Flow::Next => {}
+                                        Flow::Return(v) => return Ok(v),
+                                        Flow::Break => return Err(RuntimeError("break outside loop".into())),
+                                        Flow::Continue => return Err(RuntimeError("continue outside loop".into())),
+                                    },
+                                }
+                            }
+                            Ok(last)
+                        }
+                        _ => interp.eval(&def.body),
+                    }
                 }
-            }
+                _ => Err(RuntimeError("calling non-function".into())),
+            },
             _ => Err(RuntimeError("calling non-function".into())),
         }
     }

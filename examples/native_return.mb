@@ -1,7 +1,0 @@
-// native::return ornegi: programdan cikis
-
-native::print("Cikis yapiliyor...");
-native::return(0);
-
-// Bu satir calismaz
-native::print("burasi gorunmez");

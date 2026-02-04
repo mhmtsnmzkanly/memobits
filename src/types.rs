@@ -1,6 +1,9 @@
 //! Tip sistemi: Type enum ve yardımcılar.
 
-use std::collections::HashMap;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use crate::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
@@ -22,6 +25,7 @@ pub enum Type {
 
     Fn(Vec<Type>, Box<Type>),
 
+    Tuple(Vec<TupleField>),
     Struct { name: String, fields: HashMap<String, Type> },
     Enum { name: String, variants: Vec<EnumVariant> },
 }
@@ -30,6 +34,12 @@ pub enum Type {
 pub struct EnumVariant {
     pub name: String,
     pub data: Option<Type>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TupleField {
+    pub typ: Type,
+    pub label: Option<String>,
 }
 
 impl Type {

@@ -1,0 +1,16 @@
+// Temel tipler ve literal'ler
+let i: Int = 42;
+let f: Float = 3.14;
+let ok: Bool = true;
+let ch: Char = 'Z';
+let s: String = "memobits";
+
+// Template string (yalnızca {id})
+let name = "Ada";
+let msg = `Hello {name}`;
+
+native::print(`i: {i}`);
+native::print(`f: {f}`);
+native::print(`ok: {ok}`);
+native::print(`ch: {ch}`);
+native::print(msg);

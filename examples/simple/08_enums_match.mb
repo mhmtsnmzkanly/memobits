@@ -1,0 +1,12 @@
+// Enum ve match
+enum Color {
+    Red,
+    Rgb(Int)
+}
+
+let c = Color::Rgb(200);
+
+match c {
+    Color::Red => native::print("red"),
+    Color::Rgb(v) => native::print(`rgb: {v}`)
+}

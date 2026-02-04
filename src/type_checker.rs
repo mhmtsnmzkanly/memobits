@@ -1,27 +1,35 @@
 //! Basit TypeChecker (taslak): AST uzerinde tip denetimi ve kismi cikarim.
 //! Not: Burasi bilerek "minimale" tutuldu; sonraki kisiler icin genisletilebilir.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
+use alloc::{format, vec};
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::cell::RefCell;
+use crate::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::types::{EnumVariant, Type};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum ConstVal {
     Int(i64),
     Float(f64),
     Bool(bool),
     Char(char),
     Str(String),
+    Tuple(Vec<ConstVal>),
+    List(Vec<ConstVal>),
+    Array(Vec<ConstVal>),
+    Map(Vec<(ConstVal, ConstVal)>),
 }
 
 #[derive(Debug, Clone)]
 pub struct TypeError(pub String);
 
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -32,8 +40,8 @@ pub struct TypeWarning {
     pub pos: Option<(usize, usize)>,
 }
 
-impl std::fmt::Display for TypeWarning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TypeWarning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if let Some((line, col)) = self.pos {
             write!(f, "({}, {}): {}", line, col, self.message)
         } else {
@@ -98,6 +106,7 @@ impl TypeEnv {
 pub struct TypeChecker {
     structs: HashMap<String, Type>,
     enums: HashMap<String, Type>,
+    aliases: HashMap<String, Type>,
     return_stack: Vec<Type>,
     errors: Vec<TypeError>,
     warnings: Vec<TypeWarning>,
@@ -109,6 +118,7 @@ impl TypeChecker {
         Self {
             structs: HashMap::new(),
             enums: HashMap::new(),
+            aliases: HashMap::new(),
             return_stack: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -184,6 +194,20 @@ impl TypeChecker {
                         },
                     );
                 }
+                Item::TypeAlias(alias) => {
+                    if self.structs.contains_key(&alias.name)
+                        || self.enums.contains_key(&alias.name)
+                        || self.aliases.contains_key(&alias.name)
+                    {
+                        self.errors.push(TypeError(format!(
+                            "duplicate type name `{}`",
+                            alias.name
+                        )));
+                    } else {
+                        self.aliases.insert(alias.name.clone(), alias.target.clone());
+                    }
+                }
+                Item::ModuleDecl(_) => {}
                 _ => {}
             }
         }
@@ -192,6 +216,8 @@ impl TypeChecker {
     fn check_item(&mut self, env: Rc<RefCell<TypeEnv>>, item: &Item) -> Result<(), TypeError> {
         match item {
             Item::StructDef(_) | Item::EnumDef(_) => Ok(()),
+            Item::TypeAlias(_) => Ok(()),
+            Item::ModuleDecl(_) => Ok(()),
             Item::FnDef(def) => self.check_fn_def(env, def),
             Item::GlobalLet(b) => {
                 let t = self.check_expr(env.clone(), &b.init)?;
@@ -279,6 +305,7 @@ impl TypeChecker {
             }
             StmtKind::AssignIndex { base, index, value } => {
                 let bt = self.check_expr(env.clone(), base)?;
+                let bt_name = type_name(&bt);
                 let it = self.check_expr(env.clone(), index)?;
                 let vt = self.check_expr(env, value)?;
                 match bt {
@@ -297,7 +324,10 @@ impl TypeChecker {
                         let _ = self.unify(*v, vt)?;
                         Ok(Type::Unit)
                     }
-                    _ => Err(TypeError("index assignment on non-list/array/map".into())),
+                    _ => Err(TypeError(format!(
+                        "index assignment on non-list/array/map (got {})",
+                        bt_name
+                    ))),
                 }
             }
             StmtKind::Expr(e) => self.check_expr(env, e),
@@ -311,9 +341,18 @@ impl TypeChecker {
                                 self.warn(&first.span, "unreachable else branch (condition is always true)");
                             }
                         }
+                        let _ = self.check_block(env.clone(), then_b)?;
+                        return Ok(Type::Unit);
                     } else if let Some(first) = then_b.first() {
                         self.warn(&first.span, "unreachable then branch (condition is always false)");
                     }
+                    let t2 = if let Some(eb) = else_b {
+                        self.check_block(env.clone(), eb)?
+                    } else {
+                        Type::Unit
+                    };
+                    let _ = t2;
+                    return Ok(Type::Unit);
                 }
                 let t1 = self.check_block(env.clone(), then_b)?;
                 let t2 = if let Some(eb) = else_b {
@@ -329,6 +368,13 @@ impl TypeChecker {
             }
             StmtKind::Match { scrutinee, arms } => {
                 let st = self.check_expr(env.clone(), scrutinee)?;
+                if let Some(cv) = self.const_eval(scrutinee) {
+                    if let Some(arm) = self.find_const_match_arm(arms, &cv) {
+                        let _ = self.check_match_arm(env.clone(), &st, arm)?;
+                        self.check_match_exhaustive(&st, arms)?;
+                        return Ok(Type::Unit);
+                    }
+                }
                 let mut acc = Type::Unknown;
                 for arm in arms {
                     let t = self.check_match_arm(env.clone(), &st, arm)?;
@@ -393,11 +439,16 @@ impl TypeChecker {
             }
             ExprKind::Call { callee, args } => {
                 let callee_t = self.check_expr(env.clone(), callee)?;
+                let callee_name = type_name(&callee_t);
                 let Type::Fn(params, ret) = callee_t else {
-                    return Err(TypeError("calling non-function".into()));
+                    return Err(TypeError(format!("calling non-function (got {})", callee_name)));
                 };
                 if params.len() != args.len() {
-                    return Err(TypeError("arity mismatch".into()));
+                    return Err(TypeError(format!(
+                        "arity mismatch: expected {}, got {}",
+                        params.len(),
+                        args.len()
+                    )));
                 }
                 for (p, a) in params.iter().zip(args.iter()) {
                     let at = self.check_expr(env.clone(), a)?;
@@ -416,9 +467,14 @@ impl TypeChecker {
                                 self.warn(&first.span, "unreachable else branch (condition is always true)");
                             }
                         }
+                        return self.check_block(env.clone(), then_b);
                     } else if let Some(first) = then_b.first() {
                         self.warn(&first.span, "unreachable then branch (condition is always false)");
                     }
+                    if let Some(eb) = else_b {
+                        return self.check_block(env.clone(), eb);
+                    }
+                    return Ok(Type::Unit);
                 }
                 let t1 = self.check_block(env.clone(), then_b)?;
                 let t2 = if let Some(eb) = else_b {
@@ -430,6 +486,13 @@ impl TypeChecker {
             }
             ExprKind::Match { scrutinee, arms } => {
                 let st = self.check_expr(env.clone(), scrutinee)?;
+                if let Some(cv) = self.const_eval(scrutinee) {
+                    if let Some(arm) = self.find_const_match_arm(arms, &cv) {
+                        let t = self.check_match_arm(env.clone(), &st, arm)?;
+                        self.check_match_exhaustive(&st, arms)?;
+                        return Ok(t);
+                    }
+                }
                 let mut acc = Type::Unknown;
                 for arm in arms {
                     let t = self.check_match_arm(env.clone(), &st, arm)?;
@@ -458,7 +521,7 @@ impl TypeChecker {
                 let Type::Struct { fields: def_fields, .. } = &st else {
                     return Err(TypeError("internal struct type error".into()));
                 };
-                let mut remaining = std::collections::HashSet::new();
+                let mut remaining = HashSet::new();
                 for f in def_fields.keys() {
                     remaining.insert(f.as_str());
                 }
@@ -520,21 +583,53 @@ impl TypeChecker {
             }
             ExprKind::FieldAccess { base, field } => {
                 let bt = self.check_expr(env, base)?;
-                let bt = self.resolve_type(&bt);
-                let Type::Struct { fields, .. } = bt else {
-                    return Err(TypeError("field access on non-struct".into()));
-                };
-                fields
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| TypeError(format!("unknown field `{}`", field)))
+                let bt = self.resolve_type(bt)?;
+                let bt_name = type_name(&bt);
+                match bt {
+                    Type::Struct { fields, .. } => fields
+                        .get(field)
+                        .cloned()
+                        .ok_or_else(|| TypeError(format!("unknown field `{}`", field))),
+                    Type::Tuple(fields) => {
+                        if let Ok(idx) = field.parse::<usize>() {
+                            return fields
+                                .get(idx)
+                                .map(|f| f.typ.clone())
+                                .ok_or_else(|| TypeError(format!(
+                                    "tuple index out of bounds: {} (len {})",
+                                    idx,
+                                    fields.len()
+                                )));
+                        }
+                        let pos = fields
+                            .iter()
+                            .position(|f| f.label.as_deref() == Some(field.as_str()));
+                        if let Some(idx) = pos {
+                            Ok(fields[idx].typ.clone())
+                        } else {
+                            Err(TypeError(format!("unknown tuple label `{}`", field)))
+                        }
+                    }
+                    _ => Err(TypeError(format!(
+                        "field access on non-struct/tuple (got {})",
+                        bt_name
+                    ))),
+                }
             }
             ExprKind::Index { base, index } => {
                 let bt = self.check_expr(env.clone(), base)?;
+                let bt_name = type_name(&bt);
                 let it = self.check_expr(env, index)?;
                 match bt {
                     Type::List(inner) => {
                         let _ = self.unify(Type::Int, it)?;
+                        if let Some(idx) = self.const_int(index) {
+                            if let Some(ConstVal::List(items)) = self.const_eval(base) {
+                                if idx < 0 || (idx as usize) >= items.len() {
+                                    return Err(TypeError("list index out of bounds (const)".into()));
+                                }
+                            }
+                        }
                         Ok(*inner)
                     }
                     Type::Array(inner, n) => {
@@ -548,9 +643,20 @@ impl TypeChecker {
                     }
                     Type::Map(k, v) => {
                         let _ = self.unify(*k, it)?;
+                        if let Some(key) = self.const_eval(index) {
+                            if let Some(ConstVal::Map(items)) = self.const_eval(base) {
+                                let found = items.iter().any(|(k, _)| *k == key);
+                                if !found {
+                                    return Err(TypeError("map key not found (const)".into()));
+                                }
+                            }
+                        }
                         Ok(*v)
                     }
-                    _ => Err(TypeError("index on non-list/array/map".into())),
+                    _ => Err(TypeError(format!(
+                        "index on non-list/array/map (got {})",
+                        bt_name
+                    ))),
                 }
             }
             ExprKind::ListLiteral(elems) => {
@@ -580,6 +686,14 @@ impl TypeChecker {
                 }
                 Ok(Type::Map(Box::new(k), Box::new(v)))
             }
+            ExprKind::TupleLiteral(elems) => {
+                let mut fields = Vec::new();
+                for e in elems {
+                    let t = self.check_expr(env.clone(), e)?;
+                    fields.push(crate::types::TupleField { typ: t, label: None });
+                }
+                Ok(Type::Tuple(fields))
+            }
             ExprKind::Template { .. } => Ok(Type::String),
         }
     }
@@ -603,7 +717,7 @@ impl TypeChecker {
         scrutinee: &Type,
         p: &Pattern,
     ) -> Result<Vec<(String, Type)>, TypeError> {
-        let st = self.resolve_type(scrutinee);
+        let st = self.resolve_type(scrutinee.clone())?;
         match p {
             Pattern::Wildcard => Ok(Vec::new()),
             Pattern::Ident(name) => Ok(vec![(name.clone(), st)]),
@@ -746,8 +860,38 @@ impl TypeChecker {
             }
         }
 
-        let st = self.resolve_type(scrutinee);
+        let st = self.resolve_type(scrutinee.clone())?;
         match st {
+            Type::Unit => {
+                let mut has_unit = false;
+                for arm in arms {
+                    if matches!(&arm.pattern, Pattern::Literal(Literal::Unit)) {
+                        has_unit = true;
+                        break;
+                    }
+                }
+                if has_unit {
+                    Ok(())
+                } else {
+                    Err(TypeError("non-exhaustive match on Unit".into()))
+                }
+            }
+            Type::Bool => {
+                let mut has_true = false;
+                let mut has_false = false;
+                for arm in arms {
+                    match &arm.pattern {
+                        Pattern::Literal(Literal::Bool(true)) => has_true = true,
+                        Pattern::Literal(Literal::Bool(false)) => has_false = true,
+                        _ => {}
+                    }
+                }
+                if has_true && has_false {
+                    Ok(())
+                } else {
+                    Err(TypeError("non-exhaustive match on Bool".into()))
+                }
+            }
             Type::Option(_) => {
                 let mut has_some = false;
                 let mut has_none = false;
@@ -809,7 +953,7 @@ impl TypeChecker {
                 if all_variants.is_empty() {
                     return Ok(());
                 }
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = HashSet::new();
                 for arm in arms {
                     if let Pattern::Variant { enum_name, variant, .. } = &arm.pattern {
                         if enum_name == &name {
@@ -817,7 +961,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                let all: std::collections::HashSet<_> = all_variants.into_iter().collect();
+                let all: HashSet<_> = all_variants.into_iter().collect();
                 if seen == all {
                     Ok(())
                 } else {
@@ -831,22 +975,6 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_type(&self, t: &Type) -> Type {
-        match t {
-            Type::Struct { name, .. } => self
-                .structs
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| t.clone()),
-            Type::Enum { name, .. } => self
-                .enums
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| t.clone()),
-            _ => t.clone(),
-        }
-    }
-
     fn type_of_binop(&self, op: BinOp, l: Type, r: Type) -> Result<Type, TypeError> {
         use crate::ast::BinOp::*;
         match op {
@@ -855,7 +983,11 @@ impl TypeChecker {
                 match t {
                     Type::Int | Type::Float | Type::Unknown => Ok(t),
                     Type::String if matches!(op, Add) => Ok(Type::String),
-                    _ => Err(TypeError("numeric operator on non-number".into())),
+                    _ => Err(TypeError(format!(
+                        "operator `{:?}` expects number, got {}",
+                        op,
+                        type_name(&t)
+                    ))),
                 }
             }
             Eq | Ne => {
@@ -866,7 +998,11 @@ impl TypeChecker {
                 let t = self.unify(l, r)?;
                 match t {
                     Type::Int | Type::Float | Type::Unknown => Ok(Type::Bool),
-                    _ => Err(TypeError("comparison on non-number".into())),
+                    _ => Err(TypeError(format!(
+                        "comparison `{:?}` expects number, got {}",
+                        op,
+                        type_name(&t)
+                    ))),
                 }
             }
             And | Or => {
@@ -882,7 +1018,10 @@ impl TypeChecker {
         match op {
             Neg => match v {
                 Type::Int | Type::Float | Type::Unknown => Ok(v),
-                _ => Err(TypeError("negation on non-number".into())),
+                _ => Err(TypeError(format!(
+                    "negation expects number, got {}",
+                    type_name(&v)
+                ))),
             },
             Not => {
                 self.expect_bool(v)?;
@@ -894,7 +1033,7 @@ impl TypeChecker {
     fn expect_bool(&self, t: Type) -> Result<(), TypeError> {
         match t {
             Type::Bool | Type::Unknown => Ok(()),
-            _ => Err(TypeError("expected Bool".into())),
+            _ => Err(TypeError(format!("expected Bool, got {}", type_name(&t)))),
         }
     }
 
@@ -922,6 +1061,34 @@ impl TypeChecker {
                 Literal::String(s) => Some(ConstVal::Str(s.clone())),
                 _ => None,
             },
+            ExprKind::TupleLiteral(elems) => {
+                let mut out = Vec::with_capacity(elems.len());
+                for e in elems {
+                    out.push(self.const_eval(e)?);
+                }
+                Some(ConstVal::Tuple(out))
+            }
+            ExprKind::ListLiteral(elems) => {
+                let mut out = Vec::with_capacity(elems.len());
+                for e in elems {
+                    out.push(self.const_eval(e)?);
+                }
+                Some(ConstVal::List(out))
+            }
+            ExprKind::ArrayLiteral(elems) => {
+                let mut out = Vec::with_capacity(elems.len());
+                for e in elems {
+                    out.push(self.const_eval(e)?);
+                }
+                Some(ConstVal::Array(out))
+            }
+            ExprKind::MapLiteral(pairs) => {
+                let mut out = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    out.push((self.const_eval(k)?, self.const_eval(v)?));
+                }
+                Some(ConstVal::Map(out))
+            }
             ExprKind::Unary { op, inner } => {
                 let v = self.const_eval(inner)?;
                 match (op, v) {
@@ -994,15 +1161,44 @@ impl TypeChecker {
         });
     }
 
+    fn find_const_match_arm<'a>(&self, arms: &'a [MatchArm], cv: &ConstVal) -> Option<&'a MatchArm> {
+        for arm in arms {
+            if self.pattern_matches_const(&arm.pattern, cv) {
+                return Some(arm);
+            }
+        }
+        None
+    }
+
+    fn pattern_matches_const(&self, p: &Pattern, cv: &ConstVal) -> bool {
+        match p {
+            Pattern::Wildcard => true,
+            Pattern::Ident(_) => true,
+            Pattern::Literal(lit) => match (lit, cv) {
+                (Literal::Int(a), ConstVal::Int(b)) => *a == *b,
+                (Literal::Float(a), ConstVal::Float(b)) => *a == *b,
+                (Literal::Bool(a), ConstVal::Bool(b)) => *a == *b,
+                (Literal::Char(a), ConstVal::Char(b)) => *a == *b,
+                (Literal::String(a), ConstVal::Str(b)) => a == b,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn apply_annotation(&self, inferred: Type, ann: Option<&Type>) -> Result<Type, TypeError> {
         if let Some(t) = ann {
-            self.unify(inferred, t.clone())
+            let a = self.resolve_type(inferred)?;
+            let b = self.resolve_type(t.clone())?;
+            self.unify(a, b)
         } else {
-            Ok(inferred)
+            Ok(self.resolve_type(inferred)?)
         }
     }
 
     fn unify(&self, a: Type, b: Type) -> Result<Type, TypeError> {
+        let a = self.resolve_type(a)?;
+        let b = self.resolve_type(b)?;
         if a == b {
             return Ok(a);
         }
@@ -1030,6 +1226,23 @@ impl TypeChecker {
                 let v = self.unify(*va, *vb)?;
                 Ok(Type::Map(Box::new(k), Box::new(v)))
             }
+            (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+                let mut out = Vec::new();
+                for (fa, fb) in a.into_iter().zip(b.into_iter()) {
+                    if let (Some(la), Some(lb)) = (&fa.label, &fb.label) {
+                        if la != lb {
+                            return Err(TypeError(format!(
+                                "tuple label mismatch: `{}` vs `{}`",
+                                la, lb
+                            )));
+                        }
+                    }
+                    let t = self.unify(fa.typ, fb.typ)?;
+                    let label = fa.label.or(fb.label);
+                    out.push(crate::types::TupleField { typ: t, label });
+                }
+                Ok(Type::Tuple(out))
+            }
             (Type::Fn(pa, ra), Type::Fn(pb, rb)) if pa.len() == pb.len() => {
                 for (a, b) in pa.iter().cloned().zip(pb.iter().cloned()) {
                     let _ = self.unify(a, b)?;
@@ -1037,6 +1250,9 @@ impl TypeChecker {
                 let r = self.unify(*ra, *rb)?;
                 let params = if pa.is_empty() { pb } else { pa };
                 Ok(Type::Fn(params, Box::new(r)))
+            }
+            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => {
+                Err(TypeError("tuple type mismatch".into()))
             }
             (Type::Struct { name: a, fields: fa }, Type::Struct { name: b, fields: fb }) if a == b => {
                 let fields = if fa.is_empty() { fb } else { fa };
@@ -1050,12 +1266,111 @@ impl TypeChecker {
         }
     }
 
+    fn resolve_type(&self, t: Type) -> Result<Type, TypeError> {
+        self.resolve_type_inner(t, &mut Vec::new())
+    }
+
+    fn resolve_type_inner(&self, t: Type, stack: &mut Vec<String>) -> Result<Type, TypeError> {
+        match t {
+            Type::Struct { name, fields } => {
+                if let Some(alias) = self.aliases.get(&name) {
+                    if stack.contains(&name) {
+                        return Err(TypeError(format!(
+                            "type alias cycle detected: {}",
+                            name
+                        )));
+                    }
+                    stack.push(name);
+                    let resolved = self.resolve_type_inner(alias.clone(), stack)?;
+                    stack.pop();
+                    Ok(resolved)
+                } else {
+                    Ok(Type::Struct { name, fields })
+                }
+            }
+            Type::Option(inner) => Ok(Type::Option(Box::new(self.resolve_type_inner(*inner, stack)?))),
+            Type::Result(ok, err) => Ok(Type::Result(
+                Box::new(self.resolve_type_inner(*ok, stack)?),
+                Box::new(self.resolve_type_inner(*err, stack)?),
+            )),
+            Type::List(inner) => Ok(Type::List(Box::new(self.resolve_type_inner(*inner, stack)?))),
+            Type::Array(inner, n) => Ok(Type::Array(Box::new(self.resolve_type_inner(*inner, stack)?), n)),
+            Type::Map(k, v) => Ok(Type::Map(
+                Box::new(self.resolve_type_inner(*k, stack)?),
+                Box::new(self.resolve_type_inner(*v, stack)?),
+            )),
+            Type::Fn(params, ret) => {
+                let params = params
+                    .into_iter()
+                    .map(|p| self.resolve_type_inner(p, stack))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ret = Box::new(self.resolve_type_inner(*ret, stack)?);
+                Ok(Type::Fn(params, ret))
+            }
+            Type::Tuple(fields) => {
+                let mut out = Vec::new();
+                let mut seen = HashSet::new();
+                for f in fields {
+                    let t = self.resolve_type_inner(f.typ, stack)?;
+                    if let Some(ref label) = f.label {
+                        if !seen.insert(label.clone()) {
+                            return Err(TypeError(format!(
+                                "duplicate tuple label `{}`",
+                                label
+                            )));
+                        }
+                    }
+                    out.push(crate::types::TupleField { typ: t, label: f.label });
+                }
+                Ok(Type::Tuple(out))
+            }
+            other => Ok(other),
+        }
+    }
+
     fn native_return_type(&self, name: &str) -> Type {
         match name {
             "print" | "debug" | "return" => Type::Unit,
             "input" => Type::String,
             _ => Type::Unknown,
         }
+    }
+}
+
+fn type_name(t: &Type) -> String {
+    match t {
+        Type::Unknown => "Unknown".into(),
+        Type::Int => "Int".into(),
+        Type::Float => "Float".into(),
+        Type::Bool => "Bool".into(),
+        Type::Char => "Char".into(),
+        Type::String => "String".into(),
+        Type::Unit => "Unit".into(),
+        Type::Array(inner, n) => format!("Array<{},{}>", type_name(inner), n),
+        Type::List(inner) => format!("List<{}>", type_name(inner)),
+        Type::Map(k, v) => format!("Map<{},{}>", type_name(k), type_name(v)),
+        Type::Option(inner) => format!("Option<{}>", type_name(inner)),
+        Type::Result(ok, err) => format!("Result<{},{}>", type_name(ok), type_name(err)),
+        Type::Fn(params, ret) => {
+            let ps = params.iter().map(type_name).collect::<Vec<_>>().join(", ");
+            format!("fn({}) -> {}", ps, type_name(ret))
+        }
+        Type::Tuple(fields) => {
+            let inner = fields
+                .iter()
+                .map(|f| {
+                    if let Some(label) = &f.label {
+                        format!("{}: {}", label, type_name(&f.typ))
+                    } else {
+                        type_name(&f.typ)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({})", inner)
+        }
+        Type::Struct { name, .. } => format!("Struct({})", name),
+        Type::Enum { name, .. } => format!("Enum({})", name),
     }
 }
 

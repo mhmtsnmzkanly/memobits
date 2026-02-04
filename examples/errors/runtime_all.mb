@@ -1,0 +1,85 @@
+// ===== runtime_and_bool_operands.mb =====
+// expected: && expects Bool operands
+let f = x => x && true;
+f(1);
+
+// ===== runtime_array_index_assign_unreachable.mb =====
+// expected: cannot assign to array index (arrays are immutable at runtime)
+// NOTE: Array literal syntax is not implemented yet; this is currently unreachable.
+// Placeholder for future Array literal examples.
+
+// ===== runtime_array_index_oob_unreachable.mb =====
+// expected: array index out of bounds: ...
+// NOTE: Array literal syntax is not implemented yet; this is currently unreachable.
+// Placeholder for future Array literal examples.
+
+// ===== runtime_break_in_expr_block.mb =====
+// expected: break in expression block
+let x = { break; };
+
+// ===== runtime_break_outside_loop.mb =====
+// expected: break outside loop
+break;
+
+// ===== runtime_continue_in_expr_block.mb =====
+// expected: continue in expression block
+let x = { continue; };
+
+// ===== runtime_continue_outside_loop.mb =====
+// expected: continue outside loop
+continue;
+
+// ===== runtime_duplicate_struct_field.mb =====
+// expected: duplicate field `a` for struct `S`
+struct S { a: Int }
+let s = S { a: 1, a: 2 };
+
+// ===== runtime_if_condition_bool.mb =====
+// expected: if condition must be Bool
+let f = x => { if x { 1 } else { 2 } };
+f(1);
+
+// ===== runtime_list_index_oob.mb =====
+// expected: list index out of bounds: 2 (len 1)
+let l = [1];
+let i = 2;
+l[i];
+
+// ===== runtime_map_key_not_found.mb =====
+// expected: map key not found: b
+let m = { "a" => 1 };
+let k = "b";
+m[k];
+
+// ===== runtime_map_key_type.mb =====
+// expected: map key must be Int/Bool/Char/String (got List)
+let m = { [1] => 2 };
+
+// ===== runtime_non_exhaustive_match.mb =====
+// expected: non-exhaustive match
+let x = "b";
+match x {
+  "a" => 1
+}
+
+// ===== runtime_or_bool_operands.mb =====
+// expected: || expects Bool operands
+let f = x => x || false;
+f(1);
+
+// ===== runtime_return_in_expr_block.mb =====
+// expected: return in expression block
+fn f() -> Int {
+  let x = { return 1; };
+  return 2;
+}
+
+f();
+
+// ===== runtime_template_undefined.mb =====
+// expected: undefined `name` in template
+let s = `hi {name}`;
+
+// ===== runtime_unknown_native.mb =====
+// expected: unknown native `nope`
+native::nope();

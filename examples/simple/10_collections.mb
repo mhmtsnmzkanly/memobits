@@ -1,0 +1,9 @@
+// List, Array, Map literal
+let lst: List<Int> = [1, 2, 3];
+let arr: Array<Int, 3> = [4, 5, 6];
+let m: Map<String, Int> = {"a" => 1, "b" => 2};
+
+native::print(`lst[0]: {lst[0]}`);
+native::print(`arr[1]: {arr[1]}`);
+let b = m["b"];
+native::print(`m[b]: {b}`);

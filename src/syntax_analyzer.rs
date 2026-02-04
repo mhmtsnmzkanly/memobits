@@ -2,6 +2,7 @@
 //! Not: Lexer/Parser artik burada birlesik. Disarida ayri moduller yok.
 
 use logos::Logos;
+use crate::collections::HashMap;
 
 use crate::ast::*;
 use crate::types::Type;
@@ -14,6 +15,10 @@ pub enum Token {
     Fn,
     Struct,
     Enum,
+    Mod,
+    From,
+    Type,
+    Label,
     Match,
     If,
     Else,
@@ -111,6 +116,14 @@ enum SAToken {
     Struct,
     #[token("enum")]
     Enum,
+    #[token("mod")]
+    Mod,
+    #[token("from")]
+    From,
+    #[token("type")]
+    Type,
+    #[token("label")]
+    Label,
     #[token("match")]
     Match,
     #[token("if")]
@@ -371,6 +384,10 @@ fn push_token(
         SAToken::Fn => tokens.push((Token::Fn, span)),
         SAToken::Struct => tokens.push((Token::Struct, span)),
         SAToken::Enum => tokens.push((Token::Enum, span)),
+        SAToken::Mod => tokens.push((Token::Mod, span)),
+        SAToken::From => tokens.push((Token::From, span)),
+        SAToken::Type => tokens.push((Token::Type, span)),
+        SAToken::Label => tokens.push((Token::Label, span)),
         SAToken::Match => tokens.push((Token::Match, span)),
         SAToken::If => tokens.push((Token::If, span)),
         SAToken::Else => tokens.push((Token::Else, span)),
@@ -792,6 +809,33 @@ impl Parser {
         if self.eat(&Token::Enum) {
             return Some(Item::EnumDef(self.parse_enum_def()?));
         }
+        if self.eat(&Token::Type) {
+            let name = self.expect_ident()?;
+            self.expect(Token::Eq).ok()?;
+            let target = self.parse_type()?;
+            if !self.eat(&Token::Semi) && !self.is(&Token::Eof) {
+                self.err("expected ; after type alias".into());
+            }
+            return Some(Item::TypeAlias(TypeAlias { name, target }));
+        }
+        if self.eat(&Token::Mod) {
+            let name = self.expect_ident()?;
+            let mut path = None;
+            if self.eat(&Token::From) {
+                match self.advance() {
+                    Some((Token::StringLit(s), _)) => {
+                        path = Some(s);
+                    }
+                    _ => {
+                        self.err("expected string literal after from".into());
+                    }
+                }
+            }
+            if !self.eat(&Token::Semi) && !self.is(&Token::Eof) {
+                self.err("expected ; after mod declaration".into());
+            }
+            return Some(Item::ModuleDecl(ModuleDecl { name, path }));
+        }
         if self.eat(&Token::Fn) {
             return Some(Item::FnDef(self.parse_fn_def()?));
         }
@@ -1206,6 +1250,37 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Option<Type> {
+        if self.eat(&Token::LParen) {
+            let mut fields = Vec::new();
+            let first = self.parse_type()?;
+            let label = if self.eat(&Token::Label) {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            fields.push(crate::types::TupleField { typ: first, label });
+            if self.eat(&Token::Comma) {
+                loop {
+                    if self.eat(&Token::RParen) {
+                        break;
+                    }
+                    let t = self.parse_type()?;
+                    let label = if self.eat(&Token::Label) {
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+                    fields.push(crate::types::TupleField { typ: t, label });
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                        break;
+                    }
+                }
+                self.expect(Token::RParen).ok()?;
+                return Some(Type::Tuple(fields));
+            }
+            self.expect(Token::RParen).ok()?;
+            return Some(fields.remove(0).typ);
+        }
         if self.eat(&Token::IntKw) {
             return Some(Type::Int);
         }
@@ -1279,7 +1354,7 @@ impl Parser {
             self.advance();
             return Some(Type::Struct {
                 name,
-                fields: std::collections::HashMap::new(),
+                fields: HashMap::new(),
             });
         }
         self.err("expected type".into());
@@ -1477,15 +1552,50 @@ impl Parser {
                     },
                 );
             } else if self.eat(&Token::Dot) {
-                let field = self.expect_ident()?;
-                let span = Span { lo: e.span.lo, hi: self.last_span.hi };
-                e = self.make_expr(
-                    span,
-                    ExprKind::FieldAccess {
-                        base: Box::new(e),
-                        field,
-                    },
-                );
+                let name = match self.peek().cloned() {
+                    Some(Token::IntLit(i)) => {
+                        self.advance();
+                        i.to_string()
+                    }
+                    _ => self.expect_ident()?,
+                };
+                if self.eat(&Token::LParen) {
+                    let mut args = Vec::new();
+                    loop {
+                        self.bump_while_semi();
+                        if self.eat(&Token::RParen) {
+                            break;
+                        }
+                        args.push(self.parse_expr()?);
+                        if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                            break;
+                        }
+                    }
+                    let mut full_args = Vec::with_capacity(args.len() + 1);
+                    full_args.push(e);
+                    full_args.extend(args);
+                    let span = Span { lo: full_args[0].span.lo, hi: self.last_span.hi };
+                    let callee_span = Span { lo: span.lo, hi: span.lo };
+                    e = self.make_expr(
+                        span,
+                        ExprKind::Call {
+                            callee: Box::new(self.make_expr(
+                                callee_span,
+                                ExprKind::Ident(name),
+                            )),
+                            args: full_args,
+                        },
+                    );
+                } else {
+                    let span = Span { lo: e.span.lo, hi: self.last_span.hi };
+                    e = self.make_expr(
+                        span,
+                        ExprKind::FieldAccess {
+                            base: Box::new(e),
+                            field: name,
+                        },
+                    );
+                }
             } else if self.eat(&Token::LBracket) {
                 let index = self.parse_expr()?;
                 self.expect(Token::RBracket).ok()?;
@@ -1524,11 +1634,27 @@ impl Parser {
             }
             let prev = self.allow_struct_literal;
             self.allow_struct_literal = true;
-            let e = self.parse_expr()?;
+            let first = self.parse_expr()?;
             self.allow_struct_literal = prev;
             self.bump_while_semi();
+            if self.eat(&Token::Comma) {
+                let mut elems = vec![first];
+                loop {
+                    self.bump_while_semi();
+                    if self.eat(&Token::RParen) {
+                        break;
+                    }
+                    elems.push(self.parse_expr()?);
+                    self.bump_while_semi();
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                        break;
+                    }
+                }
+                let span = Span { lo: _start.lo, hi: self.last_span.hi };
+                return Some(self.make_expr(span, ExprKind::TupleLiteral(elems)));
+            }
             self.expect(Token::RParen).ok()?;
-            return Some(e);
+            return Some(first);
         }
 
         if self.eat(&Token::LBrace) {

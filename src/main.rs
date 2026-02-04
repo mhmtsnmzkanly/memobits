@@ -10,7 +10,9 @@ use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::Editor;
 
-use memobits::{Interpreter, NativeRegistry, SyntaxAnalyzer, TypeChecker};
+use std::path::Path;
+
+use memobits::{Interpreter, NativeRegistry, TypeChecker, load_with_modules};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -22,7 +24,7 @@ fn main() {
 
         let native = NativeRegistry::new();
         let mut interp = Interpreter::new(native);
-        run_with_interp(&mut interp, &src);
+        run_with_interp(&mut interp, &src, Some(Path::new(&path)));
         return;
     }
 
@@ -69,7 +71,7 @@ fn main() {
         if needs_more_input(&buffer) {
             continue;
         }
-        run_with_interp(&mut interp, &buffer);
+        run_with_interp(&mut interp, &buffer, None);
         buffer.clear();
     }
 
@@ -78,36 +80,33 @@ fn main() {
     }
 }
 
-fn run_with_interp(interp: &mut Interpreter, src: &str) {
-    // NOTE: Ana yol artik SyntaxAnalyzer -> AST -> Interpreter.
-    interp.set_source(src);
-    let mut sa = SyntaxAnalyzer::new(src);
-    match sa.analyz() {
-        Ok(program) => {
-            let mut tc = TypeChecker::new();
-            tc.set_source(src);
-            match tc.check_program(&program) {
-                Ok(()) => {
-                    if !tc.warnings().is_empty() {
-                        eprintln!("type warning:");
-                        for w in tc.warnings() {
-                            eprintln!("  {}", w);
-                        }
-                    }
-                    if let Err(e) = interp.run(&program) {
-                        eprintln!("runtime hatası: {}", e);
-                    }
+fn run_with_interp(interp: &mut Interpreter, src: &str, entry_path: Option<&Path>) {
+    // NOTE: Modül desteği için kaynaklar genişletilir.
+    let loaded = match load_with_modules(src, entry_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("modül hatası: {}", e);
+            return;
+        }
+    };
+
+    interp.set_source(&loaded.source);
+    let mut tc = TypeChecker::new();
+    tc.set_source(&loaded.source);
+    match tc.check_program(&loaded.program) {
+        Ok(()) => {
+            if !tc.warnings().is_empty() {
+                eprintln!("type warning:");
+                for w in tc.warnings() {
+                    eprintln!("  {}", w);
                 }
-                Err(errs) => {
-                    eprintln!("type hatası:");
-                    for e in errs {
-                        eprintln!("  {}", e);
-                    }
-                }
+            }
+            if let Err(e) = interp.run(&loaded.program) {
+                eprintln!("runtime hatası: {}", e);
             }
         }
         Err(errs) => {
-            eprintln!("syntax hatası:");
+            eprintln!("type hatası:");
             for e in errs {
                 eprintln!("  {}", e);
             }

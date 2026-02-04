@@ -1,0 +1,35 @@
+// Veri işleme akışı: list + map + match
+
+enum Msg {
+    Empty,
+    One(Int)
+}
+
+fn classify(n: Int) -> Msg {
+    if n == 0 { Msg::Empty } else { Msg::One(n) }
+}
+
+let nums: List<Int> = [0, 2, 4];
+let tags: Map<String, Int> = {"a" => 1};
+
+// list toplamı
+var i = 0;
+var sum = 0;
+loop {
+    if i >= 3 { break; }
+    sum = sum + nums[i];
+    i = i + 1;
+}
+
+let msg = classify(sum);
+
+match msg {
+    Msg::Empty => native::print("empty"),
+    Msg::One(v) => native::print(`sum: {v}`)
+}
+
+// map güncelle
+let s = sum;
+tags["sum"] = s;
+let out = tags["sum"];
+native::print(`tag sum: {out}`);

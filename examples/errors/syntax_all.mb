@@ -1,0 +1,65 @@
+// ===== syntax_expected_comma_or_rbrace.mb =====
+// expected: expected , or }
+struct S { a: Int b: Int }
+
+// ===== syntax_expected_expression.mb =====
+// expected: expected expression
+let x = ;
+
+// ===== syntax_expected_identifier.mb =====
+// expected: expected identifier
+let = 1;
+
+// ===== syntax_expected_integer.mb =====
+// expected: expected integer
+let x: Array<Int, foo> = [1];
+
+// ===== syntax_expected_non_negative_integer.mb =====
+// expected: expected non-negative integer
+let x: Array<Int, -1> = [1];
+
+// ===== syntax_expected_pattern.mb =====
+// expected: expected pattern
+match 1 { => 1 }
+
+// ===== syntax_expected_semicolon_mod.mb =====
+// expected: expected ; after mod declaration
+mod foo
+
+// ===== syntax_expected_semicolon_type_alias.mb =====
+// expected: expected ; after type alias
+type A = Int
+
+// ===== syntax_expected_string_after_from.mb =====
+// expected: expected string literal after from
+mod foo from 123;
+
+// ===== syntax_expected_type.mb =====
+// expected: expected type
+let x: = 1;
+
+// ===== syntax_invalid_assignment_target.mb =====
+// expected: invalid assignment target
+(1 + 2) = 3;
+
+// ===== syntax_lexical_error.mb =====
+// expected: Lexical error
+@;
+
+// ===== syntax_template_expected_part.mb =====
+// expected: expected template part or end
+// NOTE: This error is currently unreachable via normal lexer output.
+// It would require a corrupted token stream.
+let x = ``;
+
+// ===== syntax_template_missing_id.mb =====
+// expected: expected identifier in template interpolation
+let x = `{ }`;
+
+// ===== syntax_template_missing_rbrace.mb =====
+// expected: expected } to close template interpolation
+let x = `{name`;
+
+// ===== syntax_template_unknown_escape.mb =====
+// expected: unknown escape \q
+let x = `\q`;

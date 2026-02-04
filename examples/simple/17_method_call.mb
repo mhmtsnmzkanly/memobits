@@ -1,0 +1,15 @@
+// Method çağrısı (sadece sugar): p.len() -> len(p)
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+fn len(p: Point) -> Int {
+    p.x * p.x + p.y * p.y
+}
+
+let p = Point { x: 3, y: 4 };
+let l = p.len();
+
+native::print(`len2: {l}`);

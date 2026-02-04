@@ -1,0 +1,10 @@
+// Index atama (List / Map)
+let lst: List<Int> = [1, 2, 3];
+lst[1] = 10;
+
+let m: Map<String, Int> = {"x" => 1};
+m["y"] = 2;
+
+native::print(`lst[1]: {lst[1]}`);
+let y = m["y"];
+native::print(`m[y]: {y}`);

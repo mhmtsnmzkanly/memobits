@@ -1,0 +1,10 @@
+// native:: fonksiyonları
+native::print("print ok");
+native::debug(123);
+
+// input örneği (yorum):
+// let s = native::input();
+// native::print(`input: {s}`);
+
+// return örneği (yorum):
+// let _ = native::return(0);

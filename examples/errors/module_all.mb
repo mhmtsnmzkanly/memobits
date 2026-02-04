@@ -1,0 +1,33 @@
+// ===== module_bad_name.mb =====
+// expected: modül adı yalnızca bir identifier olmalıdır
+mod foo/bar;
+
+// ===== module_cycle_a.mb =====
+mod module_cycle_b;
+
+// ===== module_cycle_b.mb =====
+mod module_cycle_a;
+
+// ===== module_cycle_main.mb =====
+// expected: modül döngüsü tespit edildi: ...
+mod module_cycle_a;
+
+// ===== module_missing.mb =====
+// expected: modül bulunamadı: missing.mb (...)
+mod missing;
+
+// ===== module_parent_dir_forbidden.mb =====
+// expected: göreli modül yolu parent (..) içeremez
+mod foo from "../bar.mb";
+
+// ===== module_syntax_error.mb =====
+// intentional syntax error in module
+let x = ;
+
+// ===== module_syntax_error_main.mb =====
+// expected: modül syntax hatası (...)
+mod module_syntax_error;
+
+// ===== module_unreadable_main.mb =====
+// expected: modül okunamadı: ...
+mod module_unreadable;
