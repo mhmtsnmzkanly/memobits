@@ -151,7 +151,7 @@ fn fixed_arrays_keep_ownership_and_executable_ir_gated() {
         assert!(!check(source).is_empty(), "{source}");
     }
     for source in [
-        "fn f() { let a := [1, 2]; }",
+        "fn f() { let a := [[1], [2]]; }",
         "fn f(a: Array<i32, 2>) {}",
         "fn f() -> Array<i32, 2> { [1, 2] }",
     ] {
@@ -188,6 +188,7 @@ fn array_index_checks_integer_type_and_constant_bounds() {
     assert!(codes("fn f() { let x: i32 = [10, 20][-1]; }").contains(&"TE008".into()));
     assert!(codes("fn f() { let x: i32 = [10, 20][true]; }").contains(&"TE007".into()));
     assert!(codes("fn f() { let x: i32 = [10, 20][2]; }").contains(&"TE008".into()));
+    // Indexing a literal is type-correct but executable indexing needs a named local array.
     let parsed = parse(SourceId(9), "fn f() { let x: i32 = [10, 20][1]; }");
     assert!(memobits_analysis::check_typed_module(&parsed.module)
         .unwrap_err()

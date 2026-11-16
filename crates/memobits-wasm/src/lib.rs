@@ -7,8 +7,8 @@
 //! experimental and do not define a stable Memobits ABI.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    BinaryOp, BlockId, Constant, Function, FunctionId, Instruction, InstructionKind, LocalId,
-    Operand, Primitive, Program, Source, TerminatorKind, Type, UnaryOp,
+    ArrayInit, BinaryOp, BlockId, Constant, Function, FunctionId, Instruction, InstructionKind,
+    LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, UnaryOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_encoder::{
@@ -134,6 +134,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
         | InstructionKind::Store { .. } => None,
+        InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
         InstructionKind::Call { callee, .. } => match callee.source {
             Source::Function(_) => None,
             _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
@@ -168,8 +169,31 @@ fn supported_type(ty: &Type) -> bool {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
         } => matches!(inner.as_ref(), Type::Primitive(kind) if *kind != Primitive::Unit),
+        Type::Array { element, .. } => {
+            matches!(element.as_ref(), Type::Primitive(kind) if *kind != Primitive::Unit)
+        }
         _ => false,
     }
+}
+
+/// Upper bound for one activation frame. The shared stack page is 64 KiB, so a
+/// source-supplied array length can never request host or guest memory beyond
+/// this cap; larger layouts are compile-time diagnostics.
+const MAX_FRAME_SIZE: u32 = 32 * 1024;
+
+/// Identity of an array cell owner within one function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Slot {
+    Local(u32),
+    Value(u32),
+}
+
+/// Inline storage for an array-typed local or value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArrayCell {
+    offset: u32,
+    len: u32,
+    element: Primitive,
 }
 
 /// Address-taken primitive owners have one authoritative cell per activation.
@@ -177,6 +201,8 @@ fn supported_type(ty: &Type) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameLayout {
     slots: BTreeMap<u32, FrameSlot>,
+    /// Every array-typed local and value owns one inline cell.
+    arrays: BTreeMap<Slot, ArrayCell>,
     size: u32,
 }
 
@@ -278,16 +304,188 @@ impl FrameLayout {
             );
             offset = end;
         }
-        let size = if slots.is_empty() {
+        let array_types = function
+            .locals
+            .iter()
+            .enumerate()
+            .map(|(index, local)| (Slot::Local(index as u32), &local.ty, Some(local.span)))
+            .chain(
+                function
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| (Slot::Value(index as u32), ty, None)),
+            );
+        let aliases = construction_aliases(function);
+        let mut arrays = BTreeMap::new();
+        for (slot, ty, span) in array_types {
+            let Type::Array { element, len } = ty else {
+                continue;
+            };
+            if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
+                continue;
+            }
+            let error = |message: &str| FrameLayoutError {
+                message: message.into(),
+                span: span.or(Some(function.span)),
+            };
+            let Type::Primitive(element) = element.as_ref() else {
+                return Err(error("array elements must be primitive in frame layout"));
+            };
+            let (element_size, align) = storage_layout(*element).map_err(|m| error(&m))?;
+            let too_large = "array frame layout exceeds the 32 KiB activation frame limit";
+            let bytes = len
+                .checked_mul(element_size)
+                .ok_or_else(|| error(too_large))?;
+            offset = align_up(offset, align).ok_or_else(|| error(too_large))?;
+            let end = offset.checked_add(bytes).ok_or_else(|| error(too_large))?;
+            if end > MAX_FRAME_SIZE {
+                return Err(error(too_large));
+            }
+            arrays.insert(
+                slot,
+                ArrayCell {
+                    offset,
+                    len: *len,
+                    element: *element,
+                },
+            );
+            offset = end;
+        }
+        for (value, local) in aliases {
+            if let Some(cell) = arrays.get(&Slot::Local(local)).copied() {
+                arrays.insert(Slot::Value(value), cell);
+            }
+        }
+        let size = if slots.is_empty() && arrays.is_empty() {
             0
         } else {
-            align_up(offset, 16).ok_or_else(|| FrameLayoutError {
-                message: "aligned owner frame layout exceeds the 32-bit address space".into(),
-                span: Some(function.span),
-            })?
+            align_up(offset, 16)
+                .ok_or_else(|| FrameLayoutError {
+                    message: "aligned owner frame layout exceeds the 32-bit address space".into(),
+                    span: Some(function.span),
+                })?
+                .max(16)
         };
-        Ok(Self { slots, size })
+        if size > MAX_FRAME_SIZE {
+            return Err(FrameLayoutError {
+                message: "activation frame exceeds the 32 KiB frame limit".into(),
+                span: Some(function.span),
+            });
+        }
+        Ok(Self {
+            slots,
+            arrays,
+            size,
+        })
     }
+}
+
+/// Array values built and immediately assigned to a local share that local's
+/// cell, so the array is constructed in place instead of occupying a second
+/// cell and being copied. The pattern is an `ArrayNew` or array `Capture`
+/// whose output is consumed only by the very next instruction, an `Assign` to
+/// a distinct array local. Element operands are scalars, so constructing into
+/// the destination cannot read the cell being written.
+fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
+    let mut uses = vec![0u32; function.values.len()];
+    let mut count = |operand: &Operand| {
+        if let Source::Value(value) = operand.source {
+            if let Some(slot) = uses.get_mut(value.0 as usize) {
+                *slot += 1;
+            }
+        }
+    };
+    let count_edge = |edge: &memobits_ir::Edge, count: &mut dyn FnMut(&Operand)| {
+        edge.arguments.iter().for_each(&mut *count);
+    };
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                InstructionKind::Constant(_) => {}
+                InstructionKind::Capture(operand)
+                | InstructionKind::Borrow { owner: operand, .. }
+                | InstructionKind::Load { reference: operand }
+                | InstructionKind::Unary { operand, .. }
+                | InstructionKind::Assign { value: operand, .. } => count(operand),
+                InstructionKind::ArrayNew { init } => {
+                    if let ArrayInit::Elements(elements) = init {
+                        elements.iter().for_each(&mut count);
+                    }
+                }
+                InstructionKind::ElementAddr { base, index, .. } => {
+                    count(base);
+                    count(index);
+                }
+                InstructionKind::Store { reference, value } => {
+                    count(reference);
+                    count(value);
+                }
+                InstructionKind::Binary { left, right, .. } => {
+                    count(left);
+                    count(right);
+                }
+                InstructionKind::Call { callee, arguments } => {
+                    count(callee);
+                    arguments.iter().for_each(&mut count);
+                }
+            }
+        }
+        match &block.terminator.kind {
+            TerminatorKind::Goto(edge) => count_edge(edge, &mut count),
+            TerminatorKind::Branch {
+                condition,
+                then_edge,
+                else_edge,
+            } => {
+                count(condition);
+                count_edge(then_edge, &mut count);
+                count_edge(else_edge, &mut count);
+            }
+            TerminatorKind::Return(value) => value.iter().for_each(&mut count),
+            TerminatorKind::Unreachable => {}
+        }
+    }
+    let mut aliases = BTreeMap::new();
+    for block in &function.blocks {
+        for pair in block.instructions.windows(2) {
+            let [producer, consumer] = pair else { continue };
+            let Some(output) = producer.output else {
+                continue;
+            };
+            let InstructionKind::Assign {
+                target,
+                value:
+                    Operand {
+                        source: Source::Value(assigned),
+                        ..
+                    },
+                ..
+            } = &consumer.kind
+            else {
+                continue;
+            };
+            let source_is_target = matches!(
+                &producer.kind,
+                InstructionKind::Capture(Operand { source: Source::Local(local), .. }) if local == target
+            );
+            let array = |ty: Option<&Type>| matches!(ty, Some(Type::Array { .. }));
+            if *assigned == output
+                && uses[output.0 as usize] == 1
+                && matches!(
+                    producer.kind,
+                    InstructionKind::ArrayNew { .. } | InstructionKind::Capture(_)
+                )
+                && array(function.values.get(output.0 as usize))
+                && function.values.get(output.0 as usize)
+                    == function.locals.get(target.0 as usize).map(|l| &l.ty)
+                && !source_is_target
+            {
+                aliases.insert(output.0, target.0);
+            }
+        }
+    }
+    aliases
 }
 
 fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
@@ -325,6 +523,9 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Primitive(Primitive::F64) => ValType::F64,
         Type::Function(_) => unreachable!("unsupported function type checked before encoding"),
         Type::Reference { .. } => ValType::I32,
+        // Array slots keep an unused Wasm local; their authoritative storage is
+        // a frame cell and operands push the cell address.
+        Type::Array { .. } => ValType::I32,
     }
 }
 
@@ -673,11 +874,58 @@ fn emit_operand(
             return Ok(());
         }
     }
+    if let Some(cell) = array_cell(layout, operand) {
+        emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
+        return Ok(());
+    }
     body.instruction(&WasmInstruction::LocalGet(operand_local(
         function,
         param_count,
         operand,
     )?));
+    Ok(())
+}
+
+fn array_cell(layout: &FrameLayout, operand: &Operand) -> Option<ArrayCell> {
+    let slot = match operand.source {
+        Source::Local(local) => Slot::Local(local.0),
+        Source::Value(value) => Slot::Value(value.0),
+        Source::Function(_) => return None,
+    };
+    layout.arrays.get(&slot).copied()
+}
+
+fn array_cell_of(layout: &FrameLayout, slot: Slot) -> Result<ArrayCell, String> {
+    layout
+        .arrays
+        .get(&slot)
+        .copied()
+        .ok_or_else(|| "array storage cell is missing".to_string())
+}
+
+/// Copy a whole array between two cells of identical layout.
+fn emit_array_copy(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    destination: ArrayCell,
+    source: &Operand,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+) -> Result<(), String> {
+    let frame = frame.ok_or("array cell requires frame")?;
+    if array_cell(layout, source).is_some_and(|cell| cell.offset == destination.offset) {
+        // The array was constructed in the destination cell already.
+        return Ok(());
+    }
+    let (size, _) = storage_layout(destination.element)?;
+    emit_address(body, frame, destination.offset);
+    emit_operand(body, function, param_count, source, layout, frame.into())?;
+    body.instruction(&WasmInstruction::I32Const((destination.len * size) as i32));
+    body.instruction(&WasmInstruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
     Ok(())
 }
 
@@ -1234,7 +1482,64 @@ fn compile_instruction(
         }
         InstructionKind::Capture(operand) => {
             let output = output.ok_or("capture lacks an output")?;
+            if let Ok(cell) = array_cell_of(layout, Slot::Value(instruction.output.unwrap().0)) {
+                return emit_array_copy(body, function, param_count, cell, operand, layout, frame);
+            }
             emit_operand(body, function, param_count, operand, layout, frame)?;
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::ArrayNew { init } => {
+            let value = instruction.output.ok_or("array creation lacks an output")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let frame = frame.ok_or("array cell requires frame")?;
+            let (size, _) = storage_layout(cell.element)?;
+            match init {
+                ArrayInit::Elements(elements) => {
+                    if elements.len() != cell.len as usize {
+                        return Err("array literal length differs from its array type".into());
+                    }
+                    for (index, element) in elements.iter().enumerate() {
+                        emit_address(body, frame, cell.offset + index as u32 * size);
+                        emit_operand(body, function, param_count, element, layout, Some(frame))?;
+                        emit_store(body, cell.element);
+                    }
+                }
+                ArrayInit::Zeroed => {
+                    emit_address(body, frame, cell.offset);
+                    body.instruction(&WasmInstruction::I32Const(0));
+                    body.instruction(&WasmInstruction::I32Const((cell.len * size) as i32));
+                    body.instruction(&WasmInstruction::MemoryFill(0));
+                }
+            }
+        }
+        InstructionKind::ElementAddr { base, index, .. } => {
+            let output = output.ok_or("element address lacks an output")?;
+            let cell = array_cell(layout, base).ok_or("element address base is not an array")?;
+            let frame = frame.ok_or("array cell requires frame")?;
+            let (size, _) = storage_layout(cell.element)?;
+            let wide = matches!(
+                value_type(function, index)?,
+                Type::Primitive(Primitive::I64 | Primitive::U64)
+            );
+            // The unsigned comparison also rejects negative indices. The index
+            // operand is read-only, so it is re-read for the address computation.
+            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            if wide {
+                body.instruction(&WasmInstruction::I64Const(i64::from(cell.len)));
+                body.instruction(&WasmInstruction::I64GeU);
+            } else {
+                body.instruction(&WasmInstruction::I32Const(cell.len as i32));
+                body.instruction(&WasmInstruction::I32GeU);
+            }
+            trap_if(body);
+            emit_address(body, frame, cell.offset);
+            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            if wide {
+                body.instruction(&WasmInstruction::I32WrapI64);
+            }
+            body.instruction(&WasmInstruction::I32Const(size as i32));
+            body.instruction(&WasmInstruction::I32Mul);
+            body.instruction(&WasmInstruction::I32Add);
             body.instruction(&WasmInstruction::LocalSet(output));
         }
         InstructionKind::Borrow { owner, .. } => {
@@ -1264,6 +1569,9 @@ fn compile_instruction(
             emit_store(body, reference_primitive(function, reference)?);
         }
         InstructionKind::Assign { target, value, .. } => {
+            if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
+                return emit_array_copy(body, function, param_count, cell, value, layout, frame);
+            }
             if let Some(slot) = layout.slots.get(&target.0) {
                 emit_address(body, frame.ok_or("owner cell requires frame")?, slot.offset);
                 emit_operand(body, function, param_count, value, layout, frame)?;

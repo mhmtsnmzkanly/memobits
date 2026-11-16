@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Access, Block, Edge, Function, Instruction, InstructionKind, LocalId, Operand, Program, Source,
-    TerminatorKind, Type, UseMode, ValueId,
+    Access, ArrayInit, Block, Edge, Function, Instruction, InstructionKind, LocalId, Operand,
+    Program, Source, TerminatorKind, Type, UseMode, ValueId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -224,6 +224,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
         InstructionKind::Store { reference, value } => vec![reference, value],
+        InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
+        InstructionKind::ArrayNew { init } => match init {
+            ArrayInit::Elements(elements) => elements.iter().collect(),
+            ArrayInit::Zeroed => Vec::new(),
+        },
         InstructionKind::Binary { left, right, .. } => vec![left, right],
         InstructionKind::Assign { value, .. } => vec![value],
         InstructionKind::Call { callee, arguments } => {
@@ -464,6 +469,12 @@ fn transfer_provenance(
             loan,
             owner,
             access,
+        }
+        | InstructionKind::ElementAddr {
+            loan,
+            base: owner,
+            access,
+            ..
         } => {
             let owner_provenance = roots_for_owner(function, state, owner);
             let key = LoanKey::Site(loan.0);
@@ -762,6 +773,12 @@ fn check_instruction(
             loan,
             owner,
             access,
+        }
+        | InstructionKind::ElementAddr {
+            loan,
+            base: owner,
+            access,
+            ..
         } => {
             if *access == Access::Share {
                 if let Source::Local(local) = owner.source {
@@ -865,9 +882,12 @@ fn check_instruction(
     // Borrow creation and reference dereferences have their own access rules.
     // Every other owner operand still reads (or consumes) the owner directly.
     for operand in instruction_operands(&instruction.kind) {
-        if matches!(instruction.kind, InstructionKind::Borrow { .. })
-            || type_at(function, operand.source).is_some_and(is_reference)
-        {
+        let is_borrow_owner = match &instruction.kind {
+            InstructionKind::Borrow { owner, .. } => std::ptr::eq(owner, operand),
+            InstructionKind::ElementAddr { base, .. } => std::ptr::eq(base, operand),
+            _ => false,
+        };
+        if is_borrow_owner || type_at(function, operand.source).is_some_and(is_reference) {
             continue;
         }
         let provenance = roots_for_owner(function, state, operand);

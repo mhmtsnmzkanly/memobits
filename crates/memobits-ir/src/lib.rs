@@ -42,7 +42,15 @@ pub enum Primitive {
 pub enum Type {
     Primitive(Primitive),
     Function(Signature),
-    Reference { access: Access, inner: Box<Type> },
+    Reference {
+        access: Access,
+        inner: Box<Type>,
+    },
+    /// Fixed-length homogeneous array stored inline in its owner.
+    Array {
+        element: Box<Type>,
+        len: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +134,16 @@ pub enum BinaryOp {
     Or,
 }
 
+/// Initialisation of a freshly created array. Elements are never observably
+/// uninitialised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArrayInit {
+    /// One consumed operand per element, in element order.
+    Elements(Vec<Operand>),
+    /// All elements zero. Reserved for repeat lowering.
+    Zeroed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstructionKind {
     Constant(Constant),
@@ -135,6 +153,19 @@ pub enum InstructionKind {
     Borrow {
         loan: LoanId,
         owner: Operand,
+        access: Access,
+    },
+    /// Create an array value. The output type is the array type.
+    ArrayNew {
+        init: ArrayInit,
+    },
+    /// Array twin of `Borrow`: a reference to one element of an array owner or
+    /// array reference. The bounds check against the array length is part of
+    /// this instruction and traps at run time.
+    ElementAddr {
+        loan: LoanId,
+        base: Operand,
+        index: Operand,
         access: Access,
     },
     /// Read the referent. The output is read-only provenance and cannot escape
@@ -318,10 +349,23 @@ impl Program {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
+                    if matches!(
+                        function.values.get(value.0 as usize),
+                        Some(Type::Array { .. })
+                    ) {
+                        push(
+                            &mut errors,
+                            id,
+                            Some(block_id),
+                            "array-typed block parameters are not supported",
+                        );
+                    }
                 }
                 for instruction in &block.instructions {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
-                    if let InstructionKind::Borrow { loan, .. } = &instruction.kind {
+                    if let InstructionKind::Borrow { loan, .. }
+                    | InstructionKind::ElementAddr { loan, .. } = &instruction.kind
+                    {
                         if !loans.insert(*loan) {
                             push(
                                 &mut errors,
@@ -387,6 +431,14 @@ fn validate_signature_value_type(
             format!("{context} type cannot be a reference"),
         );
     }
+    if matches!(ty, Type::Array { .. }) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} type cannot be an array yet"),
+        );
+    }
     validate_type_shape(ty, errors, id, context);
 }
 
@@ -419,6 +471,16 @@ fn validate_type_shape(
                     id,
                     None,
                     format!("{context} reference must refer to a primitive value"),
+                );
+            }
+        }
+        Type::Array { element, len: _ } => {
+            if !matches!(element.as_ref(), Type::Primitive(p) if *p != Primitive::Unit) {
+                push(
+                    errors,
+                    id,
+                    None,
+                    format!("{context} array element must be a non-Unit primitive"),
                 );
             }
         }
@@ -621,6 +683,165 @@ fn validate_instruction(
                         id,
                         Some(block),
                         "borrow output type is incompatible",
+                    );
+                }
+            }
+        }
+        InstructionKind::ArrayNew { init } => {
+            let operand_types = match init {
+                ArrayInit::Elements(elements) => elements
+                    .iter()
+                    .map(|operand| {
+                        let actual = operand_type(program, function, operand, errors, id, block);
+                        if operand.mode != UseMode::Consume {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "array element operand must be consumed",
+                            );
+                        }
+                        actual
+                    })
+                    .collect::<Vec<_>>(),
+                ArrayInit::Zeroed => Vec::new(),
+            };
+            match out {
+                None => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "array creation requires an output value",
+                ),
+                Some(Type::Array { element, len }) => match init {
+                    ArrayInit::Elements(elements) => {
+                        if elements.len() != *len as usize {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "array literal length differs from output array length",
+                            );
+                        }
+                        if operand_types
+                            .iter()
+                            .flatten()
+                            .any(|actual| actual != element.as_ref())
+                        {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "array element type differs from output array element type",
+                            );
+                        }
+                    }
+                    ArrayInit::Zeroed => {}
+                },
+                Some(_) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "array creation output must have an array type",
+                ),
+            }
+        }
+        InstructionKind::ElementAddr {
+            base,
+            index,
+            access,
+            ..
+        } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            let index_type = operand_type(program, function, index, errors, id, block);
+            if instruction.output.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "element address requires an output reference",
+                );
+            }
+            let expected_mode = use_mode_for_access(*access);
+            if expected_mode.is_none() || base.mode != expected_mode.unwrap() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "element address base mode does not match requested access",
+                );
+            }
+            if index.mode != UseMode::Read {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "element address index must use Read mode",
+                );
+            }
+            if index_type.is_some_and(|ty| !is_integer(&ty)) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "element address index must be an integer",
+                );
+            }
+            let element = actual.and_then(|actual| match actual {
+                Type::Array { element, .. } if *access != Access::Owned => Some(*element),
+                Type::Reference {
+                    access: owner_access,
+                    inner,
+                } => {
+                    let permitted = match access {
+                        Access::Owned => false,
+                        Access::Borrow => {
+                            matches!(owner_access, Access::Borrow | Access::Share)
+                        }
+                        Access::Share => owner_access == Access::Share,
+                    };
+                    if !permitted {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "element address cannot strengthen reference access",
+                        );
+                    }
+                    match *inner {
+                        Type::Array { element, .. } => Some(*element),
+                        _ => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "element address base must be an array owner or array reference",
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "element address base must be an array owner or array reference",
+                    );
+                    None
+                }
+            });
+            if let (Some(element), Some(output)) = (element, out) {
+                let expected = Type::Reference {
+                    access: *access,
+                    inner: Box::new(element),
+                };
+                if output != &expected {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "element address output type is incompatible",
                     );
                 }
             }
@@ -948,6 +1169,17 @@ fn validate_read_only_loaded_values(
                 InstructionKind::Capture(value)
                 | InstructionKind::Borrow { owner: value, .. }
                 | InstructionKind::Load { reference: value } => report(block_id, value, false),
+                InstructionKind::ElementAddr { base, index, .. } => {
+                    report(block_id, base, false);
+                    report(block_id, index, false);
+                }
+                InstructionKind::ArrayNew { init } => {
+                    if let ArrayInit::Elements(elements) = init {
+                        for element in elements {
+                            report(block_id, element, true);
+                        }
+                    }
+                }
                 InstructionKind::Store { reference, value } => {
                     report(block_id, reference, false);
                     report(block_id, value, true);

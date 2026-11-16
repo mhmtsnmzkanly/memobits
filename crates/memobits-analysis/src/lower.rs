@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Access, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, Constant, Edge, Function,
-    Instruction, InstructionKind, LoanId, Local, LocalId, Operand, Primitive, Program, Source,
-    Terminator, TerminatorKind, Type, UnaryOp, UseMode, ValueId,
+    Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, Constant, Edge,
+    Function, Instruction, InstructionKind, LoanId, Local, LocalId, Operand, Primitive, Program,
+    Source, Terminator, TerminatorKind, Type, UnaryOp, UseMode, ValueId,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -524,6 +524,10 @@ impl<'a> Builder<'a> {
                     operator,
                     value,
                 } => {
+                    if let ExprKind::Index { base, index } = &target.kind {
+                        self.lower_element_assign(statement.span, base, index, operator, value);
+                        continue;
+                    }
                     let PathTarget::Local(local) = self.path(target) else {
                         unreachable!("checked assignment")
                     };
@@ -612,6 +616,245 @@ impl<'a> Builder<'a> {
         self.last_value = value;
         value
     }
+    /// Address one element of an array operand. The bounds check is part of the
+    /// instruction; the result is a reference with the requested access.
+    fn element_addr(
+        &mut self,
+        mut array: Operand,
+        position: Operand,
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        let Some(Type::Array { element, .. }) = self.operand_type(array) else {
+            unreachable!("checked array index base")
+        };
+        let loan = LoanId(self.next_loan);
+        self.next_loan += 1;
+        array.mode = access_mode(access);
+        let mut reference = self.emit(
+            span,
+            InstructionKind::ElementAddr {
+                loan,
+                base: array,
+                index: read(position),
+                access,
+            },
+            Some(Type::Reference {
+                access,
+                inner: element,
+            }),
+        )?;
+        reference.mode = access_mode(access);
+        Some(reference)
+    }
+    fn load_element(&mut self, reference: Operand, span: Span) -> Option<Operand> {
+        let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
+            unreachable!("element address is a reference")
+        };
+        self.emit(span, InstructionKind::Load { reference }, Some(*inner))
+    }
+    /// `a[i] = v` and `a[i] op= v`. The index is evaluated and captured first,
+    /// then the right-hand side; the checked element address and the store are
+    /// adjacent, so a bounds trap fires after the right-hand side's effects.
+    fn lower_element_assign(
+        &mut self,
+        span: Span,
+        base: &Expr,
+        index: &Expr,
+        operator: &str,
+        value: &Expr,
+    ) -> Option<()> {
+        let array = self.lower_expr(base)?;
+        let position = self.lower_expr(index)?;
+        let position = self.scalar(position)?;
+        let position = self.capture(position)?;
+        let previous = if operator == "=" {
+            None
+        } else {
+            let reference = self.element_addr(array, position, Access::Borrow, span)?;
+            Some(self.load_element(reference, span)?)
+        };
+        let rhs = self.lower_expr(value)?;
+        let rhs = self.scalar(rhs)?;
+        let assigned = match previous {
+            None => rhs,
+            Some(previous) => {
+                let Some(Type::Array { element, .. }) = self.operand_type(array) else {
+                    unreachable!("checked array index base")
+                };
+                self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: binary_op(operator),
+                        left: read(previous),
+                        right: read(rhs),
+                    },
+                    Some(*element),
+                )?
+            }
+        };
+        let reference = self.element_addr(array, position, Access::Share, span)?;
+        self.emit(
+            span,
+            InstructionKind::Store {
+                reference,
+                value: consume(assigned),
+            },
+            None,
+        );
+        Some(())
+    }
+    fn hidden_local(&mut self, name: &str, ty: Type, span: Span) -> LocalId {
+        let id = LocalId(self.function.locals.len() as u32);
+        self.function.locals.push(Local {
+            name: name.into(),
+            ty,
+            mutable: true,
+            span,
+        });
+        id
+    }
+    /// `[expr; N]`. Zero evaluates nothing and one evaluates once without a
+    /// loop. Larger counts always lower to a loop over a hidden zeroed
+    /// accumulator and a hidden counter, so the IR size does not depend on N and
+    /// an owned element expression is a repeated move that ownership rejects.
+    fn lower_repeat(&mut self, expr: &Expr, value: &Expr) -> Option<Operand> {
+        let ty = self.ty(expr).expect("checked repeat type");
+        let Type::Array { len, .. } = ty else {
+            unreachable!("checked repeat type")
+        };
+        let span = expr.span;
+        if len == 0 {
+            return self.emit(
+                span,
+                InstructionKind::ArrayNew {
+                    init: ArrayInit::Zeroed,
+                },
+                Some(ty),
+            );
+        }
+        if len == 1 {
+            let element = self.lower_expr(value)?;
+            let element = self.scalar(element)?;
+            let element = consume(self.capture(consume(element))?);
+            return self.emit(
+                span,
+                InstructionKind::ArrayNew {
+                    init: ArrayInit::Elements(vec![element]),
+                },
+                Some(ty),
+            );
+        }
+        let u32_ty = Type::Primitive(Primitive::U32);
+        let accumulator = self.hidden_local("repeat array", ty.clone(), span);
+        let counter = self.hidden_local("repeat index", u32_ty.clone(), span);
+        let zeroed = self.emit(
+            span,
+            InstructionKind::ArrayNew {
+                init: ArrayInit::Zeroed,
+            },
+            Some(ty.clone()),
+        )?;
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: accumulator,
+                value: consume(zeroed),
+                initialize: true,
+            },
+            None,
+        );
+        let start = self.constant(span, Constant::Integer("0".into()), u32_ty.clone())?;
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: counter,
+                value: consume(start),
+                initialize: true,
+            },
+            None,
+        );
+        let header = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.goto(header, Vec::new(), span);
+        self.current = Some(header);
+        let current_count = self.capture(op(Source::Local(counter), span))?;
+        let limit = self.constant(span, Constant::Integer(len.to_string()), u32_ty.clone())?;
+        let more = self.emit(
+            span,
+            InstructionKind::Binary {
+                op: BinaryOp::Less,
+                left: read(current_count),
+                right: read(limit),
+            },
+            Some(Type::Primitive(Primitive::Bool)),
+        )?;
+        self.finish(
+            header,
+            TerminatorKind::Branch {
+                condition: read(more),
+                then_edge: Edge {
+                    target: body,
+                    arguments: Vec::new(),
+                },
+                else_edge: Edge {
+                    target: exit,
+                    arguments: Vec::new(),
+                },
+            },
+            Some(span),
+        );
+        self.current = Some(body);
+        let produced = self
+            .lower_expr(value)
+            .and_then(|operand| self.scalar(operand))
+            .and_then(|operand| self.capture(consume(operand)));
+        if let Some(produced) = produced {
+            let position = self.capture(op(Source::Local(counter), span))?;
+            let reference = self.element_addr(
+                op(Source::Local(accumulator), span),
+                position,
+                Access::Share,
+                span,
+            )?;
+            self.emit(
+                span,
+                InstructionKind::Store {
+                    reference,
+                    value: consume(produced),
+                },
+                None,
+            );
+            let current_count = self.capture(op(Source::Local(counter), span))?;
+            let one = self.constant(span, Constant::Integer("1".into()), u32_ty.clone())?;
+            let next = self.emit(
+                span,
+                InstructionKind::Binary {
+                    op: BinaryOp::Add,
+                    left: read(current_count),
+                    right: read(one),
+                },
+                Some(u32_ty),
+            )?;
+            self.emit(
+                span,
+                InstructionKind::Assign {
+                    target: counter,
+                    value: consume(next),
+                    initialize: false,
+                },
+                None,
+            );
+            self.goto(header, Vec::new(), span);
+        }
+        self.current = Some(exit);
+        self.emit(
+            span,
+            InstructionKind::Capture(consume(op(Source::Local(accumulator), span))),
+            Some(ty),
+        )
+    }
     fn lower_loop(&mut self, body: &Block, span: Span) {
         let header = self.new_block();
         let exit = self.new_block();
@@ -632,8 +875,31 @@ impl<'a> Builder<'a> {
     fn lower_expr(&mut self, expr: &Expr) -> Option<Operand> {
         self.current?;
         match &expr.kind {
-            // Semantic checking rejects arrays before this pass can run.
-            ExprKind::Array(_) | ExprKind::RepeatArray { .. } | ExprKind::Index { .. } => None,
+            ExprKind::Array(elements) => {
+                let mut operands = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let value = self.lower_expr(element)?;
+                    let value = self.scalar(value)?;
+                    // Capture locals now so every element is read in source order.
+                    operands.push(consume(self.capture(consume(value))?));
+                }
+                self.emit(
+                    expr.span,
+                    InstructionKind::ArrayNew {
+                        init: ArrayInit::Elements(operands),
+                    },
+                    self.ty(expr),
+                )
+            }
+            ExprKind::Index { base, index } => {
+                let array = self.lower_expr(base)?;
+                let position = self.lower_expr(index)?;
+                let position = self.scalar(position)?;
+                let position = self.capture(position)?;
+                let reference = self.element_addr(array, position, Access::Borrow, expr.span)?;
+                self.load_element(reference, expr.span)
+            }
+            ExprKind::RepeatArray { value, .. } => self.lower_repeat(expr, value),
             ExprKind::Number(raw) => {
                 let ty = self.ty(expr).expect("checked number type");
                 let value = if raw.contains(['.', 'e', 'E']) {
@@ -856,7 +1122,9 @@ impl<'a> Builder<'a> {
             // A logical operator produces an owned Bool, even when its RHS
             // reads a reference. Do not forward the read-only Load result
             // into the join as an owned value.
-            let rhs = if matches!(self.ty(right), Some(Type::Reference { .. })) {
+            let rhs = if matches!(self.ty(right), Some(Type::Reference { .. }))
+                || matches!(right.kind, ExprKind::Index { .. })
+            {
                 let neutral = self.constant(
                     right.span,
                     Constant::Bool(true),

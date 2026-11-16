@@ -19,7 +19,7 @@ not constant-folded by this flow pass.
 This pass reports unsupported user-defined types, imports, qualified paths,
 ordinary field access. Primitive borrow/share parameters and named-owner conversions are supported for analysis and IR lowering. It does not resolve modules,
 check ownership, or decide a public spelling for Unit annotations. `TE001`–
-`TE017` are type-pass diagnostics; `TE020` and `TE021` are reserved for control
+`TE017` and `TE022` are type-pass diagnostics; `TE020` and `TE021` are reserved for control
 flow. Parse first and handle syntax diagnostics separately. Both analysis
 passes return source-spanned diagnostics and must be called independently.
 
@@ -90,6 +90,13 @@ execution remains disabled. See `examples/analysis/references.mb`.
 Fixed arrays are supported by the type-only APIs (`check_types` and
 `check_resolved_types`): homogeneous inference, nested arrays, contextual numeric
 literals, length matching, empty contextual literals, and repetition counts.
-Executable typed facts/lowering still reject arrays with TE017. Indexing and
-aggregate reference semantics remain unsupported. Repetition expressions are
-type-checked once even at zero count; they are not expanded by analysis.
+Executable typed facts/lowering accept arrays of primitive elements: literals,
+repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
+evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
+reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
+`let` arrays), and whole-array moves (`let b := a;`, `b = a;`). `TE022` rejects
+moving an element into an owned position. Every other array form (parameters,
+results, references, nested arrays, array-valued `if`/block results, whole
+arrays outside a binding initializer or `=`) is still gated with TE017.
+Aggregate reference semantics remain unsupported. Repetition expressions are
+type-checked once even at zero count; analysis facts never expand them.

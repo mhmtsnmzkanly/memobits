@@ -1,4 +1,6 @@
-//! Type checks for primitives and fixed arrays. Arrays remain excluded from executable IR.
+//! Type checks for primitives and fixed arrays. Executable IR supports arrays of primitive
+//! elements (literal, repetition, indexing, element and whole-array assignment); every other
+//! array form is gated with TE017.
 //! Name resolution across modules and ownership checking are separate passes.
 use std::collections::HashMap;
 
@@ -370,7 +372,11 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             access: *access,
             inner: Box::new(ir_type(inner)?),
         },
-        Ty::Array(..) | Ty::Never | Ty::Error => return None,
+        Ty::Array(element, len) => IrType::Array {
+            element: Box::new(ir_type(element)?),
+            len: *len,
+        },
+        Ty::Never | Ty::Error => return None,
     })
 }
 
@@ -387,6 +393,10 @@ struct Binding {
 struct Checker {
     diagnostics: Vec<Diagnostic>,
     executable: bool,
+    /// Address of the one array literal expression that may initialize a `let`.
+    allowed_array: usize,
+    /// Address of the path expression currently checked as an index base.
+    index_base: usize,
     functions: HashMap<String, Ty>,
     function_ids: HashMap<String, FunctionId>,
     facts: Option<FunctionFacts>,
@@ -411,15 +421,60 @@ impl Checker {
         }
         value
     }
+    /// Types in function signatures: arrays cannot cross calls yet.
+    fn signature_type(&mut self, ty: &Type) -> Ty {
+        let checked = self.type_path(ty);
+        if self.executable && matches!(checked, Ty::Array(..)) {
+            self.error(
+                17,
+                ty.span,
+                "array parameters and results are not supported yet",
+            );
+        }
+        checked
+    }
+    /// Executable arrays hold non-Unit primitive elements only.
+    fn check_element_support(&mut self, element: &Ty, span: Span) {
+        if self.executable
+            && !matches!(element, Ty::Error | Ty::Never)
+            && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
+        {
+            self.error(
+                17,
+                span,
+                "executable arrays support non-Unit primitive elements only",
+            );
+        }
+    }
+    /// Whole-array values are produced only by a literal, repetition or named
+    /// local that directly initializes a binding or is assigned with `=`.
+    fn allow_array_value(&mut self, value: &Expr) {
+        if matches!(
+            value.kind,
+            ExprKind::Array(_) | ExprKind::RepeatArray { .. } | ExprKind::Path(_)
+        ) {
+            self.allowed_array = value as *const Expr as usize;
+        }
+    }
+    /// D1: an element read is not an owned value. It may feed arithmetic,
+    /// comparisons and conditions, but not a binding, assignment, return, call
+    /// argument, array element or block result.
+    fn reject_extraction(&mut self, expr: &Expr) {
+        if self.executable && matches!(expr.kind, ExprKind::Index { .. }) {
+            self.error(
+                22,
+                expr.span,
+                "an array element cannot be moved out by indexing; an explicit copy is required and is not available yet. Use the element inside an arithmetic or comparison expression instead",
+            );
+        }
+    }
     fn type_path(&mut self, ty: &Type) -> Ty {
         if ty.path == ["Array"] {
-            if self.executable {
-                self.error(17, ty.span, "arrays have no executable typed IR yet");
-            }
             if let [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Integer(count)] =
                 ty.arguments.as_slice()
             {
                 let element = self.type_path(element);
+                self.check_element_support(&element, ty.span);
                 return match self.array_count(count) {
                     Some(count) => Ty::Array(Box::new(element), count),
                     None => Ty::Error,
@@ -521,7 +576,9 @@ impl Checker {
                     value,
                 } => {
                     let annotation = annotation.as_ref().map(|ty| self.type_path(ty));
+                    self.allow_array_value(value);
                     let inferred = self.expr(value, annotation.as_ref());
+                    self.reject_extraction(value);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
                     }
@@ -554,6 +611,7 @@ impl Checker {
                         ExprKind::Path(path) if path.len() == 1 => {
                             match self.lookup(&path[0]).cloned() {
                                 Some(binding) => {
+                                    self.allowed_array = target as *const Expr as usize;
                                     self.expr(target, None);
                                     match &binding.ty {
                                         Ty::Reference {
@@ -620,13 +678,47 @@ impl Checker {
                                 }
                             }
                         }
+                        ExprKind::Index { base, .. } => {
+                            let element = self.expr(target, None);
+                            match &base.kind {
+                                ExprKind::Path(path) if path.len() == 1 => {
+                                    if let Some(binding) = self.lookup(&path[0]).cloned() {
+                                        if matches!(binding.ty, Ty::Array(..))
+                                            && !binding.mutable
+                                            && binding.access != IrAccess::Share
+                                        {
+                                            self.error(
+                                                4,
+                                                target.span,
+                                                format!(
+                                                    "cannot assign to an element of immutable array binding '{}'; declare it with var",
+                                                    path[0]
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => self.error(
+                                    6,
+                                    target.span,
+                                    "element assignment requires a named local array",
+                                ),
+                            }
+                            element
+                        }
                         _ => {
                             self.expr(target, None);
                             self.error(6, target.span, "assignment target must be a local binding");
                             Ty::Error
                         }
                     };
+                    if operator == "=" {
+                        self.allow_array_value(value);
+                    }
                     let value_ty = self.expr(value, Some(&target_ty));
+                    if operator == "=" {
+                        self.reject_extraction(value);
+                    }
                     if matches!(value_ty, Ty::Reference { .. }) {
                         self.error(
                             17,
@@ -658,6 +750,9 @@ impl Checker {
                         .as_ref()
                         .map(|e| self.expr(e, Some(&self.result.clone())))
                         .unwrap_or(UNIT.clone());
+                    if let Some(value) = value {
+                        self.reject_extraction(value);
+                    }
                     self.ensure(
                         &actual,
                         &self.result.clone(),
@@ -671,7 +766,9 @@ impl Checker {
             }
         }
         let tail_ty = if let Some(tail) = &block.tail {
-            self.expr(tail, expected)
+            let ty = self.expr(tail, expected);
+            self.reject_extraction(tail);
+            ty
         } else {
             UNIT.clone()
         };
@@ -823,8 +920,12 @@ impl Checker {
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
             ExprKind::Array(elements) => {
-                if self.executable {
-                    self.error(17, expr.span, "arrays have no executable typed IR yet");
+                if self.executable && self.allowed_array != expr as *const Expr as usize {
+                    self.error(
+                        17,
+                        expr.span,
+                        "array literals must initialize a binding or be assigned with = in executable code",
+                    );
                 }
                 let mut element_ty = match expected {
                     Some(Ty::Array(element, _)) => Some(element.as_ref().clone()),
@@ -832,6 +933,7 @@ impl Checker {
                 };
                 for element in elements {
                     let actual = self.expr(element, element_ty.as_ref());
+                    self.reject_extraction(element);
                     if matches!(actual, Ty::Reference { .. }) {
                         self.error(17, element.span, "array elements cannot be references yet");
                     }
@@ -849,6 +951,7 @@ impl Checker {
                     );
                     return Ty::Error;
                 };
+                self.check_element_support(&element, expr.span);
                 match u32::try_from(elements.len()) {
                     Ok(count) => Ty::Array(Box::new(element), count),
                     Err(_) => {
@@ -862,8 +965,12 @@ impl Checker {
                 }
             }
             ExprKind::RepeatArray { value, count } => {
-                if self.executable {
-                    self.error(17, expr.span, "arrays have no executable typed IR yet");
+                if self.executable && self.allowed_array != expr as *const Expr as usize {
+                    self.error(
+                        17,
+                        expr.span,
+                        "array repetition must initialize a binding or be assigned with = in executable code",
+                    );
                 }
                 let context = match expected {
                     Some(Ty::Array(element, _)) => Some(element.as_ref()),
@@ -872,9 +979,18 @@ impl Checker {
                 // Check the expression exactly once, even for a zero count. Runtime
                 // repetition and ownership are deliberately gated from typed IR.
                 let element = self.expr(value, context);
+                self.reject_extraction(value);
                 if matches!(element, Ty::Reference { .. }) {
                     self.error(17, value.span, "array elements cannot be references yet");
                 }
+                if self.executable && matches!(element, Ty::Never) && context.is_none() {
+                    self.error(
+                        2,
+                        expr.span,
+                        "cannot infer repeated element type; add an Array annotation",
+                    );
+                }
+                self.check_element_support(&element, expr.span);
                 let count = self.array_count(count);
                 if let Some(context) = context {
                     if !matches!(element, Ty::Never | Ty::Error) {
@@ -894,6 +1010,17 @@ impl Checker {
                 }
             }
             ExprKind::Index { base, index } => {
+                if self.executable {
+                    if matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
+                        self.index_base = base.as_ref() as *const Expr as usize;
+                    } else {
+                        self.error(
+                            17,
+                            base.span,
+                            "indexing is supported on named local arrays only",
+                        );
+                    }
+                }
                 let base_ty = self.expr(base, None);
                 let index_ty = self.expr(index, None);
                 if !integer(&index_ty) && !matches!(index_ty, Ty::Never | Ty::Error) {
@@ -918,13 +1045,6 @@ impl Checker {
                         Ty::Error
                     }
                 };
-                if self.executable {
-                    self.error(
-                        17,
-                        expr.span,
-                        "array indexing has no executable typed IR yet",
-                    );
-                }
                 result
             }
             ExprKind::Number(raw) => {
@@ -1011,6 +1131,17 @@ impl Checker {
                             target: PathTarget::Local(local),
                             access: Some(binding.access),
                         });
+                    }
+                    if self.executable
+                        && matches!(binding.ty, Ty::Array(..))
+                        && self.index_base != expr as *const Expr as usize
+                        && self.allowed_array != expr as *const Expr as usize
+                    {
+                        self.error(
+                            17,
+                            expr.span,
+                            "whole arrays can only be moved by a direct binding initializer or = assignment, or indexed",
+                        );
                     }
                     return binding.ty;
                 }
@@ -1197,6 +1328,12 @@ impl Checker {
                     let mut diverges = false;
                     for (i, arg) in arguments.iter().enumerate() {
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
+                        if params
+                            .get(i)
+                            .is_none_or(|parameter| parameter.access == IrAccess::Owned)
+                        {
+                            self.reject_extraction(arg);
+                        }
                         if let Some(param) = params.get(i) {
                             if matches!(param.ty, Ty::Array(..)) {
                                 self.error(
@@ -1335,6 +1472,8 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
     let mut c = Checker {
         diagnostics: Vec::new(),
         executable: capture,
+        allowed_array: 0,
+        index_base: 0,
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,
@@ -1360,10 +1499,10 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
                     .iter()
                     .map(|p| FunctionParameter {
                         access: ir_access(p.access),
-                        ty: c.type_path(&p.ty),
+                        ty: c.signature_type(&p.ty),
                     })
                     .collect();
-                let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
+                let result = result.as_ref().map(|t| c.signature_type(t)).unwrap_or(UNIT);
                 if c.functions
                     .insert(name.clone(), Ty::Function(params, Box::new(result)))
                     .is_some()
@@ -1502,10 +1641,10 @@ fn check_resolved_mode(
                         .iter()
                         .map(|p| FunctionParameter {
                             access: ir_access(p.access),
-                            ty: c.type_path(&p.ty),
+                            ty: c.signature_type(&p.ty),
                         })
                         .collect();
-                    let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
+                    let result = result.as_ref().map(|t| c.signature_type(t)).unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),
                         Ty::Function(params, Box::new(result)),
@@ -1617,6 +1756,8 @@ fn checker() -> Checker {
     Checker {
         diagnostics: Vec::new(),
         executable: true,
+        allowed_array: 0,
+        index_base: 0,
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,

@@ -1,7 +1,7 @@
 //! Move and reference-handle availability over typed IR control flow.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Edge, Function, Instruction, InstructionKind, LocalId, Operand, Program, Source,
+    ArrayInit, Edge, Function, Instruction, InstructionKind, LocalId, Operand, Program, Source,
     TerminatorKind, UseMode,
 };
 use std::collections::VecDeque;
@@ -187,6 +187,19 @@ fn transfer_instruction(
         }
         InstructionKind::Borrow { owner, .. } => {
             transfer_operand(owner, state, diagnostics, function)
+        }
+        InstructionKind::ElementAddr { base, index, .. } => {
+            let mut diagnostics = diagnostics;
+            transfer_operand(base, state, diagnostics.as_deref_mut(), function);
+            transfer_operand(index, state, diagnostics, function);
+        }
+        InstructionKind::ArrayNew { init } => {
+            if let ArrayInit::Elements(elements) = init {
+                let mut diagnostics = diagnostics;
+                for element in elements {
+                    transfer_operand(element, state, diagnostics.as_deref_mut(), function);
+                }
+            }
         }
         InstructionKind::Load { reference } => {
             transfer_operand(reference, state, diagnostics, function)

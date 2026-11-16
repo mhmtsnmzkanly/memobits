@@ -213,9 +213,9 @@ fn library_lowering_has_only_export_roots_and_invalid_graph_returns_errors() {
 }
 
 #[test]
-fn arrays_check_types_but_cannot_lower_in_resolved_modules() {
+fn arrays_check_types_but_unsupported_forms_cannot_lower_in_resolved_modules() {
     for main in [
-        "fn main() { let a: Array<i8, 2> = [1, 2]; }",
+        "fn main() { let a: Array<Array<i8, 1>, 2> = [[1], [2]]; }",
         "fn main() {} fn values(a: Array<i32, 2>) -> Array<i32, 2> { [1, 2] }",
     ] {
         let fixture = Fixture::new("", main, "", "");
@@ -225,4 +225,22 @@ fn arrays_check_types_but_cannot_lower_in_resolved_modules() {
         let diagnostics = lower_resolved(&project, &resolution).unwrap_err();
         assert!(diagnostics.iter().any(|d| d.code.to_string() == "TE017"));
     }
+}
+
+#[test]
+fn let_arrays_with_indexing_lower_in_resolved_modules() {
+    let fixture = Fixture::new(
+        "",
+        "fn main() -> i32 { let a: Array<i32, 2> = [1, 2]; a[1] + a[0] }",
+        "",
+        "",
+    );
+    let project = Project::load(&fixture.0, None).unwrap();
+    let resolution = resolve(&project, Target::Application);
+    let program = lower_resolved(&project, &resolution).unwrap();
+    assert!(program.functions[0]
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| matches!(instruction.kind, InstructionKind::ElementAddr { .. })));
 }

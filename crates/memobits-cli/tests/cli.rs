@@ -699,7 +699,7 @@ entry = "main::main"
 }
 
 #[test]
-fn fixed_array_syntax_is_inspectable_but_not_executable_yet() {
+fn fixed_array_syntax_is_inspectable_and_read_only_arrays_are_executable() {
     let f = Fixture::new();
     f.write(
         "arrays.mb",
@@ -717,7 +717,162 @@ fn fixed_array_syntax_is_inspectable_but_not_executable_yet() {
         "{}",
         String::from_utf8_lossy(&analyzed.stderr)
     );
-    assert!(err(f.run(&["ownership", "arrays.mb"]), "TE017").contains("executable typed IR"));
+    let owned = f.run(&["ownership", "arrays.mb"]);
+    assert!(
+        owned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&owned.stderr)
+    );
+    // Repetition executes; repeating an owned binding is a repeated move.
+    f.write("repeat.mb", "fn main() { let values := [1; 3]; }");
+    let repeated = f.run(&["ownership", "repeat.mb"]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    f.write(
+        "moved.mb",
+        "fn main() { let x := 1; let values := [x; 3]; }",
+    );
+    assert!(err(f.run(&["ownership", "moved.mb"]), "BE001").contains("'x'"));
+    f.write("nested.mb", "fn main() { let values := [[1; 2]; 3]; }");
+    err(f.run(&["ownership", "nested.mb"]), "TE017");
+}
+
+fn run_both(f: &Fixture, source: &str) -> String {
+    f.write("src/app.mb", source);
+    let direct = f.run(&["run"]);
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    let built = f.run(&["build"]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert!(
+        artifact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&artifact.stderr)
+    );
+    assert_eq!(direct.stdout, artifact.stdout);
+    String::from_utf8_lossy(&direct.stdout).into_owned()
+}
+
+#[test]
+fn array_mutation_repetition_and_moves_run_from_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='app::main'\n",
+    );
+    // The element expression runs once per slot, in order: elements are 1, 2, 3.
+    let out = run_both(
+        &f,
+        "fn next(c: share i32) -> i32 { c += 1; c + 0 } fn main() -> i32 { var n := 0; let a := [next(n.share()); 3]; a[0] * 100 + a[1] * 10 + a[2] }",
+    );
+    assert!(out.contains("123"), "{out}");
+    let out = run_both(
+        &f,
+        "fn main() -> i32 { var a := [0; 8]; var i := 0; loop { if i >= 8 { break; } a[i] = i * i; i += 1; } a[3] += 1; let b := a; b[3] + b[7] }",
+    );
+    assert!(out.contains("59"), "{out}");
+    // Element writes trap out of range from both runs.
+    f.write(
+        "src/app.mb",
+        "fn put(n: i32) -> i32 { var a := [1, 2]; a[n] = 3; a[0] + 0 } fn main() -> i32 { let n := 1; put(n + 1) }",
+    );
+    let source = f.run(&["run"]);
+    assert_eq!(source.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&source.stderr).contains("RE007"));
+    assert!(f.run(&["build"]).status.success());
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert_eq!(artifact.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&artifact.stderr).contains("RE007"));
+    // Compile-time rejections.
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { let a := [1]; a[0] = 2; 0 }",
+    );
+    err(f.run(&["run"]), "TE004");
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { let a := [1, 2]; let b := a; a[0] + b[0] }",
+    );
+    err(f.run(&["run"]), "BE001");
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { var a := [1]; a[1] = 2; 0 }",
+    );
+    err(f.run(&["run"]), "TE008");
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { let a: Array<i64, 2049> = [0; 2049]; 0 }",
+    );
+    assert!(err(f.run(&["run"]), "LE900").contains("32 KiB"));
+}
+
+#[test]
+fn array_programs_run_from_source_and_artifact_with_dynamic_bounds_traps() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='app::main'\n",
+    );
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { let a := [1, 2, 3]; a[0] + a[2] }",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert!(String::from_utf8_lossy(&source.stdout).contains('4'));
+    let built = f.run(&["build"]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert!(
+        artifact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&artifact.stderr)
+    );
+    assert_eq!(source.stdout, artifact.stdout);
+
+    // A dynamic out-of-range index traps from both source and artifact runs.
+    f.write(
+        "src/app.mb",
+        "fn pick(n: i32) -> i32 { let a := [1, 2, 3]; a[n] + 0 } fn main() -> i32 { let n := 2; pick(n + 1) }",
+    );
+    let source = f.run(&["run"]);
+    assert_eq!(source.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&source.stderr).contains("RE007"));
+    let built = f.run(&["build"]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert_eq!(artifact.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&artifact.stderr).contains("RE007"));
+
+    // Extracting an element into a binding is a compile-time error.
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { let a := [1, 2, 3]; let x := a[1]; 0 }",
+    );
+    err(f.run(&["run"]), "TE022");
 }
 
 #[test]

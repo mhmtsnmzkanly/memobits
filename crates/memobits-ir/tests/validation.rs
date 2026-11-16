@@ -459,3 +459,286 @@ fn checks_call_signature_and_use_modes() {
     .unwrap_err();
     assert!(errors.iter().any(|e| e.message.contains("use mode")));
 }
+
+fn array_ty(len: u32) -> Type {
+    Type::Array {
+        element: Box::new(i32_ty()),
+        len,
+    }
+}
+
+fn instruction(output: Option<u32>, kind: InstructionKind) -> Instruction {
+    Instruction {
+        span: Some(span()),
+        output: output.map(ValueId),
+        kind,
+    }
+}
+
+/// `a := [c, c]; return a[index] + 0` with the pieces individually adjustable.
+/// Values: 0 const 42, 1 index, 2 array, 3 reference, 4 loaded, 5 const 0, 6 sum.
+fn array_function(index_ty: Type) -> Function {
+    let mut f = function();
+    f.locals = vec![Local {
+        name: "a".into(),
+        ty: array_ty(2),
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![
+        i32_ty(),
+        index_ty,
+        array_ty(2),
+        Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(i32_ty()),
+        },
+        i32_ty(),
+        i32_ty(),
+        i32_ty(),
+    ];
+    let value = |id: u32, mode| operand(Source::Value(ValueId(id)), mode);
+    f.blocks[0].instructions = vec![
+        instruction(
+            Some(0),
+            InstructionKind::Constant(Constant::Integer("42".into())),
+        ),
+        instruction(
+            Some(1),
+            InstructionKind::Constant(Constant::Integer("1".into())),
+        ),
+        instruction(
+            Some(2),
+            InstructionKind::ArrayNew {
+                init: ArrayInit::Elements(vec![
+                    value(0, UseMode::Consume),
+                    value(0, UseMode::Consume),
+                ]),
+            },
+        ),
+        instruction(
+            None,
+            InstructionKind::Assign {
+                target: LocalId(0),
+                value: value(2, UseMode::Consume),
+                initialize: true,
+            },
+        ),
+        instruction(
+            Some(3),
+            InstructionKind::ElementAddr {
+                loan: LoanId(0),
+                base: operand(Source::Local(LocalId(0)), UseMode::Borrow),
+                index: value(1, UseMode::Read),
+                access: Access::Borrow,
+            },
+        ),
+        instruction(
+            Some(4),
+            InstructionKind::Load {
+                reference: value(3, UseMode::Borrow),
+            },
+        ),
+        instruction(
+            Some(5),
+            InstructionKind::Constant(Constant::Integer("0".into())),
+        ),
+        instruction(
+            Some(6),
+            InstructionKind::Binary {
+                op: BinaryOp::Add,
+                left: value(4, UseMode::Read),
+                right: value(5, UseMode::Read),
+            },
+        ),
+    ];
+    f.blocks[0].terminator.kind = TerminatorKind::Return(Some(value(6, UseMode::Consume)));
+    f
+}
+
+fn messages(f: Function) -> Vec<String> {
+    Program { functions: vec![f] }
+        .validate()
+        .err()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|error| error.message)
+        .collect()
+}
+
+#[test]
+fn accepts_array_new_and_element_address() {
+    let f = array_function(i32_ty());
+    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    // Any integer width is a valid index; Zeroed needs no operands.
+    for index in [Primitive::U8, Primitive::I64, Primitive::U64] {
+        let f = array_function(Type::Primitive(index));
+        assert_eq!(
+            Program { functions: vec![f] }.validate(),
+            Ok(()),
+            "{index:?}"
+        );
+    }
+    let mut f = array_function(i32_ty());
+    f.blocks[0].instructions[2].kind = InstructionKind::ArrayNew {
+        init: ArrayInit::Zeroed,
+    };
+    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_array_literal_with_wrong_length_or_element_type() {
+    let mut f = array_function(i32_ty());
+    f.values[2] = array_ty(3);
+    f.locals[0].ty = array_ty(3);
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("array literal length differs")));
+
+    let mut f = array_function(i32_ty());
+    f.values[0] = Type::Primitive(Primitive::I64);
+    f.blocks[0].instructions[0].kind = InstructionKind::Constant(Constant::Integer("42".into()));
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("array element type differs")));
+
+    let mut f = array_function(i32_ty());
+    f.values[2] = i32_ty();
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("output must have an array type")));
+
+    let mut f = array_function(i32_ty());
+    if let InstructionKind::ArrayNew {
+        init: ArrayInit::Elements(elements),
+    } = &mut f.blocks[0].instructions[2].kind
+    {
+        elements[0].mode = UseMode::Read;
+    }
+    assert!(messages(f).iter().any(|m| m.contains("must be consumed")));
+}
+
+#[test]
+fn rejects_bad_element_address_operands() {
+    let f = array_function(Type::Primitive(Primitive::F64));
+    let mut f = f;
+    f.blocks[0].instructions[1].kind = InstructionKind::Constant(Constant::Float("1.0".into()));
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("index must be an integer")));
+
+    let f = array_function(Type::Primitive(Primitive::Bool));
+    let mut f = f;
+    f.blocks[0].instructions[1].kind = InstructionKind::Constant(Constant::Bool(true));
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("index must be an integer")));
+
+    let mut f = array_function(i32_ty());
+    if let InstructionKind::ElementAddr { index, .. } = &mut f.blocks[0].instructions[4].kind {
+        index.mode = UseMode::Consume;
+    }
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("index must use Read mode")));
+
+    let mut f = array_function(i32_ty());
+    if let InstructionKind::ElementAddr { base, .. } = &mut f.blocks[0].instructions[4].kind {
+        base.mode = UseMode::Read;
+    }
+    assert!(messages(f).iter().any(|m| m.contains("base mode")));
+
+    let mut f = array_function(i32_ty());
+    if let InstructionKind::ElementAddr { base, .. } = &mut f.blocks[0].instructions[4].kind {
+        base.source = Source::Value(ValueId(0));
+        base.mode = UseMode::Borrow;
+    }
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("base must be an array")));
+
+    let mut f = array_function(i32_ty());
+    f.values[3] = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(Type::Primitive(Primitive::I64)),
+    };
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("output type is incompatible")));
+}
+
+#[test]
+fn element_addresses_share_loan_ids_with_borrows() {
+    let mut f = array_function(i32_ty());
+    f.values.push(Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    });
+    f.blocks[0].instructions.insert(
+        5,
+        instruction(
+            Some(7),
+            InstructionKind::Borrow {
+                loan: LoanId(0),
+                owner: operand(Source::Local(LocalId(0)), UseMode::Borrow),
+                access: Access::Borrow,
+            },
+        ),
+    );
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("loan ID is defined more than once")));
+}
+
+#[test]
+fn rejects_malformed_array_types_and_array_block_parameters_or_signatures() {
+    let mut f = array_function(i32_ty());
+    f.locals[0].ty = Type::Array {
+        element: Box::new(array_ty(1)),
+        len: 2,
+    };
+    assert!(messages(f).iter().any(|m| m.contains("non-Unit primitive")));
+
+    let mut f = array_function(i32_ty());
+    f.locals[0].ty = Type::Array {
+        element: Box::new(Type::Primitive(Primitive::Unit)),
+        len: 2,
+    };
+    assert!(messages(f).iter().any(|m| m.contains("non-Unit primitive")));
+
+    let mut f = array_function(i32_ty());
+    f.signature.result = Box::new(array_ty(2));
+    assert!(messages(f).iter().any(|m| m.contains("cannot be an array")));
+
+    let mut f = array_function(i32_ty());
+    f.values.push(array_ty(2));
+    f.blocks.push(Block {
+        parameters: vec![ValueId(7)],
+        instructions: vec![],
+        terminator: Terminator {
+            span: None,
+            kind: TerminatorKind::Unreachable,
+        },
+    });
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("array-typed block parameters")));
+
+    // A reference to an array is not a valid primitive reference yet.
+    let mut f = array_function(i32_ty());
+    f.values[3] = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    };
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("reference must refer to a primitive")));
+}
+
+#[test]
+fn array_element_loads_are_read_only() {
+    let mut f = array_function(i32_ty());
+    f.blocks[0].terminator.kind =
+        TerminatorKind::Return(Some(operand(Source::Value(ValueId(4)), UseMode::Consume)));
+    assert!(messages(f).iter().any(|m| m.contains("read-only")));
+}
