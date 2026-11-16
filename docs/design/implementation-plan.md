@@ -121,23 +121,36 @@ the implemented subset; a milestone is not complete merely because its crate exi
   Indices may be any integer type; constant out-of-range indices are TE008,
   dynamic ones (reads and writes) trap (`RE007`). Extracting an element into an
   owned position (binding, `=`, return, tail, owned argument, array element) is
-  TE022. Arrays cross internal calls (WP3): owned (`a: Array<T, N>`, moved into
+  TE022. Nested arrays (WP4) work to any depth: `Array<Array<i32, 2>, 3>`,
+  literals, repetition with an array element expression (each evaluation
+  separate), `m[i][j]` reads, writes and compound writes, bounds traps and
+  TE008 on either index, whole-row replacement `m[i] = [1, 2];`, and rows lent
+  to `borrow`/`share` parameters with `m[i].borrow()` / `m[i].share()`.
+  Arrays are also function results (`-> Array<T, N>`; struct-return storage
+  owned by the caller) and `if`/block values; a result may be a literal,
+  repetition, call, named local or parameter (a move) and feeds a binding,
+  `=`, an owned argument, an element or another result. Arrays cross internal calls (WP3): owned (`a: Array<T, N>`, moved into
   the call; a literal, repetition or named array is accepted), `borrow` and
   `share` parameters with the same `.borrow()` / `.share()` call-site spelling
   as primitives, element reads through either reference, element and compound
   writes and whole-array stores through `share`, local `let r := a.borrow();`
   / `var r := a.share();` bindings and reborrowing a reference parameter. Any
-  element access overlaps the whole array in the loan checker. Still gated with
-  TE017: array results, nested arrays, non-primitive elements, array-valued
-  `if`/block results, whole arrays as operands or returns, array literals and
-  repetition outside a binding initializer, `=` or an owned argument, indexing a
-  non-local, element references, borrowing a temporary. Arrays and array
-  references in exported signatures (`main`, `[export]`) are rejected by the
-  backend with LE900. Layout: each
-  array local owns an inline cell in the 32 KiB-capped activation frame (repetition
-  also uses a hidden accumulator cell); larger layouts are a backend diagnostic.
-  Literal lengths are capped at `u32::MAX` as an analysis bound, not a memory
-  guarantee. See the WP1-WP3 checkpoints in `fixed-array-implementation.md`.
+  element access overlaps the whole array in the loan checker (including rows:
+  two `share` rows of one matrix, or a write while any row/array borrow is
+  live, are BE005). Fixed arrays are complete for primitive and nested-array
+  elements. Still gated: references to primitive elements (`a[0].share()`,
+  TE017), indexing or borrowing a temporary (`make()[0]`, `[1, 2].borrow()`,
+  TE017), extracting an element or row into an owned position (TE022),
+  whole arrays as operands or statements (TE017), reference-typed elements and
+  returned references (TE017), non-primitive element types such as `Unit`,
+  and arrays or array references in exported signatures (`main`, `[export]`,
+  parameters or results), which the backend rejects with LE900. Layout: each
+  array local, value, call result and join parameter owns an inline cell in the
+  32 KiB-capped activation frame (repetition also uses a hidden accumulator
+  cell; sizes use checked multiplication and nested sizes are products);
+  larger layouts are a backend diagnostic. Literal lengths are capped at
+  `u32::MAX` as an analysis bound, not a memory guarantee. See the WP1-WP4
+  checkpoints in `fixed-array-implementation.md`.
 - Frame memory is an experimental fixed 64 KiB page with addresses below 16
   reserved. Traps lack detailed source mapping, do not unwind caller frames, and
   discard the instance; no persistent-instance reset policy exists.
@@ -151,8 +164,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Milestone 7 (ownership and borrow): aggregate and array ownership, disjoint
   field borrowing, explicit copy/removal for aggregates, and borrow/share of
   non-primitive types.
-- Milestone 8 (runtime and collections): fixed-array layout and execution with
-  dynamic bounds checks, dynamic lists, UTF-8 strings, Option/Result/outcome
+- Milestone 8 (runtime and collections): dynamic lists (fixed arrays are done), UTF-8 strings, Option/Result/outcome
   payloads, and normal-exit cleanup for aggregates.
 - Milestone 9 (libraries and packages): source and binary dependency loading,
   package cycle detection, dependency import selection, external artifact
@@ -165,5 +177,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 ### Next step
 
-Continue the array work packages with WP4: nested arrays and array results. Keep
-TE017 gating every form not listed under the fixed-array status above.
+Fixed arrays of primitive and nested-array elements are complete (WP1-WP4).
+The next work is the first aggregate beyond arrays: an explicit copy operation
+(which lifts TE022 for copyable elements), then user-defined struct types and
+enums on the same frame-cell model, and an external array ABI if exports ever
+need one. Keep TE017/TE022/LE900 gating every form not listed under the
+fixed-array status above.

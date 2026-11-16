@@ -243,3 +243,84 @@ Still gated: array results and array-valued `if`/block results (TE017), nested
 arrays and non-primitive elements (TE017), element references (`a[0].share()`,
 TE017), borrowing a temporary (`[1, 2].borrow()`, TE017), rebinding a reference
 handle, and arrays/array references in exported signatures (LE900).
+
+
+## Executable array checkpoint (WP4)
+
+WP4 finishes fixed arrays for primitive and nested-array elements.
+
+- IR: `Type::Array` elements may be arrays (validated recursively). Function
+  results and block parameters may be arrays. A `Load` of a whole array
+  reference is invalid (rows are only addressed, never loaded). Rows use the
+  existing `ElementAddr` twice: `m[i][j]` is `ElementAddr(m, i)` giving
+  `Reference { inner: Array }`, then `ElementAddr(row, j)`, then `Load`.
+- Analysis: the old single-address "allowed array" gate became a set of
+  owned-value positions (binding initialiser, `=` right-hand side, `return` and
+  tail value, owned array argument, array element, repetition element). The
+  position propagates into the tails of `if` and block expressions, so
+  `let a := if c { [1, 2] } else { [3, 4] };`, `{ [5, 6] }`, and a named array
+  moved in a branch are accepted. Array results use the same positions
+  (`-> Array<i32, 3> { [1, 2, 3] }`, `return a;`, `a` an owned local or
+  parameter). A call returning an array is accepted wherever an owned array is.
+  Indexing accepts a named local or a row chain rooted at one; a call result
+  or other temporary (`make()[0]`) is TE017 ("bind the array to a local
+  first"). `m[i].borrow()` / `m[i].share()` are element references to a row
+  with the same ownership requirements as `m.borrow()` / `m.share()` (a `let`
+  or `borrow` root cannot be shared: TE017); a reference to a primitive element
+  (`m[i][j].share()`) is still TE017. Constant indices are checked on every
+  level (TE008). Extracting a row (`let r := m[i];`, `m[i] = m[j];`, passing
+  `m[i]` as an owned argument, returning it, an expression statement `m[i];`)
+  is TE022 exactly like a scalar element.
+- Lowering: `m[f()][g()] = h()` evaluates and captures the root and every
+  index left to right (f, g), then the right-hand side (h), then forms the
+  whole checked address chain and the `Store` adjacently, so any bounds trap on
+  either index fires after the right-hand side's effects (decision D2, now on
+  every level). A compound write forms a Borrow chain and `Load` first, then
+  the rhs and `Binary`, then a Share chain and `Store`. Every level of a Share
+  chain has Share access. A row `Store` through a Share reference is a
+  whole-array `memory.copy`, so `m[i] = [1, 2]` moves a freshly built row into
+  the slot (its old contents are replaced); a self-referential rhs such as
+  `m[0] = [m[0][1] + 0, m[0][0] + 0]` is safe because the new row is built in
+  its own value cell first. Repetition needed no change: its element expression
+  may be an array (`[[0; 2]; 3]`, `[[next(), next()]; 3]`), each iteration
+  evaluates it separately and stores it into the accumulator slot.
+- Result design (struct-return). An array-returning function has one extra
+  trailing Wasm parameter, a pointer to caller-allocated result storage. The
+  caller passes the address of the call's own output value cell in its
+  frame; the callee's `return` does one `memory.copy` of the returned array
+  into that pointer before releasing its frame. No pointer into a dead callee
+  frame ever exists. The result can alias nothing: the cell is fresh, and
+  `memory.copy` is overlap-safe anyway. `main` or an `[export]` returning an
+  array is LE900 ("cannot return arrays"); arrays also stay out of exported
+  parameters.
+- Join design. The simpler sound option was chosen over lowering into a
+  destination slot: block parameters of array type are allowed, and each is an
+  ordinary frame cell. A join edge copies the array argument into the
+  parameter cell (`memory.copy`), after the scalar arguments are staged and
+  before the staged values are assigned. Ownership is unchanged: the edge
+  consumes its argument, so a named array moved on one branch is unavailable
+  after the `if`. The cost is one extra copy per array join and one extra cell
+  per array value.
+- Layout: `array_layout` is the size and alignment of an array type, the
+  element size times the length with `checked_mul` at every level, so nested
+  sizes are products and overflow is the same "exceeds the 32 KiB activation
+  frame limit" diagnostic as an over-large frame. Layout cost depends on the
+  nesting depth of the type only, never on a source-supplied count; no host
+  allocation scales with a count. Call output cells, join parameter cells and
+  nested value cells count against the cap (each array-typed IR value owns a
+  cell, with no slot reuse, so a function with very many array-returning calls
+  can hit the cap).
+- Loans: rows are `ElementAddr` loans rooted at the array local, so a borrow of
+  any row, element or the whole array overlaps all of them: writing `m[i][j]`
+  while `m.borrow()` or `m[k].borrow()` is live is BE005, and two `share` rows
+  of one matrix in one call are BE005. A borrow-chain's parent loans are
+  excluded from conflicts with the chain's own next level.
+
+Still gated, with the diagnostic: references to primitive elements
+(`m[0][0].share()`, TE017); indexing or borrowing a temporary (`make()[0]`,
+`[1, 2].borrow()`, TE017); extracting an element or row into an owned position
+(TE022; an explicit copy operation does not exist yet); whole arrays used as
+operands or expression statements (TE017); reference-typed elements and
+returned references (TE017, `a` where `a` is a `borrow`/`share` array); `Unit`
+elements (TE017); arrays and array references in exported signatures
+(parameters and results, LE900); reference rebinding (TE017).

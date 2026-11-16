@@ -31,12 +31,16 @@ private stack occupies addresses [16, 65536); exhaustion traps. Traps do not
 unwind frames; the current runtime discards its instance after execution.
 
 Reference parameters are supported only for internal calls. Fixed arrays of
-primitive elements execute as locals and as owned, `borrow` and `share`
-parameters of internal calls (an owned array is copied from caller storage into
-the callee's own frame cell; a reference is the owner's cell address). Element
-access is bounds-checked and traps out of range. Exported signatures that use
-arrays or references, reference returns, array results, nested arrays, and
-indirect calls remain unsupported. The private pointer representation is not a stable ABI.
+primitive elements and nested arrays execute as locals, as owned, `borrow` and
+`share` parameters of internal calls (an owned array is copied from caller
+storage into the callee's own frame cell; a reference is the owner's cell
+address), as array-valued `if`/block results (array block parameters are frame
+cells; a join edge copies the argument) and as call results (struct-return: a
+hidden trailing pointer parameter addresses the call's own cell in the caller's
+frame, and `return` copies into it). Element access is bounds-checked on every
+index and traps out of range. Exported signatures that use arrays or references
+(parameters or results), reference returns, and indirect calls remain
+unsupported. The private pointer representation is not a stable ABI.
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

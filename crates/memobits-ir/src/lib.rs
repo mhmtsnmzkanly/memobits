@@ -349,17 +349,6 @@ impl Program {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
-                    if matches!(
-                        function.values.get(value.0 as usize),
-                        Some(Type::Array { .. })
-                    ) {
-                        push(
-                            &mut errors,
-                            id,
-                            Some(block_id),
-                            "array-typed block parameters are not supported",
-                        );
-                    }
                 }
                 for instruction in &block.instructions {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
@@ -450,14 +439,6 @@ fn validate_signature_value_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    if matches!(ty, Type::Array { .. }) {
-        push(
-            errors,
-            id,
-            None,
-            format!("{context} type cannot be an array yet"),
-        );
-    }
     validate_type_shape(ty, errors, id, context);
 }
 
@@ -496,16 +477,16 @@ fn validate_type_shape(
                 validate_type_shape(inner, errors, id, context);
             }
         }
-        Type::Array { element, len: _ } => {
-            if !matches!(element.as_ref(), Type::Primitive(p) if *p != Primitive::Unit) {
-                push(
-                    errors,
-                    id,
-                    None,
-                    format!("{context} array element must be a non-Unit primitive"),
-                );
-            }
-        }
+        Type::Array { element, len: _ } => match element.as_ref() {
+            Type::Primitive(p) if *p != Primitive::Unit => {}
+            Type::Array { .. } => validate_type_shape(element, errors, id, context),
+            _ => push(
+                errors,
+                id,
+                None,
+                format!("{context} array element must be a non-Unit primitive or an array"),
+            ),
+        },
     }
 }
 
@@ -882,6 +863,14 @@ fn validate_instruction(
                             id,
                             Some(block),
                             "load operand mode does not match reference access",
+                        );
+                    }
+                    if matches!(inner.as_ref(), Type::Array { .. }) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "load of a whole array is not supported; read elements instead",
                         );
                     }
                     if out.is_some_and(|output| output != inner.as_ref()) {

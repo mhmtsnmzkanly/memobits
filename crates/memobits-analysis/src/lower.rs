@@ -524,8 +524,8 @@ impl<'a> Builder<'a> {
                     operator,
                     value,
                 } => {
-                    if let ExprKind::Index { base, index } = &target.kind {
-                        self.lower_element_assign(statement.span, base, index, operator, value);
+                    if matches!(target.kind, ExprKind::Index { .. }) {
+                        self.lower_element_assign(statement.span, target, operator, value);
                         continue;
                     }
                     let PathTarget::Local(local) = self.path(target) else {
@@ -656,6 +656,38 @@ impl<'a> Builder<'a> {
             _ => unreachable!("checked array index base"),
         }
     }
+    /// Evaluate the root and every index of `a[i][j]...` left to right, each index
+    /// captured at its evaluation point. No address is formed yet, so index
+    /// effects precede any bounds check and the right-hand side of a write.
+    fn lower_place(&mut self, expr: &Expr) -> Option<(Operand, Vec<Operand>)> {
+        let ExprKind::Index { base, index } = &expr.kind else {
+            unreachable!("checked index place")
+        };
+        let (root, mut positions) = if matches!(base.kind, ExprKind::Index { .. }) {
+            self.lower_place(base)?
+        } else {
+            (self.lower_expr(base)?, Vec::new())
+        };
+        let position = self.lower_expr(index)?;
+        let position = self.scalar(position)?;
+        positions.push(self.capture(position)?);
+        Some((root, positions))
+    }
+    /// Chain of checked element addresses from `root` through `positions`. Every
+    /// level carries `access`, so a write needs `Share` rows down to the element.
+    fn address_chain(
+        &mut self,
+        root: Operand,
+        positions: &[Operand],
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        let mut current = root;
+        for position in positions {
+            current = self.element_addr(current, *position, access, span)?;
+        }
+        Some(current)
+    }
     fn load_element(&mut self, reference: Operand, span: Span) -> Option<Operand> {
         let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
             unreachable!("element address is a reference")
@@ -668,19 +700,15 @@ impl<'a> Builder<'a> {
     fn lower_element_assign(
         &mut self,
         span: Span,
-        base: &Expr,
-        index: &Expr,
+        target: &Expr,
         operator: &str,
         value: &Expr,
     ) -> Option<()> {
-        let array = self.lower_expr(base)?;
-        let position = self.lower_expr(index)?;
-        let position = self.scalar(position)?;
-        let position = self.capture(position)?;
+        let (array, positions) = self.lower_place(target)?;
         let previous = if operator == "=" {
             None
         } else {
-            let reference = self.element_addr(array, position, Access::Borrow, span)?;
+            let reference = self.address_chain(array, &positions, Access::Borrow, span)?;
             Some(self.load_element(reference, span)?)
         };
         let rhs = self.lower_expr(value)?;
@@ -688,7 +716,9 @@ impl<'a> Builder<'a> {
         let assigned = match previous {
             None => rhs,
             Some(previous) => {
-                let element = self.array_element(array);
+                let element = self
+                    .operand_type(previous)
+                    .expect("compound element read is a value");
                 self.emit(
                     span,
                     InstructionKind::Binary {
@@ -696,11 +726,11 @@ impl<'a> Builder<'a> {
                         left: read(previous),
                         right: read(rhs),
                     },
-                    Some(*element),
+                    Some(element),
                 )?
             }
         };
-        let reference = self.element_addr(array, position, Access::Share, span)?;
+        let reference = self.address_chain(array, &positions, Access::Share, span)?;
         self.emit(
             span,
             InstructionKind::Store {
@@ -898,12 +928,9 @@ impl<'a> Builder<'a> {
                     self.ty(expr),
                 )
             }
-            ExprKind::Index { base, index } => {
-                let array = self.lower_expr(base)?;
-                let position = self.lower_expr(index)?;
-                let position = self.scalar(position)?;
-                let position = self.capture(position)?;
-                let reference = self.element_addr(array, position, Access::Borrow, expr.span)?;
+            ExprKind::Index { .. } => {
+                let (array, positions) = self.lower_place(expr)?;
+                let reference = self.address_chain(array, &positions, Access::Borrow, expr.span)?;
                 self.load_element(reference, expr.span)
             }
             ExprKind::RepeatArray { value, .. } => self.lower_repeat(expr, value),
@@ -991,6 +1018,12 @@ impl<'a> Builder<'a> {
                         "share" => Access::Share,
                         _ => unreachable!("checked conversion"),
                     };
+                    if matches!(base.kind, ExprKind::Index { .. }) {
+                        // A row of a nested array: the element address is itself
+                        // the reference, with `access` on every level.
+                        let (array, positions) = self.lower_place(base)?;
+                        return self.address_chain(array, &positions, access, expr.span);
+                    }
                     let owner = self.lower_expr(base)?;
                     return self.borrow(owner, access);
                 }

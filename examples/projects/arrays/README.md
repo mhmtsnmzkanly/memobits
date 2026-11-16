@@ -1,15 +1,21 @@
 # Fixed arrays project
 
 A buildable project that uses fixed arrays of primitive elements as local
-variables. `main::main` fills an 8-element `i32` array with squares in a loop,
-updates one element, sums the array, and returns the sum.
+variables, through functions, and as a small nested array. `main::main` fills
+an 8-element `i32` array with squares in a loop, updates one element, sums the
+array, moves it, then combines that with array calls and a 2 x 3 nested array.
 
 It covers the supported array subset: literals `[1, 2, 3]`, repetition
 `[0; 8]`, the `Array<i32, 8>` annotation, element assignment and compound
 updates (`a[i] = v`, `a[i] += v`), element reads inside arithmetic, `loop` with
-`if cond { break; }`, and whole-array moves (`let b := a;`). This example
-keeps its arrays local; see `docs/design/implementation-plan.md` for the full
-supported subset.
+`if cond { break; }`, and whole-array moves (`let b := a;`). Through functions:
+a `borrow Array<i32, 3>` parameter (`sum`), a `share Array<i32, 3>` parameter
+that the caller observes (`scale`), and an array result (`make`). Nested:
+`[[0; 3]; 2]`, `grid[r][c]` reads and writes, whole-row replacement
+`grid[1] = [4, 5, 6];` and lending a row with `grid[1].borrow()`. Reading an
+element into a binding (`let x := a[0];`) or extracting a row is not allowed
+yet; use the element inside an expression. See
+`docs/design/implementation-plan.md` for the full supported subset.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/arrays/project.toml
@@ -20,10 +26,13 @@ cargo run -p memobits-cli -- run examples/projects/arrays/target/memobits/app.wa
 Observed output of each command (the build path is shown relative to the repository root):
 
 ```text
-Result: i32(352)
-Built examples/projects/arrays/target/memobits/app.wasm: 1 export(s), 1253 bytes
-Result: i32(352)
+Result: i32(444)
+Built examples/projects/arrays/target/memobits/app.wasm: 1 export(s), 3504 bytes
+Result: i32(444)
 ```
 
-The sum is 140 (squares 0 to 49) plus 100 added to `squares[3]`, plus
-`copy[3]` (109) and `seed[2]` (3).
+The result is the sum of three parts: 352 from the first section (140 for the
+squares 0 to 49, plus 100 added to `squares[3]`, plus `copy[3]` (109) and
+`seed[2]` (3)); 72 from `sum` over `make(10)` doubled by `scale` (11, 12, 13
+become 22, 24, 26); and 20 from the nested array (`grid[0][1]` is 5 and the
+replaced row `[4, 5, 6]` sums to 15).

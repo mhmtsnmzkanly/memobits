@@ -1,5 +1,38 @@
 // Fixed arrays of primitive elements: repetition, element assignment,
-// compound updates, reads inside arithmetic, and whole-array moves.
+// compound updates, reads inside arithmetic, whole-array moves, arrays through
+// functions (`borrow`, `share`, an array result) and a small nested array.
+
+// Read-only access through a `borrow` parameter.
+fn sum(a: borrow Array<i32, 3>) -> i32 {
+    var i := 0;
+    var total := 0;
+    loop {
+        if i >= 3 {
+            break;
+        }
+        total += a[i];
+        i += 1;
+    }
+    total
+}
+
+// Mutation through a `share` parameter is visible to the caller.
+fn scale(a: share Array<i32, 3>, k: i32) {
+    var i := 0;
+    loop {
+        if i >= 3 {
+            break;
+        }
+        a[i] *= k;
+        i += 1;
+    }
+}
+
+// An array result is built by the callee and moved to the caller.
+fn make(base: i32) -> Array<i32, 3> {
+    [base + 1, base + 2, base + 3]
+}
+
 fn main() -> i32 {
     var squares: Array<i32, 8> = [0; 8];
     var i := 0;
@@ -24,5 +57,20 @@ fn main() -> i32 {
 
     let copy := squares;
     let seed := [1, 2, 3];
-    total + copy[3] + seed[2]
+    let first := total + copy[3] + seed[2];
+
+    // Arrays through functions.
+    var made := make(10);
+    scale(made.share(), 2);
+    let through_calls := sum(made.borrow());
+
+    // A 2 x 3 nested array: element writes, a whole-row replacement and a row
+    // lent to `sum`.
+    var grid := [[0; 3]; 2];
+    grid[0][1] = 5;
+    grid[1][2] += 7;
+    grid[1] = [4, 5, 6];
+    let nested := grid[0][1] + sum(grid[1].borrow());
+
+    first + through_calls + nested
 }

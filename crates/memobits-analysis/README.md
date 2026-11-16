@@ -90,7 +90,9 @@ execution remains disabled. See `examples/analysis/references.mb`.
 Fixed arrays are supported by the type-only APIs (`check_types` and
 `check_resolved_types`): homogeneous inference, nested arrays, contextual numeric
 literals, length matching, empty contextual literals, and repetition counts.
-Executable typed facts/lowering accept arrays of primitive elements: literals,
+Executable typed facts/lowering accept arrays of primitive elements and nested
+arrays (`Array<Array<i32, 2>, 3>`, `m[i][j]`, `m[i] = [..]`, rows lent with
+`m[i].borrow()` / `m[i].share()`): literals,
 repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
 evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
 reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
@@ -99,8 +101,9 @@ moving an element into an owned position. Arrays also cross internal calls as
 owned, `borrow` and `share` parameters (`Reference { inner: Array }` in IR), with
 element reads through either reference, element writes through `share`, local
 `.borrow()` / `.share()` bindings and reborrows; argument/parameter length or
-element mismatches are TE002 and writes through a borrow are TE004. Every other
-array form (results, nested arrays, element references, array-valued
-`if`/block results, whole arrays outside a binding initializer, `=` or an
-owned argument) is still gated with TE017. Repetition expressions are
+element mismatches are TE002 and writes through a borrow are TE004. Arrays are
+also function results and `if`/block values (an array-typed join parameter in
+IR). Every other array form (references to primitive elements, indexing a
+temporary such as `make()[0]`, borrowing a temporary, whole arrays outside an
+owned-value position, reference elements) is still gated with TE017. Repetition expressions are
 type-checked once even at zero count; analysis facts never expand them.

@@ -691,13 +691,14 @@ fn element_addresses_share_loan_ids_with_borrows() {
 }
 
 #[test]
-fn rejects_malformed_array_types_and_array_block_parameters_or_signatures() {
+fn rejects_malformed_array_types() {
+    // Nested arrays of primitives are valid element shapes.
     let mut f = array_function(i32_ty());
     f.locals[0].ty = Type::Array {
         element: Box::new(array_ty(1)),
         len: 2,
     };
-    assert!(messages(f).iter().any(|m| m.contains("non-Unit primitive")));
+    assert!(!messages(f).iter().any(|m| m.contains("array element")));
 
     let mut f = array_function(i32_ty());
     f.locals[0].ty = Type::Array {
@@ -706,9 +707,24 @@ fn rejects_malformed_array_types_and_array_block_parameters_or_signatures() {
     };
     assert!(messages(f).iter().any(|m| m.contains("non-Unit primitive")));
 
+    // Deep element shapes are validated recursively.
+    let mut f = array_function(i32_ty());
+    f.locals[0].ty = Type::Array {
+        element: Box::new(Type::Array {
+            element: Box::new(Type::Reference {
+                access: Access::Borrow,
+                inner: Box::new(i32_ty()),
+            }),
+            len: 1,
+        }),
+        len: 2,
+    };
+    assert!(messages(f).iter().any(|m| m.contains("non-Unit primitive")));
+
+    // Array results and array block parameters are valid signature/join types.
     let mut f = array_function(i32_ty());
     f.signature.result = Box::new(array_ty(2));
-    assert!(messages(f).iter().any(|m| m.contains("cannot be an array")));
+    assert!(!messages(f).iter().any(|m| m.contains("cannot be an array")));
 
     let mut f = array_function(i32_ty());
     f.values.push(array_ty(2));
@@ -720,7 +736,7 @@ fn rejects_malformed_array_types_and_array_block_parameters_or_signatures() {
             kind: TerminatorKind::Unreachable,
         },
     });
-    assert!(messages(f)
+    assert!(!messages(f)
         .iter()
         .any(|m| m.contains("array-typed block parameters")));
 
@@ -900,4 +916,49 @@ fn borrowing_an_array_owner_produces_an_array_reference() {
     assert!(messages(f)
         .iter()
         .any(|m| m.contains("borrow output type is incompatible")));
+}
+
+#[test]
+fn array_results_nested_element_addresses_and_whole_array_loads() {
+    // An array-typed function result is valid; the returned value must match it.
+    let mut f = array_function(i32_ty());
+    f.signature.result = Box::new(array_ty(2));
+    f.blocks[0].terminator.kind =
+        TerminatorKind::Return(Some(operand(Source::Value(ValueId(2)), UseMode::Consume)));
+    assert!(messages(f).is_empty());
+    let mut f = array_function(i32_ty());
+    f.signature.result = Box::new(array_ty(3));
+    f.blocks[0].terminator.kind =
+        TerminatorKind::Return(Some(operand(Source::Value(ValueId(2)), UseMode::Consume)));
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("return value type differs")));
+
+    // Addressing a row of a nested array yields a reference to the row.
+    let nested = Type::Array {
+        element: Box::new(array_ty(2)),
+        len: 2,
+    };
+    let mut f = array_function(i32_ty());
+    f.locals[0].ty = nested;
+    f.values[3] = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    };
+    let found = messages(f);
+    assert!(
+        !found.iter().any(|m| m.contains("element address")),
+        "{found:?}"
+    );
+
+    // A whole-array load through such a reference is not an operation.
+    let mut f = array_function(i32_ty());
+    f.values[3] = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    };
+    f.values[4] = array_ty(2);
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("load of a whole array")));
 }

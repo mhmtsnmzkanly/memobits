@@ -1,8 +1,9 @@
 //! Type checks for primitives and fixed arrays. Executable IR supports arrays of primitive
-//! elements (literal, repetition, indexing, element and whole-array assignment); every other
-//! array form is gated with TE017.
+//! elements and nested arrays (literal, repetition, indexing, element, row and whole-array
+//! assignment, array parameters, results and `if`/block results); every other array form is
+//! gated with TE017.
 //! Name resolution across modules and ownership checking are separate passes.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
@@ -152,6 +153,14 @@ fn name(ty: &Ty) -> String {
         }
         Ty::Never => "never".into(),
         Ty::Error => "unknown".into(),
+    }
+}
+/// The named local at the root of an indexing chain `a[i][j]...`.
+fn index_root(expr: &Expr) -> Option<&Vec<String>> {
+    match &expr.kind {
+        ExprKind::Path(path) => Some(path),
+        ExprKind::Index { base, .. } => index_root(base),
+        _ => None,
     }
 }
 fn constant_index(expr: &Expr) -> Option<i128> {
@@ -393,8 +402,11 @@ struct Binding {
 struct Checker {
     diagnostics: Vec<Diagnostic>,
     executable: bool,
-    /// Address of the one array literal expression that may initialize a `let`.
-    allowed_array: usize,
+    /// Addresses of expressions in an owned-value position (binding initialiser,
+    /// `=` right-hand side, return/tail value, owned array argument, array element)
+    /// that may be a whole array: literals, repetitions, named arrays, and the
+    /// tails of `if`/block expressions in such a position.
+    allowed_arrays: HashSet<usize>,
     /// Address of the path expression currently checked as an index base.
     index_base: usize,
     functions: HashMap<String, Ty>,
@@ -422,36 +434,54 @@ impl Checker {
         value
     }
     /// Types in function signatures. Array parameters (owned, `borrow` or
-    /// `share`) are supported; array results are not.
-    fn signature_type(&mut self, ty: &Type, is_result: bool) -> Ty {
-        let checked = self.type_path(ty);
-        if is_result && self.executable && matches!(checked, Ty::Array(..)) {
-            self.error(17, ty.span, "array results are not supported yet");
-        }
-        checked
+    /// `share`) and owned array results are supported.
+    fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
+        self.type_path(ty)
     }
-    /// Executable arrays hold non-Unit primitive elements only.
+    /// Executable arrays hold non-Unit primitive elements or nested arrays.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
         if self.executable
-            && !matches!(element, Ty::Error | Ty::Never)
+            && !matches!(element, Ty::Error | Ty::Never | Ty::Array(..))
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
         {
             self.error(
                 17,
                 span,
-                "executable arrays support non-Unit primitive elements only",
+                "executable arrays support non-Unit primitive and nested array elements only",
             );
         }
     }
-    /// Whole-array values are produced only by a literal, repetition or named
-    /// local that directly initializes a binding or is assigned with `=`.
+    /// Whole-array values are produced by a literal, repetition, call or named
+    /// local in an owned-value position. The position propagates into the tails
+    /// of `if` and block expressions, which therefore may produce arrays too.
     fn allow_array_value(&mut self, value: &Expr) {
-        if matches!(
-            value.kind,
-            ExprKind::Array(_) | ExprKind::RepeatArray { .. } | ExprKind::Path(_)
-        ) {
-            self.allowed_array = value as *const Expr as usize;
+        match &value.kind {
+            ExprKind::Array(_) | ExprKind::RepeatArray { .. } | ExprKind::Path(_) => {
+                self.allowed_arrays.insert(value as *const Expr as usize);
+            }
+            ExprKind::Block(block) => {
+                if let Some(tail) = &block.tail {
+                    self.allow_array_value(tail);
+                }
+            }
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(tail) = &then_branch.tail {
+                    self.allow_array_value(tail);
+                }
+                if let Some(other) = else_branch {
+                    self.allow_array_value(other);
+                }
+            }
+            _ => {}
         }
+    }
+    fn array_allowed(&self, expr: &Expr) -> bool {
+        self.allowed_arrays
+            .contains(&(expr as *const Expr as usize))
     }
     /// D1: an element read is not an owned value. It may feed arithmetic,
     /// comparisons and conditions, but not a binding, assignment, return, call
@@ -608,7 +638,7 @@ impl Checker {
                         ExprKind::Path(path) if path.len() == 1 => {
                             match self.lookup(&path[0]).cloned() {
                                 Some(binding) => {
-                                    self.allowed_array = target as *const Expr as usize;
+                                    self.allow_array_value(target);
                                     self.expr(target, None);
                                     match &binding.ty {
                                         Ty::Reference {
@@ -677,8 +707,8 @@ impl Checker {
                         }
                         ExprKind::Index { base, .. } => {
                             let element = self.expr(target, None);
-                            match &base.kind {
-                                ExprKind::Path(path) if path.len() == 1 => {
+                            match index_root(base) {
+                                Some(path) if path.len() == 1 => {
                                     if let Some(binding) = self.lookup(&path[0]).cloned() {
                                         match &binding.ty {
                                             Ty::Array(..)
@@ -732,7 +762,7 @@ impl Checker {
                                 _ => self.error(
                                     6,
                                     target.span,
-                                    "element assignment requires a named local array",
+                                    "element assignment requires a named local array or a row of one",
                                 ),
                             }
                             element
@@ -774,9 +804,15 @@ impl Checker {
                     }
                 }
                 StatementKind::Expression(expr) => {
-                    self.expr(expr, None);
+                    let ty = self.expr(expr, None);
+                    if matches!(ty, Ty::Array(..)) {
+                        self.reject_extraction(expr);
+                    }
                 }
                 StatementKind::Return(value) => {
+                    if let Some(value) = value {
+                        self.allow_array_value(value);
+                    }
                     let actual = value
                         .as_ref()
                         .map(|e| self.expr(e, Some(&self.result.clone())))
@@ -848,8 +884,9 @@ impl Checker {
             return Ty::Error;
         }
 
-        let owner_binding = match &base.kind {
-            ExprKind::Path(path) if path.len() == 1 => self.lookup(&path[0]).cloned(),
+        let is_row = matches!(base.kind, ExprKind::Index { .. });
+        let owner_binding = match index_root(base) {
+            Some(path) if path.len() == 1 => self.lookup(&path[0]).cloned(),
             _ => None,
         };
         if owner_binding.is_none() {
@@ -868,7 +905,27 @@ impl Checker {
         // An array owner may be borrowed or shared as a whole.
         self.index_base = base as *const Expr as usize;
         let base_ty = self.expr(base, expected_inner);
+        if is_row && !matches!(base_ty, Ty::Array(..) | Ty::Error | Ty::Never) {
+            self.error(
+                17,
+                base.span,
+                "borrow/share conversion of an element supports nested array rows only; references to primitive elements are not supported",
+            );
+            return Ty::Error;
+        }
         let (inner, origin, current_access) = match base_ty {
+            Ty::Array(..) if is_row => {
+                let binding = owner_binding.as_ref().expect("row root checked above");
+                let access = match &binding.ty {
+                    Ty::Reference { access, .. } => *access,
+                    _ => binding.access,
+                };
+                (
+                    Box::new(base_ty),
+                    ReferenceOrigin::Binding(binding.origin),
+                    Some(access),
+                )
+            }
             Ty::Reference {
                 access,
                 inner,
@@ -953,11 +1010,11 @@ impl Checker {
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
             ExprKind::Array(elements) => {
-                if self.executable && self.allowed_array != expr as *const Expr as usize {
+                if self.executable && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
-                        "array literals must initialize a binding or be assigned with = in executable code",
+                        "array literals must be used as an owned value (binding initializer, assignment, argument, element, result or branch value)",
                     );
                 }
                 let mut element_ty = match expected {
@@ -965,6 +1022,7 @@ impl Checker {
                     _ => None,
                 };
                 for element in elements {
+                    self.allow_array_value(element);
                     let actual = self.expr(element, element_ty.as_ref());
                     self.reject_extraction(element);
                     if matches!(actual, Ty::Reference { .. }) {
@@ -998,11 +1056,11 @@ impl Checker {
                 }
             }
             ExprKind::RepeatArray { value, count } => {
-                if self.executable && self.allowed_array != expr as *const Expr as usize {
+                if self.executable && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
-                        "array repetition must initialize a binding or be assigned with = in executable code",
+                        "array repetition must be used as an owned value (binding initializer, assignment, argument, element, result or branch value)",
                     );
                 }
                 let context = match expected {
@@ -1011,6 +1069,7 @@ impl Checker {
                 };
                 // Check the expression exactly once, even for a zero count. Runtime
                 // repetition and ownership are deliberately gated from typed IR.
+                self.allow_array_value(value);
                 let element = self.expr(value, context);
                 self.reject_extraction(value);
                 if matches!(element, Ty::Reference { .. }) {
@@ -1044,14 +1103,17 @@ impl Checker {
             }
             ExprKind::Index { base, index } => {
                 if self.executable {
-                    if matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
-                        self.index_base = base.as_ref() as *const Expr as usize;
-                    } else {
-                        self.error(
+                    match &base.kind {
+                        ExprKind::Path(path) if path.len() == 1 => {
+                            self.index_base = base.as_ref() as *const Expr as usize;
+                        }
+                        // A row of a nested array; its own arm marks the root.
+                        ExprKind::Index { .. } => {}
+                        _ => self.error(
                             17,
                             base.span,
-                            "indexing is supported on named local arrays only",
-                        );
+                            "indexing is supported on named local arrays and their rows only; bind the array to a local first",
+                        ),
                     }
                 }
                 let base_ty = self.expr(base, None);
@@ -1176,12 +1238,12 @@ impl Checker {
                     if self.executable
                         && matches!(binding.ty, Ty::Array(..))
                         && self.index_base != expr as *const Expr as usize
-                        && self.allowed_array != expr as *const Expr as usize
+                        && !self.array_allowed(expr)
                     {
                         self.error(
                             17,
                             expr.span,
-                            "whole arrays can only be moved by a direct binding initializer or = assignment, or indexed",
+                            "whole arrays can only be moved into a binding, assignment, argument, element, result or branch value, or indexed",
                         );
                     }
                     return binding.ty;
@@ -1372,8 +1434,8 @@ impl Checker {
                             parameter.access == IrAccess::Owned
                                 && matches!(parameter.ty, Ty::Array(..))
                         }) {
-                            // An owned array parameter takes a literal,
-                            // repetition or named array moved into the call.
+                            // An owned array parameter takes a literal, repetition,
+                            // call result, `if` or named array moved into the call.
                             self.allow_array_value(arg);
                         }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
@@ -1526,7 +1588,7 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
     let mut c = Checker {
         diagnostics: Vec::new(),
         executable: capture,
-        allowed_array: 0,
+        allowed_arrays: HashSet::new(),
         index_base: 0,
         functions: HashMap::new(),
         function_ids: HashMap::new(),
@@ -1623,6 +1685,9 @@ fn check_function_body(
     c.scopes.push(HashMap::new());
     for (p, parameter) in parameters.iter().zip(params) {
         bind_parameter(c, p, parameter.ty);
+    }
+    if let Some(tail) = &body.tail {
+        c.allow_array_value(tail);
     }
     let (tail, returns) = c.block(body, Some(&c.result.clone()));
     if !returns {
@@ -1816,7 +1881,7 @@ fn checker() -> Checker {
     Checker {
         diagnostics: Vec::new(),
         executable: true,
-        allowed_array: 0,
+        allowed_arrays: HashSet::new(),
         index_base: 0,
         functions: HashMap::new(),
         function_ids: HashMap::new(),

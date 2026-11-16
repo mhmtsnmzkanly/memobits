@@ -153,15 +153,14 @@ fn fixed_arrays_keep_ownership_and_executable_ir_gated() {
         "fn f(a: borrow Array<i32, 1>) {}",
         "fn f(a: Array<i32, 2>) {}",
         "fn take(a: Array<i32, 1>) {} fn f() { take([1]); }",
+        "fn f() { let a := [[1], [2]]; }",
+        "fn f() -> Array<i32, 2> { [1, 2] }",
     ] {
         assert!(check(source).is_empty(), "{source}");
         let parsed = parse(SourceId(9), source);
         assert!(memobits_analysis::check_typed_module(&parsed.module).is_ok());
     }
-    for source in [
-        "fn f() { let a := [[1], [2]]; }",
-        "fn f() -> Array<i32, 2> { [1, 2] }",
-    ] {
+    for source in ["fn f() { [1, 2]; }", "fn f() { let a := [1, 2]; a; }"] {
         let parsed = parse(SourceId(9), source);
         let diagnostics = memobits_analysis::check_typed_module(&parsed.module).unwrap_err();
         assert!(diagnostics.iter().any(|d| d.code.to_string() == "TE017"));

@@ -737,7 +737,13 @@ fn fixed_array_syntax_is_inspectable_and_read_only_arrays_are_executable() {
     );
     assert!(err(f.run(&["ownership", "moved.mb"]), "BE001").contains("'x'"));
     f.write("nested.mb", "fn main() { let values := [[1; 2]; 3]; }");
-    err(f.run(&["ownership", "nested.mb"]), "TE017");
+    assert!(f.run(&["ownership", "nested.mb"]).status.success());
+    // Reference-typed elements stay gated.
+    f.write(
+        "refs.mb",
+        "fn main() { var x := 1; let values := [x.borrow()]; }",
+    );
+    err(f.run(&["ownership", "refs.mb"]), "TE017");
 }
 
 fn run_both(f: &Fixture, source: &str) -> String {
@@ -888,7 +894,13 @@ fn fixed_array_types_are_checked_without_enabling_execution() {
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
-    err(f.run(&["ownership", "arrays.mb"]), "TE017");
+    // Nested arrays are executable too.
+    let owned = f.run(&["ownership", "arrays.mb"]);
+    assert!(
+        owned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&owned.stderr)
+    );
     f.write(
         "invalid.mb",
         "fn main() { let values: Array<i32, 3> = [1, 2]; }",
@@ -971,6 +983,76 @@ fn array_parameters_run_from_source_and_artifact() {
         "fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {} fn main() -> i32 { var a := [1, 2]; two(a.share(), a.share()); 0 }",
     );
     err(f.run(&["run"]), "BE005");
+}
+
+#[test]
+fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='app::main'\n",
+    );
+    let sum = "fn sum(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
+    // A repetition-built result consumed by a borrow-taking sum and an owned call.
+    let out = run_both(
+        &f,
+        &format!("{sum} fn make(v: i32) -> Array<i32, 3> {{ [v + 0; 3] }} fn own(a: Array<i32, 3>) -> i32 {{ a[0] + a[2] }} fn main() -> i32 {{ let a := make(4); sum(a.borrow()) * 100 + own(make(5)) }}"),
+    );
+    assert!(out.contains("1210"), "{out}");
+    // An if-value chosen dynamically and recursion returning arrays.
+    let out = run_both(
+        &f,
+        "fn pick(c: Bool) -> Array<i32, 2> { if c { [1, 2] } else { [3, 4] } } fn fib(n: i32) -> Array<i32, 2> { if n <= 0 { return [0, 1]; } let p := fib(n - 1); [p[1] + 0, p[0] + p[1]] } fn main() -> i32 { let a := pick(true); let b := pick(false); let c := fib(10); a[1] * 1000 + b[0] * 100 + c[0] }",
+    );
+    assert!(out.contains("2355"), "{out}");
+    // A 3x3 matrix filled by nested loops, then traced and summed.
+    let out = run_both(
+        &f,
+        "fn main() -> i32 { var m := [[0; 3]; 3]; var i := 0; loop { if i >= 3 { break; } var j := 0; loop { if j >= 3 { break; } m[i][j] = i * 3 + j; j += 1; } i += 1; } var tr := 0; var total := 0; var k := 0; loop { if k >= 3 { break; } tr += m[k][k]; var l := 0; loop { if l >= 3 { break; } total += m[k][l]; l += 1; } k += 1; } tr * 100 + total }",
+    );
+    assert!(out.contains("1236"), "{out}");
+    // Rows by borrow/share and a whole-row replacement.
+    let out = run_both(
+        &f,
+        &format!("{sum} fn zero(a: share Array<i32, 3>) {{ a[0] = 0; a[1] = 0; a[2] = 0; }} fn main() -> i32 {{ var m := [[1, 2, 3], [4, 5, 6]]; zero(m[0].share()); m[1] = [7, 8, 9]; sum(m[0].borrow()) * 100 + sum(m[1].borrow()) }}"),
+    );
+    assert!(out.contains("24"), "{out}");
+    // Evaluation order of nested assignment: index, index, right-hand side.
+    let out = run_both(
+        &f,
+        "fn d(log: share i32, k: i32) -> i32 { log = log * 10 + k; 0 } fn main() -> i32 { var log := 0; var m := [[0; 2]; 2]; m[d(log.share(), 1)][d(log.share(), 2)] = d(log.share(), 3); log }",
+    );
+    assert!(out.contains("123"), "{out}");
+
+    // Either index of a nested read traps in both runs.
+    for body in [
+        "let m := [[1, 2], [3, 4]]; let i := 1; m[i + 1][0] + 0",
+        "let m := [[1, 2], [3, 4]]; let i := 1; m[0][i + 1] + 0",
+    ] {
+        f.write("src/app.mb", &format!("fn main() -> i32 {{ {body} }}"));
+        let source = f.run(&["run"]);
+        assert_eq!(source.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&source.stderr).contains("RE007"));
+        assert!(f.run(&["build"]).status.success());
+        let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+        assert_eq!(artifact.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&artifact.stderr).contains("RE007"));
+    }
+
+    // Compile-time diagnostics.
+    for (source, code) in [
+        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; let r := m[0]; 0 }", "TE022"),
+        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[0][2] + 0 }", "TE008"),
+        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[2][0] + 0 }", "TE008"),
+        ("fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m.borrow(); m[0][0] = 1; r[0][0] + 0 }", "BE005"),
+        ("fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { let a := make(); let b := a; a[0] + 0 }", "BE001"),
+        ("fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { make()[0] + 0 }", "TE017"),
+        ("fn main() -> Array<i32, 2> { [1, 2] }", "LE900"),
+        ("fn main() -> i32 { let m: Array<Array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }", "LE900"),
+    ] {
+        f.write("src/app.mb", source);
+        err(f.run(&["run"]), code);
+    }
 }
 
 #[test]

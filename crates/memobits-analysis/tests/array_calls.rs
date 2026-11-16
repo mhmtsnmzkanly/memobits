@@ -222,13 +222,7 @@ fn element_extraction_through_references_stays_rejected() {
 #[test]
 fn unsupported_array_call_forms_report_gate_diagnostics() {
     for source in [
-        // array results
-        "fn make() -> Array<i32, 2> { [1, 2] }",
-        // nested arrays and non-primitive elements in signatures
-        "fn f(a: Array<Array<i32, 1>, 1>) {}",
-        "fn f(a: borrow Array<Array<i32, 1>, 1>) {}",
-        "fn f(a: share Array<Array<i32, 1>, 1>) {}",
-        // element references
+        // references to primitive elements
         "fn f(a: share Array<i32, 2>) { let r := a[0].share(); }",
         "fn g(x: share i32) {} fn f(a: share Array<i32, 2>) { g(a[0].share()); }",
         // temporaries cannot be borrowed

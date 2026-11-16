@@ -37,10 +37,11 @@ fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
 /// validated and checked before this artifact selection.
 ///
 /// Internal direct calls support borrow/share references to non-Unit primitives
-/// and to fixed arrays of them, and owned array parameters (copied into the
-/// callee's frame). Exported signatures remain primitive-only; reference and
-/// array ABIs are not defined. Indirect calls, reference and array results and
-/// other pointees are rejected.
+/// and to (nested) fixed arrays of them, owned array parameters (copied into the
+/// callee's frame) and array results (written through a hidden pointer to
+/// caller-allocated storage). Exported signatures remain primitive-only; reference
+/// and array ABIs are not defined. Indirect calls, reference results and other
+/// pointees are rejected.
 /// Integer arithmetic is checked in every profile; a failed runtime check
 /// traps with Wasm `unreachable` until the host runtime maps traps to language
 /// runtime diagnostics.
@@ -88,6 +89,11 @@ pub fn compile(
                     "Wasm exported signatures cannot take arrays or array references; the external array ABI is not defined",
                     Some(function.span),
                 ));
+            } else if matches!(function.signature.result.as_ref(), Type::Array { .. }) {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot return arrays; the external array ABI is not defined",
+                    Some(function.span),
+                ));
             } else if !function.signature.parameters.iter().all(|p| {
                 p.access == memobits_ir::Access::Owned && matches!(p.ty, Type::Primitive(_))
             }) || !matches!(function.signature.result.as_ref(), Type::Primitive(_))
@@ -115,7 +121,7 @@ pub fn compile(
             &function.signature.result,
         ) {
             errors.push(diagnostic(
-                "Wasm backend supports primitive results and primitive or borrow/share primitive parameters only",
+                "Wasm backend supports primitive or array results and primitive, array or borrow/share parameters only",
                 Some(function.span),
             ));
         }
@@ -172,7 +178,7 @@ fn primitive_signature<'a>(
             matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
                 || matches!(p.ty, Type::Array { .. })
         }
-    }) && matches!(result, Type::Primitive(_))
+    }) && matches!(result, Type::Primitive(_) | Type::Array { .. })
 }
 
 fn supported_type(ty: &Type) -> bool {
@@ -186,9 +192,11 @@ fn supported_type(ty: &Type) -> bool {
             array @ Type::Array { .. } => supported_type(array),
             _ => false,
         },
-        Type::Array { element, .. } => {
-            matches!(element.as_ref(), Type::Primitive(kind) if *kind != Primitive::Unit)
-        }
+        Type::Array { element, .. } => match element.as_ref() {
+            Type::Primitive(kind) => *kind != Primitive::Unit,
+            nested @ Type::Array { .. } => supported_type(nested),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -205,12 +213,12 @@ enum Slot {
     Value(u32),
 }
 
-/// Inline storage for an array-typed local or value.
+/// Inline storage for an array-typed local or value. Nested arrays are laid
+/// out contiguously row by row, so a cell is just an offset and a byte size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArrayCell {
     offset: u32,
-    len: u32,
-    element: Primitive,
+    size: u32,
 }
 
 /// Address-taken primitive owners have one authoritative cell per activation.
@@ -341,9 +349,9 @@ impl FrameLayout {
         let aliases = construction_aliases(function);
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
-            let Type::Array { element, len } = ty else {
+            if !matches!(ty, Type::Array { .. }) {
                 continue;
-            };
+            }
             if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
                 continue;
             }
@@ -351,14 +359,14 @@ impl FrameLayout {
                 message: message.into(),
                 span: span.or(Some(function.span)),
             };
-            let Type::Primitive(element) = element.as_ref() else {
-                return Err(error("array elements must be primitive in frame layout"));
-            };
-            let (element_size, align) = storage_layout(*element).map_err(|m| error(&m))?;
             let too_large = "array frame layout exceeds the 32 KiB activation frame limit";
-            let bytes = len
-                .checked_mul(element_size)
-                .ok_or_else(|| error(too_large))?;
+            let (bytes, align) = array_layout(ty).map_err(|m| {
+                if m == LAYOUT_OVERFLOW {
+                    error(too_large)
+                } else {
+                    error(&m)
+                }
+            })?;
             offset = align_up(offset, align).ok_or_else(|| error(too_large))?;
             let end = offset.checked_add(bytes).ok_or_else(|| error(too_large))?;
             if end > MAX_FRAME_SIZE {
@@ -368,8 +376,7 @@ impl FrameLayout {
                 slot,
                 ArrayCell {
                     offset,
-                    len: *len,
-                    element: *element,
+                    size: bytes,
                 },
             );
             offset = end;
@@ -521,6 +528,32 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
     Ok((width, width))
 }
 
+const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
+
+/// Size and alignment of an array type: element size times length with checked
+/// multiplication. Nested arrays recurse over the type only, so the cost depends
+/// on nesting depth and never on any source-supplied count.
+fn array_layout(ty: &Type) -> Result<(u32, u32), String> {
+    match ty {
+        Type::Primitive(kind) => storage_layout(*kind),
+        Type::Array { element, len } => {
+            let (size, align) = array_layout(element)?;
+            let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
+            Ok((bytes, align))
+        }
+        _ => Err("array elements must be primitive or arrays in frame layout".into()),
+    }
+}
+
+/// Byte size of the pointee of an array operand type (owner or reference).
+fn array_bytes(ty: &Type) -> Result<u32, String> {
+    match ty {
+        Type::Array { .. } => array_layout(ty).map(|(size, _)| size),
+        Type::Reference { inner, .. } => array_bytes(inner),
+        _ => Err("expected an array type".into()),
+    }
+}
+
 fn align_up(value: u32, align: u32) -> Option<u32> {
     debug_assert!(align.is_power_of_two());
     value
@@ -663,14 +696,26 @@ fn encode_frames(
         .collect::<Vec<_>>();
     let mut types = TypeSection::new();
     for signature in &signatures {
-        let params = signature.parameters.iter().map(|p| {
-            if p.access == memobits_ir::Access::Owned {
-                wasm_type(&p.ty)
-            } else {
-                ValType::I32
-            }
-        });
-        let results = if matches!(signature.result.as_ref(), Type::Primitive(Primitive::Unit)) {
+        // An array result is written through a hidden trailing pointer
+        // parameter to caller-allocated storage; the Wasm result list is empty.
+        let hidden =
+            matches!(signature.result.as_ref(), Type::Array { .. }).then_some(ValType::I32);
+        let params = signature
+            .parameters
+            .iter()
+            .map(|p| {
+                if p.access == memobits_ir::Access::Owned {
+                    wasm_type(&p.ty)
+                } else {
+                    ValType::I32
+                }
+            })
+            .chain(hidden)
+            .collect::<Vec<_>>();
+        let results = if matches!(
+            signature.result.as_ref(),
+            Type::Primitive(Primitive::Unit) | Type::Array { .. }
+        ) {
             Vec::new()
         } else {
             vec![wasm_type(&signature.result)]
@@ -734,7 +779,10 @@ fn compile_function(
     observe: bool,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function(function).map_err(|error| error.message)?;
-    let param_count = function.signature.parameters.len() as u32;
+    let result_is_array = matches!(function.signature.result.as_ref(), Type::Array { .. });
+    // Wasm parameters: the source parameters plus, for an array result, one
+    // hidden pointer to the caller-allocated result storage (last parameter).
+    let param_count = function.signature.parameters.len() as u32 + u32::from(result_is_array);
     let mut local_types = function
         .locals
         .iter()
@@ -784,10 +832,9 @@ fn compile_function(
             // An owned array arrives as a pointer to caller-side storage. The
             // callee copies it into its own cell, so mutating a `var` parameter
             // never reaches the caller and recursion keeps separate frames.
-            let (size, _) = storage_layout(cell.element)?;
             emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
             body.instruction(&WasmInstruction::LocalGet(index as u32));
-            body.instruction(&WasmInstruction::I32Const((cell.len * size) as i32));
+            body.instruction(&WasmInstruction::I32Const(cell.size as i32));
             body.instruction(&WasmInstruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
@@ -954,10 +1001,9 @@ fn emit_array_copy(
         // The array was constructed in the destination cell already.
         return Ok(());
     }
-    let (size, _) = storage_layout(destination.element)?;
     emit_address(body, frame, destination.offset);
     emit_operand(body, function, param_count, source, layout, frame.into())?;
-    body.instruction(&WasmInstruction::I32Const((destination.len * size) as i32));
+    body.instruction(&WasmInstruction::I32Const(destination.size as i32));
     body.instruction(&WasmInstruction::MemoryCopy {
         src_mem: 0,
         dst_mem: 0,
@@ -1528,22 +1574,44 @@ fn compile_instruction(
             let value = instruction.output.ok_or("array creation lacks an output")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
             let frame = frame.ok_or("array cell requires frame")?;
-            let (size, _) = storage_layout(cell.element)?;
+            let Type::Array { element, len } = function.values[value.0 as usize].clone() else {
+                return Err("array creation output must have an array type".into());
+            };
+            let (size, _) = array_layout(&element)?;
             match init {
                 ArrayInit::Elements(elements) => {
-                    if elements.len() != cell.len as usize {
+                    if elements.len() != len as usize {
                         return Err("array literal length differs from its array type".into());
                     }
-                    for (index, element) in elements.iter().enumerate() {
-                        emit_address(body, frame, cell.offset + index as u32 * size);
-                        emit_operand(body, function, param_count, element, layout, Some(frame))?;
-                        emit_store(body, cell.element);
+                    for (index, operand) in elements.iter().enumerate() {
+                        let destination = cell
+                            .offset
+                            .checked_add(
+                                u32::try_from(index)
+                                    .ok()
+                                    .and_then(|index| index.checked_mul(size))
+                                    .ok_or(LAYOUT_OVERFLOW)?,
+                            )
+                            .ok_or(LAYOUT_OVERFLOW)?;
+                        emit_address(body, frame, destination);
+                        emit_operand(body, function, param_count, operand, layout, Some(frame))?;
+                        match element.as_ref() {
+                            Type::Primitive(kind) => emit_store(body, *kind),
+                            _ => {
+                                // A nested array element is copied from its cell.
+                                body.instruction(&WasmInstruction::I32Const(size as i32));
+                                body.instruction(&WasmInstruction::MemoryCopy {
+                                    src_mem: 0,
+                                    dst_mem: 0,
+                                });
+                            }
+                        }
                     }
                 }
                 ArrayInit::Zeroed => {
                     emit_address(body, frame, cell.offset);
                     body.instruction(&WasmInstruction::I32Const(0));
-                    body.instruction(&WasmInstruction::I32Const((cell.len * size) as i32));
+                    body.instruction(&WasmInstruction::I32Const(cell.size as i32));
                     body.instruction(&WasmInstruction::MemoryFill(0));
                 }
             }
@@ -1560,10 +1628,7 @@ fn compile_instruction(
                 },
                 _ => return Err("element address base is not an array".into()),
             };
-            let Type::Primitive(element) = *element else {
-                return Err("array elements must be primitive".into());
-            };
-            let (size, _) = storage_layout(element)?;
+            let (size, _) = array_layout(&element)?;
             let wide = matches!(
                 value_type(function, index)?,
                 Type::Primitive(Primitive::I64 | Primitive::U64)
@@ -1614,14 +1679,10 @@ fn compile_instruction(
             emit_operand(body, function, param_count, reference, layout, frame)?;
             emit_operand(body, function, param_count, value, layout, frame)?;
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
-                if let Type::Array { element, len } = *inner {
+                if matches!(inner.as_ref(), Type::Array { .. }) {
                     // Whole-array store through a share reference: the value
                     // operand is the address of an array cell of the same layout.
-                    let Type::Primitive(element) = *element else {
-                        return Err("array elements must be primitive".into());
-                    };
-                    let (size, _) = storage_layout(element)?;
-                    body.instruction(&WasmInstruction::I32Const((len * size) as i32));
+                    body.instruction(&WasmInstruction::I32Const(array_bytes(&inner)? as i32));
                     body.instruction(&WasmInstruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
@@ -1651,12 +1712,21 @@ fn compile_instruction(
             for argument in arguments {
                 emit_operand(body, function, param_count, argument, layout, frame)?;
             }
-            body.instruction(&WasmInstruction::Call(indices[&target.0]));
             let value = output.ok_or("call lacks an output")?;
+            let id = instruction.output.unwrap();
+            if matches!(function.values[id.0 as usize], Type::Array { .. }) {
+                // Struct-return: the callee writes its result into this call's
+                // own value cell in the caller's frame (never into a dead
+                // callee frame), passed as the hidden trailing pointer.
+                let cell = array_cell_of(layout, Slot::Value(id.0))?;
+                emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
+                body.instruction(&WasmInstruction::Call(indices[&target.0]));
+                return Ok(());
+            }
+            body.instruction(&WasmInstruction::Call(indices[&target.0]));
             // The Program's function table is available only to the caller; a
             // Unit call leaves no Wasm stack result and receives an internal zero.
             // Determine Unit from the value's recorded type.
-            let id = instruction.output.unwrap();
             if matches!(
                 function.values[id.0 as usize],
                 Type::Primitive(Primitive::Unit)
@@ -1839,7 +1909,18 @@ fn compile_terminator(
         }
         TerminatorKind::Return(value) => {
             if let Some(value) = value {
-                if value_type(function, value)? != Type::Primitive(Primitive::Unit) {
+                let ty = value_type(function, value)?;
+                if matches!(ty, Type::Array { .. }) {
+                    // Write the result through the hidden pointer parameter
+                    // (the last Wasm parameter) before the frame is released.
+                    body.instruction(&WasmInstruction::LocalGet(param_count - 1));
+                    emit_operand(body, function, param_count, value, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(array_bytes(&ty)? as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                } else if ty != Type::Primitive(Primitive::Unit) {
                     emit_operand(body, function, param_count, value, layout, frame)?;
                 }
             }
@@ -1870,15 +1951,30 @@ fn emit_edge(
     // Stage every argument on the operand stack before assigning any target
     // parameter. This gives block edges parallel-copy semantics, including
     // swaps and loop backedges.
-    for argument in arguments {
-        emit_operand(body, function, param_count, argument, layout, frame)?;
+    // Array parameters live in frame cells: their arguments are copied in
+    // memory after the scalars are staged, so they take no stack slot.
+    let is_array = |parameter: &memobits_ir::ValueId| {
+        matches!(function.values[parameter.0 as usize], Type::Array { .. })
+    };
+    for (argument, parameter) in arguments.iter().zip(parameters) {
+        if !is_array(parameter) {
+            emit_operand(body, function, param_count, argument, layout, frame)?;
+        }
+    }
+    for (argument, parameter) in arguments.iter().zip(parameters) {
+        if is_array(parameter) {
+            let cell = array_cell_of(layout, Slot::Value(parameter.0))?;
+            emit_array_copy(body, function, param_count, cell, argument, layout, frame)?;
+        }
     }
     for parameter in parameters.iter().rev() {
-        body.instruction(&WasmInstruction::LocalSet(value_local(
-            function,
-            param_count,
-            *parameter,
-        )));
+        if !is_array(parameter) {
+            body.instruction(&WasmInstruction::LocalSet(value_local(
+                function,
+                param_count,
+                *parameter,
+            )));
+        }
     }
     body.instruction(&WasmInstruction::I32Const(target.0 as i32));
     body.instruction(&WasmInstruction::LocalSet(pc));

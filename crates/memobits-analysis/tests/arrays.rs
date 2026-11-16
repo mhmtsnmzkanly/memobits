@@ -90,28 +90,16 @@ fn unsupported_array_forms_stay_gated() {
     for source in [
         // whole arrays as values outside a binding initializer or `=`
         "fn main() { let a := [1, 2]; a; }",
-        "fn main() { let a := [1, 2]; let b := [a; 2]; }",
-        "fn main() { let a := [1, 2]; let b := if true { a } else { a }; }",
-        "fn main() { let a := [1, 2]; let b := { a }; }",
         "fn main() { let a := [1, 2]; let b := a; a = b + 1; }",
-        // array results
-        "fn make() -> Array<i32, 2> { [1, 2] }",
-        // nested arrays and non-primitive elements
-        "fn main() { let a := [[1], [2]]; }",
-        "fn main() { let a: Array<Array<i32, 1>, 1> = [[1]]; }",
-        "fn main() { let a := [[1]; 2]; }",
         "fn main() { var x := 1; let a := [x.borrow()]; }",
         // literals and repetition outside a binding initializer or `=`
         "fn main() { [1, 2]; }",
         "fn main() { [1; 2]; }",
         "fn main() { let x := [1, 2][0] + 1; }",
-        "fn main() { let a := if true { [1] } else { [2] }; }",
-        "fn main() { let a := { [1] }; }",
-        "fn main() { let a := { [1; 2] }; }",
-        // element references are not expressible yet
+        // indexing a call result
+        "fn make() -> Array<i32, 2> { [1, 2] } fn main() { let x := make()[0] + 1; }",
+        // references to primitive elements are not expressible
         "fn main() { var a := [1, 2]; let r := a[0].share(); }",
-        // indexing a non-local
-        "fn main() { var a := [[1], [2]]; a[0][0] = 1; }",
     ] {
         assert!(codes(source).contains(&"TE017".into()), "{source}");
     }
