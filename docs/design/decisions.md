@@ -76,6 +76,14 @@ only where explicitly stated; unresolved API spellings remain proposals.
 
 - Type declarations use `type Name { fields... }` for field-based types,
   `type Name [ variants... ]` for enums, and `type Name = Other;` for aliases.
+- Type parameters exist only on compiler-known types: `Array<T, N>`, `List<T>`,
+  `Option<T>`, `Result<T, E>`, and the three-state `Outcome<T, E>`. They share
+  one category with `Array`: the compiler instantiates them per use.
+  User-defined generic types are not part of the language.
+- The prelude exposes the variants of `Option`, `Result`, and `Outcome` by short
+  name (for example `Some`, `None`). Variants of user enums are written
+  `Type::Variant`. `Result` and `Outcome` variant names are still provisional;
+  a short name shared by both must be resolved before they are implemented.
 - Initial integers are `i8/i16/i32/i64` and `u8/u16/u32/u64`; floats are `f32`
   and `f64`. Unconstrained integer literals default to `i32`, floats to `f64`.
   Wider integers, SIMD, and target-width integer types are deferred.
@@ -114,6 +122,14 @@ only where explicitly stated; unresolved API spellings remain proposals.
   explicit return supports early exit. Unit-returning functions may omit `-> ()`.
 - Evaluate call arguments and ordinary binary operands left to right. Boolean
   `&&` and `||` short-circuit. Optimization preserves observable evaluation order.
+- Element assignment `a[i] = value` evaluates the base and every index operand
+  left to right, then the right-hand side, and performs the bounds checks
+  immediately before the store. A dynamic out-of-range index therefore fails
+  after the right-hand side's effects. Rationale: checking before the right-hand
+  side would hold exclusive access to the element while it is evaluated and
+  reject ordinary code such as `a[i] = a[j] + 1`; operand order still follows
+  the left-to-right rule. Java orders array stores the same way. Compound
+  assignment reads the element, evaluates the right-hand side, then stores.
 - Owned matching consumes the scrutinee and transfers selected payloads. Matching
   a read-only borrow produces borrowed payload bindings. Mutable matching is deferred.
 - Function parameters cannot override access modes at the call site; share
