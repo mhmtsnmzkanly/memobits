@@ -220,3 +220,117 @@ fn malformed_arrays_recover_to_following_statements_and_items() {
         );
     }
 }
+
+fn function_body(source: &str) -> memobits_syntax::Block {
+    let parsed = parse(SourceId(7), source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    body.clone()
+}
+
+#[test]
+fn block_like_statements_end_at_their_closing_brace() {
+    let body = function_body("fn f(c: Bool) -> Array<i32, 2> { if c { return [5, 6]; } [7, 8] }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(
+        matches!(body.statements[0].kind, StatementKind::Expression(ref e) if matches!(e.kind, ExprKind::If { .. }))
+    );
+    assert!(
+        matches!(body.tail.as_deref().map(|e| &e.kind), Some(ExprKind::Array(v)) if v.len() == 2)
+    );
+
+    let body = function_body("fn main() -> i32 { var x := 1; if x == 1 { x = 2; } (x + 1) }");
+    assert_eq!(body.statements.len(), 2);
+    assert!(
+        matches!(body.statements[1].kind, StatementKind::Expression(ref e) if matches!(e.kind, ExprKind::If { .. }))
+    );
+    assert!(
+        matches!(body.tail.as_deref().map(|e| &e.kind), Some(ExprKind::Binary { operator, .. }) if operator == "+")
+    );
+
+    let body = function_body("fn f() -> i32 { loop { break; } [1, 2] }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(matches!(body.statements[0].kind, StatementKind::Loop(_)));
+    assert!(matches!(
+        body.tail.as_deref().map(|e| &e.kind),
+        Some(ExprKind::Array(_))
+    ));
+
+    let body = function_body("fn f(x: i32) -> i32 { { x = 1; } (x) }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(
+        matches!(body.statements[0].kind, StatementKind::Expression(ref e) if matches!(e.kind, ExprKind::Block(_)))
+    );
+    assert!(matches!(
+        body.tail.as_deref().map(|e| &e.kind),
+        Some(ExprKind::Path(_))
+    ));
+
+    let body = function_body("fn f(c: Bool) -> i32 { if c { 1 } else { 2 } [1] }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(matches!(
+        body.tail.as_deref().map(|e| &e.kind),
+        Some(ExprKind::Array(_))
+    ));
+
+    let body = function_body("fn f(c: Bool) -> i32 { if c {} else if c {} else {} [1] }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(matches!(
+        body.tail.as_deref().map(|e| &e.kind),
+        Some(ExprKind::Array(_))
+    ));
+
+    let body = function_body("fn f() -> i32 { loop { break; } -x }");
+    assert_eq!(body.statements.len(), 1);
+    assert!(matches!(body.statements[0].kind, StatementKind::Loop(_)));
+    assert!(
+        matches!(body.tail.as_deref().map(|e| &e.kind), Some(ExprKind::Unary { operator, .. }) if operator == "-")
+    );
+}
+
+#[test]
+fn block_like_expressions_outside_statement_position_are_unchanged() {
+    let body = function_body("fn f(c: Bool) { let a := if c { 1 } else { 2 } + 3; }");
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    // The else operand keeps full-expression parsing, so `+ 3` joins it.
+    let ExprKind::If { else_branch, .. } = &value.kind else {
+        panic!()
+    };
+    assert!(
+        matches!(else_branch.as_deref().map(|e| &e.kind), Some(ExprKind::Binary { operator, .. }) if operator == "+")
+    );
+
+    let body = function_body("fn f(c: Bool) { foo(if c { 1 } else { 2 }); }");
+    let StatementKind::Expression(e) = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Call { arguments, .. } = &e.kind else {
+        panic!()
+    };
+    assert!(matches!(arguments[0].kind, ExprKind::If { .. }));
+
+    let body = function_body("fn f(c: Bool) { (if c { a } else { b })[0]; }");
+    let StatementKind::Expression(e) = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Index { base, .. } = &e.kind else {
+        panic!()
+    };
+    assert!(matches!(base.kind, ExprKind::If { .. }));
+
+    let body = function_body("fn f(c: Bool) { var x := 0; x = if c { 1 } else { 2 }; }");
+    let StatementKind::Assign { value, .. } = &body.statements[1].kind else {
+        panic!()
+    };
+    assert!(matches!(value.kind, ExprKind::If { .. }));
+
+    let body = function_body("fn f(c: Bool) -> i32 { return if c { 1 } else { 2 }; }");
+    let StatementKind::Return(Some(value)) = &body.statements[0].kind else {
+        panic!()
+    };
+    assert!(matches!(value.kind, ExprKind::If { .. }));
+}

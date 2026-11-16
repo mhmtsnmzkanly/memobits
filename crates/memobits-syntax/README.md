@@ -8,6 +8,9 @@ Implemented syntax: functions, parameter access modes, basic named types,
 field/enum/alias declarations, path imports with aliases, explicit and inferred
 bindings, assignments, numeric/boolean expressions, calls, field access, blocks,
 if/else, return, loop, break, and continue. Nested block comments are supported.
+A block-like statement (`if`, `loop`, or a bare block) at the start of a statement
+ends at its closing `}`: following `[`, `(`, `.`, or binary operators start a new
+statement or tail instead of continuing it. In other positions these forms are full expressions.
 The parser accepts member-call spellings such as `value.borrow()`,
 `value.share()`, and `value.copy()` as ordinary call and field syntax; it does
 not assign access or copying semantics to them.

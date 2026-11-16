@@ -673,7 +673,14 @@ impl Parser {
             self.expect(";")?;
             StatementKind::Continue
         } else {
-            let e = self.expr(0)?;
+            // A block-like expression at the start of a statement ends at its
+            // closing brace: no postfix or binary continuation.
+            let block_start = self.at("{") || self.at("if");
+            let e = if block_start {
+                self.block_like(true)?
+            } else {
+                self.expr(0)?
+            };
             if ["=", "+=", "-=", "*=", "/=", "%="]
                 .iter()
                 .any(|s| self.at(s))
@@ -693,7 +700,7 @@ impl Parser {
                 StatementKind::Expression(e)
             } else if self.at("}") {
                 return Ok((None, Some(e)));
-            } else if matches!(e.kind, ExprKind::If { .. } | ExprKind::Block(_)) {
+            } else if block_start {
                 StatementKind::Expression(e)
             } else {
                 return self.fail("expected ';' or block end after expression");
@@ -706,6 +713,43 @@ impl Parser {
             }),
             None,
         ))
+    }
+    /// Parses a bare block or an `if`/`else` chain, starting at `{` or `if`.
+    /// In statement position (`statement == true`) the `else` chain is also
+    /// parsed block-only, so the statement ends at its final `}`. Elsewhere the
+    /// `else` operand keeps its original full-expression parsing.
+    fn block_like(&mut self, statement: bool) -> PResult<Expr> {
+        let start = self.current().span.start;
+        if self.at("{") {
+            let b = self.block()?;
+            return Ok(Node {
+                span: b.span,
+                kind: ExprKind::Block(b),
+            });
+        }
+        self.expect("if")?;
+        let condition = Box::new(self.expr(0)?);
+        let then_branch = self.block()?;
+        let else_branch = if self.eat("else") {
+            if !self.at("if") && !self.at("{") {
+                return self.fail("expected 'if' or block after 'else'");
+            }
+            Some(Box::new(if statement {
+                self.block_like(true)?
+            } else {
+                self.expr(0)?
+            }))
+        } else {
+            None
+        };
+        Ok(Node {
+            span: self.span(start),
+            kind: ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            },
+        })
     }
     fn expr(&mut self, minimum: u8) -> PResult<Expr> {
         let start = self.current().span.start;
@@ -744,31 +788,8 @@ impl Parser {
                 span: self.span(start),
                 kind,
             }
-        } else if self.at("{") {
-            let b = self.block()?;
-            Node {
-                span: b.span,
-                kind: ExprKind::Block(b),
-            }
-        } else if self.eat("if") {
-            let condition = Box::new(self.expr(0)?);
-            let then_branch = self.block()?;
-            let else_branch = if self.eat("else") {
-                if !self.at("if") && !self.at("{") {
-                    return self.fail("expected 'if' or block after 'else'");
-                }
-                Some(Box::new(self.expr(0)?))
-            } else {
-                None
-            };
-            Node {
-                span: self.span(start),
-                kind: ExprKind::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                },
-            }
+        } else if self.at("{") || self.at("if") {
+            self.block_like(false)?
         } else if self.eat("(") {
             let e = self.expr(0)?;
             self.expect(")")?;
