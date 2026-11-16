@@ -260,23 +260,23 @@ let is_number := match value {
 // 13. Common three-way outcome
 // ----------------------------
 // ACCEPTED states: successful operation, operation not performed, failure.
-// PROPOSED names: Outcome<T, E>, Ok, Skipped, Error.
+// ACCEPTED names: Attempt<T, E> with Done(T), Skipped, Failed(E).
 // The common type is provided centrally, not redefined in every library.
-// An operation that succeeds but finds no record may return Ok(None); that is
+// An operation that succeeds but finds no record may return Done(None); that is
 // different from Skipped. Exact combination with Option remains API-specific.
 
 // let selected := match get_user_choice() {
-//     Ok(value) => value,
+//     Done(value) => value,
 //     Skipped => 0,
-//     Error(reason) => {
+//     Failed(reason) => {
 //         report(reason);
 //         0
 //     },
 // };
 
-// ACCEPTED: try is optional Result-match sugar. An else block handles Error;
+// ACCEPTED: try is optional Result-match sugar. An else block handles Err;
 // without else, it discards the Result error. It never catches traps. Skipped is
-// an Outcome state, not a Result error, and is not implicitly converted.
+// an Attempt state, not a Result error, and is not implicitly converted.
 // Illustrative sugar:
 let new_text := try build_text() else (reason) {
     report(reason);

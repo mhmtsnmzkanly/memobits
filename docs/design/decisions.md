@@ -83,24 +83,41 @@ only where explicitly stated; unresolved API spellings remain proposals.
 - Type declarations use `type Name { fields... }` for field-based types,
   `type Name [ variants... ]` for enums, and `type Name = Other;` for aliases.
 - Type parameters exist only on compiler-known types: `Array<T, N>`, `List<T>`,
-  `Option<T>`, `Result<T, E>`, and the three-state `Outcome<T, E>`. They share
+  `Option<T>`, `Result<T, E>`, and the three-state `Attempt<T, E>`. They share
   one category with `Array`: the compiler instantiates them per use.
   User-defined generic types are not available now, but the door stays open:
   `<...>` after a type name is reserved for type arguments, and compiler-known
   types are instantiated through a general mechanism rather than per-type
   special cases, so user declarations can adopt it later without a redesign.
-- Errors form a hierarchy rooted in one base error type that the host
-  understands. User and program error types, and the standard error types used
-  by `Result` and `Outcome`, derive from that base, so the host can report any
-  error through its base part. The derivation mechanism and the base type's
-  contents are not designed yet and must be settled before `Result` and
-  `Outcome` are implemented.
+- The three-state result is `Attempt<T, E>` with variants `Done(T)`, `Skipped`,
+  and `Failed(E)`. `Result<T, E>` has `Ok(T)` and `Err(E)`; `Option<T>` has
+  `Some(T)` and `None`. No short variant name is shared between them.
+- Errors form a hierarchy rooted in the compiler-known type `Error`, which the
+  host understands. `Error` has the public fields `code: u32`, a
+  program-defined numeric code, and `message: String`, which joins it when
+  strings are implemented. The compiler also records the concrete error type's
+  identity in every error value; programs do not write it, and the host uses it
+  to name the error type from artifact metadata.
+- An error type derives from `Error` or from another error type with
+  `type ParseError: Error { line: u32 }`. Derivation exists only inside this
+  hierarchy; it is not general inheritance. A derived type contains its
+  ancestors' fields first, in order, followed by its own. Ancestor fields are
+  accessed directly (`e.code`) and initialized explicitly in a literal like any
+  other field.
+- A borrow or share of an error is accepted wherever a borrow or share of one
+  of its ancestors is expected. An owned error converts to an ancestor type
+  only explicitly; the conversion drops the derived fields and keeps the
+  recorded concrete identity. Its spelling is not designed yet.
+- The error parameter `E` of `Result<T, E>` and `Attempt<T, E>` must be `Error`
+  or a type derived from it. There are no separate standard error types per
+  result type; simple programs use `Error` directly. An entry function may
+  return `Result` or `Attempt`; the host reports a returned error through its
+  `Error` part. Traps are not errors in this hierarchy and are reported by the
+  host separately.
 - Empty field-based types (`type Unit {}`) are allowed. Empty enums
   (`type Never []`) are rejected.
-- The prelude exposes the variants of `Option`, `Result`, and `Outcome` by short
-  name (for example `Some`, `None`). Variants of user enums are written
-  `Type::Variant`. `Result` and `Outcome` variant names are still provisional;
-  a short name shared by both must be resolved before they are implemented.
+- The prelude exposes the variants of `Option`, `Result`, and `Attempt` by short
+  name. Variants of user enums are written `Type::Variant`.
 - Initial integers are `i8/i16/i32/i64` and `u8/u16/u32/u64`; floats are `f32`
   and `f64`. Unconstrained integer literals default to `i32`, floats to `f64`.
   Wider integers, SIMD, and target-width integer types are deferred.
