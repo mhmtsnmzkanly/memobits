@@ -3,8 +3,7 @@
 A minimal source project for the new compiler pipeline. Its application root is
 `main::main`; its library root exports only `math::add` as `add`.
 
-This fixture is not compatible with the legacy interpreter. Project inventory
-can be inspected with:
+Project inventory can be inspected with:
 
 ```sh
 cargo run -p memobits-cli -- project --project examples/projects/numeric/project.toml

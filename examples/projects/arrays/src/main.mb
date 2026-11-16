@@ -1,0 +1,28 @@
+// Fixed arrays of primitive elements: repetition, element assignment,
+// compound updates, reads inside arithmetic, and whole-array moves.
+fn main() -> i32 {
+    var squares: Array<i32, 8> = [0; 8];
+    var i := 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        squares[i] = i * i;
+        i += 1;
+    }
+    squares[3] += 100;
+
+    var total := 0;
+    var j := 0;
+    loop {
+        if j >= 8 {
+            break;
+        }
+        total = total + squares[j];
+        j += 1;
+    }
+
+    let copy := squares;
+    let seed := [1, 2, 3];
+    total + copy[3] + seed[2]
+}

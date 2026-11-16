@@ -96,8 +96,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   every return.
 - **Runtime and execution** (`memobits-runtime`, wasmi): fresh instance per run,
   bounded default fuel, structured host errors for traps. Source and artifact
-  execution share the same path and print scalar results. The legacy AST
-  interpreter in the root crate remains available as a reference only.
+  execution share the same path and print scalar results. The former AST
+  interpreter was removed from the repository and never defined the semantics.
 
 ### Known limits of the implemented subset
 

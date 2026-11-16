@@ -1,7 +1,7 @@
 // Memobits language design guide
 // =============================
 // STATUS: design reference, NOT an executable program or a conformance test.
-// The current interpreter does not implement this proposed language revision.
+// The current compiler does not implement this proposed language revision.
 // Sections are independent examples, not a single shared scope. Definitions may
 // be repeated to compare alternatives. Commented ERROR examples must be rejected
 // by the future compiler once their associated feature is implemented.

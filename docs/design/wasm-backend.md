@@ -35,7 +35,7 @@ stable error ABI. Statically proven failures should be diagnosed before encoding
 Independent Wasm validation checks binary structure. Execution tests must also
 check numerical results, branches, loops, call evaluation order, parallel edge
 arguments, and dynamic failures. Test expected language behavior directly: the
-legacy interpreter has different semantics and is not a conformance oracle.
+removed AST interpreter never defined the semantics and is not a conformance oracle.
 
 Backend output is not evidence of a stable ABI, complete borrow safety, or
 full language support. These remain separate verification gates.

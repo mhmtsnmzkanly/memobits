@@ -24,9 +24,13 @@ argument evaluation, repeated arithmetic reads, and shadowing:
 cargo run -p memobits-cli -- ownership examples/analysis/ownership.mb
 ```
 
-`ownership` lowers one module to IR and checks move availability. Borrow/share
-lifetimes, aggregate ownership, and Wasm execution are not implemented yet.
+`ownership` lowers one module to IR. Its output reports that owned primitive
+moves and primitive loans were checked and that internal primitive references
+are supported. Aggregate ownership and external reference signatures are not
+supported, and a passing check is not a complete borrow-safety guarantee.
 
 `references.mb` exercises primitive share updates, borrow reads, and last-use
-release. Check it with `mb ownership examples/analysis/references.mb`; reference
-programs are not yet executable by the Wasm backend.
+release. Check it with `mb ownership examples/analysis/references.mb`. Internal
+primitive references also compile and run: copied to `src/main.mb` of a project
+whose manifest has `entry = "main::main"`, `mb run --project PATH` prints
+`Result: i32(64)`.

@@ -1,4 +1,4 @@
-// This example is accepted by `mb analyze`; Wasm execution is not available yet.
+// This example is accepted by `mb analyze`; copied to `src/main.mb` of a project, `mb run` prints `Result: i64(16)`.
 fn clamp(value: i64, lower: i64, upper: i64) -> i64 {
     if value < lower {
         lower

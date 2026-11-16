@@ -63,5 +63,6 @@ Code, diagnostics, and documentation are written in English.
 ## Examples
 
 - `examples/projects/` — buildable projects with a `project.toml`.
+- `examples/projects/arrays/` — fixed arrays of primitive elements.
 - `examples/analysis/` — single files for the analysis and ownership commands.
 - `examples/design/` — illustrative target syntax.
