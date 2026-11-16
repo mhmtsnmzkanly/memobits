@@ -1,0 +1,222 @@
+use memobits_diagnostics::SourceId;
+use memobits_syntax::{lex, parse, Access, ExprKind, ItemKind, StatementKind};
+
+#[test]
+fn parses_real_project_sources() {
+    for source in [
+        include_str!("../../../examples/projects/numeric/src/main.mb"),
+        include_str!("../../../examples/projects/numeric/src/math.mb"),
+    ] {
+        let result = parse(SourceId(0), source);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(!result.module.items.is_empty());
+    }
+}
+
+#[test]
+fn precedence_and_access_modes_are_preserved() {
+    let result = parse(
+        SourceId(1),
+        "fn f(a: borrow Player, b: share Player, var c: Player) -> i32 { let n := 1 + 2 * 3; n }",
+    );
+    assert!(result.diagnostics.is_empty());
+    let ItemKind::Function {
+        parameters, body, ..
+    } = &result.module.items[0].kind
+    else {
+        panic!()
+    };
+    assert_eq!(parameters[0].access, Access::Borrow);
+    assert_eq!(parameters[1].access, Access::Share);
+    assert!(parameters[2].mutable);
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Binary {
+        operator, right, ..
+    } = &value.kind
+    else {
+        panic!()
+    };
+    assert_eq!(operator, "+");
+    assert!(matches!(&right.kind, ExprKind::Binary { operator, .. } if operator == "*"));
+    assert!(body.tail.is_some());
+}
+
+#[test]
+fn parses_documented_access_conversion_suffixes() {
+    let result = parse(
+        SourceId(5),
+        "fn use_value(value: i32) { consume(value.borrow()); consume(value.share()); consume(value.copy()); }",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
+        panic!()
+    };
+
+    for (index, expected) in ["borrow", "share", "copy"].into_iter().enumerate() {
+        let StatementKind::Expression(expression) = &body.statements[index].kind else {
+            panic!("expected outer call expression")
+        };
+        let ExprKind::Call { arguments, .. } = &expression.kind else {
+            panic!("expected outer call")
+        };
+        let ExprKind::Call {
+            callee,
+            arguments: suffix_args,
+        } = &arguments[0].kind
+        else {
+            panic!("expected conversion call")
+        };
+        assert!(suffix_args.is_empty());
+        assert!(matches!(&callee.kind, ExprKind::Field { name, .. } if name == expected));
+    }
+}
+
+#[test]
+fn borrow_and_share_remain_reserved_as_function_and_binding_names() {
+    for source in ["fn borrow() {}", "fn f() { let share := 1; }"] {
+        let result = parse(SourceId(6), source);
+        assert!(!result.diagnostics.is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn accepted_type_forms_and_loop_parse() {
+    let source = "pub type Player { pub score: i32 } type State [ Idle, Active(i32) ] type Id = u64; fn f() { var n: i32 = 0; loop { if n > 3 { break; } n += 1; continue; } return; }";
+    let result = parse(SourceId(2), source);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.module.items.len(), 4);
+}
+
+#[test]
+fn rejects_legacy_and_incomplete_syntax_without_hanging() {
+    for source in [
+        "fn f() { let x = 1; }",
+        "fn f() { while true {} }",
+        "struct X {}",
+        "fn f(",
+        "fn f() { let x := ; return; }",
+        "type X [ Broken(",
+    ] {
+        let result = parse(SourceId(3), source);
+        assert!(!result.diagnostics.is_empty(), "{source}");
+        for d in result.diagnostics {
+            let span = d.span.unwrap();
+            assert!(source.is_char_boundary(span.start));
+            assert!(source.is_char_boundary(span.end));
+        }
+    }
+}
+
+#[test]
+fn utf8_errors_and_nested_comments_have_valid_spans() {
+    let text = "/* outer /* nested */ done */ 🙂 fn valid() {}";
+    let result = lex(SourceId(4), text);
+    assert_eq!(result.diagnostics.len(), 1);
+    let span = result.diagnostics[0].span.unwrap();
+    assert_eq!(&text[span.start..span.end], "🙂");
+    let parsed = parse(SourceId(4), text);
+    assert_eq!(parsed.module.items.len(), 1);
+    assert!(!lex(SourceId(0), "/* unfinished").diagnostics.is_empty());
+}
+
+#[test]
+fn arrays_preserve_nested_types_literals_and_spans() {
+    use memobits_syntax::TypeArgument;
+    let source = "fn f(a: Array<Array<i32, 0>, 1_000>) { [1, 2,]; []; [f(); 03]; }";
+    let parsed = parse(SourceId(0), source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function {
+        parameters, body, ..
+    } = &parsed.module.items[0].kind
+    else {
+        panic!()
+    };
+    let ty = &parameters[0].ty;
+    assert_eq!(
+        &source[ty.span.start..ty.span.end],
+        "Array<Array<i32, 0>, 1_000>"
+    );
+    let TypeArgument::Type(inner) = &ty.arguments[0] else {
+        panic!()
+    };
+    assert_eq!(inner.path, ["Array"]);
+    let TypeArgument::Integer(count) = &ty.arguments[1] else {
+        panic!()
+    };
+    assert_eq!(count.raw, "1_000");
+    let StatementKind::Expression(expr) = &body.statements[2].kind else {
+        panic!()
+    };
+    let ExprKind::RepeatArray { value, count } = &expr.kind else {
+        panic!()
+    };
+    assert!(matches!(value.kind, ExprKind::Call { .. }));
+    assert_eq!(count.raw, "03");
+    assert_eq!(&source[count.span.start..count.span.end], "03");
+    assert_eq!(&source[expr.span.start..expr.span.end], "[f(); 03]");
+}
+
+#[test]
+fn indexing_chains_with_calls_fields_and_unary_precedence() {
+    let parsed = parse(SourceId(0), "fn f() { -a[1 + 2].b()[0] * 3 }");
+    assert!(parsed.diagnostics.is_empty());
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    let ExprKind::Binary { left, .. } = &body.tail.as_ref().unwrap().kind else {
+        panic!()
+    };
+    let ExprKind::Unary { operand, .. } = &left.kind else {
+        panic!()
+    };
+    let ExprKind::Index { base, .. } = &operand.kind else {
+        panic!()
+    };
+    assert!(matches!(base.kind, ExprKind::Call { .. }));
+}
+
+#[test]
+fn malformed_arrays_recover_to_following_statements_and_items() {
+    for malformed in [
+        "[1,,2]",
+        "[1; -1]",
+        "[1; 1.5]",
+        "a[]",
+        "[1; n]",
+        "[1; 2 + 3]",
+    ] {
+        let parsed = parse(
+            SourceId(0),
+            &format!("fn f() {{ {malformed}; let good := 3; }} fn g() {{}}"),
+        );
+        assert!(!parsed.diagnostics.is_empty(), "{malformed}");
+        assert_eq!(parsed.module.items.len(), 2, "{malformed}");
+        let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+            panic!()
+        };
+        assert_eq!(body.statements.len(), 1, "{malformed}");
+    }
+    for ty in [
+        "Array<i32>",
+        "Array<i32, -1>",
+        "Array<i32, 1.0>",
+        "Array<i32, n>",
+        "Array<i32, 1 + 2>",
+        "Array<i32, 1, 2>",
+        "i32<u8, 2>",
+        "Array",
+    ] {
+        let parsed = parse(SourceId(0), &format!("fn bad(a: {ty}) {{}} fn good() {{}}"));
+        assert!(!parsed.diagnostics.is_empty(), "{ty}");
+        assert!(
+            parsed
+                .module
+                .items
+                .iter()
+                .any(|i| matches!(&i.kind, ItemKind::Function { name, .. } if name == "good")),
+            "{ty}"
+        );
+    }
+}

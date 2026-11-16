@@ -1,8 +1,8 @@
 //! SyntaxAnalyzer: logos tabanli lexer + parser + hata raporlama.
 //! Not: Lexer/Parser artik burada birlesik. Disarida ayri moduller yok.
 
-use logos::Logos;
 use crate::collections::HashMap;
+use logos::Logos;
 
 use crate::ast::*;
 use crate::types::Type;
@@ -307,7 +307,11 @@ impl SyntaxError {
 
 impl std::fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Error on ({}:{}): {}", self.pos.0, self.pos.1, self.detail)
+        write!(
+            f,
+            "Error on ({}:{}): {}",
+            self.pos.0, self.pos.1, self.detail
+        )
     }
 }
 
@@ -351,7 +355,6 @@ impl SyntaxAnalyzer {
             }
         }
     }
-
 
     fn lex(&mut self) {
         let src = self.source.clone();
@@ -1011,7 +1014,10 @@ impl Parser {
                     let b = self.parse_block_stmts()?;
                     self.expect(Token::RBrace).ok()?;
                     let span = Parser::block_span(&b);
-                    Expr { node: ExprKind::Block(b), span }
+                    Expr {
+                        node: ExprKind::Block(b),
+                        span,
+                    }
                 } else {
                     self.err("expected => or { after Get:".into());
                     return None;
@@ -1037,7 +1043,10 @@ impl Parser {
                     let b = self.parse_block_stmts()?;
                     self.expect(Token::RBrace).ok()?;
                     let span = Parser::block_span(&b);
-                    Expr { node: ExprKind::Block(b), span }
+                    Expr {
+                        node: ExprKind::Block(b),
+                        span,
+                    }
                 } else {
                     self.err("expected => or { after Set:".into());
                     return None;
@@ -1124,13 +1133,19 @@ impl Parser {
         if self.eat(&Token::Let) {
             let start = self.last_span.clone();
             let b = self.parse_let_binding()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_stmt(span, StmtKind::Let(b)));
         }
         if self.eat(&Token::Var) {
             let start = self.last_span.clone();
             let b = self.parse_var_binding()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_stmt(span, StmtKind::Var(b)));
         }
         if self.eat(&Token::Break) {
@@ -1155,30 +1170,45 @@ impl Parser {
             } else {
                 None
             };
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
-            return Some(self.make_stmt(span, StmtKind::If {
-                cond,
-                then_b,
-                else_b,
-            }));
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
+            return Some(self.make_stmt(
+                span,
+                StmtKind::If {
+                    cond,
+                    then_b,
+                    else_b,
+                },
+            ));
         }
         if self.eat(&Token::Loop) {
             let start = self.last_span.clone();
             self.expect(Token::LBrace).ok()?;
             let body = self.parse_block_stmts()?;
             self.expect(Token::RBrace).ok()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_stmt(span, StmtKind::Loop(body)));
         }
         if self.eat(&Token::Return) {
             let start = self.last_span.clone();
             // NOTE: return ifadesi opsiyonel olabilir.
             if self.is(&Token::Semi) || self.is(&Token::RBrace) {
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_stmt(span, StmtKind::Return(None)));
             }
             let val = self.parse_expr()?;
-            let span = Span { lo: start.lo, hi: val.span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: val.span.hi,
+            };
             return Some(self.make_stmt(span, StmtKind::Return(Some(val))));
         }
         if self.eat(&Token::Match) {
@@ -1228,7 +1258,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_stmt(span, StmtKind::Match { scrutinee, arms }));
         }
         // Assign: ident = expr, or expression statement starting with ident
@@ -1239,7 +1272,10 @@ impl Parser {
             let lhs = self.parse_expr_postfix(Some(head))?;
             if self.eat(&Token::Eq) {
                 let value = self.parse_expr()?;
-                let span = Span { lo: lhs.span.lo, hi: value.span.hi };
+                let span = Span {
+                    lo: lhs.span.lo,
+                    hi: value.span.hi,
+                };
                 return match lhs.node {
                     ExprKind::Ident(name) => {
                         Some(self.make_stmt(span, StmtKind::Assign { name, value }))
@@ -1659,7 +1695,10 @@ impl Parser {
         if self.eat(&Token::Minus) {
             let start = self.last_span.clone();
             let inner = self.parse_expr_unary()?;
-            let span = Span { lo: start.lo, hi: inner.span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: inner.span.hi,
+            };
             return Some(self.make_expr(
                 span,
                 ExprKind::Unary {
@@ -1671,7 +1710,10 @@ impl Parser {
         if self.eat(&Token::Not) {
             let start = self.last_span.clone();
             let inner = self.parse_expr_unary()?;
-            let span = Span { lo: start.lo, hi: inner.span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: inner.span.hi,
+            };
             return Some(self.make_expr(
                 span,
                 ExprKind::Unary {
@@ -1697,11 +1739,14 @@ impl Parser {
                         break;
                     }
                     args.push(self.parse_expr()?);
-                if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
-                    break;
+                    if !self.eat(&Token::Comma) && !self.is(&Token::RParen) {
+                        break;
+                    }
                 }
-            }
-                let span = Span { lo: e.span.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: e.span.lo,
+                    hi: self.last_span.hi,
+                };
                 e = self.make_expr(
                     span,
                     ExprKind::Call {
@@ -1732,20 +1777,26 @@ impl Parser {
                     let mut full_args = Vec::with_capacity(args.len() + 1);
                     full_args.push(e);
                     full_args.extend(args);
-                    let span = Span { lo: full_args[0].span.lo, hi: self.last_span.hi };
-                    let callee_span = Span { lo: span.lo, hi: span.lo };
+                    let span = Span {
+                        lo: full_args[0].span.lo,
+                        hi: self.last_span.hi,
+                    };
+                    let callee_span = Span {
+                        lo: span.lo,
+                        hi: span.lo,
+                    };
                     e = self.make_expr(
                         span,
                         ExprKind::Call {
-                            callee: Box::new(self.make_expr(
-                                callee_span,
-                                ExprKind::Ident(name),
-                            )),
+                            callee: Box::new(self.make_expr(callee_span, ExprKind::Ident(name))),
                             args: full_args,
                         },
                     );
                 } else {
-                    let span = Span { lo: e.span.lo, hi: self.last_span.hi };
+                    let span = Span {
+                        lo: e.span.lo,
+                        hi: self.last_span.hi,
+                    };
                     e = self.make_expr(
                         span,
                         ExprKind::FieldAccess {
@@ -1757,7 +1808,10 @@ impl Parser {
             } else if self.eat(&Token::LBracket) {
                 let index = self.parse_expr()?;
                 self.expect(Token::RBracket).ok()?;
-                let span = Span { lo: e.span.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: e.span.lo,
+                    hi: self.last_span.hi,
+                };
                 e = self.make_expr(
                     span,
                     ExprKind::Index {
@@ -1808,7 +1862,10 @@ impl Parser {
                         break;
                     }
                 }
-                let span = Span { lo: _start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: _start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_expr(span, ExprKind::TupleLiteral(elems)));
             }
             self.expect(Token::RParen).ok()?;
@@ -1829,7 +1886,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
         }
 
@@ -1847,7 +1907,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
         }
 
@@ -1855,7 +1918,10 @@ impl Parser {
             let start = self.last_span.clone();
             self.bump_while_semi();
             if self.eat(&Token::RBrace) {
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_expr(span, ExprKind::Block(Vec::new())));
             }
 
@@ -1881,7 +1947,10 @@ impl Parser {
                     let v = self.parse_expr()?;
                     pairs.push((k, v));
                 }
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_expr(span, ExprKind::MapLiteral(pairs)));
             }
 
@@ -1899,7 +1968,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(span, ExprKind::Block(body)));
         }
 
@@ -1917,7 +1989,10 @@ impl Parser {
             } else {
                 None
             };
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(
                 span,
                 ExprKind::If {
@@ -1975,11 +2050,11 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
-            return Some(self.make_expr(
-                span,
-                ExprKind::Match { scrutinee, arms },
-            ));
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
+            return Some(self.make_expr(span, ExprKind::Match { scrutinee, arms }));
         }
 
         if self.eat(&Token::None) {
@@ -2024,33 +2099,33 @@ impl Parser {
             self.expect(Token::LParen).ok()?;
             let inner = self.parse_expr()?;
             self.expect(Token::RParen).ok()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
-            return Some(self.make_expr(
-                span,
-                ExprKind::Literal(Literal::Some(Box::new(inner))),
-            ));
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
+            return Some(self.make_expr(span, ExprKind::Literal(Literal::Some(Box::new(inner)))));
         }
         if self.eat(&Token::Ok) {
             let start = self.last_span.clone();
             self.expect(Token::LParen).ok()?;
             let inner = self.parse_expr()?;
             self.expect(Token::RParen).ok()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
-            return Some(self.make_expr(
-                span,
-                ExprKind::Literal(Literal::Ok(Box::new(inner))),
-            ));
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
+            return Some(self.make_expr(span, ExprKind::Literal(Literal::Ok(Box::new(inner)))));
         }
         if self.eat(&Token::Err) {
             let start = self.last_span.clone();
             self.expect(Token::LParen).ok()?;
             let inner = self.parse_expr()?;
             self.expect(Token::RParen).ok()?;
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
-            return Some(self.make_expr(
-                span,
-                ExprKind::Literal(Literal::Err(Box::new(inner))),
-            ));
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
+            return Some(self.make_expr(span, ExprKind::Literal(Literal::Err(Box::new(inner)))));
         }
 
         if let Some(Token::NativeIdent(ref name)) = self.peek() {
@@ -2069,7 +2144,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(span, ExprKind::NativeCall(name, args)));
         }
 
@@ -2084,7 +2162,10 @@ impl Parser {
             } else {
                 None
             };
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(
                 span,
                 ExprKind::VariantLiteral {
@@ -2110,7 +2191,10 @@ impl Parser {
                         break;
                     }
                 }
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_expr(span, ExprKind::ArrayLiteral(elems)));
             }
             if self.eat(&Token::FatArrow) {
@@ -2120,11 +2204,11 @@ impl Parser {
                     params.push((n, None));
                 }
                 let body = Box::new(self.parse_expr()?);
-                let span = Span { lo: start.lo, hi: body.span.hi };
-                return Some(self.make_expr(
-                    span,
-                    ExprKind::Lambda { params, body },
-                ));
+                let span = Span {
+                    lo: start.lo,
+                    hi: body.span.hi,
+                };
+                return Some(self.make_expr(span, ExprKind::Lambda { params, body }));
             }
             if self.allow_struct_literal && self.eat(&Token::LBrace) {
                 let mut fields = Vec::new();
@@ -2141,11 +2225,11 @@ impl Parser {
                         break;
                     }
                 }
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
-                return Some(self.make_expr(
-                    span,
-                    ExprKind::StructLiteral { name, fields },
-                ));
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
+                return Some(self.make_expr(span, ExprKind::StructLiteral { name, fields }));
             }
             if self.eat(&Token::ColonColon) {
                 let variant = self.expect_ident()?;
@@ -2156,7 +2240,10 @@ impl Parser {
                 } else {
                     None
                 };
-                let span = Span { lo: start.lo, hi: self.last_span.hi };
+                let span = Span {
+                    lo: start.lo,
+                    hi: self.last_span.hi,
+                };
                 return Some(self.make_expr(
                     span,
                     ExprKind::VariantLiteral {
@@ -2166,7 +2253,10 @@ impl Parser {
                     },
                 ));
             }
-            let span = Span { lo: start.lo, hi: start.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: start.hi,
+            };
             return Some(self.make_expr(span, ExprKind::Ident(name)));
         }
 
@@ -2183,7 +2273,10 @@ impl Parser {
                     break;
                 }
             }
-            let span = Span { lo: start.lo, hi: self.last_span.hi };
+            let span = Span {
+                lo: start.lo,
+                hi: self.last_span.hi,
+            };
             return Some(self.make_expr(span, ExprKind::ListLiteral(elems)));
         }
 
@@ -2208,7 +2301,10 @@ impl Parser {
                 break;
             }
         }
-        let span = Span { lo: start.lo, hi: self.last_span.hi };
+        let span = Span {
+            lo: start.lo,
+            hi: self.last_span.hi,
+        };
         Some(self.make_expr(span, ExprKind::Template { parts }))
     }
 }

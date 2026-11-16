@@ -120,12 +120,26 @@ pub struct PropertySetter {
 pub enum StmtKind {
     Let(LetBinding),
     Var(VarBinding),
-    Assign { name: String, value: Expr },
-    AssignIndex { base: Expr, index: Expr, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+    },
+    AssignIndex {
+        base: Expr,
+        index: Expr,
+        value: Expr,
+    },
     Expr(Expr),
-    If { cond: Expr, then_b: Vec<Stmt>, else_b: Option<Vec<Stmt>> },
+    If {
+        cond: Expr,
+        then_b: Vec<Stmt>,
+        else_b: Option<Vec<Stmt>>,
+    },
     Loop(Vec<Stmt>),
-    Match { scrutinee: Expr, arms: Vec<MatchArm> },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+    },
     /// return expr;  (expr opsiyonel)
     Return(Option<Expr>),
     Break,
@@ -142,8 +156,15 @@ pub struct MatchArm {
 pub enum Pattern {
     Wildcard,
     Ident(String),
-    StructLiteral { name: String, fields: Vec<(String, Pattern)> },
-    Variant { enum_name: String, variant: String, inner: Option<Box<Pattern>> },
+    StructLiteral {
+        name: String,
+        fields: Vec<(String, Pattern)>,
+    },
+    Variant {
+        enum_name: String,
+        variant: String,
+        inner: Option<Box<Pattern>>,
+    },
     Literal(Literal),
 }
 
@@ -167,22 +188,57 @@ pub enum ExprKind {
     Literal(Literal),
     Ident(String),
     NativeCall(String, Vec<Expr>),
-    Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    Unary { op: UnaryOp, inner: Box<Expr> },
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Binary {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        inner: Box<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
     Block(Vec<Stmt>),
-    If { cond: Box<Expr>, then_b: Vec<Stmt>, else_b: Option<Vec<Stmt>> },
-    Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
-    Lambda { params: Vec<(String, Option<Type>)>, body: Box<Expr> },
-    StructLiteral { name: String, fields: Vec<(String, Expr)> },
-    VariantLiteral { enum_name: String, variant: String, data: Option<Box<Expr>> },
-    FieldAccess { base: Box<Expr>, field: String },
-    Index { base: Box<Expr>, index: Box<Expr> },
+    If {
+        cond: Box<Expr>,
+        then_b: Vec<Stmt>,
+        else_b: Option<Vec<Stmt>>,
+    },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+    Lambda {
+        params: Vec<(String, Option<Type>)>,
+        body: Box<Expr>,
+    },
+    StructLiteral {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    VariantLiteral {
+        enum_name: String,
+        variant: String,
+        data: Option<Box<Expr>>,
+    },
+    FieldAccess {
+        base: Box<Expr>,
+        field: String,
+    },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
     ListLiteral(Vec<Expr>),
     ArrayLiteral(Vec<Expr>),
     MapLiteral(Vec<(Expr, Expr)>),
     TupleLiteral(Vec<Expr>),
-    Template { parts: Vec<TemplatePart> },
+    Template {
+        parts: Vec<TemplatePart>,
+    },
 }
 
 #[derive(Clone, Debug)]

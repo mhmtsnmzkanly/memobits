@@ -1,0 +1,22 @@
+[package]
+name = "memobits-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mb"
+path = "src/main.rs"
+
+[dependencies]
+memobits-project = { path = "../memobits-project" }
+memobits-diagnostics = { path = "../memobits-diagnostics" }
+memobits-syntax = { path = "../memobits-syntax" }
+memobits-resolve = { path = "../memobits-resolve" }
+memobits-analysis = { path = "../memobits-analysis" }
+memobits-ownership = { path = "../memobits-ownership" }
+memobits-wasm = { path = "../memobits-wasm" }
+memobits-ir = { path = "../memobits-ir" }
+memobits-runtime = { path = "../memobits-runtime" }
+
+[dev-dependencies]
+wasmparser = "0.263.0"

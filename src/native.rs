@@ -1,16 +1,16 @@
 //! native:: namespace — host fonksiyonları kaydı ve çağrı.
 
+use crate::collections::HashMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::collections::HashMap;
 
 #[cfg(feature = "std")]
 use std::io::{self, Write};
 
-use crate::value::{HeapObject, Value, EvalResult};
 #[cfg(feature = "std")]
 use crate::value::RuntimeError;
+use crate::value::{EvalResult, HeapObject, Value};
 
 #[derive(Clone)]
 pub struct NativeRegistry {
@@ -31,7 +31,9 @@ impl NativeRegistry {
     }
 
     pub fn empty() -> Self {
-        Self { fns: HashMap::new() }
+        Self {
+            fns: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: impl Into<String>, f: NativeFnType) {
@@ -52,7 +54,9 @@ fn native_print(args: &[Value]) -> EvalResult {
         print!("{}", value_to_string(a));
     }
     println!();
-    io::stdout().flush().map_err(|e| RuntimeError(e.to_string()))?;
+    io::stdout()
+        .flush()
+        .map_err(|e| RuntimeError(e.to_string()))?;
     Ok(Value::Unit)
 }
 
@@ -60,7 +64,9 @@ fn native_print(args: &[Value]) -> EvalResult {
 fn native_debug(args: &[Value]) -> EvalResult {
     dbg!(args);
     println!();
-    io::stdout().flush().map_err(|e| RuntimeError(e.to_string()))?;
+    io::stdout()
+        .flush()
+        .map_err(|e| RuntimeError(e.to_string()))?;
     Ok(Value::Unit)
 }
 
@@ -82,7 +88,11 @@ pub fn value_to_string(v: &Value) -> String {
                     .collect();
                 format!("{} {{ {} }}", type_id, fs.join(", "))
             }
-            HeapObject::Enum { type_id, variant_id, payload } => {
+            HeapObject::Enum {
+                type_id,
+                variant_id,
+                payload,
+            } => {
                 if type_id == "Option" {
                     return match (variant_id, payload.as_slice()) {
                         (0, []) => "None".to_string(),

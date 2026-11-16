@@ -1,0 +1,8 @@
+[package]
+name = "memobits-ownership"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memobits-diagnostics = { path = "../memobits-diagnostics" }
+memobits-ir = { path = "../memobits-ir" }

@@ -1,0 +1,7 @@
+[package]
+name = "memobits-diagnostics"
+version = "0.1.0"
+edition = "2021"
+description = "Shared source diagnostics for Memobits"
+
+[dependencies]

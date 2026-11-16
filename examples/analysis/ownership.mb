@@ -1,0 +1,11 @@
+// Run with `mb ownership examples/analysis/ownership.mb`.
+fn consume_pair(first: i32, second: i32) {}
+
+fn main() -> i32 {
+    var value := 10;
+    // The first argument consumes the old value before the second restores it.
+    consume_pair(value, { value = 20; 0 });
+    let total := value + value;
+    let total := total;
+    total
+}

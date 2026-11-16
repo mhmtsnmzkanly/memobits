@@ -1,9 +1,9 @@
 //! Scope zinciri ve binding yönetimi.
 
+use crate::collections::HashMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::RefCell;
-use crate::collections::HashMap;
 
 use crate::value::{EnvRef, Value};
 
@@ -43,10 +43,8 @@ impl Environment {
     }
 
     pub fn define(&mut self, name: impl Into<String>, value: Value, mutable: bool) {
-        self.bindings.insert(
-            name.into(),
-            Binding { value, mutable },
-        );
+        self.bindings
+            .insert(name.into(), Binding { value, mutable });
     }
 
     pub fn set(&mut self, name: &str, value: Value) -> bool {

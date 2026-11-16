@@ -1,8 +1,8 @@
 //! Compile-time optimizer: const propagation, folding, and dead code pruning.
 
+use crate::collections::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::collections::HashMap;
 
 use crate::ast::*;
 
@@ -135,7 +135,11 @@ impl Optimizer {
             StmtKind::Expr(e) => {
                 self.optimize_expr(e);
             }
-            StmtKind::If { cond, then_b, else_b } => {
+            StmtKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 self.optimize_expr(cond);
                 if let Some(ConstVal::Bool(b)) = self.const_eval(cond) {
                     let body = if b {
@@ -230,7 +234,11 @@ impl Optimizer {
                 }
                 self.pop_scope();
             }
-            ExprKind::If { cond, then_b, else_b } => {
+            ExprKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 self.optimize_expr(cond);
                 if let Some(ConstVal::Bool(b)) = self.const_eval(cond) {
                     let body = if b {
@@ -377,61 +385,133 @@ impl Optimizer {
                 let r = self.const_eval(right)?;
                 match (op, l, r) {
                     (BinOp::Add, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a + b)),
-                    (BinOp::Add, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a + b)),
+                    (BinOp::Add, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a + b))
+                    }
                     (BinOp::Sub, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a - b)),
-                    (BinOp::Sub, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a - b)),
+                    (BinOp::Sub, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a - b))
+                    }
                     (BinOp::Mul, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a * b)),
-                    (BinOp::Mul, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a * b)),
+                    (BinOp::Mul, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a * b))
+                    }
                     (BinOp::Div, ConstVal::Int(a), ConstVal::Int(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::Int(a / b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::Int(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::Int(a), ConstVal::Int(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::Int(a % b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::Int(a % b))
+                        }
                     }
                     (BinOp::Div, ConstVal::UInt(a), ConstVal::UInt(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::UInt(a / b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::UInt(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::UInt(a), ConstVal::UInt(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::UInt(a % b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::UInt(a % b))
+                        }
                     }
-                    (BinOp::Add, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a + b)),
-                    (BinOp::Sub, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a - b)),
-                    (BinOp::Mul, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a * b)),
+                    (BinOp::Add, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a + b))
+                    }
+                    (BinOp::Sub, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a - b))
+                    }
+                    (BinOp::Mul, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a * b))
+                    }
                     (BinOp::Div, ConstVal::Float(a), ConstVal::Float(b)) => {
-                        if b == 0.0 { None } else { Some(ConstVal::Float(a / b)) }
+                        if b == 0.0 {
+                            None
+                        } else {
+                            Some(ConstVal::Float(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::Float(a), ConstVal::Float(b)) => {
-                        if b == 0.0 { None } else { Some(ConstVal::Float(a % b)) }
+                        if b == 0.0 {
+                            None
+                        } else {
+                            Some(ConstVal::Float(a % b))
+                        }
                     }
                     (BinOp::Add, ConstVal::Str(a), ConstVal::Str(b)) => {
                         Some(ConstVal::Str(format!("{}{}", a, b)))
                     }
-                    (BinOp::And, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a && b)),
-                    (BinOp::Or, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a || b)),
+                    (BinOp::And, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a && b))
+                    }
+                    (BinOp::Or, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a || b))
+                    }
                     (BinOp::Eq, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Char(a), ConstVal::Char(b)) => Some(ConstVal::Bool(a == b)),
+                    (BinOp::Eq, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Char(a), ConstVal::Char(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
                     (BinOp::Eq, ConstVal::Str(a), ConstVal::Str(b)) => Some(ConstVal::Bool(a == b)),
                     (BinOp::Ne, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Char(a), ConstVal::Char(b)) => Some(ConstVal::Bool(a != b)),
+                    (BinOp::Ne, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Char(a), ConstVal::Char(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
                     (BinOp::Ne, ConstVal::Str(a), ConstVal::Str(b)) => Some(ConstVal::Bool(a != b)),
                     (BinOp::Lt, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a < b)),
-                    (BinOp::Lt, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a < b)),
+                    (BinOp::Lt, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a < b))
+                    }
                     (BinOp::Le, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a <= b)),
-                    (BinOp::Le, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a <= b)),
+                    (BinOp::Le, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a <= b))
+                    }
                     (BinOp::Gt, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a > b)),
-                    (BinOp::Gt, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a > b)),
+                    (BinOp::Gt, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a > b))
+                    }
                     (BinOp::Ge, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a >= b)),
-                    (BinOp::Ge, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a >= b)),
-                    (BinOp::Lt, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a < b)),
-                    (BinOp::Le, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a <= b)),
-                    (BinOp::Gt, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a > b)),
-                    (BinOp::Ge, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a >= b)),
+                    (BinOp::Ge, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a >= b))
+                    }
+                    (BinOp::Lt, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a < b))
+                    }
+                    (BinOp::Le, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a <= b))
+                    }
+                    (BinOp::Gt, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a > b))
+                    }
+                    (BinOp::Ge, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a >= b))
+                    }
                     _ => None,
                 }
             }
@@ -469,31 +549,78 @@ fn pattern_matches_const(p: &Pattern, cv: &ConstVal) -> bool {
 
 fn const_to_expr(cv: ConstVal, span: Span) -> Expr {
     match cv {
-        ConstVal::Int(i) => Expr { node: ExprKind::Literal(Literal::Int(i)), span },
-        ConstVal::UInt(u) => Expr { node: ExprKind::Literal(Literal::UInt(u)), span },
-        ConstVal::Float(f) => Expr { node: ExprKind::Literal(Literal::Float(f)), span },
-        ConstVal::Bool(b) => Expr { node: ExprKind::Literal(Literal::Bool(b)), span },
-        ConstVal::Char(c) => Expr { node: ExprKind::Literal(Literal::Char(c)), span },
-        ConstVal::Str(s) => Expr { node: ExprKind::Literal(Literal::String(s)), span },
-        ConstVal::Unit => Expr { node: ExprKind::Literal(Literal::Unit), span },
+        ConstVal::Int(i) => Expr {
+            node: ExprKind::Literal(Literal::Int(i)),
+            span,
+        },
+        ConstVal::UInt(u) => Expr {
+            node: ExprKind::Literal(Literal::UInt(u)),
+            span,
+        },
+        ConstVal::Float(f) => Expr {
+            node: ExprKind::Literal(Literal::Float(f)),
+            span,
+        },
+        ConstVal::Bool(b) => Expr {
+            node: ExprKind::Literal(Literal::Bool(b)),
+            span,
+        },
+        ConstVal::Char(c) => Expr {
+            node: ExprKind::Literal(Literal::Char(c)),
+            span,
+        },
+        ConstVal::Str(s) => Expr {
+            node: ExprKind::Literal(Literal::String(s)),
+            span,
+        },
+        ConstVal::Unit => Expr {
+            node: ExprKind::Literal(Literal::Unit),
+            span,
+        },
         ConstVal::Tuple(items) => {
-            let elems = items.into_iter().map(|v| const_to_expr(v, span.clone())).collect();
-            Expr { node: ExprKind::TupleLiteral(elems), span }
+            let elems = items
+                .into_iter()
+                .map(|v| const_to_expr(v, span.clone()))
+                .collect();
+            Expr {
+                node: ExprKind::TupleLiteral(elems),
+                span,
+            }
         }
         ConstVal::List(items) => {
-            let elems = items.into_iter().map(|v| const_to_expr(v, span.clone())).collect();
-            Expr { node: ExprKind::ListLiteral(elems), span }
+            let elems = items
+                .into_iter()
+                .map(|v| const_to_expr(v, span.clone()))
+                .collect();
+            Expr {
+                node: ExprKind::ListLiteral(elems),
+                span,
+            }
         }
         ConstVal::Array(items) => {
-            let elems = items.into_iter().map(|v| const_to_expr(v, span.clone())).collect();
-            Expr { node: ExprKind::ArrayLiteral(elems), span }
+            let elems = items
+                .into_iter()
+                .map(|v| const_to_expr(v, span.clone()))
+                .collect();
+            Expr {
+                node: ExprKind::ArrayLiteral(elems),
+                span,
+            }
         }
         ConstVal::Map(items) => {
             let pairs = items
                 .into_iter()
-                .map(|(k, v)| (const_to_expr(k, span.clone()), const_to_expr(v, span.clone())))
+                .map(|(k, v)| {
+                    (
+                        const_to_expr(k, span.clone()),
+                        const_to_expr(v, span.clone()),
+                    )
+                })
                 .collect();
-            Expr { node: ExprKind::MapLiteral(pairs), span }
+            Expr {
+                node: ExprKind::MapLiteral(pairs),
+                span,
+            }
         }
     }
 }

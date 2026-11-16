@@ -1,0 +1,10 @@
+[package]
+name = "memobits-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmi = "2.0.0"
+
+[dev-dependencies]
+wasm-encoder = "0.263.0"

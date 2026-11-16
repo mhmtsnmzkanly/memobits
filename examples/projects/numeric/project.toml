@@ -1,0 +1,7 @@
+[package]
+name = "numeric-demo"
+version = "0.1.0"
+entry = "main::main"
+
+[export]
+add = "math::add"

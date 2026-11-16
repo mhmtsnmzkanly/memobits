@@ -4,18 +4,18 @@
 //!   cargo run -- <dosya.mb>
 //!   cargo run --              # REPL (tek satır)
 
-use std::env;
-use std::fs;
-use std::time::{Duration, Instant};
-use sysinfo::{System, Pid};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::Editor;
+use std::env;
+use std::fs;
+use std::time::{Duration, Instant};
+use sysinfo::{Pid, System};
 
 use std::path::Path;
 
-use memobits::{Interpreter, NativeRegistry, TypeChecker, load_with_modules};
 use memobits::optimizer::optimize_program;
+use memobits::{load_with_modules, Interpreter, NativeRegistry, TypeChecker};
 
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -84,7 +84,12 @@ fn main() {
     }
 }
 
-fn run_with_interp(interp: &mut Interpreter, src: &str, entry_path: Option<&Path>, performance: bool) {
+fn run_with_interp(
+    interp: &mut Interpreter,
+    src: &str,
+    entry_path: Option<&Path>,
+    performance: bool,
+) {
     let perf_start = Instant::now();
     let mem_start = rss_kb();
 

@@ -1,0 +1,16 @@
+[package]
+name = "memobits-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memobits-diagnostics = { path = "../memobits-diagnostics" }
+memobits-ir = { path = "../memobits-ir" }
+memobits-ownership = { path = "../memobits-ownership" }
+wasm-encoder = "0.263.0"
+
+[dev-dependencies]
+memobits-analysis = { path = "../memobits-analysis" }
+memobits-syntax = { path = "../memobits-syntax" }
+wasmi = "2.0.0"
+wasmparser = "0.263.0"

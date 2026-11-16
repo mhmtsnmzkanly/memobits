@@ -9,11 +9,11 @@ pub mod ast;
 pub mod collections;
 pub mod environment;
 pub mod interpreter;
+#[cfg(feature = "std")]
+pub mod module_loader;
 pub mod native;
 pub mod optimizer;
 pub mod primitive;
-#[cfg(feature = "std")]
-pub mod module_loader;
 #[cfg(feature = "std")]
 pub mod syntax_analyzer;
 pub mod type_checker;

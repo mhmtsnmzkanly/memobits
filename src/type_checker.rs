@@ -1,13 +1,13 @@
 //! Basit TypeChecker (taslak): AST uzerinde tip denetimi ve kismi cikarim.
 //! Not: Burasi bilerek "minimale" tutuldu; sonraki kisiler icin genisletilebilir.
 
-use alloc::{format, vec};
+use crate::collections::{HashMap, HashSet};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::cell::RefCell;
-use crate::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::types::{EnumVariant, Type};
@@ -75,7 +75,8 @@ impl TypeEnv {
     }
 
     fn define(&mut self, name: impl Into<String>, typ: Type, mutable: bool) {
-        self.bindings.insert(name.into(), TypeBinding { typ, mutable });
+        self.bindings
+            .insert(name.into(), TypeBinding { typ, mutable });
     }
 
     fn set(&mut self, name: &str, typ: Type) -> Result<(), TypeError> {
@@ -96,11 +97,10 @@ impl TypeEnv {
     }
 
     fn get(&self, name: &str) -> Option<TypeBinding> {
-        self.bindings.get(name).cloned().or_else(|| {
-            self.parent
-                .as_ref()
-                .and_then(|p| p.borrow().get(name))
-        })
+        self.bindings
+            .get(name)
+            .cloned()
+            .or_else(|| self.parent.as_ref().and_then(|p| p.borrow().get(name)))
     }
 }
 
@@ -203,12 +203,11 @@ impl TypeChecker {
                         || self.aliases.contains_key(&alias.name)
                         || self.properties.contains_key(&alias.name)
                     {
-                        self.errors.push(TypeError(format!(
-                            "duplicate type name `{}`",
-                            alias.name
-                        )));
+                        self.errors
+                            .push(TypeError(format!("duplicate type name `{}`", alias.name)));
                     } else {
-                        self.aliases.insert(alias.name.clone(), alias.target.clone());
+                        self.aliases
+                            .insert(alias.name.clone(), alias.target.clone());
                     }
                 }
                 Item::ModuleDecl(_) => {}
@@ -218,10 +217,8 @@ impl TypeChecker {
                         || self.enums.contains_key(&def.name)
                         || self.aliases.contains_key(&def.name)
                     {
-                        self.errors.push(TypeError(format!(
-                            "duplicate property name `{}`",
-                            def.name
-                        )));
+                        self.errors
+                            .push(TypeError(format!("duplicate property name `{}`", def.name)));
                     } else {
                         self.properties.insert(def.name.clone(), def.clone());
                     }
@@ -257,19 +254,29 @@ impl TypeChecker {
         }
     }
 
-    fn check_property_def(&mut self, env: Rc<RefCell<TypeEnv>>, def: &PropertyDef) -> Result<(), TypeError> {
+    fn check_property_def(
+        &mut self,
+        env: Rc<RefCell<TypeEnv>>,
+        def: &PropertyDef,
+    ) -> Result<(), TypeError> {
         let dt = self.check_expr(env.clone(), &def.default)?;
         let _ = self.unify(def.typ.clone(), dt)?;
 
         let getter_env = Rc::new(RefCell::new(TypeEnv::with_parent(env.clone())));
-        getter_env.borrow_mut().define(def.getter.value_param.clone(), def.typ.clone(), false);
+        getter_env
+            .borrow_mut()
+            .define(def.getter.value_param.clone(), def.typ.clone(), false);
         let gt = self.check_expr(getter_env, &def.getter.body)?;
         let _ = self.unify(def.typ.clone(), gt)?;
 
         if let Some(setter) = &def.setter {
             let setter_env = Rc::new(RefCell::new(TypeEnv::with_parent(env)));
-            setter_env.borrow_mut().define(setter.value_param.clone(), def.typ.clone(), false);
-            setter_env.borrow_mut().define(setter.input_param.clone(), def.typ.clone(), false);
+            setter_env
+                .borrow_mut()
+                .define(setter.value_param.clone(), def.typ.clone(), false);
+            setter_env
+                .borrow_mut()
+                .define(setter.input_param.clone(), def.typ.clone(), false);
             let st = self.check_expr(setter_env, &setter.body)?;
             let _ = self.unify(def.typ.clone(), st)?;
         }
@@ -290,9 +297,16 @@ impl TypeChecker {
             .map_err(|e| TypeError(format!("fn `{}`: {}", def.name, e)))
     }
 
-    fn check_block(&mut self, env: Rc<RefCell<TypeEnv>>, stmts: &[Stmt]) -> Result<Type, TypeError> {
+    fn check_block(
+        &mut self,
+        env: Rc<RefCell<TypeEnv>>,
+        stmts: &[Stmt],
+    ) -> Result<Type, TypeError> {
         let mut last = Type::Unit;
-        if let Some(pos) = stmts.iter().position(|s| matches!(s.node, StmtKind::Return(_))) {
+        if let Some(pos) = stmts
+            .iter()
+            .position(|s| matches!(s.node, StmtKind::Return(_)))
+        {
             if pos + 1 < stmts.len() {
                 let span = &stmts[pos + 1].span;
                 self.warn(span, "unreachable statement after return");
@@ -340,10 +354,7 @@ impl TypeChecker {
                 }
                 if let Some(prop) = self.properties.get(name) {
                     if prop.setter.is_none() {
-                        return Err(TypeError(format!(
-                            "property `{}` is read-only",
-                            name
-                        )));
+                        return Err(TypeError(format!("property `{}` is read-only", name)));
                     }
                     let _ = self.unify(prop.typ.clone(), rhs)?;
                     return Ok(Type::Unit);
@@ -382,20 +393,30 @@ impl TypeChecker {
                 }
             }
             StmtKind::Expr(e) => self.check_expr(env, e),
-            StmtKind::If { cond, then_b, else_b } => {
+            StmtKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 let ct = self.check_expr(env.clone(), cond)?;
                 self.expect_bool(ct)?;
                 if let Some(b) = self.const_bool(cond) {
                     if b {
                         if let Some(eb) = else_b.as_ref() {
                             if let Some(first) = eb.first() {
-                                self.warn(&first.span, "unreachable else branch (condition is always true)");
+                                self.warn(
+                                    &first.span,
+                                    "unreachable else branch (condition is always true)",
+                                );
                             }
                         }
                         let _ = self.check_block(env.clone(), then_b)?;
                         return Ok(Type::Unit);
                     } else if let Some(first) = then_b.first() {
-                        self.warn(&first.span, "unreachable then branch (condition is always false)");
+                        self.warn(
+                            &first.span,
+                            "unreachable then branch (condition is always false)",
+                        );
                     }
                     let t2 = if let Some(eb) = else_b {
                         self.check_block(env.clone(), eb)?
@@ -505,7 +526,10 @@ impl TypeChecker {
                 let callee_t = self.check_expr(env.clone(), callee)?;
                 let callee_name = type_name(&callee_t);
                 let Type::Fn(params, ret) = callee_t else {
-                    return Err(TypeError(format!("calling non-function (got {})", callee_name)));
+                    return Err(TypeError(format!(
+                        "calling non-function (got {})",
+                        callee_name
+                    )));
                 };
                 if params.len() != args.len() {
                     return Err(TypeError(format!(
@@ -521,19 +545,29 @@ impl TypeChecker {
                 Ok(*ret)
             }
             ExprKind::Block(stmts) => self.check_block(env, stmts),
-            ExprKind::If { cond, then_b, else_b } => {
+            ExprKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 let ct = self.check_expr(env.clone(), cond)?;
                 self.expect_bool(ct)?;
                 if let Some(b) = self.const_bool(cond) {
                     if b {
                         if let Some(eb) = else_b.as_ref() {
                             if let Some(first) = eb.first() {
-                                self.warn(&first.span, "unreachable else branch (condition is always true)");
+                                self.warn(
+                                    &first.span,
+                                    "unreachable else branch (condition is always true)",
+                                );
                             }
                         }
                         return self.check_block(env.clone(), then_b);
                     } else if let Some(first) = then_b.first() {
-                        self.warn(&first.span, "unreachable then branch (condition is always false)");
+                        self.warn(
+                            &first.span,
+                            "unreachable then branch (condition is always false)",
+                        );
                     }
                     if let Some(eb) = else_b {
                         return self.check_block(env.clone(), eb);
@@ -582,7 +616,10 @@ impl TypeChecker {
                     .get(name)
                     .ok_or_else(|| TypeError(format!("unknown struct `{}`", name)))?
                     .clone();
-                let Type::Struct { fields: def_fields, .. } = &st else {
+                let Type::Struct {
+                    fields: def_fields, ..
+                } = &st
+                else {
                     return Err(TypeError("internal struct type error".into()));
                 };
                 let mut remaining = HashSet::new();
@@ -608,7 +645,11 @@ impl TypeChecker {
                 }
                 Ok(st)
             }
-            ExprKind::VariantLiteral { enum_name, variant, data } => {
+            ExprKind::VariantLiteral {
+                enum_name,
+                variant,
+                data,
+            } => {
                 let et = self
                     .enums
                     .get(enum_name)
@@ -620,10 +661,12 @@ impl TypeChecker {
                 let v = variants
                     .iter()
                     .find(|v| v.name == *variant)
-                    .ok_or_else(|| TypeError(format!(
-                        "unknown variant `{}` for enum `{}`",
-                        variant, enum_name
-                    )))?;
+                    .ok_or_else(|| {
+                        TypeError(format!(
+                            "unknown variant `{}` for enum `{}`",
+                            variant, enum_name
+                        ))
+                    })?;
                 match (&v.data, data) {
                     (Some(dt), Some(expr)) => {
                         let vt = self.check_expr(env, expr)?;
@@ -656,14 +699,13 @@ impl TypeChecker {
                         .ok_or_else(|| TypeError(format!("unknown field `{}`", field))),
                     Type::Tuple(fields) => {
                         if let Ok(idx) = field.parse::<usize>() {
-                            return fields
-                                .get(idx)
-                                .map(|f| f.typ.clone())
-                                .ok_or_else(|| TypeError(format!(
+                            return fields.get(idx).map(|f| f.typ.clone()).ok_or_else(|| {
+                                TypeError(format!(
                                     "tuple index out of bounds: {} (len {})",
                                     idx,
                                     fields.len()
-                                )));
+                                ))
+                            });
                         }
                         let pos = fields
                             .iter()
@@ -690,7 +732,9 @@ impl TypeChecker {
                         if let Some(idx) = self.const_int(index) {
                             if let Some(ConstVal::List(items)) = self.const_eval(base) {
                                 if idx < 0 || (idx as usize) >= items.len() {
-                                    return Err(TypeError("list index out of bounds (const)".into()));
+                                    return Err(TypeError(
+                                        "list index out of bounds (const)".into(),
+                                    ));
                                 }
                             }
                         }
@@ -766,7 +810,10 @@ impl TypeChecker {
                 let mut fields = Vec::new();
                 for e in elems {
                     let t = self.check_expr(env.clone(), e)?;
-                    fields.push(crate::types::TupleField { typ: t, label: None });
+                    fields.push(crate::types::TupleField {
+                        typ: t,
+                        label: None,
+                    });
                 }
                 Ok(Type::Tuple(fields))
             }
@@ -802,8 +849,15 @@ impl TypeChecker {
                 let _ = self.unify(st, pt)?;
                 Ok(Vec::new())
             }
-            Pattern::StructLiteral { name, fields: pat_fields } => {
-                let Some(Type::Struct { name: sn, fields: def_fields }) = self.structs.get(name) else {
+            Pattern::StructLiteral {
+                name,
+                fields: pat_fields,
+            } => {
+                let Some(Type::Struct {
+                    name: sn,
+                    fields: def_fields,
+                }) = self.structs.get(name)
+                else {
                     return Err(TypeError(format!("unknown struct `{}`", name)));
                 };
                 let _ = self.unify(
@@ -823,7 +877,11 @@ impl TypeChecker {
                 }
                 Ok(out)
             }
-            Pattern::Variant { enum_name, variant, inner } => {
+            Pattern::Variant {
+                enum_name,
+                variant,
+                inner,
+            } => {
                 if enum_name == "Option" {
                     let inner_ty = match st {
                         Type::Option(t) => *t,
@@ -832,10 +890,8 @@ impl TypeChecker {
                             return Err(TypeError("pattern expects Option".into()));
                         }
                     };
-                    let _ = self.unify(
-                        scrutinee.clone(),
-                        Type::Option(Box::new(inner_ty.clone())),
-                    )?;
+                    let _ =
+                        self.unify(scrutinee.clone(), Type::Option(Box::new(inner_ty.clone())))?;
                     if variant == "Some" {
                         if let Some(pat) = inner {
                             return Ok(self.check_pattern_bindings(&inner_ty, pat)?);
@@ -975,11 +1031,9 @@ impl TypeChecker {
                 for arm in arms {
                     match &arm.pattern {
                         Pattern::Literal(Literal::None) => has_none = true,
-                        Pattern::Variant { enum_name, variant, .. }
-                            if enum_name == "Option" && variant == "Some" =>
-                        {
-                            has_some = true
-                        }
+                        Pattern::Variant {
+                            enum_name, variant, ..
+                        } if enum_name == "Option" && variant == "Some" => has_some = true,
                         _ => {}
                     }
                 }
@@ -994,16 +1048,12 @@ impl TypeChecker {
                 let mut has_err = false;
                 for arm in arms {
                     match &arm.pattern {
-                        Pattern::Variant { enum_name, variant, .. }
-                            if enum_name == "Result" && variant == "Ok" =>
-                        {
-                            has_ok = true
-                        }
-                        Pattern::Variant { enum_name, variant, .. }
-                            if enum_name == "Result" && variant == "Err" =>
-                        {
-                            has_err = true
-                        }
+                        Pattern::Variant {
+                            enum_name, variant, ..
+                        } if enum_name == "Result" && variant == "Ok" => has_ok = true,
+                        Pattern::Variant {
+                            enum_name, variant, ..
+                        } if enum_name == "Result" && variant == "Err" => has_err = true,
                         _ => {}
                     }
                 }
@@ -1018,9 +1068,9 @@ impl TypeChecker {
                     self.enums
                         .get(&name)
                         .and_then(|t| match t {
-                            Type::Enum { variants, .. } => Some(
-                                variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
-                            ),
+                            Type::Enum { variants, .. } => {
+                                Some(variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>())
+                            }
                             _ => None,
                         })
                         .unwrap_or_default()
@@ -1032,7 +1082,10 @@ impl TypeChecker {
                 }
                 let mut seen = HashSet::new();
                 for arm in arms {
-                    if let Pattern::Variant { enum_name, variant, .. } = &arm.pattern {
+                    if let Pattern::Variant {
+                        enum_name, variant, ..
+                    } = &arm.pattern
+                    {
                         if enum_name == &name {
                             seen.insert(variant.clone());
                         }
@@ -1181,61 +1234,133 @@ impl TypeChecker {
                 let r = self.const_eval(right)?;
                 match (op, l, r) {
                     (BinOp::Add, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a + b)),
-                    (BinOp::Add, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a + b)),
+                    (BinOp::Add, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a + b))
+                    }
                     (BinOp::Sub, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a - b)),
-                    (BinOp::Sub, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a - b)),
+                    (BinOp::Sub, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a - b))
+                    }
                     (BinOp::Mul, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Int(a * b)),
-                    (BinOp::Mul, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::UInt(a * b)),
+                    (BinOp::Mul, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::UInt(a * b))
+                    }
                     (BinOp::Div, ConstVal::Int(a), ConstVal::Int(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::Int(a / b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::Int(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::Int(a), ConstVal::Int(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::Int(a % b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::Int(a % b))
+                        }
                     }
                     (BinOp::Div, ConstVal::UInt(a), ConstVal::UInt(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::UInt(a / b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::UInt(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::UInt(a), ConstVal::UInt(b)) => {
-                        if b == 0 { None } else { Some(ConstVal::UInt(a % b)) }
+                        if b == 0 {
+                            None
+                        } else {
+                            Some(ConstVal::UInt(a % b))
+                        }
                     }
-                    (BinOp::Add, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a + b)),
-                    (BinOp::Sub, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a - b)),
-                    (BinOp::Mul, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Float(a * b)),
+                    (BinOp::Add, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a + b))
+                    }
+                    (BinOp::Sub, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a - b))
+                    }
+                    (BinOp::Mul, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Float(a * b))
+                    }
                     (BinOp::Div, ConstVal::Float(a), ConstVal::Float(b)) => {
-                        if b == 0.0 { None } else { Some(ConstVal::Float(a / b)) }
+                        if b == 0.0 {
+                            None
+                        } else {
+                            Some(ConstVal::Float(a / b))
+                        }
                     }
                     (BinOp::Rem, ConstVal::Float(a), ConstVal::Float(b)) => {
-                        if b == 0.0 { None } else { Some(ConstVal::Float(a % b)) }
+                        if b == 0.0 {
+                            None
+                        } else {
+                            Some(ConstVal::Float(a % b))
+                        }
                     }
                     (BinOp::Add, ConstVal::Str(a), ConstVal::Str(b)) => {
                         Some(ConstVal::Str(format!("{}{}", a, b)))
                     }
-                    (BinOp::And, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a && b)),
-                    (BinOp::Or, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a || b)),
+                    (BinOp::And, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a && b))
+                    }
+                    (BinOp::Or, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a || b))
+                    }
                     (BinOp::Eq, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a == b)),
-                    (BinOp::Eq, ConstVal::Char(a), ConstVal::Char(b)) => Some(ConstVal::Bool(a == b)),
+                    (BinOp::Eq, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
+                    (BinOp::Eq, ConstVal::Char(a), ConstVal::Char(b)) => {
+                        Some(ConstVal::Bool(a == b))
+                    }
                     (BinOp::Eq, ConstVal::Str(a), ConstVal::Str(b)) => Some(ConstVal::Bool(a == b)),
                     (BinOp::Ne, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Bool(a), ConstVal::Bool(b)) => Some(ConstVal::Bool(a != b)),
-                    (BinOp::Ne, ConstVal::Char(a), ConstVal::Char(b)) => Some(ConstVal::Bool(a != b)),
+                    (BinOp::Ne, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Bool(a), ConstVal::Bool(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
+                    (BinOp::Ne, ConstVal::Char(a), ConstVal::Char(b)) => {
+                        Some(ConstVal::Bool(a != b))
+                    }
                     (BinOp::Ne, ConstVal::Str(a), ConstVal::Str(b)) => Some(ConstVal::Bool(a != b)),
                     (BinOp::Lt, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a < b)),
-                    (BinOp::Lt, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a < b)),
+                    (BinOp::Lt, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a < b))
+                    }
                     (BinOp::Le, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a <= b)),
-                    (BinOp::Le, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a <= b)),
+                    (BinOp::Le, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a <= b))
+                    }
                     (BinOp::Gt, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a > b)),
-                    (BinOp::Gt, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a > b)),
+                    (BinOp::Gt, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a > b))
+                    }
                     (BinOp::Ge, ConstVal::Int(a), ConstVal::Int(b)) => Some(ConstVal::Bool(a >= b)),
-                    (BinOp::Ge, ConstVal::UInt(a), ConstVal::UInt(b)) => Some(ConstVal::Bool(a >= b)),
-                    (BinOp::Lt, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a < b)),
-                    (BinOp::Le, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a <= b)),
-                    (BinOp::Gt, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a > b)),
-                    (BinOp::Ge, ConstVal::Float(a), ConstVal::Float(b)) => Some(ConstVal::Bool(a >= b)),
+                    (BinOp::Ge, ConstVal::UInt(a), ConstVal::UInt(b)) => {
+                        Some(ConstVal::Bool(a >= b))
+                    }
+                    (BinOp::Lt, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a < b))
+                    }
+                    (BinOp::Le, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a <= b))
+                    }
+                    (BinOp::Gt, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a > b))
+                    }
+                    (BinOp::Ge, ConstVal::Float(a), ConstVal::Float(b)) => {
+                        Some(ConstVal::Bool(a >= b))
+                    }
                     _ => None,
                 }
             }
@@ -1244,17 +1369,18 @@ impl TypeChecker {
     }
 
     fn warn(&mut self, span: &Span, msg: &str) {
-        let pos = self
-            .source
-            .as_ref()
-            .map(|src| line_col(src, span.lo));
+        let pos = self.source.as_ref().map(|src| line_col(src, span.lo));
         self.warnings.push(TypeWarning {
             message: msg.to_string(),
             pos,
         });
     }
 
-    fn find_const_match_arm<'a>(&self, arms: &'a [MatchArm], cv: &ConstVal) -> Option<&'a MatchArm> {
+    fn find_const_match_arm<'a>(
+        &self,
+        arms: &'a [MatchArm],
+        cv: &ConstVal,
+    ) -> Option<&'a MatchArm> {
         for arm in arms {
             if self.pattern_matches_const(&arm.pattern, cv) {
                 return Some(arm);
@@ -1348,11 +1474,29 @@ impl TypeChecker {
             (Type::Tuple(_), _) | (_, Type::Tuple(_)) => {
                 Err(TypeError("tuple type mismatch".into()))
             }
-            (Type::Struct { name: a, fields: fa }, Type::Struct { name: b, fields: fb }) if a == b => {
+            (
+                Type::Struct {
+                    name: a,
+                    fields: fa,
+                },
+                Type::Struct {
+                    name: b,
+                    fields: fb,
+                },
+            ) if a == b => {
                 let fields = if fa.is_empty() { fb } else { fa };
                 Ok(Type::Struct { name: a, fields })
             }
-            (Type::Enum { name: a, variants: va }, Type::Enum { name: b, variants: vb }) if a == b => {
+            (
+                Type::Enum {
+                    name: a,
+                    variants: va,
+                },
+                Type::Enum {
+                    name: b,
+                    variants: vb,
+                },
+            ) if a == b => {
                 let variants = if va.is_empty() { vb } else { va };
                 Ok(Type::Enum { name: a, variants })
             }
@@ -1369,10 +1513,7 @@ impl TypeChecker {
             Type::Struct { name, fields } => {
                 if let Some(alias) = self.aliases.get(&name) {
                     if stack.contains(&name) {
-                        return Err(TypeError(format!(
-                            "type alias cycle detected: {}",
-                            name
-                        )));
+                        return Err(TypeError(format!("type alias cycle detected: {}", name)));
                     }
                     stack.push(name);
                     let resolved = self.resolve_type_inner(alias.clone(), stack)?;
@@ -1382,13 +1523,20 @@ impl TypeChecker {
                     Ok(Type::Struct { name, fields })
                 }
             }
-            Type::Option(inner) => Ok(Type::Option(Box::new(self.resolve_type_inner(*inner, stack)?))),
+            Type::Option(inner) => Ok(Type::Option(Box::new(
+                self.resolve_type_inner(*inner, stack)?,
+            ))),
             Type::Result(ok, err) => Ok(Type::Result(
                 Box::new(self.resolve_type_inner(*ok, stack)?),
                 Box::new(self.resolve_type_inner(*err, stack)?),
             )),
-            Type::List(inner) => Ok(Type::List(Box::new(self.resolve_type_inner(*inner, stack)?))),
-            Type::Array(inner, n) => Ok(Type::Array(Box::new(self.resolve_type_inner(*inner, stack)?), n)),
+            Type::List(inner) => Ok(Type::List(Box::new(
+                self.resolve_type_inner(*inner, stack)?,
+            ))),
+            Type::Array(inner, n) => Ok(Type::Array(
+                Box::new(self.resolve_type_inner(*inner, stack)?),
+                n,
+            )),
             Type::Map(k, v) => Ok(Type::Map(
                 Box::new(self.resolve_type_inner(*k, stack)?),
                 Box::new(self.resolve_type_inner(*v, stack)?),
@@ -1408,13 +1556,13 @@ impl TypeChecker {
                     let t = self.resolve_type_inner(f.typ, stack)?;
                     if let Some(ref label) = f.label {
                         if !seen.insert(label.clone()) {
-                            return Err(TypeError(format!(
-                                "duplicate tuple label `{}`",
-                                label
-                            )));
+                            return Err(TypeError(format!("duplicate tuple label `{}`", label)));
                         }
                     }
-                    out.push(crate::types::TupleField { typ: t, label: f.label });
+                    out.push(crate::types::TupleField {
+                        typ: t,
+                        label: f.label,
+                    });
                 }
                 Ok(Type::Tuple(out))
             }
@@ -1432,7 +1580,10 @@ impl TypeChecker {
 
     fn is_valid_map_key_type(&self, t: &Type) -> Result<bool, TypeError> {
         let t = self.resolve_type(t.clone())?;
-        Ok(matches!(t, Type::Int | Type::UInt | Type::Bool | Type::Char | Type::String | Type::Unknown))
+        Ok(matches!(
+            t,
+            Type::Int | Type::UInt | Type::Bool | Type::Char | Type::String | Type::Unknown
+        ))
     }
 
     fn primitive_call_type(&self, name: &str, args: &[Type]) -> Option<Result<Type, TypeError>> {
@@ -1460,8 +1611,14 @@ impl TypeChecker {
 
     fn prim_int(&self, name: &str, args: &[Type]) -> Result<Type, TypeError> {
         match name {
-            "to_int" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::Int) }
-            "to_uint" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::UInt) }
+            "to_int" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::Int)
+            }
+            "to_uint" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::UInt)
+            }
             "abs" | "signum" | "reverse_bits" | "swap_bytes" | "to_be" | "to_le" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::Int)
@@ -1491,35 +1648,47 @@ impl TypeChecker {
                 self.expect_type(args.get(0), Type::Int)?;
                 Ok(Type::Option(Box::new(Type::Int)))
             }
-            "saturating_add" | "saturating_sub" | "saturating_mul"
-            | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem" => {
+            "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
+            | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::Int)?;
                 Ok(Type::Int)
             }
-            "wrapping_shl" | "wrapping_shr"
-            | "overflowing_shl" | "overflowing_shr" => {
+            "wrapping_shl" | "wrapping_shr" | "overflowing_shl" | "overflowing_shr" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::UInt)?;
                 if name.starts_with("overflowing_") {
                     Ok(Type::Tuple(vec![
-                        crate::types::TupleField { typ: Type::Int, label: None },
-                        crate::types::TupleField { typ: Type::Bool, label: None },
+                        crate::types::TupleField {
+                            typ: Type::Int,
+                            label: None,
+                        },
+                        crate::types::TupleField {
+                            typ: Type::Bool,
+                            label: None,
+                        },
                     ]))
                 } else {
                     Ok(Type::Int)
                 }
             }
-            "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "overflowing_div" | "overflowing_rem" => {
+            "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "overflowing_div"
+            | "overflowing_rem" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::Int)?;
                 Ok(Type::Tuple(vec![
-                    crate::types::TupleField { typ: Type::Int, label: None },
-                    crate::types::TupleField { typ: Type::Bool, label: None },
+                    crate::types::TupleField {
+                        typ: Type::Int,
+                        label: None,
+                    },
+                    crate::types::TupleField {
+                        typ: Type::Bool,
+                        label: None,
+                    },
                 ]))
             }
-            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros"
-            | "leading_ones" | "trailing_ones" => {
+            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+            | "trailing_ones" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::UInt)
             }
@@ -1532,14 +1701,23 @@ impl TypeChecker {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::String)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for Int", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for Int",
+                name
+            ))),
         }
     }
 
     fn prim_uint(&self, name: &str, args: &[Type]) -> Result<Type, TypeError> {
         match name {
-            "to_int" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::Int) }
-            "to_uint" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::UInt) }
+            "to_int" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::Int)
+            }
+            "to_uint" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::UInt)
+            }
             "is_zero" | "is_power_of_two" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::Bool)
@@ -1569,35 +1747,47 @@ impl TypeChecker {
                 self.expect_type(args.get(0), Type::UInt)?;
                 Ok(Type::Option(Box::new(Type::UInt)))
             }
-            "saturating_add" | "saturating_sub" | "saturating_mul"
-            | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem" => {
+            "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
+            | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::UInt)?;
                 Ok(Type::UInt)
             }
-            "wrapping_shl" | "wrapping_shr"
-            | "overflowing_shl" | "overflowing_shr" => {
+            "wrapping_shl" | "wrapping_shr" | "overflowing_shl" | "overflowing_shr" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::UInt)?;
                 if name.starts_with("overflowing_") {
                     Ok(Type::Tuple(vec![
-                        crate::types::TupleField { typ: Type::UInt, label: None },
-                        crate::types::TupleField { typ: Type::Bool, label: None },
+                        crate::types::TupleField {
+                            typ: Type::UInt,
+                            label: None,
+                        },
+                        crate::types::TupleField {
+                            typ: Type::Bool,
+                            label: None,
+                        },
                     ]))
                 } else {
                     Ok(Type::UInt)
                 }
             }
-            "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "overflowing_div" | "overflowing_rem" => {
+            "overflowing_add" | "overflowing_sub" | "overflowing_mul" | "overflowing_div"
+            | "overflowing_rem" => {
                 self.expect_arity(name, args.len(), 1)?;
                 self.expect_type(args.get(0), Type::UInt)?;
                 Ok(Type::Tuple(vec![
-                    crate::types::TupleField { typ: Type::UInt, label: None },
-                    crate::types::TupleField { typ: Type::Bool, label: None },
+                    crate::types::TupleField {
+                        typ: Type::UInt,
+                        label: None,
+                    },
+                    crate::types::TupleField {
+                        typ: Type::Bool,
+                        label: None,
+                    },
                 ]))
             }
-            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros"
-            | "leading_ones" | "trailing_ones" => {
+            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+            | "trailing_ones" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::UInt)
             }
@@ -1610,23 +1800,31 @@ impl TypeChecker {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::String)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for UInt", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for UInt",
+                name
+            ))),
         }
     }
 
     fn prim_float(&self, name: &str, args: &[Type]) -> Result<Type, TypeError> {
         match name {
-            "to_int" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::Int) }
-            "to_uint" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::UInt) }
-            "abs" | "signum" | "floor" | "ceil" | "round" | "trunc" | "fract"
-            | "sqrt" | "cbrt" | "exp" | "exp2" | "ln" | "log2" | "log10"
-            | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
-            | "to_degrees" | "to_radians" => {
+            "to_int" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::Int)
+            }
+            "to_uint" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::UInt)
+            }
+            "abs" | "signum" | "floor" | "ceil" | "round" | "trunc" | "fract" | "sqrt" | "cbrt"
+            | "exp" | "exp2" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin"
+            | "acos" | "atan" | "to_degrees" | "to_radians" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::Float)
             }
-            "is_nan" | "is_infinite" | "is_finite" | "is_normal"
-            | "is_sign_positive" | "is_sign_negative" => {
+            "is_nan" | "is_infinite" | "is_finite" | "is_normal" | "is_sign_positive"
+            | "is_sign_negative" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::Bool)
             }
@@ -1650,14 +1848,23 @@ impl TypeChecker {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::String)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for Float", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for Float",
+                name
+            ))),
         }
     }
 
     fn prim_bool(&self, name: &str, args: &[Type]) -> Result<Type, TypeError> {
         match name {
-            "to_int" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::Int) }
-            "to_uint" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::UInt) }
+            "to_int" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::Int)
+            }
+            "to_uint" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::UInt)
+            }
             "not" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::Bool)
@@ -1666,14 +1873,23 @@ impl TypeChecker {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::String)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for Bool", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for Bool",
+                name
+            ))),
         }
     }
 
     fn prim_char(&self, name: &str, args: &[Type]) -> Result<Type, TypeError> {
         match name {
-            "to_int" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::Int) }
-            "to_uint" => { self.expect_arity(name, args.len(), 0)?; Ok(Type::UInt) }
+            "to_int" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::Int)
+            }
+            "to_uint" => {
+                self.expect_arity(name, args.len(), 0)?;
+                Ok(Type::UInt)
+            }
             "to_string" | "to_uppercase" | "to_lowercase" => {
                 self.expect_arity(name, args.len(), 0)?;
                 Ok(Type::String)
@@ -1688,7 +1904,10 @@ impl TypeChecker {
                 self.expect_type(args.get(0), Type::UInt)?;
                 Ok(Type::Bool)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for Char", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for Char",
+                name
+            ))),
         }
     }
 
@@ -1735,7 +1954,10 @@ impl TypeChecker {
                 self.expect_type(args.get(1), Type::UInt)?;
                 Ok(Type::String)
             }
-            _ => Err(TypeError(format!("unsupported primitive method `{}` for String", name))),
+            _ => Err(TypeError(format!(
+                "unsupported primitive method `{}` for String",
+                name
+            ))),
         }
     }
 

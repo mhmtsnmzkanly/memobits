@@ -1,17 +1,17 @@
 //! AST-walking interpreter.
 
-use alloc::{format, vec};
+use crate::collections::{HashMap, HashSet};
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::cell::RefCell;
-use crate::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::environment::Environment;
-use crate::native::{NativeRegistry, value_to_string};
+use crate::native::{value_to_string, NativeRegistry};
 use crate::types::Type;
-use crate::value::{EvalResult, FunctionId, HeapObject, RuntimeError, Value, value_type_name};
+use crate::value::{value_type_name, EvalResult, FunctionId, HeapObject, RuntimeError, Value};
 
 #[derive(Clone)]
 pub struct Interpreter {
@@ -106,7 +106,12 @@ impl Interpreter {
     ) -> FunctionId {
         let mut funcs = self.functions.borrow_mut();
         let id = funcs.len();
-        funcs.push(FunctionDef { name, params, param_types, body });
+        funcs.push(FunctionDef {
+            name,
+            params,
+            param_types,
+            body,
+        });
         id
     }
 
@@ -137,15 +142,20 @@ impl Interpreter {
             Item::FnDef(d) => {
                 let name = d.name.clone();
                 let params: Vec<String> = d.params.iter().map(|(p, _)| p.clone()).collect();
-                let param_types: Vec<Option<Type>> = d.params.iter().map(|(_, t)| Some(t.clone())).collect();
+                let param_types: Vec<Option<Type>> =
+                    d.params.iter().map(|(_, t)| Some(t.clone())).collect();
                 let body_span = Interpreter::block_span(&d.body);
                 let body_expr = Expr {
                     node: ExprKind::Block(d.body.clone()),
                     span: body_span,
                 };
-                let fn_id = self.register_function(Some(name.clone()), params, param_types, body_expr);
+                let fn_id =
+                    self.register_function(Some(name.clone()), params, param_types, body_expr);
                 let captured = self.env.borrow().snapshot();
-                let f = Value::heap(HeapObject::Closure { fn_id, env: captured });
+                let f = Value::heap(HeapObject::Closure {
+                    fn_id,
+                    env: captured,
+                });
                 self.env.borrow_mut().define(name, f, false);
                 Ok(Value::Unit)
             }
@@ -203,7 +213,10 @@ impl Interpreter {
                     if self.set_property_value(name, v)? {
                         return Ok(Flow::Next);
                     }
-                    return Err(RuntimeError(format!("cannot assign to immutable binding `{}`", name)));
+                    return Err(RuntimeError(format!(
+                        "cannot assign to immutable binding `{}`",
+                        name
+                    )));
                 }
                 Ok(Flow::Next)
             }
@@ -226,7 +239,9 @@ impl Interpreter {
                             guard[idx] = v;
                             Ok(Flow::Next)
                         }
-                        HeapObject::Array(_) => Err(RuntimeError("cannot assign to array index (arrays are immutable at runtime)".into())),
+                        HeapObject::Array(_) => Err(RuntimeError(
+                            "cannot assign to array index (arrays are immutable at runtime)".into(),
+                        )),
                         _ => Err(RuntimeError(format!(
                             "index assignment on non-list/map (got {})",
                             value_type_name(&b)
@@ -246,7 +261,9 @@ impl Interpreter {
                             guard[idx] = v;
                             Ok(Flow::Next)
                         }
-                        HeapObject::Array(_) => Err(RuntimeError("cannot assign to array index (arrays are immutable at runtime)".into())),
+                        HeapObject::Array(_) => Err(RuntimeError(
+                            "cannot assign to array index (arrays are immutable at runtime)".into(),
+                        )),
                         _ => Err(RuntimeError(format!(
                             "index assignment on non-list/map (got {})",
                             value_type_name(&b)
@@ -274,7 +291,11 @@ impl Interpreter {
                 self.eval(e)?;
                 Ok(Flow::Next)
             }
-            StmtKind::If { cond, then_b, else_b } => {
+            StmtKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 let c = self.eval(cond)?;
                 let b = match &c {
                     Value::Bool(true) => true,
@@ -296,7 +317,10 @@ impl Interpreter {
                     Ok(Flow::Return(v)) => return Ok(Flow::Return(v)),
                     Err(e) => {
                         if e.0.starts_with("exit:") {
-                            let code = e.0.strip_prefix("exit:").and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let code =
+                                e.0.strip_prefix("exit:")
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0);
                             #[cfg(feature = "std")]
                             {
                                 std::process::exit(code);
@@ -373,20 +397,27 @@ impl Interpreter {
                 _ => Ok(false),
             },
             (Pattern::Literal(Literal::None), Value::HeapRef(h)) => match h.as_ref() {
-                HeapObject::Enum { type_id, variant_id, payload } => {
-                    Ok(type_id == "Option" && *variant_id == 0 && payload.is_empty())
-                }
+                HeapObject::Enum {
+                    type_id,
+                    variant_id,
+                    payload,
+                } => Ok(type_id == "Option" && *variant_id == 0 && payload.is_empty()),
                 _ => Ok(false),
             },
             (Pattern::StructLiteral { name, fields }, Value::HeapRef(h)) => match h.as_ref() {
-                HeapObject::Struct { type_id, fields: vals } => {
+                HeapObject::Struct {
+                    type_id,
+                    fields: vals,
+                } => {
                     if name != type_id {
                         return Ok(false);
                     }
                     self.validate_struct_pattern(name, fields)?;
                     for (fname, pat) in fields {
                         let idx = self.struct_field_index(type_id, fname)?;
-                        let Some(fv) = vals.get(idx) else { return Ok(false) };
+                        let Some(fv) = vals.get(idx) else {
+                            return Ok(false);
+                        };
                         if !self.match_pattern_into(pat, fv, env.clone())? {
                             return Ok(false);
                         }
@@ -395,8 +426,19 @@ impl Interpreter {
                 }
                 _ => Ok(false),
             },
-            (Pattern::Variant { enum_name, variant, inner }, Value::HeapRef(h)) => match h.as_ref() {
-                HeapObject::Enum { type_id, variant_id, payload } if enum_name == type_id => {
+            (
+                Pattern::Variant {
+                    enum_name,
+                    variant,
+                    inner,
+                },
+                Value::HeapRef(h),
+            ) => match h.as_ref() {
+                HeapObject::Enum {
+                    type_id,
+                    variant_id,
+                    payload,
+                } if enum_name == type_id => {
                     let (vid, expects_data) = self.enum_variant_id(enum_name, variant)?;
                     if *variant_id != vid {
                         return Ok(false);
@@ -433,12 +475,21 @@ impl Interpreter {
                 }
             }
             ExprKind::NativeCall(name, args) => {
-                let f = self.native.get(name).ok_or_else(|| RuntimeError(format!("unknown native `{}`", name)))?;
-                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                let f = self
+                    .native
+                    .get(name)
+                    .ok_or_else(|| RuntimeError(format!("unknown native `{}`", name)))?;
+                let vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let r = f(&vals);
                 if let Err(ref e) = r {
                     if e.0.starts_with("exit:") {
-                        let code = e.0.strip_prefix("exit:").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let code =
+                            e.0.strip_prefix("exit:")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
                         #[cfg(feature = "std")]
                         {
                             std::process::exit(code);
@@ -451,37 +502,35 @@ impl Interpreter {
                 }
                 r
             }
-            ExprKind::Binary { op, left, right } => {
-                match op {
-                    BinOp::And => {
-                        let l = self.eval(left)?;
-                        match l {
-                            Value::Bool(false) => Ok(Value::Bool(false)),
-                            Value::Bool(true) => {
-                                let r = self.eval(right)?;
-                                self.eval_binop(*op, &l, &r)
-                            }
-                            _ => Err(RuntimeError("&& expects Bool operands".into())),
+            ExprKind::Binary { op, left, right } => match op {
+                BinOp::And => {
+                    let l = self.eval(left)?;
+                    match l {
+                        Value::Bool(false) => Ok(Value::Bool(false)),
+                        Value::Bool(true) => {
+                            let r = self.eval(right)?;
+                            self.eval_binop(*op, &l, &r)
                         }
-                    }
-                    BinOp::Or => {
-                        let l = self.eval(left)?;
-                        match l {
-                            Value::Bool(true) => Ok(Value::Bool(true)),
-                            Value::Bool(false) => {
-                                let r = self.eval(right)?;
-                                self.eval_binop(*op, &l, &r)
-                            }
-                            _ => Err(RuntimeError("|| expects Bool operands".into())),
-                        }
-                    }
-                    _ => {
-                        let l = self.eval(left)?;
-                        let r = self.eval(right)?;
-                        self.eval_binop(*op, &l, &r)
+                        _ => Err(RuntimeError("&& expects Bool operands".into())),
                     }
                 }
-            }
+                BinOp::Or => {
+                    let l = self.eval(left)?;
+                    match l {
+                        Value::Bool(true) => Ok(Value::Bool(true)),
+                        Value::Bool(false) => {
+                            let r = self.eval(right)?;
+                            self.eval_binop(*op, &l, &r)
+                        }
+                        _ => Err(RuntimeError("|| expects Bool operands".into())),
+                    }
+                }
+                _ => {
+                    let l = self.eval(left)?;
+                    let r = self.eval(right)?;
+                    self.eval_binop(*op, &l, &r)
+                }
+            },
             ExprKind::Unary { op, inner } => {
                 let v = self.eval(inner)?;
                 self.eval_unop(*op, &v)
@@ -490,22 +539,29 @@ impl Interpreter {
                 if let ExprKind::Ident(name) = &callee.node {
                     let f_opt = { self.env.borrow().get(name) };
                     if let Some(f) = f_opt {
-                        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                        let arg_vals: Vec<Value> = args
+                            .iter()
+                            .map(|a| self.eval(a))
+                            .collect::<Result<Vec<_>, _>>()?;
                         return self.call(&f, &arg_vals);
                     }
-                    let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                    let arg_vals: Vec<Value> =
+                        args.iter()
+                            .map(|a| self.eval(a))
+                            .collect::<Result<Vec<_>, _>>()?;
                     if let Some(res) = crate::primitive::call_primitive(name, &arg_vals) {
                         return res;
                     }
                     return Err(RuntimeError(format!("undefined function `{}`", name)));
                 }
                 let f = self.eval(callee)?;
-                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.call(&f, &arg_vals)
             }
-            ExprKind::Block(stmts) => {
-                self.eval_block_value(stmts)
-            }
+            ExprKind::Block(stmts) => self.eval_block_value(stmts),
             ExprKind::StructLiteral { name, fields } => {
                 let vals = self.build_struct_fields(name, fields)?;
                 Ok(Value::heap(HeapObject::Struct {
@@ -513,7 +569,11 @@ impl Interpreter {
                     fields: vals,
                 }))
             }
-            ExprKind::VariantLiteral { enum_name, variant, data } => {
+            ExprKind::VariantLiteral {
+                enum_name,
+                variant,
+                data,
+            } => {
                 let (variant_id, expects_data) = self.enum_variant_id(enum_name, variant)?;
                 match (expects_data, data) {
                     (true, Some(expr)) => {
@@ -552,27 +612,25 @@ impl Interpreter {
                         }
                         HeapObject::Tuple { labels, values } => {
                             if let Ok(idx) = field.parse::<usize>() {
-                                return values
-                                    .get(idx)
-                                    .cloned()
-                                    .ok_or_else(|| RuntimeError(format!(
+                                return values.get(idx).cloned().ok_or_else(|| {
+                                    RuntimeError(format!(
                                         "tuple index out of bounds: {} (len {})",
                                         idx,
                                         values.len()
-                                    )));
+                                    ))
+                                });
                             }
                             let pos = labels
                                 .iter()
                                 .position(|l| l.as_deref() == Some(field.as_str()));
                             if let Some(idx) = pos {
-                                values
-                                    .get(idx)
-                                    .cloned()
-                                    .ok_or_else(|| RuntimeError(format!(
+                                values.get(idx).cloned().ok_or_else(|| {
+                                    RuntimeError(format!(
                                         "tuple index out of bounds: {} (len {})",
                                         idx,
                                         values.len()
-                                    )))
+                                    ))
+                                })
                             } else {
                                 Err(RuntimeError(format!("unknown tuple label `{}`", field)))
                             }
@@ -589,11 +647,17 @@ impl Interpreter {
                 }
             }
             ExprKind::ListLiteral(elems) => {
-                let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
+                let v: Vec<Value> = elems
+                    .iter()
+                    .map(|e| self.eval(e))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::heap(HeapObject::List(RefCell::new(v))))
             }
             ExprKind::ArrayLiteral(elems) => {
-                let v: Vec<Value> = elems.iter().map(|e| self.eval(e)).collect::<Result<Vec<_>, _>>()?;
+                let v: Vec<Value> = elems
+                    .iter()
+                    .map(|e| self.eval(e))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::heap(HeapObject::Array(v)))
             }
             ExprKind::Template { parts } => {
@@ -606,8 +670,9 @@ impl Interpreter {
                             let v = if let Some(v) = env_val {
                                 v
                             } else {
-                                self.get_property_value(id)
-                                    .map_err(|_| RuntimeError(format!("undefined `{}` in template", id)))?
+                                self.get_property_value(id).map_err(|_| {
+                                    RuntimeError(format!("undefined `{}` in template", id))
+                                })?
                             };
                             s.push_str(&crate::native::value_to_string(&v));
                         }
@@ -623,16 +688,23 @@ impl Interpreter {
                         HeapObject::List(vec) => {
                             let idx = *idx as usize;
                             let guard = vec.borrow();
-                            guard
-                                .get(idx)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError(format!("list index out of bounds: {} (len {})", idx, guard.len())))
+                            guard.get(idx).cloned().ok_or_else(|| {
+                                RuntimeError(format!(
+                                    "list index out of bounds: {} (len {})",
+                                    idx,
+                                    guard.len()
+                                ))
+                            })
                         }
                         HeapObject::Array(arr) => {
                             let idx = *idx as usize;
-                            arr.get(idx)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError(format!("array index out of bounds: {} (len {})", idx, arr.len())))
+                            arr.get(idx).cloned().ok_or_else(|| {
+                                RuntimeError(format!(
+                                    "array index out of bounds: {} (len {})",
+                                    idx,
+                                    arr.len()
+                                ))
+                            })
                         }
                         _ => Err(RuntimeError(format!(
                             "index on non-list/array/map (got {})",
@@ -643,16 +715,23 @@ impl Interpreter {
                         HeapObject::List(vec) => {
                             let idx = *idx as usize;
                             let guard = vec.borrow();
-                            guard
-                                .get(idx)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError(format!("list index out of bounds: {} (len {})", idx, guard.len())))
+                            guard.get(idx).cloned().ok_or_else(|| {
+                                RuntimeError(format!(
+                                    "list index out of bounds: {} (len {})",
+                                    idx,
+                                    guard.len()
+                                ))
+                            })
                         }
                         HeapObject::Array(arr) => {
                             let idx = *idx as usize;
-                            arr.get(idx)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError(format!("array index out of bounds: {} (len {})", idx, arr.len())))
+                            arr.get(idx).cloned().ok_or_else(|| {
+                                RuntimeError(format!(
+                                    "array index out of bounds: {} (len {})",
+                                    idx,
+                                    arr.len()
+                                ))
+                            })
                         }
                         _ => Err(RuntimeError(format!(
                             "index on non-list/array/map (got {})",
@@ -662,13 +741,12 @@ impl Interpreter {
                     (Value::HeapRef(h), key_val) => match h.as_ref() {
                         HeapObject::Map(map) => {
                             self.ensure_map_key(key_val)?;
-                            map.borrow()
-                                .get(key_val)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError(format!(
+                            map.borrow().get(key_val).cloned().ok_or_else(|| {
+                                RuntimeError(format!(
                                     "map key not found: {}",
                                     value_to_string(key_val)
-                                )))
+                                ))
+                            })
                         }
                         _ => Err(RuntimeError(format!(
                             "index on non-list/array/map (got {})",
@@ -683,10 +761,14 @@ impl Interpreter {
             }
             ExprKind::Lambda { params, body } => {
                 let ps: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
-                let param_types: Vec<Option<Type>> = params.iter().map(|(_, t)| t.clone()).collect();
+                let param_types: Vec<Option<Type>> =
+                    params.iter().map(|(_, t)| t.clone()).collect();
                 let fn_id = self.register_function(None, ps, param_types, body.as_ref().clone());
                 let captured = self.env.borrow().snapshot();
-                Ok(Value::heap(HeapObject::Closure { fn_id, env: captured }))
+                Ok(Value::heap(HeapObject::Closure {
+                    fn_id,
+                    env: captured,
+                }))
             }
             ExprKind::MapLiteral(pairs) => {
                 let mut m = HashMap::new();
@@ -708,7 +790,11 @@ impl Interpreter {
                     values: vals,
                 }))
             }
-            ExprKind::If { cond, then_b, else_b } => {
+            ExprKind::If {
+                cond,
+                then_b,
+                else_b,
+            } => {
                 let c = self.eval(cond)?;
                 let b = match &c {
                     Value::Bool(true) => true,
@@ -812,7 +898,11 @@ impl Interpreter {
                 .struct_defs
                 .get(name)
                 .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
-            let names = def.fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+            let names = def
+                .fields
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>();
             (names, def.fields.len())
         };
         let mut out: Vec<Option<Value>> = vec![None; field_count];
@@ -852,8 +942,7 @@ impl Interpreter {
             .struct_defs
             .get(name)
             .ok_or_else(|| RuntimeError(format!("unknown struct `{}`", name)))?;
-        let def_fields: HashSet<&str> =
-            def.fields.iter().map(|(n, _)| n.as_str()).collect();
+        let def_fields: HashSet<&str> = def.fields.iter().map(|(n, _)| n.as_str()).collect();
         for (f, _) in fields {
             if !def_fields.contains(f.as_str()) {
                 return Err(RuntimeError(format!(
@@ -953,10 +1042,12 @@ impl Interpreter {
             .iter()
             .enumerate()
             .find(|(_, v)| v.name == variant)
-            .ok_or_else(|| RuntimeError(format!(
-                "unknown variant `{}` for enum `{}`",
-                variant, enum_name
-            )))?;
+            .ok_or_else(|| {
+                RuntimeError(format!(
+                    "unknown variant `{}` for enum `{}`",
+                    variant, enum_name
+                ))
+            })?;
         Ok((idx, v.data.is_some()))
     }
 
@@ -970,7 +1061,10 @@ impl Interpreter {
                 (HeapObject::String(sa), HeapObject::String(sb)) => {
                     Ok(Value::string(format!("{}{}", sa, sb)))
                 }
-                _ => Err(RuntimeError(format!("type error: {:?} {:?} {:?}", op, l, r))),
+                _ => Err(RuntimeError(format!(
+                    "type error: {:?} {:?} {:?}",
+                    op, l, r
+                ))),
             },
             (Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (Sub, Value::UInt(a), Value::UInt(b)) => Ok(Value::UInt(a - b)),
@@ -983,37 +1077,37 @@ impl Interpreter {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::Int(a / b))
-            },
+            }
             (Div, Value::UInt(a), Value::UInt(b)) => {
                 if *b == 0 {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::UInt(a / b))
-            },
+            }
             (Div, Value::Float(a), Value::Float(b)) => {
                 if *b == 0.0 {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::Float(a / b))
-            },
+            }
             (Rem, Value::Int(a), Value::Int(b)) => {
                 if *b == 0 {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::Int(a % b))
-            },
+            }
             (Rem, Value::UInt(a), Value::UInt(b)) => {
                 if *b == 0 {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::UInt(a % b))
-            },
+            }
             (Rem, Value::Float(a), Value::Float(b)) => {
                 if *b == 0.0 {
                     return Err(RuntimeError("division by zero".into()));
                 }
                 Ok(Value::Float(a % b))
-            },
+            }
             (Eq, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::UInt(a), Value::UInt(b)) => Ok(Value::Bool(a == b)),
             (Eq, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
@@ -1045,7 +1139,10 @@ impl Interpreter {
             (Ge, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
             (And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
             (Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
-            _ => Err(RuntimeError(format!("type error: {:?} {:?} {:?}", op, l, r))),
+            _ => Err(RuntimeError(format!(
+                "type error: {:?} {:?} {:?}",
+                op, l, r
+            ))),
         }
     }
 
@@ -1102,8 +1199,14 @@ impl Interpreter {
                                     _ => match interp.run_stmt(s)? {
                                         Flow::Next => {}
                                         Flow::Return(v) => return Ok(v),
-                                        Flow::Break => return Err(RuntimeError("break outside loop".into())),
-                                        Flow::Continue => return Err(RuntimeError("continue outside loop".into())),
+                                        Flow::Break => {
+                                            return Err(RuntimeError("break outside loop".into()))
+                                        }
+                                        Flow::Continue => {
+                                            return Err(RuntimeError(
+                                                "continue outside loop".into(),
+                                            ))
+                                        }
                                     },
                                 }
                             }
@@ -1144,11 +1247,7 @@ impl Interpreter {
         Ok(true)
     }
 
-    fn eval_property_body(
-        &mut self,
-        body: &Expr,
-        params: &[(&str, Value)],
-    ) -> EvalResult {
+    fn eval_property_body(&mut self, body: &Expr, params: &[(&str, Value)]) -> EvalResult {
         let prev = self.env.clone();
         let child = Rc::new(RefCell::new(Environment::with_parent(prev.clone())));
         {
@@ -1176,7 +1275,11 @@ impl Interpreter {
             let is_last = idx + 1 == stmts.len();
             match &s.node {
                 StmtKind::Expr(e) => last = self.eval(e)?,
-                StmtKind::If { cond, then_b, else_b } if is_last => {
+                StmtKind::If {
+                    cond,
+                    then_b,
+                    else_b,
+                } if is_last => {
                     let c = self.eval(cond)?;
                     let b = match &c {
                         Value::Bool(true) => true,

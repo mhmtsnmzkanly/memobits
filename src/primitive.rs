@@ -332,7 +332,9 @@ fn call_float(name: &str, v: f64, args: &[Value]) -> EvalResult {
         "to_int" => {
             expect_args_len(name, args.len(), 0)?;
             if !v.is_finite() {
-                return Err(RuntimeError("cannot convert non-finite Float to Int".into()));
+                return Err(RuntimeError(
+                    "cannot convert non-finite Float to Int".into(),
+                ));
             }
             let t = v.trunc();
             if t < i64::MIN as f64 || t > i64::MAX as f64 {
@@ -343,7 +345,9 @@ fn call_float(name: &str, v: f64, args: &[Value]) -> EvalResult {
         "to_uint" => {
             expect_args_len(name, args.len(), 0)?;
             if !v.is_finite() {
-                return Err(RuntimeError("cannot convert non-finite Float to UInt".into()));
+                return Err(RuntimeError(
+                    "cannot convert non-finite Float to UInt".into(),
+                ));
             }
             let t = v.trunc();
             if t < 0.0 || t > u64::MAX as f64 {
@@ -351,21 +355,66 @@ fn call_float(name: &str, v: f64, args: &[Value]) -> EvalResult {
             }
             Ok(Value::UInt(t as u64))
         }
-        "abs" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.abs())) }
-        "signum" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.signum())) }
-        "is_nan" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_nan())) }
-        "is_infinite" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_infinite())) }
-        "is_finite" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_finite())) }
-        "is_normal" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_normal())) }
-        "is_sign_positive" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_sign_positive())) }
-        "is_sign_negative" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_sign_negative())) }
-        "floor" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.floor())) }
-        "ceil" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.ceil())) }
-        "round" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.round())) }
-        "trunc" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.trunc())) }
-        "fract" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.fract())) }
-        "sqrt" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.sqrt())) }
-        "cbrt" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.cbrt())) }
+        "abs" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.abs()))
+        }
+        "signum" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.signum()))
+        }
+        "is_nan" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_nan()))
+        }
+        "is_infinite" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_infinite()))
+        }
+        "is_finite" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_finite()))
+        }
+        "is_normal" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_normal()))
+        }
+        "is_sign_positive" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_sign_positive()))
+        }
+        "is_sign_negative" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_sign_negative()))
+        }
+        "floor" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.floor()))
+        }
+        "ceil" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.ceil()))
+        }
+        "round" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.round()))
+        }
+        "trunc" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.trunc()))
+        }
+        "fract" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.fract()))
+        }
+        "sqrt" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.sqrt()))
+        }
+        "cbrt" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.cbrt()))
+        }
         "powf" => {
             expect_args_len(name, args.len(), 1)?;
             let e = as_float(&args[0]).ok_or_else(|| RuntimeError("expected Float".into()))?;
@@ -376,22 +425,55 @@ fn call_float(name: &str, v: f64, args: &[Value]) -> EvalResult {
             let e = as_int(&args[0]).ok_or_else(|| RuntimeError("expected Int".into()))?;
             Ok(Value::Float(v.powi(e as i32)))
         }
-        "exp" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.exp())) }
-        "exp2" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.exp2())) }
-        "ln" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.ln())) }
+        "exp" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.exp()))
+        }
+        "exp2" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.exp2()))
+        }
+        "ln" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.ln()))
+        }
         "log" => {
             expect_args_len(name, args.len(), 1)?;
             let base = as_float(&args[0]).ok_or_else(|| RuntimeError("expected Float".into()))?;
             Ok(Value::Float(v.log(base)))
         }
-        "log2" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.log2())) }
-        "log10" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.log10())) }
-        "sin" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.sin())) }
-        "cos" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.cos())) }
-        "tan" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.tan())) }
-        "asin" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.asin())) }
-        "acos" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.acos())) }
-        "atan" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.atan())) }
+        "log2" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.log2()))
+        }
+        "log10" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.log10()))
+        }
+        "sin" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.sin()))
+        }
+        "cos" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.cos()))
+        }
+        "tan" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.tan()))
+        }
+        "asin" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.asin()))
+        }
+        "acos" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.acos()))
+        }
+        "atan" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.atan()))
+        }
         "atan2" => {
             expect_args_len(name, args.len(), 1)?;
             let o = as_float(&args[0]).ok_or_else(|| RuntimeError("expected Float".into()))?;
@@ -413,34 +495,82 @@ fn call_float(name: &str, v: f64, args: &[Value]) -> EvalResult {
             let hi = as_float(&args[1]).ok_or_else(|| RuntimeError("expected Float".into()))?;
             Ok(Value::Float(v.clamp(lo, hi)))
         }
-        "to_degrees" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.to_degrees())) }
-        "to_radians" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Float(v.to_radians())) }
-        "to_string" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(v.to_string())) }
+        "to_degrees" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.to_degrees()))
+        }
+        "to_radians" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Float(v.to_radians()))
+        }
+        "to_string" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(v.to_string()))
+        }
         _ => unsupported(name, "Float"),
     }
 }
 
 fn call_bool(name: &str, v: bool, args: &[Value]) -> EvalResult {
     match name {
-        "to_int" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Int(if v { 1 } else { 0 })) }
-        "to_uint" => { expect_args_len(name, args.len(), 0)?; Ok(Value::UInt(if v { 1 } else { 0 })) }
-        "not" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(!v)) }
-        "to_string" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(v.to_string())) }
+        "to_int" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Int(if v { 1 } else { 0 }))
+        }
+        "to_uint" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::UInt(if v { 1 } else { 0 }))
+        }
+        "not" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(!v))
+        }
+        "to_string" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(v.to_string()))
+        }
         _ => unsupported(name, "Bool"),
     }
 }
 
 fn call_char(name: &str, v: char, args: &[Value]) -> EvalResult {
     match name {
-        "to_int" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Int(v as u32 as i64)) }
-        "to_uint" => { expect_args_len(name, args.len(), 0)?; Ok(Value::UInt(v as u32 as u64)) }
-        "to_string" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(v.to_string())) }
-        "is_alphabetic" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_alphabetic())) }
-        "is_numeric" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_numeric())) }
-        "is_alphanumeric" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_alphanumeric())) }
-        "is_whitespace" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_whitespace())) }
-        "is_uppercase" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_uppercase())) }
-        "is_lowercase" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(v.is_lowercase())) }
+        "to_int" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Int(v as u32 as i64))
+        }
+        "to_uint" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::UInt(v as u32 as u64))
+        }
+        "to_string" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(v.to_string()))
+        }
+        "is_alphabetic" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_alphabetic()))
+        }
+        "is_numeric" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_numeric()))
+        }
+        "is_alphanumeric" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_alphanumeric()))
+        }
+        "is_whitespace" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_whitespace()))
+        }
+        "is_uppercase" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_uppercase()))
+        }
+        "is_lowercase" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(v.is_lowercase()))
+        }
         "is_digit" => {
             expect_args_len(name, args.len(), 1)?;
             let radix = as_uint(&args[0]).ok_or_else(|| RuntimeError("expected UInt".into()))?;
@@ -460,8 +590,14 @@ fn call_char(name: &str, v: char, args: &[Value]) -> EvalResult {
 
 fn call_string(name: &str, s: &str, args: &[Value]) -> EvalResult {
     match name {
-        "len" => { expect_args_len(name, args.len(), 0)?; Ok(Value::UInt(s.len() as u64)) }
-        "is_empty" => { expect_args_len(name, args.len(), 0)?; Ok(Value::Bool(s.is_empty())) }
+        "len" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::UInt(s.len() as u64))
+        }
+        "is_empty" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::Bool(s.is_empty()))
+        }
         "contains" => {
             expect_args_len(name, args.len(), 1)?;
             let sub = as_str(&args[0]).ok_or_else(|| RuntimeError("expected String".into()))?;
@@ -477,11 +613,26 @@ fn call_string(name: &str, s: &str, args: &[Value]) -> EvalResult {
             let sub = as_str(&args[0]).ok_or_else(|| RuntimeError("expected String".into()))?;
             Ok(Value::Bool(s.ends_with(sub)))
         }
-        "trim" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.trim().to_string())) }
-        "trim_start" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.trim_start().to_string())) }
-        "trim_end" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.trim_end().to_string())) }
-        "to_uppercase" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.to_uppercase())) }
-        "to_lowercase" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.to_lowercase())) }
+        "trim" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.trim().to_string()))
+        }
+        "trim_start" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.trim_start().to_string()))
+        }
+        "trim_end" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.trim_end().to_string()))
+        }
+        "to_uppercase" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.to_uppercase()))
+        }
+        "to_lowercase" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.to_lowercase()))
+        }
         "replace" => {
             expect_args_len(name, args.len(), 2)?;
             let from = as_str(&args[0]).ok_or_else(|| RuntimeError("expected String".into()))?;
@@ -492,12 +643,16 @@ fn call_string(name: &str, s: &str, args: &[Value]) -> EvalResult {
             expect_args_len(name, args.len(), 1)?;
             let sep = as_str(&args[0]).ok_or_else(|| RuntimeError("expected String".into()))?;
             let parts: Vec<Value> = s.split(sep).map(|p| Value::string(p.to_string())).collect();
-            Ok(Value::heap(HeapObject::List(core::cell::RefCell::new(parts))))
+            Ok(Value::heap(HeapObject::List(core::cell::RefCell::new(
+                parts,
+            ))))
         }
         "chars" => {
             expect_args_len(name, args.len(), 0)?;
             let parts: Vec<Value> = s.chars().map(Value::Char).collect();
-            Ok(Value::heap(HeapObject::List(core::cell::RefCell::new(parts))))
+            Ok(Value::heap(HeapObject::List(core::cell::RefCell::new(
+                parts,
+            ))))
         }
         "repeat" => {
             expect_args_len(name, args.len(), 1)?;
@@ -506,8 +661,10 @@ fn call_string(name: &str, s: &str, args: &[Value]) -> EvalResult {
         }
         "slice" => {
             expect_args_len(name, args.len(), 2)?;
-            let start = as_uint(&args[0]).ok_or_else(|| RuntimeError("expected UInt".into()))? as usize;
-            let len = as_uint(&args[1]).ok_or_else(|| RuntimeError("expected UInt".into()))? as usize;
+            let start =
+                as_uint(&args[0]).ok_or_else(|| RuntimeError("expected UInt".into()))? as usize;
+            let len =
+                as_uint(&args[1]).ok_or_else(|| RuntimeError("expected UInt".into()))? as usize;
             let chars: Vec<char> = s.chars().collect();
             if start > chars.len() || start + len > chars.len() {
                 return Err(RuntimeError("string slice out of bounds".into()));
@@ -515,17 +672,15 @@ fn call_string(name: &str, s: &str, args: &[Value]) -> EvalResult {
             let out: String = chars[start..start + len].iter().collect();
             Ok(Value::string(out))
         }
-        "to_string" => { expect_args_len(name, args.len(), 0)?; Ok(Value::string(s.to_string())) }
+        "to_string" => {
+            expect_args_len(name, args.len(), 0)?;
+            Ok(Value::string(s.to_string()))
+        }
         _ => unsupported(name, "String"),
     }
 }
 
-fn checked_i64(
-    name: &str,
-    v: i64,
-    args: &[Value],
-    f: fn(i64, i64) -> Option<i64>,
-) -> EvalResult {
+fn checked_i64(name: &str, v: i64, args: &[Value], f: fn(i64, i64) -> Option<i64>) -> EvalResult {
     expect_args_len(name, args.len(), 1)?;
     let o = as_int(&args[0]).ok_or_else(|| RuntimeError("expected Int".into()))?;
     Ok(match f(v, o) {
@@ -542,12 +697,7 @@ fn checked_i64(
     })
 }
 
-fn checked_u64(
-    name: &str,
-    v: u64,
-    args: &[Value],
-    f: fn(u64, u64) -> Option<u64>,
-) -> EvalResult {
+fn checked_u64(name: &str, v: u64, args: &[Value], f: fn(u64, u64) -> Option<u64>) -> EvalResult {
     expect_args_len(name, args.len(), 1)?;
     let o = as_uint(&args[0]).ok_or_else(|| RuntimeError("expected UInt".into()))?;
     Ok(match f(v, o) {

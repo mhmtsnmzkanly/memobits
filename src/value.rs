@@ -1,12 +1,12 @@
 //! Runtime değerler (Value) ve heap nesneleri.
 
+use crate::collections::HashMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::mem;
 use core::cell::RefCell;
 use core::hash::{Hash, Hasher};
-use crate::collections::HashMap;
+use core::mem;
 
 pub type EvalResult = Result<Value, RuntimeError>;
 

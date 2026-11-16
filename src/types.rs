@@ -1,9 +1,9 @@
 //! Tip sistemi: Type enum ve yardımcılar.
 
+use crate::collections::HashMap;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
@@ -27,8 +27,14 @@ pub enum Type {
     Fn(Vec<Type>, Box<Type>),
 
     Tuple(Vec<TupleField>),
-    Struct { name: String, fields: HashMap<String, Type> },
-    Enum { name: String, variants: Vec<EnumVariant> },
+    Struct {
+        name: String,
+        fields: HashMap<String, Type>,
+    },
+    Enum {
+        name: String,
+        variants: Vec<EnumVariant>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

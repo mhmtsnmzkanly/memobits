@@ -23,7 +23,10 @@ pub struct LoadedProgram {
     pub source: String,
 }
 
-pub fn load_with_modules(entry_source: &str, entry_path: Option<&Path>) -> Result<LoadedProgram, ModuleError> {
+pub fn load_with_modules(
+    entry_source: &str,
+    entry_path: Option<&Path>,
+) -> Result<LoadedProgram, ModuleError> {
     let base_dir = match entry_path {
         Some(p) => p.parent().unwrap_or_else(|| Path::new(".")),
         None => Path::new("."),
@@ -109,8 +112,9 @@ impl ModuleLoader {
             return Ok(());
         }
 
-        let source = fs::read_to_string(&canonical)
-            .map_err(|e| ModuleError(format!("modül okunamadı: {} ({})", canonical.display(), e)))?;
+        let source = fs::read_to_string(&canonical).map_err(|e| {
+            ModuleError(format!("modül okunamadı: {} ({})", canonical.display(), e))
+        })?;
 
         let mut sa = SyntaxAnalyzer::new(&source);
         let program = sa.analyz().map_err(|errs| {
@@ -119,7 +123,11 @@ impl ModuleLoader {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            ModuleError(format!("modül syntax hatası ({}):\n{}", canonical.display(), msg))
+            ModuleError(format!(
+                "modül syntax hatası ({}):\n{}",
+                canonical.display(),
+                msg
+            ))
         })?;
 
         let (mods, program) = split_module_decls(program);
@@ -148,15 +156,15 @@ fn resolve_module_path(base_dir: &Path, decl: &ModuleDecl) -> Result<PathBuf, Mo
             return Ok(p.to_path_buf());
         }
         if has_parent_dir(p) {
-            return Err(ModuleError(
-                "göreli modül yolu parent (..) içeremez".into(),
-            ));
+            return Err(ModuleError("göreli modül yolu parent (..) içeremez".into()));
         }
         return Ok(base_dir.join(p));
     }
 
     if decl.name.contains('/') || decl.name.contains('\\') {
-        return Err(ModuleError("modül adı yalnızca bir identifier olmalıdır".into()));
+        return Err(ModuleError(
+            "modül adı yalnızca bir identifier olmalıdır".into(),
+        ));
     }
     let filename = format!("{}.mb", decl.name);
     Ok(base_dir.join(filename))
@@ -222,7 +230,11 @@ fn shift_stmt(stmt: &mut Stmt, offset: usize) {
             shift_expr(value, offset);
         }
         StmtKind::Expr(e) => shift_expr(e, offset),
-        StmtKind::If { cond, then_b, else_b } => {
+        StmtKind::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
             shift_expr(cond, offset);
             for s in then_b {
                 shift_stmt(s, offset);
@@ -286,7 +298,11 @@ fn shift_expr(expr: &mut Expr, offset: usize) {
                 shift_stmt(s, offset);
             }
         }
-        ExprKind::If { cond, then_b, else_b } => {
+        ExprKind::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
             shift_expr(cond, offset);
             for s in then_b {
                 shift_stmt(s, offset);
