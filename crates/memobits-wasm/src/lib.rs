@@ -36,9 +36,11 @@ fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
 /// are emitted, retaining their relative Program order. All source IR is
 /// validated and checked before this artifact selection.
 ///
-/// Internal direct calls support borrow/share references to non-Unit primitives.
-/// Exported signatures remain primitive-only; reference ABI is not defined.
-/// Indirect calls, reference results and non-primitive pointees are rejected.
+/// Internal direct calls support borrow/share references to non-Unit primitives
+/// and to fixed arrays of them, and owned array parameters (copied into the
+/// callee's frame). Exported signatures remain primitive-only; reference and
+/// array ABIs are not defined. Indirect calls, reference and array results and
+/// other pointees are rejected.
 /// Integer arithmetic is checked in every profile; a failed runtime check
 /// traps with Wasm `unreachable` until the host runtime maps traps to language
 /// runtime diagnostics.
@@ -76,7 +78,17 @@ pub fn compile(
     }
     for id in exports.values() {
         if let Some(function) = program.functions.get(id.0 as usize) {
-            if !function.signature.parameters.iter().all(|p| {
+            if function
+                .signature
+                .parameters
+                .iter()
+                .any(|p| matches!(p.ty, Type::Array { .. }))
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot take arrays or array references; the external array ABI is not defined",
+                    Some(function.span),
+                ));
+            } else if !function.signature.parameters.iter().all(|p| {
                 p.access == memobits_ir::Access::Owned && matches!(p.ty, Type::Primitive(_))
             }) || !matches!(function.signature.result.as_ref(), Type::Primitive(_))
             {
@@ -155,9 +167,10 @@ fn primitive_signature<'a>(
     result: &Type,
 ) -> bool {
     parameters.all(|p| match p.access {
-        memobits_ir::Access::Owned => matches!(p.ty, Type::Primitive(_)),
+        memobits_ir::Access::Owned => matches!(p.ty, Type::Primitive(_) | Type::Array { .. }),
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
             matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
+                || matches!(p.ty, Type::Array { .. })
         }
     }) && matches!(result, Type::Primitive(_))
 }
@@ -168,7 +181,11 @@ fn supported_type(ty: &Type) -> bool {
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
-        } => matches!(inner.as_ref(), Type::Primitive(kind) if *kind != Primitive::Unit),
+        } => match inner.as_ref() {
+            Type::Primitive(kind) => *kind != Primitive::Unit,
+            array @ Type::Array { .. } => supported_type(array),
+            _ => false,
+        },
         Type::Array { element, .. } => {
             matches!(element.as_ref(), Type::Primitive(kind) if *kind != Primitive::Unit)
         }
@@ -263,13 +280,18 @@ impl FrameLayout {
                         owners.insert(local.0);
                     }
                     Type::Reference { access: memobits_ir::Access::Borrow | memobits_ir::Access::Share, inner } => {
-                        let Type::Primitive(primitive) = inner.as_ref() else {
-                            return Err(error("nested or non-primitive references are not supported by frame layout".into()));
-                        };
-                        storage_layout(*primitive).map_err(error)?;
+                        match inner.as_ref() {
+                            Type::Primitive(primitive) => {
+                                storage_layout(*primitive).map_err(error)?;
+                            }
+                            Type::Array { .. } => {}
+                            _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
+                        }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
+                    // An array owner already has its cell (one per array local or value).
+                    Type::Array { .. } => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -756,6 +778,20 @@ fn compile_function(
             emit_address(body, frame.ok_or("owner cell requires frame")?, slot.offset);
             body.instruction(&WasmInstruction::LocalGet(index as u32));
             emit_store(body, slot.ty);
+            continue;
+        }
+        if let Some(cell) = layout.arrays.get(&Slot::Local(local.0)) {
+            // An owned array arrives as a pointer to caller-side storage. The
+            // callee copies it into its own cell, so mutating a `var` parameter
+            // never reaches the caller and recursion keeps separate frames.
+            let (size, _) = storage_layout(cell.element)?;
+            emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
+            body.instruction(&WasmInstruction::LocalGet(index as u32));
+            body.instruction(&WasmInstruction::I32Const((cell.len * size) as i32));
+            body.instruction(&WasmInstruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
             continue;
         }
         body.instruction(&WasmInstruction::LocalGet(index as u32));
@@ -1514,26 +1550,37 @@ fn compile_instruction(
         }
         InstructionKind::ElementAddr { base, index, .. } => {
             let output = output.ok_or("element address lacks an output")?;
-            let cell = array_cell(layout, base).ok_or("element address base is not an array")?;
-            let frame = frame.ok_or("array cell requires frame")?;
-            let (size, _) = storage_layout(cell.element)?;
+            // The base is an array owner (its operand is the cell address) or a
+            // reference to an array (its operand is the owner's address).
+            let (len, element) = match value_type(function, base)? {
+                Type::Array { element, len } => (len, element),
+                Type::Reference { inner, .. } => match *inner {
+                    Type::Array { element, len } => (len, element),
+                    _ => return Err("element address base is not an array".into()),
+                },
+                _ => return Err("element address base is not an array".into()),
+            };
+            let Type::Primitive(element) = *element else {
+                return Err("array elements must be primitive".into());
+            };
+            let (size, _) = storage_layout(element)?;
             let wide = matches!(
                 value_type(function, index)?,
                 Type::Primitive(Primitive::I64 | Primitive::U64)
             );
             // The unsigned comparison also rejects negative indices. The index
             // operand is read-only, so it is re-read for the address computation.
-            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            emit_operand(body, function, param_count, index, layout, frame)?;
             if wide {
-                body.instruction(&WasmInstruction::I64Const(i64::from(cell.len)));
+                body.instruction(&WasmInstruction::I64Const(i64::from(len)));
                 body.instruction(&WasmInstruction::I64GeU);
             } else {
-                body.instruction(&WasmInstruction::I32Const(cell.len as i32));
+                body.instruction(&WasmInstruction::I32Const(len as i32));
                 body.instruction(&WasmInstruction::I32GeU);
             }
             trap_if(body);
-            emit_address(body, frame, cell.offset);
-            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            emit_operand(body, function, param_count, base, layout, frame)?;
+            emit_operand(body, function, param_count, index, layout, frame)?;
             if wide {
                 body.instruction(&WasmInstruction::I32WrapI64);
             }
@@ -1566,6 +1613,22 @@ fn compile_instruction(
         InstructionKind::Store { reference, value } => {
             emit_operand(body, function, param_count, reference, layout, frame)?;
             emit_operand(body, function, param_count, value, layout, frame)?;
+            if let Type::Reference { inner, .. } = value_type(function, reference)? {
+                if let Type::Array { element, len } = *inner {
+                    // Whole-array store through a share reference: the value
+                    // operand is the address of an array cell of the same layout.
+                    let Type::Primitive(element) = *element else {
+                        return Err("array elements must be primitive".into());
+                    };
+                    let (size, _) = storage_layout(element)?;
+                    body.instruction(&WasmInstruction::I32Const((len * size) as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                    return Ok(());
+                }
+            }
             emit_store(body, reference_primitive(function, reference)?);
         }
         InstructionKind::Assign { target, value, .. } => {

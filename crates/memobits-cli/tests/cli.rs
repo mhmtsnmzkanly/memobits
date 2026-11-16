@@ -897,3 +897,133 @@ fn fixed_array_types_are_checked_without_enabling_execution() {
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid.mb:1:"));
 }
+
+#[test]
+fn array_parameters_run_from_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='app::main'\n",
+    );
+    let sum = "fn sum(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
+    let fill = "fn fill(a: share Array<i32, 4>, v: i32) { var i := 0; loop { if i >= 4 { break; } a[i] = v + i; i += 1; } } ";
+    // A borrow parameter called twice on the same array.
+    let out = run_both(
+        &f,
+        &format!("{sum} fn main() -> i32 {{ let a := [1, 2, 3]; sum(a.borrow()) * 10 + sum(a.borrow()) }}"),
+    );
+    assert!(out.contains("66"), "{out}");
+    // The caller observes writes made through a share parameter.
+    let out = run_both(
+        &f,
+        &format!("{fill} fn main() -> i32 {{ var a := [0; 4]; fill(a.share(), 10); a[0] + a[3] }}"),
+    );
+    assert!(out.contains("23"), "{out}");
+    // An owned parameter moves the source and the callee sees the contents.
+    let out = run_both(
+        &f,
+        "fn f(a: Array<i32, 3>) -> i32 { a[0] + a[2] } fn main() -> i32 { let a := [1, 2, 3]; f(a) + f([10, 20, 30]) }",
+    );
+    assert!(out.contains("44"), "{out}");
+    // Recursion with an array borrow parameter.
+    let out = run_both(
+        &f,
+        "fn rec(a: borrow Array<i32, 3>, n: i32) -> i32 { let m := n + 0; var l := [m + 0, m * 2, m * 3]; if m + 0 == 0 { a[0] + 0 } else { let r := rec(a, m - 1); r + l[2] } } fn main() -> i32 { let a := [100, 2, 3]; rec(a.borrow(), 3) }",
+    );
+    assert!(out.contains("118"), "{out}");
+
+    // A dynamic out-of-range index inside the callee traps in both runs.
+    f.write(
+        "src/app.mb",
+        "fn get(a: borrow Array<i32, 3>, n: i32) -> i32 { a[n] + 0 } fn main() -> i32 { let a := [1, 2, 3]; let n := 2; get(a.borrow(), n + 1) }",
+    );
+    let source = f.run(&["run"]);
+    assert_eq!(source.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&source.stderr).contains("RE007"));
+    assert!(f.run(&["build"]).status.success());
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert_eq!(artifact.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&artifact.stderr).contains("RE007"));
+
+    // Compile-time diagnostics.
+    f.write(
+        "src/app.mb",
+        "fn get(a: borrow Array<i32, 3>) -> i32 { a[3] + 0 } fn main() -> i32 { 0 }",
+    );
+    err(f.run(&["run"]), "TE008");
+    f.write(
+        "src/app.mb",
+        "fn get(a: borrow Array<i32, 3>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; get(a.borrow()) }",
+    );
+    err(f.run(&["run"]), "TE002");
+    f.write(
+        "src/app.mb",
+        "fn own(a: Array<i32, 2>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; let r := own(a); a[0] + r }",
+    );
+    err(f.run(&["run"]), "BE001");
+    f.write(
+        "src/app.mb",
+        "fn put(a: borrow Array<i32, 2>) { a[0] = 1; } fn main() -> i32 { 0 }",
+    );
+    err(f.run(&["run"]), "TE004");
+    f.write(
+        "src/app.mb",
+        "fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {} fn main() -> i32 { var a := [1, 2]; two(a.share(), a.share()); 0 }",
+    );
+    err(f.run(&["run"]), "BE005");
+}
+
+#[test]
+fn array_parameters_cross_modules_and_stay_out_of_exported_signatures() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/vec.mb",
+        "pub fn total(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t }\n\
+         pub fn scale(a: share Array<i32, 3>, k: i32) { var i := 0; loop { if i >= 3 { break; } a[i] *= k; i += 1; } }\n\
+         pub fn first(a: Array<i32, 3>) -> i32 { a[0] + 0 }\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use vec::total; use vec::scale; use vec::first;\n\
+         fn main() -> i32 { var a := [1, 2, 3]; scale(a.share(), 10); let t := total(a.borrow()); t + first(a) }\n",
+    );
+    assert!(f.run(&["analyze-project"]).status.success());
+    assert!(f.run(&["ownership-project"]).status.success());
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert!(String::from_utf8_lossy(&source.stdout).contains("70"));
+    assert!(f.run(&["build"]).status.success());
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert_eq!(source.stdout, artifact.stdout);
+
+    // Mismatched array types across a module boundary are type errors.
+    f.write(
+        "src/main.mb",
+        "use vec::total; fn main() -> i32 { let a := [1, 2]; total(a.borrow()) }",
+    );
+    err(f.run(&["run"]), "TE002");
+
+    // Arrays and array references are rejected in exported signatures.
+    f.write("src/main.mb", "fn main() -> i32 { 0 }\n");
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='main::main'\n[export]\ntotal='vec::total'\nfirst='vec::first'\n",
+    );
+    let message = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(message.contains("arrays or array references"), "{message}");
+    f.write(
+        "project.toml",
+        "[package]\nname='arrays'\nentry='main::main'\n[export]\nfirst='vec::first'\n",
+    );
+    err(f.run(&["build", "--lib"]), "LE900");
+    f.write("src/main.mb", "fn main(a: Array<i32, 2>) -> i32 { 0 }\n");
+    err(f.run(&["run"]), "LE900");
+}

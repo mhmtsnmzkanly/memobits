@@ -140,19 +140,26 @@ fn fixed_arrays_reject_incompatible_elements_lengths_and_ranges() {
 #[test]
 fn fixed_arrays_keep_ownership_and_executable_ir_gated() {
     for source in [
-        "fn f() { let a := [1]; a.borrow(); }",
-        "fn f(a: borrow Array<i32, 1>) {}",
         "fn f(x: i32) { let a := [x.borrow()]; }",
         "fn f(x: i32) { let a := [x.borrow(); 0]; }",
-        "fn take(a: Array<i32, 1>) {} fn f() { take([1]); }",
         "fn f() { [1] + [2]; }",
         "fn f() { [1] == [2]; }",
     ] {
         assert!(!check(source).is_empty(), "{source}");
     }
+    // Array parameters and array references type-check and execute.
+    for source in [
+        "fn f() { let a := [1]; a.borrow(); }",
+        "fn f(a: borrow Array<i32, 1>) {}",
+        "fn f(a: Array<i32, 2>) {}",
+        "fn take(a: Array<i32, 1>) {} fn f() { take([1]); }",
+    ] {
+        assert!(check(source).is_empty(), "{source}");
+        let parsed = parse(SourceId(9), source);
+        assert!(memobits_analysis::check_typed_module(&parsed.module).is_ok());
+    }
     for source in [
         "fn f() { let a := [[1], [2]]; }",
-        "fn f(a: Array<i32, 2>) {}",
         "fn f() -> Array<i32, 2> { [1, 2] }",
     ] {
         let parsed = parse(SourceId(9), source);

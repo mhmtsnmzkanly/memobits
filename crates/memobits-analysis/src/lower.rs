@@ -625,9 +625,7 @@ impl<'a> Builder<'a> {
         access: Access,
         span: Span,
     ) -> Option<Operand> {
-        let Some(Type::Array { element, .. }) = self.operand_type(array) else {
-            unreachable!("checked array index base")
-        };
+        let element = self.array_element(array);
         let loan = LoanId(self.next_loan);
         self.next_loan += 1;
         array.mode = access_mode(access);
@@ -646,6 +644,17 @@ impl<'a> Builder<'a> {
         )?;
         reference.mode = access_mode(access);
         Some(reference)
+    }
+    /// Element type of an array owner or of a reference to an array.
+    fn array_element(&self, array: Operand) -> Box<Type> {
+        match self.operand_type(array) {
+            Some(Type::Array { element, .. }) => element,
+            Some(Type::Reference { inner, .. }) => match *inner {
+                Type::Array { element, .. } => element,
+                _ => unreachable!("checked array index base"),
+            },
+            _ => unreachable!("checked array index base"),
+        }
     }
     fn load_element(&mut self, reference: Operand, span: Span) -> Option<Operand> {
         let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
@@ -679,9 +688,7 @@ impl<'a> Builder<'a> {
         let assigned = match previous {
             None => rhs,
             Some(previous) => {
-                let Some(Type::Array { element, .. }) = self.operand_type(array) else {
-                    unreachable!("checked array index base")
-                };
+                let element = self.array_element(array);
                 self.emit(
                     span,
                     InstructionKind::Binary {

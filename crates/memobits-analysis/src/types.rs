@@ -421,15 +421,12 @@ impl Checker {
         }
         value
     }
-    /// Types in function signatures: arrays cannot cross calls yet.
-    fn signature_type(&mut self, ty: &Type) -> Ty {
+    /// Types in function signatures. Array parameters (owned, `borrow` or
+    /// `share`) are supported; array results are not.
+    fn signature_type(&mut self, ty: &Type, is_result: bool) -> Ty {
         let checked = self.type_path(ty);
-        if self.executable && matches!(checked, Ty::Array(..)) {
-            self.error(
-                17,
-                ty.span,
-                "array parameters and results are not supported yet",
-            );
+        if is_result && self.executable && matches!(checked, Ty::Array(..)) {
+            self.error(17, ty.span, "array results are not supported yet");
         }
         checked
     }
@@ -683,18 +680,52 @@ impl Checker {
                             match &base.kind {
                                 ExprKind::Path(path) if path.len() == 1 => {
                                     if let Some(binding) = self.lookup(&path[0]).cloned() {
-                                        if matches!(binding.ty, Ty::Array(..))
-                                            && !binding.mutable
-                                            && binding.access != IrAccess::Share
-                                        {
-                                            self.error(
-                                                4,
-                                                target.span,
-                                                format!(
-                                                    "cannot assign to an element of immutable array binding '{}'; declare it with var",
-                                                    path[0]
-                                                ),
-                                            );
+                                        match &binding.ty {
+                                            Ty::Array(..)
+                                                if !binding.mutable
+                                                    && binding.access != IrAccess::Share =>
+                                            {
+                                                self.error(
+                                                    4,
+                                                    target.span,
+                                                    format!(
+                                                        "cannot assign to an element of immutable array binding '{}'; declare it with var",
+                                                        path[0]
+                                                    ),
+                                                );
+                                            }
+                                            Ty::Reference {
+                                                access: IrAccess::Borrow,
+                                                inner,
+                                                ..
+                                            } if matches!(inner.as_ref(), Ty::Array(..)) => {
+                                                self.error(
+                                                    4,
+                                                    target.span,
+                                                    format!(
+                                                        "cannot assign to an element through borrow binding '{}'",
+                                                        path[0]
+                                                    ),
+                                                );
+                                            }
+                                            Ty::Reference {
+                                                access: IrAccess::Share,
+                                                inner,
+                                                ..
+                                            } if matches!(inner.as_ref(), Ty::Array(..))
+                                                && !binding.mutable
+                                                && binding.access != IrAccess::Share =>
+                                            {
+                                                self.error(
+                                                    4,
+                                                    target.span,
+                                                    format!(
+                                                        "cannot assign to an element through immutable share binding '{}'",
+                                                        path[0]
+                                                    ),
+                                                );
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -834,6 +865,8 @@ impl Checker {
             Some(Ty::Reference { inner, .. }) => Some(inner.as_ref()),
             other => other,
         };
+        // An array owner may be borrowed or shared as a whole.
+        self.index_base = base as *const Expr as usize;
         let base_ty = self.expr(base, expected_inner);
         let (inner, origin, current_access) = match base_ty {
             Ty::Reference {
@@ -841,7 +874,7 @@ impl Checker {
                 inner,
                 origin,
             } => (inner, origin, Some(access)),
-            primitive @ Ty::Primitive(_) => {
+            primitive @ (Ty::Primitive(_) | Ty::Array(..)) => {
                 let origin = owner_binding
                     .as_ref()
                     .map_or(ReferenceOrigin::Temporary, |binding| {
@@ -855,17 +888,17 @@ impl Checker {
                 self.error(
                     17,
                     base.span,
-                    "borrow/share conversion requires a primitive owner or reference",
+                    "borrow/share conversion requires a primitive or array owner or reference",
                 );
                 return Ty::Error;
             }
         };
 
-        if !matches!(inner.as_ref(), Ty::Primitive(_)) {
+        if !matches!(inner.as_ref(), Ty::Primitive(_) | Ty::Array(..)) {
             self.error(
                 17,
                 base.span,
-                "borrow/share conversion currently supports primitive values only",
+                "borrow/share conversion currently supports primitive values and arrays only",
             );
             return Ty::Error;
         }
@@ -1026,6 +1059,14 @@ impl Checker {
                 if !integer(&index_ty) && !matches!(index_ty, Ty::Never | Ty::Error) {
                     self.error(7, index.span, "array index must be an integer");
                 }
+                // An array reference (`borrow`/`share` parameter or binding)
+                // indexes like its owner.
+                let base_ty = match base_ty {
+                    Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Array(..)) => {
+                        *inner
+                    }
+                    other => other,
+                };
                 let result = match base_ty {
                     Ty::Array(element, count) => {
                         if let Some(value) = constant_index(index) {
@@ -1327,6 +1368,14 @@ impl Checker {
                     }
                     let mut diverges = false;
                     for (i, arg) in arguments.iter().enumerate() {
+                        if params.get(i).is_some_and(|parameter| {
+                            parameter.access == IrAccess::Owned
+                                && matches!(parameter.ty, Ty::Array(..))
+                        }) {
+                            // An owned array parameter takes a literal,
+                            // repetition or named array moved into the call.
+                            self.allow_array_value(arg);
+                        }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
                         if params
                             .get(i)
@@ -1335,15 +1384,20 @@ impl Checker {
                             self.reject_extraction(arg);
                         }
                         if let Some(param) = params.get(i) {
-                            if matches!(param.ty, Ty::Array(..)) {
-                                self.error(
-                                    17,
-                                    arg.span,
-                                    "array call arguments require aggregate ownership support",
-                                );
-                            }
                             if param.access == IrAccess::Owned {
                                 self.ensure(&actual, &param.ty, arg.span);
+                            } else if matches!(&actual, Ty::Reference { inner, .. } if !compatible(inner, &param.ty))
+                            {
+                                self.error(
+                                    2,
+                                    arg.span,
+                                    format!(
+                                        "expected {} {}, found {}",
+                                        access_name(param.access),
+                                        name(&param.ty),
+                                        name(&actual)
+                                    ),
+                                );
                             } else if !parameter_accepts(&actual, param) {
                                 self.error(
                                     17,
@@ -1457,7 +1511,7 @@ pub fn check_types(module: &Module) -> Vec<Diagnostic> {
 
 /// Check a standalone module and retain canonical local and expression facts.
 /// This returns no facts if type or control-flow diagnostics exist.
-/// Fixed arrays report TE017 here until aggregate ownership and IR are supported.
+/// Array forms outside the executable subset (results, nesting, element references) report TE017.
 pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic>> {
     let (mut diagnostics, functions) = check_standalone(module, true);
     diagnostics.extend(crate::check_control_flow(module));
@@ -1499,10 +1553,13 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
                     .iter()
                     .map(|p| FunctionParameter {
                         access: ir_access(p.access),
-                        ty: c.signature_type(&p.ty),
+                        ty: c.signature_type(&p.ty, false),
                     })
                     .collect();
-                let result = result.as_ref().map(|t| c.signature_type(t)).unwrap_or(UNIT);
+                let result = result
+                    .as_ref()
+                    .map(|t| c.signature_type(t, true))
+                    .unwrap_or(UNIT);
                 if c.functions
                     .insert(name.clone(), Ty::Function(params, Box::new(result)))
                     .is_some()
@@ -1641,10 +1698,13 @@ fn check_resolved_mode(
                         .iter()
                         .map(|p| FunctionParameter {
                             access: ir_access(p.access),
-                            ty: c.signature_type(&p.ty),
+                            ty: c.signature_type(&p.ty, false),
                         })
                         .collect();
-                    let result = result.as_ref().map(|t| c.signature_type(t)).unwrap_or(UNIT);
+                    let result = result
+                        .as_ref()
+                        .map(|t| c.signature_type(t, true))
+                        .unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),
                         Ty::Function(params, Box::new(result)),
@@ -1774,13 +1834,6 @@ fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
             17,
             p.span,
             "borrow/share parameters cannot be rebound; remove the var modifier",
-        );
-    }
-    if p.access != Access::Owned && matches!(ty, Ty::Array(..)) {
-        c.error(
-            17,
-            p.span,
-            "array references require aggregate ownership support",
         );
     }
     let access = ir_access(p.access);

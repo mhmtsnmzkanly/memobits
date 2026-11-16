@@ -121,14 +121,23 @@ the implemented subset; a milestone is not complete merely because its crate exi
   Indices may be any integer type; constant out-of-range indices are TE008,
   dynamic ones (reads and writes) trap (`RE007`). Extracting an element into an
   owned position (binding, `=`, return, tail, owned argument, array element) is
-  TE022. Still gated with TE017: array parameters/results/references, nested
-  arrays, non-primitive elements, array-valued `if`/block results, whole arrays
-  as operands/arguments/returns, array literals and repetition outside a binding
-  initializer or `=`, indexing a non-local, element references. Layout: each
+  TE022. Arrays cross internal calls (WP3): owned (`a: Array<T, N>`, moved into
+  the call; a literal, repetition or named array is accepted), `borrow` and
+  `share` parameters with the same `.borrow()` / `.share()` call-site spelling
+  as primitives, element reads through either reference, element and compound
+  writes and whole-array stores through `share`, local `let r := a.borrow();`
+  / `var r := a.share();` bindings and reborrowing a reference parameter. Any
+  element access overlaps the whole array in the loan checker. Still gated with
+  TE017: array results, nested arrays, non-primitive elements, array-valued
+  `if`/block results, whole arrays as operands or returns, array literals and
+  repetition outside a binding initializer, `=` or an owned argument, indexing a
+  non-local, element references, borrowing a temporary. Arrays and array
+  references in exported signatures (`main`, `[export]`) are rejected by the
+  backend with LE900. Layout: each
   array local owns an inline cell in the 32 KiB-capped activation frame (repetition
   also uses a hidden accumulator cell); larger layouts are a backend diagnostic.
   Literal lengths are capped at `u32::MAX` as an analysis bound, not a memory
-  guarantee. See the WP1 and WP2 checkpoints in `fixed-array-implementation.md`.
+  guarantee. See the WP1-WP3 checkpoints in `fixed-array-implementation.md`.
 - Frame memory is an experimental fixed 64 KiB page with addresses below 16
   reserved. Traps lack detailed source mapping, do not unwind caller frames, and
   discard the instance; no persistent-instance reset policy exists.
@@ -156,7 +165,5 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 ### Next step
 
-Continue the array work packages: arrays across internal calls (owned, `borrow`
-and `share` array parameters, element access through references); then nested
-arrays and array results. Keep TE017 gating every form not listed under the
-fixed-array status above.
+Continue the array work packages with WP4: nested arrays and array results. Keep
+TE017 gating every form not listed under the fixed-array status above.

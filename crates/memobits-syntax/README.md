@@ -23,5 +23,5 @@ current accepted subset. The parser is handwritten and uses Pratt precedence.
 Fixed-array syntax includes structured `Array<T, N>` (including nested element
 types), element literals, repetitions, and postfix indexing. Counts are
 source-located nonnegative integer literals. Other generic constructors are
-rejected. Array typing, ownership, and execution remain unsupported and produce
-explicit semantic diagnostics.
+rejected. This crate only parses arrays; typing, ownership and execution live in
+the later pipeline crates, which gate unsupported array forms with diagnostics.

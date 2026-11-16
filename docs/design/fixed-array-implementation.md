@@ -188,3 +188,58 @@ literals and repetition outside a binding initializer or `=`, indexing a
 non-local, and element references (`a[i].share()`). Arrays in exported
 signatures remain rejected by the backend.
 
+
+## Executable array checkpoint (WP3)
+
+WP3 lets arrays of primitive elements cross internal function calls.
+
+- Signatures: `a: Array<T, N>` (owned), `a: borrow Array<T, N>` and
+  `a: share Array<T, N>`. In IR a parameter names its pointee type, so the
+  parameter local of a `borrow`/`share` array is `Reference { access, inner:
+  Array }`, exactly like primitives; the validator now allows an array (never a
+  nested reference) as the referent, accepts `Borrow` of an array owner or array
+  reference, and keeps array results and array block parameters invalid. `var`
+  on an owned array parameter permits element writes to the callee's own copy;
+  `var` on a reference parameter stays TE017.
+- Source spelling mirrors primitives: the caller writes `a.borrow()` or
+  `a.share()` (a bare array for a reference parameter is TE017) and the
+  signature decides the access; `share` needs a `var` owner. Local bindings
+  `let r := a.borrow();` and `var r := a.share();` work as for scalars, and a
+  reference parameter or binding can be passed on (reborrow) to a parameter of
+  equal or weaker access. A `let` share binding cannot write (TE004).
+- Typing: indexing unwraps an array reference. Reads work through `borrow` and
+  `share`; `a[i] = v` and `a[i] op= v` require `var`/share ownership and are
+  TE004 through a `borrow` or an immutable share binding. A constant
+  out-of-range index through a reference is TE008, the D1 extraction rule
+  TE022 applies unchanged, and a length or element mismatch between argument and
+  parameter is TE002 (`expected borrow Array<i32, 3>, found borrow Array<i32,
+  2>`). An owned array argument may be a literal, a repetition or a named array
+  (a move). A whole array may be assigned through a share reference
+  (`a = [1, 2];` stores with a memory copy).
+- Ownership and loans needed no new rules. An owned argument is captured (moved)
+  when it is evaluated, so later arguments cannot use it (BE001). `.borrow()` /
+  `.share()` are ordinary `Borrow` instructions rooted at the array local, so
+  every element access overlaps the whole array: an element write while a
+  borrow or share is live is BE005, two `share` (or share + borrow) arguments of
+  one array in a call are BE005, and any number of `borrow` arguments are fine.
+  These are tested in source form (`memobits-analysis/tests/array_references.rs`).
+- Wasm: a reference to an array is the owner cell's address (an `i32` Wasm
+  parameter/local). `ElementAddr` pushes the base operand, which is the cell
+  address for an owner and the pointer for a reference, so one code path does
+  the unsigned bounds check against the length from the type. An owned array
+  parameter arrives as a pointer to caller-side storage (the caller's captured
+  value cell or a literal's cell, which stays valid for the whole call because
+  the callee frame sits above it); the parameter prologue `memory.copy`s it into
+  the callee's own cell, so a `var` parameter never writes into the caller and
+  every recursive activation has its own copy. A whole-array `Store` through a
+  share reference is a `memory.copy` too. Parameter cells count against the
+  32 KiB frame cap of the callee.
+- Exports: `main` and `[export]` functions with array or array-reference
+  parameters are rejected by the backend with LE900 ("cannot take arrays or
+  array references; the external array ABI is not defined"). There is no
+  external array ABI.
+
+Still gated: array results and array-valued `if`/block results (TE017), nested
+arrays and non-primitive elements (TE017), element references (`a[0].share()`,
+TE017), borrowing a temporary (`[1, 2].borrow()`, TE017), rebinding a reference
+handle, and arrays/array references in exported signatures (LE900).

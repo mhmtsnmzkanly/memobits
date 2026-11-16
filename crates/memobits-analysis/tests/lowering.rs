@@ -223,7 +223,7 @@ fn array_syntax_cannot_produce_executable_ir() {
         "fn main() { [1, 2]; }",
         "fn main() { [1; 2]; }",
         "fn main() { [1][0]; }",
-        "fn main(a: Array<i32, 2>) {}",
+        "fn make() -> Array<i32, 2> { [1, 2] }",
     ] {
         assert!(lowering_codes(source).contains(&"TE017".into()), "{source}");
     }

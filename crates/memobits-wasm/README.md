@@ -30,9 +30,13 @@ width. Per-invocation frames are restored on normal and early returns. The fixed
 private stack occupies addresses [16, 65536); exhaustion traps. Traps do not
 unwind frames; the current runtime discards its instance after execution.
 
-Reference parameters are supported only for internal calls. Exported reference
-signatures, reference returns, nested/aggregate references, and indirect calls
-remain unsupported. The private pointer representation is not a stable ABI.
+Reference parameters are supported only for internal calls. Fixed arrays of
+primitive elements execute as locals and as owned, `borrow` and `share`
+parameters of internal calls (an owned array is copied from caller storage into
+the callee's own frame cell; a reference is the owner's cell address). Element
+access is bounds-checked and traps out of range. Exported signatures that use
+arrays or references, reference returns, array results, nested arrays, and
+indirect calls remain unsupported. The private pointer representation is not a stable ABI.
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

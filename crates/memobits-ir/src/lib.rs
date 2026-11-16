@@ -296,7 +296,7 @@ impl Program {
                 );
             }
             for parameter in &function.signature.parameters {
-                validate_signature_value_type(&parameter.ty, &mut errors, id, "function parameter");
+                validate_parameter_type(&parameter.ty, &mut errors, id, "function parameter");
             }
             validate_signature_value_type(
                 &function.signature.result,
@@ -417,6 +417,25 @@ fn parameter_local_type(parameter: &ParameterType) -> Type {
     }
 }
 
+/// A parameter names its pointee type: a primitive or a fixed array of
+/// primitives, passed by ownership, `borrow` or `share`.
+fn validate_parameter_type(
+    ty: &Type,
+    errors: &mut Vec<ValidationError>,
+    id: FunctionId,
+    context: &str,
+) {
+    if matches!(ty, Type::Reference { .. }) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} type cannot be a reference"),
+        );
+    }
+    validate_type_shape(ty, errors, id, context);
+}
+
 fn validate_signature_value_type(
     ty: &Type,
     errors: &mut Vec<ValidationError>,
@@ -452,7 +471,7 @@ fn validate_type_shape(
         Type::Primitive(_) => {}
         Type::Function(signature) => {
             for parameter in &signature.parameters {
-                validate_signature_value_type(&parameter.ty, errors, id, "function type parameter");
+                validate_parameter_type(&parameter.ty, errors, id, "function type parameter");
             }
             validate_signature_value_type(&signature.result, errors, id, "function type result");
         }
@@ -465,13 +484,16 @@ fn validate_type_shape(
                     format!("{context} reference cannot use Owned access"),
                 );
             }
-            if !matches!(inner.as_ref(), Type::Primitive(_)) {
+            if !matches!(inner.as_ref(), Type::Primitive(_) | Type::Array { .. }) {
                 push(
                     errors,
                     id,
                     None,
-                    format!("{context} reference must refer to a primitive value"),
+                    format!("{context} reference must refer to a primitive value or an array"),
                 );
+            }
+            if matches!(inner.as_ref(), Type::Array { .. }) {
+                validate_type_shape(inner, errors, id, context);
             }
         }
         Type::Array { element, len: _ } => {
@@ -661,13 +683,13 @@ fn validate_instruction(
                     }
                     Some(*inner)
                 }
-                Type::Primitive(_) if *access != Access::Owned => Some(actual),
+                Type::Primitive(_) | Type::Array { .. } if *access != Access::Owned => Some(actual),
                 _ => {
                     push(
                         errors,
                         id,
                         Some(block),
-                        "borrow source must be a primitive owner or reference",
+                        "borrow source must be a primitive or array owner or a reference",
                     );
                     None
                 }

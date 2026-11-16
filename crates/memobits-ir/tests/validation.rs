@@ -724,15 +724,18 @@ fn rejects_malformed_array_types_and_array_block_parameters_or_signatures() {
         .iter()
         .any(|m| m.contains("array-typed block parameters")));
 
-    // A reference to an array is not a valid primitive reference yet.
+    // A reference may refer to a primitive or an array, never to a reference.
     let mut f = array_function(i32_ty());
     f.values[3] = Type::Reference {
         access: Access::Borrow,
-        inner: Box::new(array_ty(2)),
+        inner: Box::new(Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(array_ty(2)),
+        }),
     };
     assert!(messages(f)
         .iter()
-        .any(|m| m.contains("reference must refer to a primitive")));
+        .any(|m| m.contains("reference must refer to a primitive value or an array")));
 }
 
 #[test]
@@ -741,4 +744,160 @@ fn array_element_loads_are_read_only() {
     f.blocks[0].terminator.kind =
         TerminatorKind::Return(Some(operand(Source::Value(ValueId(4)), UseMode::Consume)));
     assert!(messages(f).iter().any(|m| m.contains("read-only")));
+}
+
+/// `fn reader(a: <access> Array<i32, 2>) -> i32 { a[0] + 0 }` built by hand.
+/// Values: 0 index, 1 element reference, 2 loaded, 3 const 0, 4 sum.
+fn array_reference_function(access: Access) -> Function {
+    let mut f = function();
+    f.signature.parameters = vec![ParameterType {
+        access,
+        ty: array_ty(2),
+    }];
+    f.parameter_locals = vec![LocalId(0)];
+    f.locals = vec![Local {
+        name: "a".into(),
+        ty: Type::Reference {
+            access,
+            inner: Box::new(array_ty(2)),
+        },
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![
+        Type::Primitive(Primitive::U32),
+        Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(i32_ty()),
+        },
+        i32_ty(),
+        i32_ty(),
+        i32_ty(),
+    ];
+    let value = |id: u32, mode| operand(Source::Value(ValueId(id)), mode);
+    f.blocks[0].instructions = vec![
+        instruction(
+            Some(0),
+            InstructionKind::Constant(Constant::Integer("0".into())),
+        ),
+        instruction(
+            Some(1),
+            InstructionKind::ElementAddr {
+                loan: LoanId(0),
+                base: operand(Source::Local(LocalId(0)), UseMode::Borrow),
+                index: value(0, UseMode::Read),
+                access: Access::Borrow,
+            },
+        ),
+        instruction(
+            Some(2),
+            InstructionKind::Load {
+                reference: value(1, UseMode::Borrow),
+            },
+        ),
+        instruction(
+            Some(3),
+            InstructionKind::Constant(Constant::Integer("0".into())),
+        ),
+        instruction(
+            Some(4),
+            InstructionKind::Binary {
+                op: BinaryOp::Add,
+                left: value(2, UseMode::Read),
+                right: value(3, UseMode::Read),
+            },
+        ),
+    ];
+    f.blocks[0].terminator.kind = TerminatorKind::Return(Some(value(4, UseMode::Consume)));
+    f
+}
+
+#[test]
+fn accepts_array_parameters_and_references_to_arrays() {
+    for access in [Access::Owned, Access::Borrow, Access::Share] {
+        let mut f = array_reference_function(access);
+        if access == Access::Owned {
+            // An owned array parameter is an array local, indexed in place.
+            f.locals[0].ty = array_ty(2);
+        }
+        assert!(messages(f).is_empty(), "{access:?}");
+    }
+}
+
+#[test]
+fn array_parameter_locals_follow_the_signature_access_mode() {
+    let mut f = array_reference_function(Access::Borrow);
+    f.locals[0].ty = array_ty(2);
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("parameter local type differs")));
+    let mut f = array_reference_function(Access::Borrow);
+    f.signature.parameters[0].ty = array_ty(3);
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("parameter local type differs")));
+    // A parameter names its pointee; a reference-typed parameter stays invalid.
+    let mut f = array_reference_function(Access::Borrow);
+    f.signature.parameters[0].ty = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    };
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("cannot be a reference")));
+}
+
+#[test]
+fn element_addresses_through_references_respect_access() {
+    // A borrow reference cannot produce a Share element address.
+    let mut f = array_reference_function(Access::Borrow);
+    if let InstructionKind::ElementAddr { base, access, .. } = &mut f.blocks[0].instructions[1].kind
+    {
+        base.mode = UseMode::Share;
+        *access = Access::Share;
+    }
+    f.values[1] = Type::Reference {
+        access: Access::Share,
+        inner: Box::new(i32_ty()),
+    };
+    assert!(messages(f).iter().any(|m| m.contains("strengthen")));
+    // A reference to a primitive is not an array base.
+    let mut f = array_reference_function(Access::Borrow);
+    f.signature.parameters[0].ty = i32_ty();
+    f.locals[0].ty = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(i32_ty()),
+    };
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("base must be an array owner or array reference")));
+}
+
+#[test]
+fn borrowing_an_array_owner_produces_an_array_reference() {
+    // a := [c, c]; r := borrow a  (value 7)
+    let mut f = array_function(i32_ty());
+    f.values.push(Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(2)),
+    });
+    f.blocks[0].instructions.insert(
+        5,
+        instruction(
+            Some(7),
+            InstructionKind::Borrow {
+                loan: LoanId(1),
+                owner: operand(Source::Local(LocalId(0)), UseMode::Borrow),
+                access: Access::Borrow,
+            },
+        ),
+    );
+    assert!(messages(f.clone()).is_empty(), "{:?}", messages(f.clone()));
+    f.values[7] = Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(array_ty(3)),
+    };
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("borrow output type is incompatible")));
 }

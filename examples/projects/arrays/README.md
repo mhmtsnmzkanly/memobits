@@ -7,9 +7,9 @@ updates one element, sums the array, and returns the sum.
 It covers the supported array subset: literals `[1, 2, 3]`, repetition
 `[0; 8]`, the `Array<i32, 8>` annotation, element assignment and compound
 updates (`a[i] = v`, `a[i] += v`), element reads inside arithmetic, `loop` with
-`if cond { break; }`, and whole-array moves (`let b := a;`). Arrays are not
-passed to or returned from functions, and nested arrays and printing are not
-supported.
+`if cond { break; }`, and whole-array moves (`let b := a;`). This example
+keeps its arrays local; see `docs/design/implementation-plan.md` for the full
+supported subset.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/arrays/project.toml

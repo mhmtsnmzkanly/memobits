@@ -94,10 +94,7 @@ fn unsupported_array_forms_stay_gated() {
         "fn main() { let a := [1, 2]; let b := if true { a } else { a }; }",
         "fn main() { let a := [1, 2]; let b := { a }; }",
         "fn main() { let a := [1, 2]; let b := a; a = b + 1; }",
-        // arrays in calls and results
-        "fn take(a: Array<i32, 2>) {} fn main() { let a := [1, 2]; take(a); }",
-        "fn take(a: borrow Array<i32, 2>) {}",
-        "fn take(a: share Array<i32, 2>) {}",
+        // array results
         "fn make() -> Array<i32, 2> { [1, 2] }",
         // nested arrays and non-primitive elements
         "fn main() { let a := [[1], [2]]; }",

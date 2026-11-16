@@ -95,8 +95,12 @@ repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
 evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
 reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
 `let` arrays), and whole-array moves (`let b := a;`, `b = a;`). `TE022` rejects
-moving an element into an owned position. Every other array form (parameters,
-results, references, nested arrays, array-valued `if`/block results, whole
-arrays outside a binding initializer or `=`) is still gated with TE017.
-Aggregate reference semantics remain unsupported. Repetition expressions are
+moving an element into an owned position. Arrays also cross internal calls as
+owned, `borrow` and `share` parameters (`Reference { inner: Array }` in IR), with
+element reads through either reference, element writes through `share`, local
+`.borrow()` / `.share()` bindings and reborrows; argument/parameter length or
+element mismatches are TE002 and writes through a borrow are TE004. Every other
+array form (results, nested arrays, element references, array-valued
+`if`/block results, whole arrays outside a binding initializer, `=` or an
+owned argument) is still gated with TE017. Repetition expressions are
 type-checked once even at zero count; analysis facts never expand them.
