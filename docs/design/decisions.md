@@ -33,8 +33,14 @@ only where explicitly stated; unresolved API spellings remain proposals.
 - `let` bindings cannot be reassigned or mutated through; `var` bindings can
   change while retaining their type. Bindings require an initializer. `:=`
   infers a type; `:` introduces an annotation. Shadowing creates a new binding.
-- Owned assignment and owned function parameters transfer ownership, including
-  numeric values. Basic numeric arithmetic and comparisons read their operands.
+- Owned assignment and owned function parameters transfer ownership of
+  aggregate values: arrays, field-based types, enums, and later collections and
+  strings. Primitive values (integers, floats, `Bool`) are copied implicitly:
+  binding, assigning, passing, or returning one leaves the source usable, and a
+  primitive element or field may be read into an owned position. Moving a
+  primitive protects no resource, and arithmetic already read its operands
+  without consuming them, so requiring explicit copies only added noise. Wrap a
+  primitive in a field-based type when it must not be duplicated.
 - Function parameter access is fixed by its signature: `T` takes ownership,
   `borrow T` grants read-only borrowing, and `share T` grants exclusive mutable
   borrowing. Call syntax cannot override the signature. A `share` parameter
@@ -45,18 +51,18 @@ only where explicitly stated; unresolved API spellings remain proposals.
   Proven disjoint child fields may be borrowed independently; uncertain dynamic
   locations are treated as overlapping. Borrowed fields in user structs are
   deferred, while borrowed payloads in Option/result-like types are supported.
-- Copying is explicit and available only for copyable types. Copy-on-write may
-  provide independent value semantics for suitable collections; it is distinct
-  from `share`. Exact copy method spelling is still provisional. Primitive
-  `expr.copy()` (integers, floats, `Bool`) is implemented with this spelling:
-  it only reads its receiver (a local, an array element, or a value read
-  through a reference) and yields a fresh owned value. Aggregate copy and
-  copy-on-write remain open.
+- Copying an aggregate is explicit and available only for copyable types.
+  Copy-on-write may provide independent value semantics for suitable
+  collections; it is distinct from `share`. The spelling is `expr.copy()`; it
+  only reads its receiver and yields a fresh owned value. It is also accepted on
+  primitives, where it is never required. Aggregate copy and copy-on-write are
+  not implemented yet.
 - Collections are homogeneous. `Array<T, N>` has fixed length; `List<T>` is
   dynamic. `let` prevents element mutation. Indexing checks bounds; proven bad
   constant indices are compile errors, dynamic failures are controlled runtime
-  errors. `get` expresses absence as `Option`. Extracting an element into an
-  owned binding requires explicit borrow/share/copy/removal. Removal transfers
+  errors. `get` expresses absence as `Option`. Extracting an aggregate
+  element into an owned binding requires explicit borrow/share/copy/removal;
+  primitive elements are copied implicitly. Removal transfers
   ownership from a dynamic list; fixed arrays need a replacement operation.
 - Conditions are Bool. Value-producing branches have one compatible result
   type; use an enum for alternatives with different payload types. Enums support
@@ -79,7 +85,18 @@ only where explicitly stated; unresolved API spellings remain proposals.
 - Type parameters exist only on compiler-known types: `Array<T, N>`, `List<T>`,
   `Option<T>`, `Result<T, E>`, and the three-state `Outcome<T, E>`. They share
   one category with `Array`: the compiler instantiates them per use.
-  User-defined generic types are not part of the language.
+  User-defined generic types are not available now, but the door stays open:
+  `<...>` after a type name is reserved for type arguments, and compiler-known
+  types are instantiated through a general mechanism rather than per-type
+  special cases, so user declarations can adopt it later without a redesign.
+- Errors form a hierarchy rooted in one base error type that the host
+  understands. User and program error types, and the standard error types used
+  by `Result` and `Outcome`, derive from that base, so the host can report any
+  error through its base part. The derivation mechanism and the base type's
+  contents are not designed yet and must be settled before `Result` and
+  `Outcome` are implemented.
+- Empty field-based types (`type Unit {}`) are allowed. Empty enums
+  (`type Never []`) are rejected.
 - The prelude exposes the variants of `Option`, `Result`, and `Outcome` by short
   name (for example `Some`, `None`). Variants of user enums are written
   `Type::Variant`. `Result` and `Outcome` variant names are still provisional;
@@ -106,8 +123,8 @@ only where explicitly stated; unresolved API spellings remain proposals.
 
 - Array repetition `[expression; N]` evaluates the expression separately for
   every element, in order. `[make_value(); 3]` calls three times. It does not
-  implicitly clone an owned value; repeating an owned binding requires explicit
-  copies and repeated moves are errors.
+  implicitly clone an owned aggregate; repeating an aggregate binding requires
+  explicit copies and repeated moves are errors. Primitive values repeat freely.
 - Build the foundation in stages: workspace/project model and diagnostics;
   lexer/parser and syntax diagnostics; name resolution and type checking;
   typed IR with initial move checking; Wasm generation and validation; full
@@ -134,10 +151,35 @@ only where explicitly stated; unresolved API spellings remain proposals.
   a read-only borrow produces borrowed payload bindings. Mutable matching is deferred.
 - Function parameters cannot override access modes at the call site; share
   parameters mutate their targets but are not rebound to another target.
-- Struct fields default to module-private. External construction must not bypass
-  private fields; every field must be initialized explicitly.
+- Struct fields default to module-private. Outside its defining module a
+  private field cannot be read, written, named in a struct literal, or
+  destructured, so a type with a private field cannot be constructed
+  externally. A `pub` field is readable externally and writable through a `var`
+  owner or a `share`. Every field must be initialized explicitly. Closing reads
+  as well as writes lets a module keep invariants and change its representation.
+- A struct literal `Name { field: value }` may not appear directly in an `if`
+  condition, where `{` would be ambiguous with the block; parenthesize it.
+- `match` arms are separated by commas; the comma is optional after an arm whose
+  body is a block.
 - Whole-value destructuring uses `let Type { field, field: alias } := value;`,
   or `var` for mutable bindings. Initial patterns name all accessible fields;
   implicit partial field moves and nested/omitting destructuring are deferred.
 - Default source-root configuration is `[package].src = "./src"`; manifest
   override is resolved relative to the invoking directory.
+
+## Memory layout and limits
+
+- Aggregate values are addressed storage. Whether a value lives on the stack or
+  the heap is a backend decision that the language rules, typed IR, and
+  ownership analysis do not observe, so storage placement can change later
+  without affecting programs.
+- Linear memory is ordered: reserved low addresses, the stack, static data, then
+  the heap. The stack sits below the heap so that exhausting it fails with a
+  controlled error instead of overwriting heap data. The heap is introduced
+  with dynamic collections and strings and grows at the end.
+- The stack size is a build setting, `[build].stack_size` in bytes, with a
+  default of 1 MiB. There is no separate per-function frame limit: a frame that
+  cannot fit in the configured stack is a compile error, and dynamic exhaustion
+  is a controlled runtime error.
+- Enum tags use the smallest unsigned integer width that fits the variant
+  count. Tag width and field layout are not a stable ABI.
