@@ -1,17 +1,4 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["legacy"]
 resolver = "2"
-
-[package]
-name = "memobits"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-logos = { version = "0.16.0", optional = true }
-rustyline = { version = "13.0.0", optional = true }
-sysinfo = { version = "0.30.13" }
-
-[features]
-default = ["std"]
-std = ["logos", "rustyline"]
