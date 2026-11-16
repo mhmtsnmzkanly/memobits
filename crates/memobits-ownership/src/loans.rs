@@ -220,6 +220,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
         InstructionKind::Constant(_) => Vec::new(),
         InstructionKind::Capture(operand)
+        | InstructionKind::Copy { source: operand }
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],

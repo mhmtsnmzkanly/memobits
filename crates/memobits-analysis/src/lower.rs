@@ -1013,6 +1013,19 @@ impl<'a> Builder<'a> {
             }
             ExprKind::Call { callee, arguments } => {
                 if let ExprKind::Field { base, name } = &callee.kind {
+                    if name == "copy" {
+                        // Read the receiver (loading through a reference or
+                        // element address) and produce a fresh owned value.
+                        let source = self.lower_expr(base)?;
+                        let source = self.scalar(source)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::Copy {
+                                source: read(source),
+                            },
+                            self.ty(expr),
+                        );
+                    }
                     let access = match name.as_str() {
                         "borrow" => Access::Borrow,
                         "share" => Access::Share,

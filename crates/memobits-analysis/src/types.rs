@@ -491,7 +491,7 @@ impl Checker {
             self.error(
                 22,
                 expr.span,
-                "an array element cannot be moved out by indexing; an explicit copy is required and is not available yet. Use the element inside an arithmetic or comparison expression instead",
+                "an array element cannot be moved out by indexing; use `.copy()` to copy the element, or use it inside an arithmetic or comparison expression",
             );
         }
     }
@@ -859,6 +859,35 @@ impl Checker {
             });
         }
         ty
+    }
+    /// `expr.copy()`: a fresh owned value of a primitive type. The receiver is
+    /// only read; a primitive behind a reference is copied out of it.
+    fn copy_conversion(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        if !arguments.is_empty() {
+            self.error(
+                10,
+                expression.span,
+                format!("copy() takes no arguments, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            self.expr(base, None);
+            return Ty::Error;
+        }
+        let receiver = self.expr(base, None);
+        match read_type(receiver) {
+            ty @ Ty::Primitive(kind) if kind != "Unit" => ty,
+            ty @ (Ty::Never | Ty::Error) => ty,
+            _ => {
+                self.error(
+                    17,
+                    expression.span,
+                    "copy is currently available only for primitive values (integers, floats and Bool); copying arrays and rows is not supported yet",
+                );
+                Ty::Error
+            }
+        }
     }
     fn reference_conversion(
         &mut self,
@@ -1413,6 +1442,9 @@ impl Checker {
                     };
                     if let Some(access) = access {
                         return self.reference_conversion(expr, base, arguments, access, expected);
+                    }
+                    if name == "copy" {
+                        return self.copy_conversion(expr, base, arguments);
                     }
                 }
                 let ty = self.expr(callee, None);

@@ -274,3 +274,35 @@ fn reassignment_to_immutable_local_is_rejected() {
     assert_eq!(diagnostics[0].code.to_string(), "BE004");
     assert_eq!(diagnostics[0].span.unwrap().start, 18);
 }
+
+fn copy_into(output: u32, source: Operand) -> Instruction {
+    Instruction {
+        span: Some(span(0)),
+        output: Some(ValueId(output)),
+        kind: InstructionKind::Copy { source },
+    }
+}
+
+#[test]
+fn copy_reads_its_source_and_is_rejected_after_a_move() {
+    let mut f = base();
+    f.values = vec![ty(), ty()];
+    f.blocks[0].instructions = vec![
+        copy_into(0, local(0, UseMode::Read, 10)),
+        copy_into(1, local(0, UseMode::Read, 11)),
+        consume(value(0, UseMode::Consume, 12)),
+        consume(local(0, UseMode::Consume, 13)),
+    ];
+    let first = check_moves(&Program {
+        functions: vec![f.clone()],
+    });
+    assert!(first.is_empty(), "{first:?}");
+    f.values.push(ty());
+    f.blocks[0]
+        .instructions
+        .push(copy_into(2, local(0, UseMode::Read, 14)));
+    let diagnostics = check_moves(&Program { functions: vec![f] });
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code.to_string(), "BE001");
+    assert_eq!(diagnostics[0].span.unwrap().start, 14);
+}

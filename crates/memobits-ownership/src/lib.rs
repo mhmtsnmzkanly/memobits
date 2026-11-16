@@ -185,6 +185,7 @@ fn transfer_instruction(
         InstructionKind::Capture(operand) => {
             transfer_operand(operand, state, diagnostics, function)
         }
+        InstructionKind::Copy { source } => transfer_operand(source, state, diagnostics, function),
         InstructionKind::Borrow { owner, .. } => {
             transfer_operand(owner, state, diagnostics, function)
         }

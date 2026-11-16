@@ -962,3 +962,79 @@ fn array_results_nested_element_addresses_and_whole_array_loads() {
         .iter()
         .any(|m| m.contains("load of a whole array")));
 }
+
+fn copy_function(source_ty: Type, output_ty: Type, mode: UseMode) -> Function {
+    let mut f = function();
+    f.signature.parameters = vec![ParameterType {
+        access: Access::Borrow,
+        ty: source_ty.clone(),
+    }];
+    f.signature.result = Box::new(output_ty.clone());
+    f.parameter_locals = vec![LocalId(0)];
+    f.locals = vec![Local {
+        name: "value".into(),
+        ty: Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(source_ty),
+        },
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![i32_ty(), output_ty];
+    f.blocks[0].instructions = vec![
+        Instruction {
+            span: Some(span()),
+            output: Some(ValueId(0)),
+            kind: InstructionKind::Load {
+                reference: operand(Source::Local(LocalId(0)), UseMode::Borrow),
+            },
+        },
+        Instruction {
+            span: Some(span()),
+            output: Some(ValueId(1)),
+            kind: InstructionKind::Copy {
+                source: operand(Source::Value(ValueId(0)), mode),
+            },
+        },
+    ];
+    f.blocks[0].terminator.kind =
+        TerminatorKind::Return(Some(operand(Source::Value(ValueId(1)), UseMode::Consume)));
+    f
+}
+
+#[test]
+fn copy_turns_a_loaded_read_only_value_into_an_owned_value() {
+    let f = copy_function(i32_ty(), i32_ty(), UseMode::Read);
+    Program { functions: vec![f] }.validate().unwrap();
+}
+
+#[test]
+fn copy_requires_a_primitive_read_source_with_matching_output() {
+    let messages = |f: Function| -> Vec<String> {
+        Program { functions: vec![f] }
+            .validate()
+            .unwrap_err()
+            .into_iter()
+            .map(|error| error.message)
+            .collect()
+    };
+    assert!(
+        messages(copy_function(i32_ty(), i32_ty(), UseMode::Consume))
+            .iter()
+            .any(|m| m.contains("only read its source"))
+    );
+    let mut f = copy_function(i32_ty(), bool_ty(), UseMode::Read);
+    f.values[0] = i32_ty();
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("copy output type differs")));
+    let mut f = copy_function(i32_ty(), i32_ty(), UseMode::Read);
+    f.values[0] = Type::Array {
+        element: Box::new(i32_ty()),
+        len: 2,
+    };
+    f.values[1] = f.values[0].clone();
+    assert!(messages(f)
+        .iter()
+        .any(|m| m.contains("copy is available only for primitive values")));
+}

@@ -147,8 +147,8 @@ WP2 adds mutation, repetition and whole-array moves on top of WP1.
   A whole-array value (literal, repetition or named local) is accepted only as
   a binding initializer or the right-hand side of `=`. Element assignment to a
   `let` array is TE004; a constant out-of-range write index is TE008; the
-  element-extraction rule TE022 also covers `a[i] = a[j]` (use `a[j] + 0`-style
-  arithmetic instead until an explicit copy exists).
+  element-extraction rule TE022 also covers `a[i] = a[j]` (write
+  `a[i] = a[j].copy();`; see the primitive copy in `implementation-plan.md`).
 - Element assignment lowers per D2: base, index (captured), then the right-hand
   side, then `ElementAddr(Share)` and `Store` adjacently, so the bounds trap
   fires after the right-hand side's effects. A compound write first does
@@ -319,7 +319,8 @@ WP4 finishes fixed arrays for primitive and nested-array elements.
 Still gated, with the diagnostic: references to primitive elements
 (`m[0][0].share()`, TE017); indexing or borrowing a temporary (`make()[0]`,
 `[1, 2].borrow()`, TE017); extracting an element or row into an owned position
-(TE022; an explicit copy operation does not exist yet); whole arrays used as
+(TE022; write `a[i].copy()` for a primitive element; whole-row or array
+copy is not available); whole arrays used as
 operands or expression statements (TE017); reference-typed elements and
 returned references (TE017, `a` where `a` is a `borrow`/`share` array); `Unit`
 elements (TE017); arrays and array references in exported signatures

@@ -173,6 +173,12 @@ pub enum InstructionKind {
     Load {
         reference: Operand,
     },
+    /// Explicit copy of a primitive value. `source` is only read (use mode
+    /// `Read`); it may be an owner, a parameter or a loaded referent. The output
+    /// is an ordinary owned value, so it is not read-only provenance.
+    Copy {
+        source: Operand,
+    },
     /// Write through an exclusive share reference.
     Store {
         reference: Operand,
@@ -621,6 +627,43 @@ fn validate_instruction(
                     Some(block),
                     "capture output type differs from operand type",
                 );
+            }
+        }
+        InstructionKind::Copy { source } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            if out.is_none() {
+                push(errors, id, Some(block), "copy requires an output value");
+            }
+            if source.mode != UseMode::Read {
+                push(errors, id, Some(block), "copy must only read its source");
+            }
+            match &input {
+                Some(Type::Primitive(Primitive::Unit)) | None => {
+                    if input.is_some() {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "copy is available only for primitive values",
+                        );
+                    }
+                }
+                Some(Type::Primitive(_)) => {
+                    if out.is_some_and(|output| Some(output) != input.as_ref()) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "copy output type differs from source type",
+                        );
+                    }
+                }
+                Some(_) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "copy is available only for primitive values",
+                ),
             }
         }
         InstructionKind::Borrow { owner, access, .. } => {
@@ -1195,6 +1238,7 @@ fn validate_read_only_loaded_values(
                     report(block_id, reference, false);
                     report(block_id, value, true);
                 }
+                InstructionKind::Copy { source } => report(block_id, source, false),
                 InstructionKind::Unary { operand, .. } => report(block_id, operand, false),
                 InstructionKind::Binary { left, right, .. } => {
                     report(block_id, left, false);

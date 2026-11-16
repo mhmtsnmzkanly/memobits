@@ -97,7 +97,9 @@ repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
 evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
 reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
 `let` arrays), and whole-array moves (`let b := a;`, `b = a;`). `TE022` rejects
-moving an element into an owned position. Arrays also cross internal calls as
+moving an element into an owned position; use `a[i].copy()` (primitive `expr.copy()`
+reads a local, element or reference referent and yields an owned value; arrays
+and rows cannot be copied yet, TE017). Arrays also cross internal calls as
 owned, `borrow` and `share` parameters (`Reference { inner: Array }` in IR), with
 element reads through either reference, element writes through `share`, local
 `.borrow()` / `.share()` bindings and reborrows; argument/parameter length or

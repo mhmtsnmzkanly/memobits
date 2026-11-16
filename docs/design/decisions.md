@@ -47,7 +47,11 @@ only where explicitly stated; unresolved API spellings remain proposals.
   deferred, while borrowed payloads in Option/result-like types are supported.
 - Copying is explicit and available only for copyable types. Copy-on-write may
   provide independent value semantics for suitable collections; it is distinct
-  from `share`. Exact copy method spelling is still provisional.
+  from `share`. Exact copy method spelling is still provisional. Primitive
+  `expr.copy()` (integers, floats, `Bool`) is implemented with this spelling:
+  it only reads its receiver (a local, an array element, or a value read
+  through a reference) and yields a fresh owned value. Aggregate copy and
+  copy-on-write remain open.
 - Collections are homogeneous. `Array<T, N>` has fixed length; `List<T>` is
   dynamic. `let` prevents element mutation. Indexing checks bounds; proven bad
   constant indices are compile errors, dynamic failures are controlled runtime

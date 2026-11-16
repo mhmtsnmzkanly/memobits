@@ -1,5 +1,5 @@
 // Fixed arrays of primitive elements: repetition, element assignment,
-// compound updates, reads inside arithmetic, whole-array moves, arrays through
+// compound updates, reads inside arithmetic, `.copy()`, whole-array moves, arrays through
 // functions (`borrow`, `share`, an array result) and a small nested array.
 
 // Read-only access through a `borrow` parameter.
@@ -55,9 +55,11 @@ fn main() -> i32 {
         j += 1;
     }
 
-    let copy := squares;
+    // `.copy()` reads an element into a fresh owned value; `squares` stays intact.
+    let peak := squares[7].copy();
+    let moved := squares;
     let seed := [1, 2, 3];
-    let first := total + copy[3] + seed[2];
+    let first := total + moved[3] + seed[2] + peak;
 
     // Arrays through functions.
     var made := make(10);

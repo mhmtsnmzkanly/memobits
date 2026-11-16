@@ -148,6 +148,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
     match &instruction.kind {
         InstructionKind::Constant(_)
         | InstructionKind::Capture(_)
+        | InstructionKind::Copy { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -433,6 +434,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             match &instruction.kind {
                 InstructionKind::Constant(_) => {}
                 InstructionKind::Capture(operand)
+                | InstructionKind::Copy { source: operand }
                 | InstructionKind::Borrow { owner: operand, .. }
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
@@ -1568,6 +1570,11 @@ fn compile_instruction(
                 return emit_array_copy(body, function, param_count, cell, operand, layout, frame);
             }
             emit_operand(body, function, param_count, operand, layout, frame)?;
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::Copy { source } => {
+            let output = output.ok_or("copy lacks an output")?;
+            emit_operand(body, function, param_count, source, layout, frame)?;
             body.instruction(&WasmInstruction::LocalSet(output));
         }
         InstructionKind::ArrayNew { init } => {

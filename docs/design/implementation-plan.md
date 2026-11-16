@@ -140,7 +140,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   live, are BE005). Fixed arrays are complete for primitive and nested-array
   elements. Still gated: references to primitive elements (`a[0].share()`,
   TE017), indexing or borrowing a temporary (`make()[0]`, `[1, 2].borrow()`,
-  TE017), extracting an element or row into an owned position (TE022),
+  TE017), extracting an element or row into an owned position (TE022; a primitive
+  element is written `a[i].copy()`, rows cannot be copied yet),
   whole arrays as operands or statements (TE017), reference-typed elements and
   returned references (TE017), non-primitive element types such as `Unit`,
   and arrays or array references in exported signatures (`main`, `[export]`,
@@ -151,6 +152,21 @@ the implemented subset; a milestone is not complete merely because its crate exi
   larger layouts are a backend diagnostic. Literal lengths are capped at
   `u32::MAX` as an analysis bound, not a memory guarantee. See the WP1-WP4
   checkpoints in `fixed-array-implementation.md`.
+- **Primitive copy** (`memobits-analysis`, `-ir`, `-ownership`, `-wasm`):
+  `expr.copy()` is a compiler-known zero-argument method (like `.borrow()` /
+  `.share()`) for integers, floats and `Bool`. The receiver may be a local or
+  parameter, an array element at any depth (bounds-checked), or a primitive
+  read through a `borrow`/`share` reference (`r.copy()`, `p[i].copy()`). It
+  lowers to a distinct IR instruction `Copy { source }` whose source is a
+  `Read` use and whose output is an ordinary owned value (a `Load` result stays
+  read-only, so `validate_read_only_loaded_values` is unchanged). Ownership
+  treats it as a non-consuming read: allowed while borrows are live, BE005
+  while a `share` of the owner is live, BE001 on a moved local. It works in
+  every owned position, including repetition elements (evaluated per
+  iteration). `.copy()` on an array, a row or a reference to one is TE017
+  ("copy is currently available only for primitive values"); arguments are
+  TE010. Aggregate copy and copy-on-write are not implemented and the spelling
+  remains provisional. `a[i] + 0` still works.
 - Frame memory is an experimental fixed 64 KiB page with addresses below 16
   reserved. Traps lack detailed source mapping, do not unwind caller frames, and
   discard the instance; no persistent-instance reset policy exists.
@@ -178,8 +194,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
 ### Next step
 
 Fixed arrays of primitive and nested-array elements are complete (WP1-WP4).
-The next work is the first aggregate beyond arrays: an explicit copy operation
-(which lifts TE022 for copyable elements), then user-defined struct types and
+The next work is the first aggregate beyond arrays: copy of aggregates (primitive
+`.copy()` already lifts TE022 for primitive elements), then user-defined struct types and
 enums on the same frame-cell model, and an external array ABI if exports ever
 need one. Keep TE017/TE022/LE900 gating every form not listed under the
 fixed-array status above.

@@ -1056,6 +1056,46 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
 }
 
 #[test]
+fn primitive_copy_runs_from_source_and_artifact_and_is_checked() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='copies'\nentry='app::main'\n",
+    );
+    let out = run_both(
+        &f,
+        "fn mk(v: i32) -> Array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] } \
+         fn swap(a: share Array<i32, 3>, i: i32, j: i32) { let t := a[i].copy(); a[i] = a[j].copy(); a[j] = t; } \
+         fn main() -> i32 { var a := mk(1); swap(a.share(), 0, 2); a[0] * 100 + a[1] * 10 + a[2] }",
+    );
+    assert!(out.contains("321"), "{out}");
+    let out = run_both(
+        &f,
+        "fn pick(flags: borrow Array<Bool, 2>, i: i32) -> Bool { flags[i].copy() } \
+         fn main() -> i32 { let flags := [false, true]; let on := pick(flags.borrow(), 1); if on { 7 } else { 0 } }",
+    );
+    assert!(out.contains('7'), "{out}");
+    // Compile-time rejections.
+    for (source, code) in [
+        (
+            "fn main() -> i32 { let a := [1, 2]; let b := a.copy(); 0 }",
+            "TE017",
+        ),
+        (
+            "fn main() -> i32 { let x := 1; let y := x; let z := x.copy(); z }",
+            "BE001",
+        ),
+        (
+            "fn main() -> i32 { let a := [1, 2]; let x := a[1]; 0 }",
+            "TE022",
+        ),
+    ] {
+        f.write("src/app.mb", source);
+        err(f.run(&["run"]), code);
+    }
+}
+
+#[test]
 fn array_parameters_cross_modules_and_stay_out_of_exported_signatures() {
     let f = Fixture::new();
     f.write(
