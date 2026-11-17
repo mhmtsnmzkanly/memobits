@@ -25,13 +25,14 @@ the variants (missing variants are named). All arms share one result type under
 the `if` rule. The scrutinee is consumed; each arm binds its payload by moving
 it out. See "The B2 plan" and the B2 checkpoint below.
 
-**B3 — borrow matching and enum parameters everywhere (planned).**
-`match v.borrow() { .. }` and `match` through `borrow E` / `share E`
-parameters, with payload bindings that are references. Loans: payload bindings
-keep a loan on the scrutinee's place until their last use, with a variant
-payload path in the loan (like a field path). Mutable matching (`share`) is
-decided here. Enum values also appear in more positions (field bases, call
-results used as scrutinees).
+**B3 — borrow matching (implemented; see the B3 checkpoint).**
+`match` through `borrow E` / `share E` parameters and reference bindings,
+`match s.borrow() { .. }`, and over places that cannot be moved (`l.shape`,
+`a[i]`, `g[i].cell.kind`), with payload bindings that are copies (primitives)
+or read-only references (aggregates). Loans: a payload binding keeps a loan on
+the scrutinee's place until its last use, with a variant payload step in the
+loan path (like a field path). Mutable matching stays deferred: matching
+through a `share` binds read-only too.
 
 **B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy (planned).**
 The standard generic enums, written once as prelude declarations and
@@ -257,8 +258,8 @@ test-only `__test_memory` export, not by any language-level tag access.
   It also rejects duplicate or out-of-range variants and validates every edge's
   block-parameter arguments. `EnumTag` accepts an enum owner (`Read`) or a
   reference to an enum; B2 lowering only uses the owner form.
-- **`VariantAddr` and `Step::Variant` are not built.** Nothing in B2 projects a
-  reference into a payload; they arrive with B3's borrowed payload bindings.
+- **`VariantAddr` and `Step::Variant` are not built in B2.** Nothing in B2 projects a
+  reference into a payload; they arrived with B3's borrowed payload bindings.
 - Lowering does not match the scrutinee place directly. The scrutinee is moved
   once into a hidden local (`Assign`, which is the single consume the move pass
   sees), the tag is read from it, and each arm extracts its bound payloads from
@@ -280,8 +281,8 @@ test-only `__test_memory` export, not by any language-level tag access.
 
 | Problem | Code |
 | --- | --- |
-| Scrutinee is not an enum; borrowed enum scrutinee (`borrow`/`share` parameter, `.borrow()`, `.share()`) | TE029 (the latter points at B3) |
-| Matching an enum in a field or element (`match h.s`, `match a[0]`) | TE022 (points at B3) |
+| Scrutinee is not an enum | TE029 |
+| (B2 only; lifted by B3) borrowed enum scrutinee, enum in a field or element | TE029 / TE022 |
 | Pattern names another enum, an unknown variant, a non-variant path, a bare identifier (binding pattern), has the wrong payload count, or binds a name twice | TE030 |
 | Missing variants without a `_` arm | TE031 (names them) |
 | Unreachable arm: duplicate variant, arm after `_`, or `_` after every variant is matched | TE032 (an error, not a warning) |
@@ -293,8 +294,95 @@ test-only `__test_memory` export, not by any language-level tag access.
 
 ### Still gated
 
-Matching through a reference (`borrow`/`share` parameter or conversion), matching
-an enum place (field, element) without moving it, mutable matching, nested
+Nothing of B2's reference and place gating remains (see B3). Gated: nested
 patterns, literal patterns, guards, or-patterns, bare binding patterns (`x =>`),
 `..` in patterns, enum equality, and enums in `main` / `[export]` signatures.
 Everything in B3 and B4 above.
+
+## B3 checkpoint
+
+### The rule as built
+
+A `match` is **borrowing** when its scrutinee cannot be moved: its type is a
+reference to an enum (a `borrow`/`share` parameter or reference binding, or the
+result of `x.borrow()` / `x.share()`), or it is an element or field place
+(`a[i]`, `l.shape`, `g[i].cell.kind`, any `Index`/`Field` chain). Every other
+scrutinee (owned locals including owned parameters, calls, constructions,
+blocks) is **owned** and keeps the B2 semantics (consumed, BE001 afterwards,
+payloads moved out).
+
+A borrowing match consumes nothing: the place can be matched again and written
+afterwards. Each bound payload slot is:
+
+- a primitive: copied into an immutable plain value of the payload type
+  (`Load` of the payload address, then `Copy`), consistent with implicit
+  primitive copy, so no loan outlives the copy;
+- an array, struct or enum: an immutable local of type `borrow T`, a read-only
+  reference to the payload slot. It can be passed to `borrow` parameters,
+  indexed, field-read and matched again (a nested enum payload is a `borrow`
+  enum scrutinee); it cannot be moved out (TE017 "reference values cannot escape
+  into an owned value", plus TE002 against an owned parameter) or written (TE004
+  "cannot assign through borrow binding"). Matching through a `share` binds
+  read-only as well; payload mutation through a match is not allowed.
+
+### Representation
+
+- `InstructionKind::VariantAddr { loan, base, variant, field, access }` is the
+  enum twin of `FieldAddr`: a reference `Reference { access, payload type }` to
+  one payload field, `base + payload offset` in Wasm. `base` is an enum owner or
+  a reference to one, with the same mode and access-strengthening rules as
+  `FieldAddr`. The validator checks the variant and payload ranges, the base,
+  mode, the output type and loan uniqueness; like `VariantExtract` it does not
+  check dominance by the `Switch` edge.
+- Lowering of a borrowing match: the scrutinee place becomes a reference (an
+  existing reference local is used directly; an element/field chain becomes the
+  usual checked address chain with `Borrow` access; a call result or conversion
+  is assigned to a hidden reference local). `EnumTag` reads the tag through that
+  reference (the validator accepts a `Borrow` mode on any enum reference), a
+  `Switch` dispatches, and each arm emits one `VariantAddr` (access `Borrow`) per
+  bound slot, then either `Load` + `Copy` (primitive) or an `Assign` of the
+  reference to the binding's local (aggregate). No `VariantExtract` is used.
+- Facts: `MatchFact::borrowed`; the aggregate binding locals are typed
+  `Reference { Borrow, T }` in the type checker, so the existing reference-local
+  rules (index and field reads, `borrow` arguments, TE004 on writes) apply
+  unchanged.
+
+### Loan rule for variants
+
+The loan path step is `Step::Variant(variant, field)`, pushed by `VariantAddr`
+like `Field` by `FieldAddr`. Overlap: two `Variant` steps are disjoint only when
+they name the same variant and different payload fields; **different variants
+overlap** (an enum's variants share one storage area), unlike struct fields.
+A `Variant` step against any other step kind is conservatively overlapping. A
+path that is a prefix of another names an enclosing place, so writing the
+scrutinee place (`l.a = ..`), its internals, or moving the enclosing value while a
+payload borrow is live is BE005, while a disjoint place (`l.b.y = 1`) or a
+different constant element (`a[1]` while `a[0]` is matched) is accepted. A
+dynamic index overlaps every element (`match a[i]` with `a[j] = ..` is BE005).
+Loans end at the binding's last use (non-lexical), and a primitive payload copy
+holds no loan. Diagnostics name the place with a variant step as
+`` `l.a::Rect.0` `` (variant name, payload index) in the "was borrowed here" label:
+
+```text
+error[BE005]: cannot write `l.a` while it is borrowed
+ note: `l.a::B.0` was borrowed here
+ note: the borrow is used later here, which keeps it alive
+```
+
+### Per-crate changes
+
+`memobits-ir` (`VariantAddr`, validation, loan-id uniqueness, read-only-load
+check, `EnumTag` accepts `Borrow` mode on a `Share` reference); `memobits-analysis`
+(`match_expr` classifies the scrutinee, reference-typed aggregate payload
+bindings, `MatchFact::borrowed`, `lower_match` borrowing path); `memobits-ownership`
+(`Step::Variant`, overlap rule, `VariantAddr` as an address instruction and place
+names); `memobits-wasm` (`VariantAddr` offset, no new layout).
+
+### Gated, still
+
+Nested patterns, literal patterns, guards, or-patterns, bare binding patterns,
+mutable matching (writes through payload bindings: TE004; matching a `share`
+does not make bindings writable), `==`/`!=` on enums (TE007), a match scrutinee
+projecting through a call result (`f().field`, TE017), enums in `main` /
+`[export]` signatures (LE900), reference-valued arm results and returning or
+escaping a payload reference (TE017).

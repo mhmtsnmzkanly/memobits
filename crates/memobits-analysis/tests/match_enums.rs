@@ -185,7 +185,7 @@ fn duplicate_and_unreachable_arms_are_errors() {
 }
 
 #[test]
-fn scrutinee_must_be_an_owned_enum() {
+fn scrutinee_must_be_an_enum() {
     rejected(
         "match 1 { _ => 1 }",
         "TE029",
@@ -195,41 +195,6 @@ fn scrutinee_must_be_an_owned_enum() {
         "let p := P { x: 1, y: 2 }; match p { _ => 1 }",
         "TE029",
         "found P",
-    );
-    rejected(
-        "let s := make(1); match s.borrow() { _ => 1 }",
-        "TE029",
-        "borrow matching (B3)",
-    );
-    rejected(
-        "var s := make(1); match s.share() { _ => 1 }",
-        "TE029",
-        "borrow matching (B3)",
-    );
-    let source = format!(
-        "{DECLS} fn look(s: borrow Shape) -> i32 {{ match s {{ _ => 1 }} }} fn main() {{}}"
-    );
-    assert!(diagnostics(&source)
-        .iter()
-        .any(|d| d.code.to_string() == "TE029" && d.message.contains("borrowed enum")));
-    let source =
-        format!("{DECLS} fn look(s: share Shape) -> i32 {{ match s {{ _ => 1 }} }} fn main() {{}}");
-    assert!(diagnostics(&source)
-        .iter()
-        .any(|d| d.code.to_string() == "TE029"));
-}
-
-#[test]
-fn enums_in_fields_and_elements_cannot_be_matched_in_place() {
-    rejected(
-        "let h := H { s: make(1), n: 1 }; match h.s { _ => 1 }",
-        "TE022",
-        "cannot move an enum out of an element or field",
-    );
-    rejected(
-        "let a := [make(1); 2]; match a[0] { _ => 1 }",
-        "TE022",
-        "borrow matching (B3)",
     );
 }
 

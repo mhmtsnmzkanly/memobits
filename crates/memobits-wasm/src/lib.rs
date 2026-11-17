@@ -272,6 +272,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         InstructionKind::StructNew { .. }
         | InstructionKind::EnumNew { .. }
         | InstructionKind::FieldAddr { .. }
+        | InstructionKind::VariantAddr { .. }
         | InstructionKind::Extract { .. }
         | InstructionKind::EnumTag { .. }
         | InstructionKind::VariantExtract { .. } => None,
@@ -851,6 +852,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     count(index);
                 }
                 InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::VariantAddr { base, .. }
                 | InstructionKind::Extract { base, .. }
                 | InstructionKind::EnumTag { base }
                 | InstructionKind::VariantExtract { base, .. } => count(base),
@@ -2450,6 +2452,34 @@ fn compile_instruction(
                 .and_then(|struct_layout| struct_layout.offsets.get(*field as usize))
                 .copied()
                 .ok_or("field address refers to a missing field")?;
+            emit_operand(body, function, param_count, base, layout, frame)?;
+            body.instruction(&WasmInstruction::I32Const(offset as i32));
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::VariantAddr {
+            base,
+            variant,
+            field,
+            ..
+        } => {
+            let output = output.ok_or("variant address lacks an output")?;
+            let type_id = match value_type(function, base)? {
+                Type::Enum(type_id) => type_id,
+                Type::Reference { inner, .. } => match *inner {
+                    Type::Enum(type_id) => type_id,
+                    _ => return Err("variant address base is not an enum".into()),
+                },
+                _ => return Err("variant address base is not an enum".into()),
+            };
+            let offset = layout
+                .structs
+                .get(type_id.0 as usize)
+                .and_then(|enum_type| enum_type.enum_layout.as_ref())
+                .and_then(|enum_layout| enum_layout.variants.get(*variant as usize))
+                .and_then(|variant_layout| variant_layout.offsets.get(*field as usize))
+                .copied()
+                .ok_or("variant address refers to a missing payload field")?;
             emit_operand(body, function, param_count, base, layout, frame)?;
             body.instruction(&WasmInstruction::I32Const(offset as i32));
             body.instruction(&WasmInstruction::I32Add);

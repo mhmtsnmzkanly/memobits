@@ -228,6 +228,7 @@ fn transfer_instruction(
             transfer_operand(index, state, diagnostics, function);
         }
         InstructionKind::FieldAddr { base, .. }
+        | InstructionKind::VariantAddr { base, .. }
         | InstructionKind::Extract { base, .. }
         | InstructionKind::EnumTag { base }
         | InstructionKind::VariantExtract { base, .. } => {

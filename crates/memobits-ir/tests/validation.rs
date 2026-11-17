@@ -2127,6 +2127,116 @@ fn rejects_invalid_variant_extractions() {
     assert!(has(&errors, "must be an enum owner"), "{errors:?}");
 }
 
+fn variant_addr(variant: u32, field: u32, access: Access, mode: UseMode) -> InstructionKind {
+    InstructionKind::VariantAddr {
+        loan: LoanId(0),
+        base: operand(Source::Local(LocalId(0)), mode),
+        variant,
+        field,
+        access,
+    }
+}
+
+fn ref_ty(access: Access, inner: Type) -> Type {
+    Type::Reference {
+        access,
+        inner: Box::new(inner),
+    }
+}
+
+#[test]
+fn accepts_variant_addresses_of_payload_fields() {
+    // E::C(i32, Bool): borrow both fields of the owner on the arm's path.
+    let errors = switch_program(|p| {
+        let f = &mut p.functions[0];
+        f.values.push(ref_ty(Access::Borrow, i32_ty()));
+        f.values.push(ref_ty(Access::Borrow, bool_ty()));
+        let mut second = variant_addr(2, 1, Access::Borrow, UseMode::Borrow);
+        if let InstructionKind::VariantAddr { loan, .. } = &mut second {
+            *loan = LoanId(1);
+        }
+        f.blocks[3].instructions = vec![
+            ins(Some(3), variant_addr(2, 0, Access::Borrow, UseMode::Borrow)),
+            ins(Some(4), second),
+        ];
+    });
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_variant_addresses() {
+    let with = |kind: InstructionKind, out: Type| {
+        switch_program(|p| {
+            let f = &mut p.functions[0];
+            f.values.push(out);
+            f.blocks[3].instructions = vec![ins(Some(3), kind)];
+        })
+    };
+    let borrow_i32 = ref_ty(Access::Borrow, i32_ty());
+    let errors = with(
+        variant_addr(5, 0, Access::Borrow, UseMode::Borrow),
+        borrow_i32.clone(),
+    );
+    assert!(
+        has(&errors, "variant index 5 is out of range"),
+        "{errors:?}"
+    );
+    let errors = with(
+        variant_addr(1, 3, Access::Borrow, UseMode::Borrow),
+        borrow_i32.clone(),
+    );
+    assert!(
+        has(&errors, "payload index 3 is out of range"),
+        "{errors:?}"
+    );
+    let errors = with(
+        variant_addr(2, 1, Access::Borrow, UseMode::Borrow),
+        borrow_i32.clone(),
+    );
+    assert!(has(&errors, "output type is incompatible"), "{errors:?}");
+    // The output access must be the requested one.
+    let errors = with(
+        variant_addr(1, 0, Access::Borrow, UseMode::Borrow),
+        ref_ty(Access::Share, i32_ty()),
+    );
+    assert!(has(&errors, "output type is incompatible"), "{errors:?}");
+    // The base mode must match the access.
+    let errors = with(
+        variant_addr(1, 0, Access::Borrow, UseMode::Read),
+        borrow_i32.clone(),
+    );
+    assert!(has(&errors, "base mode does not match"), "{errors:?}");
+    // The base must be an enum.
+    let errors = with(
+        InstructionKind::VariantAddr {
+            loan: LoanId(0),
+            base: val(0, UseMode::Borrow),
+            variant: 1,
+            field: 0,
+            access: Access::Borrow,
+        },
+        borrow_i32.clone(),
+    );
+    assert!(
+        has(&errors, "must be an enum owner or enum reference"),
+        "{errors:?}"
+    );
+    // Two addresses may not reuse a loan id.
+    let errors = switch_program(|p| {
+        let f = &mut p.functions[0];
+        f.values.push(borrow_i32.clone());
+        f.values.push(borrow_i32.clone());
+        f.blocks[2].instructions = vec![
+            ins(Some(3), variant_addr(1, 0, Access::Borrow, UseMode::Borrow)),
+            ins(Some(4), variant_addr(1, 0, Access::Borrow, UseMode::Borrow)),
+        ];
+    });
+    assert!(
+        has(&errors, "loan ID is defined more than once"),
+        "{errors:?}"
+    );
+}
+
 #[test]
 fn an_aggregate_variant_extraction_must_be_followed_by_a_consuming_use() {
     let array = Type::Array {

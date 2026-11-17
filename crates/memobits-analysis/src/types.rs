@@ -371,6 +371,9 @@ pub struct VariantUse {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchFact {
     pub expression: ExprId,
+    /// The scrutinee is matched in place (a reference, or an element or field
+    /// place): nothing is consumed and aggregate payload bindings are borrows.
+    pub borrowed: bool,
     pub arms: Vec<MatchArmFact>,
 }
 
@@ -1559,9 +1562,11 @@ impl Checker {
         self.record_variant(id, variant);
         enum_ty
     }
-    /// `match scrutinee { pattern => body, ... }` over an owned enum value.
-    /// Patterns are flat (`Enum::Variant`, `Enum::Variant(a, _)`, `_`); the
-    /// scrutinee is consumed and each arm binds owned payload locals.
+    /// `match scrutinee { pattern => body, ... }`. Patterns are flat
+    /// (`Enum::Variant`, `Enum::Variant(a, _)`, `_`). An owned scrutinee is
+    /// consumed and each arm binds owned payload locals; a scrutinee that
+    /// cannot be moved (a reference, an element or field place) is matched in
+    /// place and binds borrows.
     fn match_expr(
         &mut self,
         expr: &Expr,
@@ -1574,30 +1579,22 @@ impl Checker {
         let scrutinee_ty = self.expr(scrutinee, None);
         let table = Rc::clone(&self.table);
         let mut enum_id = None;
+        // A scrutinee that cannot be moved (a reference, or an element or field
+        // place) is matched in place: payload bindings borrow the payload.
+        let mut borrowed = false;
         match &scrutinee_ty {
             Ty::Enum(found, _) => {
-                if matches!(
+                borrowed = matches!(
                     scrutinee.kind,
                     ExprKind::Index { .. } | ExprKind::Field { .. }
-                ) {
-                    self.error(
-                        22,
-                        scrutinee.span,
-                        "cannot move an enum out of an element or field to match on it; matching a place without consuming it needs borrow matching (B3), so match an owned local, a call result or a constructed value",
-                    );
-                } else {
-                    enum_id = Some(*found);
-                }
+                );
+                enum_id = Some(*found);
             }
             Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Enum(..)) => {
-                self.error(
-                    29,
-                    scrutinee.span,
-                    format!(
-                        "cannot match on a borrowed enum ({}); `match` consumes an owned enum, and borrowed payload bindings arrive with borrow matching (B3)",
-                        name(&scrutinee_ty)
-                    ),
-                );
+                borrowed = true;
+                if let Ty::Enum(found, _) = inner.as_ref() {
+                    enum_id = Some(*found);
+                }
             }
             Ty::Never | Ty::Error => {}
             other => self.error(
@@ -1733,6 +1730,19 @@ impl Checker {
                         }
                         bound.push(binding);
                         let addr = slot as *const _ as usize;
+                        // A borrowing match binds primitives by copy and every
+                        // aggregate payload as a read-only reference to it.
+                        let slot_ty = if borrowed
+                            && matches!(slot_ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))
+                        {
+                            Ty::Reference {
+                                access: IrAccess::Borrow,
+                                inner: Box::new(slot_ty),
+                                origin: ReferenceOrigin::Binding(addr),
+                            }
+                        } else {
+                            slot_ty
+                        };
                         let local = self.register_local(
                             binding,
                             &slot_ty,
@@ -1816,6 +1826,7 @@ impl Checker {
         if let Some((facts_out, expression)) = self.facts.as_mut().zip(id) {
             facts_out.matches.push(MatchFact {
                 expression,
+                borrowed,
                 arms: facts,
             });
         }

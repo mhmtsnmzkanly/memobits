@@ -54,6 +54,12 @@ each edge, so a payload move is legal only on its arm's path and an enum consume
 arms is unavailable after the join (BE001). Lowering moves the scrutinee into a hidden local
 first, which is the single consume of the source value.
 
+Borrowing `match` (B3): `VariantAddr` is an address instruction like `FieldAddr` whose loan
+path step is `Step::Variant(variant, field)`. Different variants of one enum overlap (shared
+storage); the same variant's different payload fields are disjoint. A live payload borrow
+therefore blocks writes to the scrutinee place or its enclosing places (BE005, with the place
+rendered as `` `l.a::Rect.0` `` in the "borrowed here" label) and allows disjoint places.
+
 Field-disjoint loans (A4). Provenance and loans track *places*: a root (local, temporary,
 reference parameter, or external) plus a projection path of steps `Field(i)`,
 `Const(n)` (an index that is an integer `Constant` instruction) and `Dynamic` (any other

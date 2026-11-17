@@ -166,6 +166,14 @@ only where explicitly stated; unresolved API spellings remain proposals.
   assignment reads the element, evaluates the right-hand side, then stores.
 - Owned matching consumes the scrutinee and transfers selected payloads. Matching
   a read-only borrow produces borrowed payload bindings. Mutable matching is deferred.
+  A scrutinee that cannot be moved (a `borrow`/`share` parameter or reference
+  binding, a field `l.shape`, an element `a[i]`, nested places) is matched in
+  place and consumes nothing: a primitive payload binding is copied into a
+  plain value, an aggregate payload binding is a read-only `borrow` of its
+  slot that lives as long as it is used and that can be passed on, indexed and
+  field-read but not moved out or written. Matching through a `share` gives
+  read-only bindings too. Owned scrutinees (owned locals, temporaries, owned
+  parameters) keep consuming semantics.
 - Function parameters cannot override access modes at the call site; share
   parameters mutate their targets but are not rebound to another target.
 - Struct fields default to module-private. Outside its defining module a

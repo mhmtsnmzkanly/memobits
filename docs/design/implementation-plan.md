@@ -173,6 +173,20 @@ the implemented subset; a milestone is not complete merely because its crate exi
   resolve variant paths in the resolver. Details in the B2 checkpoint of
   `enum-implementation.md`; example in `examples/projects/enums/`.
 
+### Enums (B3)
+
+- **Borrow matching** (`memobits-analysis`, `-ir`, `-ownership`, `-wasm`): a
+  scrutinee that cannot be moved (a `borrow`/`share` parameter or reference
+  binding, `x.borrow()`, an element or field place such as `a[i]` or `l.shape`)
+  is matched in place. Primitive payload bindings are copies, aggregate payload
+  bindings are read-only `borrow` references (indexable, field-readable, usable
+  as `borrow` arguments; not movable, TE017, not writable, TE004). IR:
+  `VariantAddr`; loan path step `Step::Variant`, where different variants of one
+  enum place overlap. Disjoint writes during a payload borrow are accepted, an
+  overlapping write is BE005 with the place named. Mutable matching stays
+  deferred. Details in the B3 checkpoint of `enum-implementation.md`; example
+  in `examples/projects/enums/`.
+
 ### Known limits of the implemented subset
 
 - Analysis success is not an ownership or borrow-safety proof. Coverage is the
@@ -277,18 +291,18 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Milestones 10-12 (A* and ENF consumers, optimization): not started.
 - Milestone 13 (later design): task/host coordination, parallel execution,
   static storage, property/extension systems, ABI compatibility, and cross-language calls.
-- Milestone 4 gaps: borrow matching (B3) and three-state
+- Milestone 4 gaps: mutable matching and three-state
   outcome distinctions. Struct forms beyond A4 (whole-struct `.copy()`, references to primitive fields) are gated, not analysed.
 
 ### Next step
 
 Fixed arrays of primitive and nested-array elements are complete (WP1-WP4),
 structs are complete through A4 (`struct-implementation.md`), and enums are
-implemented through B2 (values and owned `match`, `enum-implementation.md`). The
-next work is B3: borrow matching (`match v.borrow() { .. }`, matching through
-`borrow` / `share` parameters, fields and elements) with borrowed payload
-bindings, a `Step::Variant` loan path and `VariantAddr`, then B4 (compiler-known
-`Option`, `Result`, `Attempt` and the `Error` hierarchy). The implicit primitive copy decided in `decisions.md`
+implemented through B3 (values, owned `match` and borrowing `match` over
+references and places, `enum-implementation.md`). The next work is B4:
+compiler-known `Option`, `Result` and `Attempt` and the `Error` hierarchy as
+monomorphised prelude enums, with minimal generic enum syntax and reference
+payloads (`Option<borrow T>`) on top of B3's loans. The implicit primitive copy decided in `decisions.md`
 is implemented. After that: copy of aggregates, references to primitive fields,
 and an external array ABI if exports ever need one. Keep TE017/TE022/LE900
 gating every form not listed under the fixed-array, struct and enum status above.

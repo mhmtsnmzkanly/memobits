@@ -1405,31 +1405,83 @@ impl<'a> Builder<'a> {
     /// joins its value like an `if` branch.
     fn lower_match(&mut self, expr: &Expr, scrutinee: &Expr, arms: &[MatchArm]) -> Option<Operand> {
         let fact = self.matches[&self.id(expr)];
-        let source = self.lower_expr(scrutinee)?;
-        let Some(Type::Enum(enum_id)) = self.operand_type(source) else {
-            unreachable!("checked match scrutinee")
+        let span = scrutinee.span;
+        // `cell` is the hidden owner of a consuming match, or the reference to
+        // the matched place of a borrowing one.
+        let (cell, enum_id, tag) = if fact.borrowed {
+            let reference = if matches!(
+                scrutinee.kind,
+                ExprKind::Index { .. } | ExprKind::Field { .. }
+            ) {
+                let (root, projections) = self.lower_place(scrutinee)?;
+                self.address_chain(root, &projections, Access::Borrow, span)?
+            } else {
+                self.lower_expr(scrutinee)?
+            };
+            let Some(Type::Reference { access, inner }) = self.operand_type(reference) else {
+                unreachable!("checked borrowing match scrutinee")
+            };
+            let Type::Enum(enum_id) = *inner else {
+                unreachable!("checked borrowing match scrutinee")
+            };
+            let cell = match reference.source {
+                Source::Local(local) => local,
+                _ => {
+                    let local = self.hidden_local(
+                        "match scrutinee",
+                        Type::Reference {
+                            access,
+                            inner: Box::new(Type::Enum(enum_id)),
+                        },
+                        span,
+                    );
+                    self.emit(
+                        span,
+                        InstructionKind::Assign {
+                            target: local,
+                            value: consume(reference),
+                            initialize: true,
+                        },
+                        None,
+                    );
+                    local
+                }
+            };
+            let mut base = op(Source::Local(cell), span);
+            base.mode = UseMode::Borrow;
+            let tag = self.emit(
+                span,
+                InstructionKind::EnumTag { base },
+                Some(Type::Primitive(Primitive::U32)),
+            )?;
+            (cell, enum_id, tag)
+        } else {
+            let source = self.lower_expr(scrutinee)?;
+            let Some(Type::Enum(enum_id)) = self.operand_type(source) else {
+                unreachable!("checked match scrutinee")
+            };
+            let cell = self.hidden_local("match scrutinee", Type::Enum(enum_id), span);
+            let moved = self.owned(source)?;
+            self.emit(
+                span,
+                InstructionKind::Assign {
+                    target: cell,
+                    value: moved,
+                    initialize: true,
+                },
+                None,
+            );
+            let tag = self.emit(
+                span,
+                InstructionKind::EnumTag {
+                    base: read(op(Source::Local(cell), span)),
+                },
+                Some(Type::Primitive(Primitive::U32)),
+            )?;
+            (cell, enum_id, tag)
         };
         let types = self.types;
         let definition = &types[enum_id.0 as usize];
-        let span = scrutinee.span;
-        let cell = self.hidden_local("match scrutinee", Type::Enum(enum_id), span);
-        let moved = self.owned(source)?;
-        self.emit(
-            span,
-            InstructionKind::Assign {
-                target: cell,
-                value: moved,
-                initialize: true,
-            },
-            None,
-        );
-        let tag = self.emit(
-            span,
-            InstructionKind::EnumTag {
-                base: read(op(Source::Local(cell), span)),
-            },
-            Some(Type::Primitive(Primitive::U32)),
-        )?;
         let join_id = self.new_block();
         let parameter = self.ty(expr).map(|ty| {
             let id = self.new_value(ty);
@@ -1473,7 +1525,49 @@ impl<'a> Builder<'a> {
                     .enumerate()
                     .filter_map(|(index, local)| local.map(|local| (index, local)))
                     .collect();
+                if fact.borrowed {
+                    for (index, local) in &bound {
+                        let ty = payload[*index].clone();
+                        let loan = LoanId(self.next_loan);
+                        self.next_loan += 1;
+                        let mut base = op(Source::Local(cell), arm.pattern.span);
+                        base.mode = UseMode::Borrow;
+                        let mut reference = self.emit(
+                            arm.pattern.span,
+                            InstructionKind::VariantAddr {
+                                loan,
+                                base,
+                                variant,
+                                field: *index as u32,
+                                access: Access::Borrow,
+                            },
+                            Some(Type::Reference {
+                                access: Access::Borrow,
+                                inner: Box::new(ty.clone()),
+                            }),
+                        )?;
+                        reference.mode = UseMode::Borrow;
+                        let value = if matches!(ty, Type::Primitive(_)) {
+                            let loaded = self.load_element(reference, arm.pattern.span)?;
+                            self.owned(loaded)?
+                        } else {
+                            consume(reference)
+                        };
+                        self.emit(
+                            arm.pattern.span,
+                            InstructionKind::Assign {
+                                target: *local,
+                                value,
+                                initialize: true,
+                            },
+                            None,
+                        );
+                    }
+                }
                 for (position, (index, local)) in bound.iter().enumerate() {
+                    if fact.borrowed {
+                        break; // borrowing bindings were addressed above
+                    }
                     let mut base = op(Source::Local(cell), arm.pattern.span);
                     base.mode = if position + 1 == bound.len() {
                         UseMode::Consume

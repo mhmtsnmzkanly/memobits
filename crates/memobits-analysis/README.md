@@ -190,8 +190,7 @@ variant_uses` records which expressions are variant constructions.
 
 `match` on owned enums (B2, "B2 checkpoint" in `docs/design/enum-implementation.md`). The
 scrutinee is an owned local, a call result, a construction or a block/`if`/`match` yielding an
-enum; a `borrow`/`share` enum or `.borrow()`/`.share()` result is TE029 and a field or element
-is TE022, both pointing at B3 (borrow matching). Patterns are flat: `Enum::Variant`,
+enum (a reference or element/field place is a borrowing match, see below). Patterns are flat: `Enum::Variant`,
 `Enum::Variant(a, _)`, `_`; a pattern of another enum, an unknown variant, a bare identifier,
 a wrong payload count or a repeated binding is TE030. Arms unify like `if` branches (TE013;
 `return`/`break`/`continue` arms are `Never`). Without a `_` arm every variant must be matched
@@ -202,3 +201,11 @@ Lowering moves the scrutinee once into a hidden local, emits `EnumTag` and a `Sw
 block per arm, extracts each arm's bound payloads with `VariantExtract` (the last consumes the
 cell) and joins arm values through a block parameter like `if`. `==`/`!=` on enums stays TE007
 and suggests `match`.
+
+Borrowing `match` (B3, "B3 checkpoint"). A scrutinee whose type is a reference to an enum
+(`borrow`/`share` parameter or binding, `.borrow()`/`.share()`) or that is an element/field
+place (`a[i]`, `l.shape`) is matched in place (`MatchFact::borrowed`): nothing is consumed,
+primitive payload bindings are copies, aggregate payload bindings are `borrow T` reference
+locals (so TE004 on writes and TE017 when moved out). Lowering forms the place reference
+(a hidden reference local when needed), reads the tag through it with `EnumTag`, and emits
+one `VariantAddr` per bound slot instead of `VariantExtract`; mutable matching stays deferred.

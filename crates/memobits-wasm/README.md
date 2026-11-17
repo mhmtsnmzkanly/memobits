@@ -81,5 +81,9 @@ zero-extended) from the enum cell, `VariantExtract` loads a payload primitive at
 `Switch` compiles to a compare chain inside the `pc` dispatcher (one `if` per listed variant;
 the default, or the last listed variant when every variant is listed, is the fallthrough).
 
+Borrowing `match` (B3): `VariantAddr` is `base + variant payload offset` (the base operand is
+the enum cell address, or the reference value), the same layout data as `VariantExtract`;
+`EnumTag` through a reference loads the tag from the referenced cell.
+
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

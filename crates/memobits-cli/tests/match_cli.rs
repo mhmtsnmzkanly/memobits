@@ -317,21 +317,21 @@ fn the_scrutinee_is_consumed_and_payloads_are_owned() {
 }
 
 #[test]
-fn borrowed_and_place_scrutinees_point_at_borrow_matching() {
+fn borrowed_and_place_scrutinees_match_in_place() {
     let f = Fixture::new();
-    for source in [
-        format!("{SHAPE}fn look(s: borrow Shape) -> i32 {{ match s {{ _ => 1 }} }}\nfn main() -> i32 {{ 0 }}"),
-        format!("{SHAPE}fn look(s: share Shape) -> i32 {{ match s {{ _ => 1 }} }}\nfn main() -> i32 {{ 0 }}"),
-        format!("{SHAPE}fn main() -> i32 {{ let s := Shape::Empty; match s.borrow() {{ _ => 1 }} }}"),
-    ] {
-        let text = f.error(&source, "TE029");
-        assert!(text.contains("B3"), "{text}");
-    }
-    let text = f.error(
-        &format!("{SHAPE}type H {{ s: Shape }}\nfn main() -> i32 {{ let h := H {{ s: Shape::Empty }}; match h.s {{ _ => 1 }} }}"),
-        "TE022",
+    assert_eq!(
+        f.result(&format!(
+            "{SHAPE}type H {{ s: Shape }}\n\
+             fn look(s: borrow Shape) -> i32 {{ match s {{ Shape::Empty => 1, _ => 2 }} }}\n\
+             fn peek(s: share Shape) -> i32 {{ match s {{ Shape::Circle(_) => 10, _ => 20 }} }}\n\
+             fn main() -> i32 {{\n\
+                 var s := Shape::Circle(1.0);\n\
+                 let h := H {{ s: Shape::Empty }};\n\
+                 look(s.borrow()) + peek(s.share()) * 10 + match h.s {{ Shape::Empty => 1000, _ => 0 }}\n\
+             }}"
+        )),
+        "Result: i32(1102)"
     );
-    assert!(text.contains("B3"), "{text}");
 }
 
 #[test]
@@ -371,12 +371,198 @@ fn the_enums_example_project_runs_from_source_and_artifact() {
     );
     assert_eq!(
         String::from_utf8(run.stdout).unwrap().trim(),
-        "Result: i32(4300)"
+        "Result: i32(1094300)"
     );
     assert!(copy.run(&["build"]).status.success());
     let artifact = copy.run(&["run", "target/memobits/app.wasm"]);
     assert_eq!(
         String::from_utf8(artifact.stdout).unwrap().trim(),
-        "Result: i32(4300)"
+        "Result: i32(1094300)"
     );
+}
+
+// ---- Package B3: borrowing matches over places and references ----
+
+const GEOM: &str = "type P { x: i32, y: i32 }\n\
+    type Shape [ Empty, Circle(i32), Rect(i32, i32), Poly(P, Array<i32, 3>) ]\n\
+    type Holder { shape: Shape, tag: P }\n\
+    fn is_big(s: borrow Shape) -> Bool {\n\
+        match s { Shape::Rect(w, h) => w * h > 10, _ => false }\n\
+    }\n\
+    fn sum_point(p: borrow P) -> i32 { p.x + p.y }\n";
+
+#[test]
+fn matching_an_enum_array_in_a_loop_counts_variants_and_sums_payloads() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.result(&format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 let shapes: Array<Shape, 5> = [Shape::Rect(2, 3), Shape::Empty, Shape::Circle(4), \
+                     Shape::Poly(P {{ x: 1, y: 2 }}, [10, 20, 30]), Shape::Rect(4, 5)];\n\
+                 var rects := 0;\n\
+                 var empties := 0;\n\
+                 var sum := 0;\n\
+                 var i := 0;\n\
+                 loop {{\n\
+                     if i == 5 {{ break; }}\n\
+                     match shapes[i] {{\n\
+                         Shape::Rect(w, h) => {{ rects += 1; sum += w * h; }}\n\
+                         Shape::Empty => {{ empties += 1; }}\n\
+                         Shape::Circle(r) => {{ sum += r; }}\n\
+                         Shape::Poly(p, pts) => {{ sum += sum_point(p) + pts[1]; }}\n\
+                     }}\n\
+                     i += 1;\n\
+                 }}\n\
+                 rects * 1000 + empties * 100 + sum\n\
+             }}"
+        )),
+        // sum = 6 + 4 + (3 + 20) + 20 = 53
+        "Result: i32(2153)"
+    );
+}
+
+#[test]
+fn matching_a_struct_field_and_borrowing_params_agree_from_source_and_artifact() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.result(&format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 let h := Holder {{ shape: Shape::Rect(4, 5), tag: P {{ x: 7, y: 8 }} }};\n\
+                 let arr: Array<Shape, 2> = [Shape::Empty, Shape::Rect(1, 1)];\n\
+                 let by_field := match h.shape {{ Shape::Rect(w, _) => w, _ => 0 }};\n\
+                 let by_param := if is_big(h.shape.borrow()) {{ 10 }} else {{ 0 }};\n\
+                 let by_elem := if is_big(arr[1].borrow()) {{ 100 }} else {{ 1 }};\n\
+                 by_field + by_param + by_elem\n\
+             }}"
+        )),
+        "Result: i32(15)"
+    );
+}
+
+#[test]
+fn nested_enum_payloads_and_aggregate_payload_bindings_read_through_references() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.result(&format!(
+            "{GEOM}\
+             type Wrap [ Plain, Boxed(Shape) ]\n\
+             fn main() -> i32 {{\n\
+                 let w: Array<Wrap, 2> = [Wrap::Plain, Wrap::Boxed(Shape::Poly(P {{ x: 3, y: 4 }}, [5, 6, 7]))];\n\
+                 match w[1] {{\n\
+                     Wrap::Boxed(inner) => match inner {{\n\
+                         Shape::Poly(p, pts) => sum_point(p) * 100 + pts[2],\n\
+                         _ => 0,\n\
+                     }},\n\
+                     Wrap::Plain => 1,\n\
+                 }}\n\
+             }}"
+        )),
+        "Result: i32(707)"
+    );
+}
+
+#[test]
+fn a_disjoint_write_during_a_payload_borrow_runs_and_an_overlapping_one_is_be005() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.result(&format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 var h := Holder {{ shape: Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5]), tag: P {{ x: 0, y: 0 }} }};\n\
+                 match h.shape {{\n\
+                     Shape::Poly(p, _) => {{ h.tag.y = 9; p.x + h.tag.y }}\n\
+                     _ => 0,\n\
+                 }}\n\
+             }}"
+        )),
+        "Result: i32(10)"
+    );
+    let text = f.error(
+        &format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 var h := Holder {{ shape: Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5]), tag: P {{ x: 0, y: 0 }} }};\n\
+                 match h.shape {{\n\
+                     Shape::Poly(p, _) => {{ h.shape = Shape::Empty; p.x }}\n\
+                     _ => 0,\n\
+                 }}\n\
+             }}"
+        ),
+        "BE005",
+    );
+    assert!(
+        text.contains("cannot write `h.shape` while it is borrowed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("`h.shape::Poly.0` was borrowed here"),
+        "{text}"
+    );
+    assert!(text.contains("is used later here"), "{text}");
+}
+
+#[test]
+fn a_dynamic_index_write_during_a_payload_borrow_is_be005() {
+    let f = Fixture::new();
+    let text = f.error(
+        &format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 var a: Array<Shape, 2> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5]), Shape::Empty];\n\
+                 var i := 0;\n\
+                 var j := 1;\n\
+                 match a[i] {{\n\
+                     Shape::Poly(p, _) => {{ a[j] = Shape::Empty; p.x }}\n\
+                     _ => 0,\n\
+                 }}\n\
+             }}"
+        ),
+        "BE005",
+    );
+    assert!(text.contains("`a[_]`"), "{text}");
+}
+
+#[test]
+fn payload_bindings_cannot_be_moved_out_or_written_and_owned_matches_still_consume() {
+    let f = Fixture::new();
+    let text = f.error(
+        &format!(
+            "{GEOM}\
+             fn take(p: P) -> i32 {{ p.x }}\n\
+             fn main() -> i32 {{\n\
+                 let a: Array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
+                 match a[0] {{ Shape::Poly(p, _) => take(p), _ => 0 }}\n\
+             }}"
+        ),
+        "TE017",
+    );
+    assert!(text.contains("reference values cannot escape"), "{text}");
+    let text = f.error(
+        &format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 var a: Array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
+                 match a[0] {{ Shape::Poly(p, _) => {{ p.x = 5; 1 }}, _ => 0 }}\n\
+             }}"
+        ),
+        "TE004",
+    );
+    assert!(
+        text.contains("cannot assign through borrow binding 'p'"),
+        "{text}"
+    );
+    let text = f.error(
+        &format!(
+            "{GEOM}\
+             fn main() -> i32 {{\n\
+                 let s := Shape::Circle(3);\n\
+                 let a := match s {{ Shape::Circle(r) => r, _ => 0 }};\n\
+                 match s {{ Shape::Circle(r) => r + a, _ => 0 }}\n\
+             }}"
+        ),
+        "BE001",
+    );
+    assert!(text.contains("'s'"), "{text}");
 }

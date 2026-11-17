@@ -1,6 +1,6 @@
 # Enums project
 
-A buildable project for the enum packages B1 and B2. `src/main.mb` declares a
+A buildable project for the enum packages B1 to B3. `src/main.mb` declares a
 `Shape` enum and a `Job` state-machine enum and inspects them with `match`.
 
 It demonstrates:
@@ -15,10 +15,15 @@ It demonstrates:
 - exhaustiveness: every variant must be matched or a `_` arm must exist;
 - ownership: matching an owned enum consumes it and each bound payload is an
   owned local, so `advance(j: Job) -> Job` builds the next state in each arm and
-  the loop writes `job = advance(job);`.
+  the loop writes `job = advance(job);`;
+- borrowing matches (B3): a scrutinee that cannot be moved is matched in place.
+  `is_wide(s: borrow Shape)` matches its reference parameter, and
+  `count_corners` matches `tiles[i]` in a loop, an element of a `borrow` array.
+  Nothing is consumed, so the array stays whole and the same element can be
+  matched again; primitive payloads are copied, aggregate payloads would be
+  read-only borrows (writing through a match is not allowed).
 
-Still gated: matching a `borrow`/`share` enum, a field or an element (B3),
-nested patterns, literal patterns, guards, `==` on enums (use `match`), and
+Still gated: nested patterns, literal patterns, guards, `==` on enums (use `match`), and
 enums in `main` or `[export]` signatures. See
 `docs/design/enum-implementation.md`.
 
@@ -32,14 +37,18 @@ Observed output of each command, from the repository root (the absolute prefix
 of the built path is shortened to the repository root):
 
 ```text
-Result: i32(4300)
-Built examples/projects/enums/target/memobits/app.wasm: 1 export(s), 3539 bytes
-Result: i32(4300)
+Result: i32(1094300)
+Built examples/projects/enums/target/memobits/app.wasm: 1 export(s), 6197 bytes
+Result: i32(1094300)
 ```
 
-The result is 300 + 4000 + 0. The rectangle `2 x 4` has area 8 and the circle
+The result is 300 + 4000 + 0 + 1090000. The rectangle `2 x 4` has area 8 and the circle
 of radius 2 has area `3 * 2 * 2 = 12`, so the two areas sum to 20 and `shapes`
 is `corners(Shape::Rect(..))`, 4. The job starts `Waiting`, runs `Running(1)`,
 `Running(2)`, `Running(3)`, then the fourth step finishes it with
 `Finished(3 * 100)` and the fifth step keeps it finished, so `total(job)` is
 300. `corners(Shape::Empty)` is 0.
+The `tiles` array holds `Rect(3, 2)`, `Empty`, `Circle(1)` and `Rect(1, 5)`, so
+`count_corners` adds 4 + 0 + 1 + 4 = 9 and `is_wide(tiles[0].borrow())` is
+true (3 > 2) and adds 100, giving `borrowed = 109`, which contributes
+`109 * 10000 = 1090000`.

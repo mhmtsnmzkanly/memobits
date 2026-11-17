@@ -244,6 +244,20 @@ pub enum InstructionKind {
         field: u32,
         access: Access,
     },
+    /// Enum twin of `FieldAddr`: a reference to payload field `field` of variant
+    /// `variant` of an enum owner or of a reference to one. The output is
+    /// `Reference { access, payload type }`. It is only meaningful on a path
+    /// where the enum's tag is `variant` (the `Switch` edge for it); the
+    /// validator checks indices and types, not dominance. The loan path step
+    /// for it is the variant and field, and different variants of one enum
+    /// place overlap because they share the payload storage.
+    VariantAddr {
+        loan: LoanId,
+        base: Operand,
+        variant: u32,
+        field: u32,
+        access: Access,
+    },
     /// Whole-value destructuring: read one field out of a struct owner into a
     /// fresh owned value of the field's type (a primitive is copied, a nested
     /// struct or array is moved by a bitwise copy). `base` is a struct owner
@@ -494,7 +508,8 @@ impl Program {
                     );
                     if let InstructionKind::Borrow { loan, .. }
                     | InstructionKind::ElementAddr { loan, .. }
-                    | InstructionKind::FieldAddr { loan, .. } = &instruction.kind
+                    | InstructionKind::FieldAddr { loan, .. }
+                    | InstructionKind::VariantAddr { loan, .. } = &instruction.kind
                     {
                         if !loans.insert(*loan) {
                             push(
@@ -1528,6 +1543,119 @@ fn validate_instruction(
                 }
             }
         }
+        InstructionKind::VariantAddr {
+            base,
+            variant,
+            field,
+            access,
+            ..
+        } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            if instruction.output.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "variant address requires an output reference",
+                );
+            }
+            let expected_mode = use_mode_for_access(*access);
+            if expected_mode.is_none() || base.mode != expected_mode.unwrap() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "variant address base mode does not match requested access",
+                );
+            }
+            let enum_id = match actual {
+                Some(Type::Enum(type_id)) if *access != Access::Owned => Some(type_id),
+                Some(Type::Reference {
+                    access: owner_access,
+                    inner,
+                }) if matches!(inner.as_ref(), Type::Enum(_)) => {
+                    let permitted = match access {
+                        Access::Owned => false,
+                        Access::Borrow => matches!(owner_access, Access::Borrow | Access::Share),
+                        Access::Share => owner_access == Access::Share,
+                    };
+                    if !permitted {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "variant address cannot strengthen reference access",
+                        );
+                    }
+                    match *inner {
+                        Type::Enum(type_id) => Some(type_id),
+                        _ => None,
+                    }
+                }
+                Some(_) => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "variant address base must be an enum owner or enum reference",
+                    );
+                    None
+                }
+                None => None,
+            };
+            let payload_type =
+                enum_id.and_then(|type_id| match program.types.get(type_id.0 as usize) {
+                    Some(TypeDef {
+                        kind: TypeDefKind::Enum { variants },
+                        ..
+                    }) => match variants.get(*variant as usize) {
+                        None => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                format!("variant index {variant} is out of range"),
+                            );
+                            None
+                        }
+                        Some(declared) => match declared.payload.get(*field as usize) {
+                            None => {
+                                push(
+                                    errors,
+                                    id,
+                                    Some(block),
+                                    format!("payload index {field} is out of range"),
+                                );
+                                None
+                            }
+                            Some(ty) => Some(ty.clone()),
+                        },
+                    },
+                    _ => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("enum type {:?} is out of range or names a struct", type_id),
+                        );
+                        None
+                    }
+                });
+            if let (Some(payload_type), Some(output)) = (payload_type, out) {
+                let expected = Type::Reference {
+                    access: *access,
+                    inner: Box::new(payload_type),
+                };
+                if output != &expected {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "variant address output type is incompatible",
+                    );
+                }
+            }
+        }
         InstructionKind::Extract { base, field } => {
             let actual = operand_type(program, function, base, errors, id, block);
             if base.mode == UseMode::Borrow || base.mode == UseMode::Share {
@@ -1610,7 +1738,8 @@ fn validate_instruction(
                 (Some(Type::Enum(type_id)), UseMode::Read) => Some(*type_id),
                 (Some(Type::Reference { access, inner }), mode)
                     if matches!(inner.as_ref(), Type::Enum(_))
-                        && use_mode_for_access(*access) == Some(mode) =>
+                        && (use_mode_for_access(*access) == Some(mode)
+                            || mode == UseMode::Borrow) =>
                 {
                     match inner.as_ref() {
                         Type::Enum(type_id) => Some(*type_id),
@@ -2079,6 +2208,7 @@ fn validate_read_only_loaded_values(
                     report(block_id, index, false);
                 }
                 InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::VariantAddr { base, .. }
                 | InstructionKind::Extract { base, .. }
                 | InstructionKind::EnumTag { base }
                 | InstructionKind::VariantExtract { base, .. } => report(block_id, base, false),

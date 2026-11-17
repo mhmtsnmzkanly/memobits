@@ -23,11 +23,14 @@ enum Root {
     External,
 }
 
-/// One projection step below a root: a struct field, an array element with a
-/// known constant index, or an array element with an unknown index.
+/// One projection step below a root: a struct field, a payload field of an
+/// enum variant, an array element with a known constant index, or an array
+/// element with an unknown index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Step {
     Field(u32),
+    /// Payload field `.1` of variant `.0`.
+    Variant(u32, u32),
     Const(u128),
     Dynamic,
 }
@@ -51,10 +54,13 @@ impl Place {
 
 /// Conservative step overlap: only provably different steps are disjoint.
 /// Distinct fields never overlap, distinct constant indices never overlap, and
-/// a dynamic index may equal any index.
+/// a dynamic index may equal any index. Payload fields of one variant are
+/// distinct storage, but different variants of an enum share the same storage,
+/// so they overlap.
 fn steps_may_overlap(left: Step, right: Step) -> bool {
     match (left, right) {
         (Step::Field(a), Step::Field(b)) => a == b,
+        (Step::Variant(va, fa), Step::Variant(vb, fb)) => va != vb || fa == fb,
         (Step::Const(a), Step::Const(b)) => a == b,
         _ => true,
     }
@@ -236,6 +242,21 @@ fn place_name(function: &Function, program: &Program, place: &Place) -> String {
                 text.push('.');
                 text.push_str(&field.name);
                 ty = &field.ty;
+            }
+            (Step::Variant(variant, field), Type::Enum(id)) => {
+                let Some(TypeDefKind::Enum { variants }) =
+                    program.types.get(id.0 as usize).map(|def| &def.kind)
+                else {
+                    return "this value".to_owned();
+                };
+                let Some(declared) = variants.get(*variant as usize) else {
+                    return "this value".to_owned();
+                };
+                let Some(payload) = declared.payload.get(*field as usize) else {
+                    return "this value".to_owned();
+                };
+                text.push_str(&format!("::{}.{field}", declared.name));
+                ty = payload;
             }
             (Step::Const(index), Type::Array { element, .. }) => {
                 text.push_str(&format!("[{index}]"));
@@ -589,6 +610,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
         InstructionKind::FieldAddr { base, .. }
+        | InstructionKind::VariantAddr { base, .. }
         | InstructionKind::Extract { base, .. }
         | InstructionKind::EnumTag { base }
         | InstructionKind::VariantExtract { base, .. } => vec![base],
@@ -848,6 +870,13 @@ fn address_provenance(
             field,
             access,
         } => (loan, base, access, Some(Step::Field(*field))),
+        InstructionKind::VariantAddr {
+            loan,
+            base,
+            variant,
+            field,
+            access,
+        } => (loan, base, access, Some(Step::Variant(*variant, *field))),
         InstructionKind::ElementAddr {
             loan,
             base,
@@ -905,6 +934,7 @@ fn intermediate_addresses(function: &Function) -> HashSet<u32> {
         for instruction in &block.instructions {
             let base = match &instruction.kind {
                 InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::VariantAddr { base, .. }
                 | InstructionKind::ElementAddr { base, .. } => Some(base),
                 _ => None,
             };
@@ -927,6 +957,7 @@ fn intermediate_addresses(function: &Function) -> HashSet<u32> {
             matches!(
                 instruction.kind,
                 InstructionKind::FieldAddr { .. }
+                    | InstructionKind::VariantAddr { .. }
                     | InstructionKind::ElementAddr { .. }
                     | InstructionKind::Borrow { .. }
             )
@@ -998,7 +1029,8 @@ fn transfer_provenance(
     let new = match &instruction.kind {
         InstructionKind::Borrow { .. }
         | InstructionKind::ElementAddr { .. }
-        | InstructionKind::FieldAddr { .. } => {
+        | InstructionKind::FieldAddr { .. }
+        | InstructionKind::VariantAddr { .. } => {
             let (owner_provenance, access, loan) =
                 address_provenance(function, state, instruction, consts)
                     .expect("address instruction");
@@ -1377,6 +1409,12 @@ fn check_instruction(
             base: owner,
             access,
             ..
+        }
+        | InstructionKind::VariantAddr {
+            loan,
+            base: owner,
+            access,
+            ..
         } => {
             if *access == Access::Share {
                 if let Source::Local(local) = owner.source {
@@ -1491,9 +1529,9 @@ fn check_instruction(
     for operand in instruction_operands(&instruction.kind) {
         let is_borrow_owner = match &instruction.kind {
             InstructionKind::Borrow { owner, .. } => std::ptr::eq(owner, operand),
-            InstructionKind::ElementAddr { base, .. } | InstructionKind::FieldAddr { base, .. } => {
-                std::ptr::eq(base, operand)
-            }
+            InstructionKind::ElementAddr { base, .. }
+            | InstructionKind::FieldAddr { base, .. }
+            | InstructionKind::VariantAddr { base, .. } => std::ptr::eq(base, operand),
             _ => false,
         };
         if is_borrow_owner || type_at(function, operand.source).is_some_and(is_reference) {
@@ -1636,5 +1674,23 @@ fn check_call(
                 diagnostics.push(pending);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{steps_may_overlap, Step};
+
+    #[test]
+    fn variant_steps_overlap_across_variants_but_not_across_fields() {
+        // Different variants share the payload storage.
+        assert!(steps_may_overlap(Step::Variant(0, 0), Step::Variant(1, 0)));
+        assert!(steps_may_overlap(Step::Variant(0, 1), Step::Variant(1, 0)));
+        // One variant's payload fields are distinct storage.
+        assert!(steps_may_overlap(Step::Variant(2, 1), Step::Variant(2, 1)));
+        assert!(!steps_may_overlap(Step::Variant(2, 0), Step::Variant(2, 1)));
+        // Fields, constants and variants never compare equal to each other.
+        assert!(steps_may_overlap(Step::Variant(0, 0), Step::Field(0)));
+        assert!(!steps_may_overlap(Step::Field(0), Step::Field(1)));
     }
 }

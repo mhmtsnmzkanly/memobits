@@ -57,7 +57,10 @@ consume-the-whole-value rule: an aggregate extraction with a `Read` base must be
 in the block by a consuming use of the base); `TerminatorKind::Switch { tag, ty, targets,
 default }` branches on a tag of enum `ty`. Validation checks the `u32` tag and enum type,
 unique in-range variants, that every variant has a target or a default exists, and each
-edge's block-parameter arguments. Payload references (`VariantAddr`) are not part of the IR
-until B3.
+edge's block-parameter arguments. `VariantAddr { loan, base, variant, field, access }` (B3) is the enum twin of `FieldAddr`: a
+reference to one payload field of an enum owner or enum reference, valid on the arm's path
+(dominance is not validated); the validator checks variant and payload ranges, base mode and
+access, the output `Reference` type and loan-id uniqueness. `EnumTag` also accepts a `Borrow`
+mode on any enum reference.
 
 Run tests with `cargo test --offline -p memobits-ir`.

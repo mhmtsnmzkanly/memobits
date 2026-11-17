@@ -270,3 +270,134 @@ fn a_live_reference_blocks_the_consuming_extraction() {
     );
     assert!(loans(&p).contains(&"BE005".to_string()), "{:?}", loans(&p));
 }
+
+fn variant_addr(loan: u32, access: Access, mode: UseMode) -> InstructionKind {
+    InstructionKind::VariantAddr {
+        loan: LoanId(loan),
+        base: local(0, mode),
+        variant: 1,
+        field: 0,
+        access,
+    }
+}
+
+fn ref_i32(access: Access) -> Type {
+    Type::Reference {
+        access,
+        inner: Box::new(i32_ty()),
+    }
+}
+
+#[test]
+fn a_payload_borrow_conflicts_with_a_write_to_the_same_payload() {
+    // r := &e.B.0; w := &mut e.B.0; *w = 5; read through r afterwards.
+    let head = vec![
+        ins(Some(3), variant_addr(0, Access::Borrow, UseMode::Borrow)),
+        ins(
+            Some(4),
+            InstructionKind::Constant(Constant::Integer("5".into())),
+        ),
+        ins(Some(5), variant_addr(1, Access::Share, UseMode::Share)),
+        ins(
+            None,
+            InstructionKind::Store {
+                reference: value(5, UseMode::Share),
+                value: value(4, UseMode::Consume),
+            },
+        ),
+        ins(
+            Some(6),
+            InstructionKind::Load {
+                reference: value(3, UseMode::Borrow),
+            },
+        ),
+    ];
+    let p = program(
+        vec![],
+        vec![],
+        vec![],
+        head,
+        vec![
+            ref_i32(Access::Borrow),
+            i32_ty(),
+            ref_i32(Access::Share),
+            i32_ty(),
+        ],
+    );
+    assert_eq!(loans(&p), ["BE005"]);
+}
+
+#[test]
+fn a_payload_borrow_conflicts_with_a_write_to_the_whole_enum() {
+    // r := &e.B.0 stays live while the whole enum is reassigned.
+    let head = vec![
+        ins(Some(3), variant_addr(0, Access::Borrow, UseMode::Borrow)),
+        ins(
+            Some(4),
+            InstructionKind::EnumNew {
+                ty: TypeId(0),
+                variant: 0,
+                payload: vec![],
+            },
+        ),
+        InstructionKind::Assign {
+            target: LocalId(0),
+            value: value(4, UseMode::Consume),
+            initialize: false,
+        }
+        .into_ins(),
+        ins(
+            Some(5),
+            InstructionKind::Load {
+                reference: value(3, UseMode::Borrow),
+            },
+        ),
+    ];
+    let p = program(
+        vec![],
+        vec![],
+        vec![],
+        head,
+        vec![ref_i32(Access::Borrow), enum_ty(), i32_ty()],
+    );
+    assert!(loans(&p).contains(&"BE005".to_string()), "{:?}", loans(&p));
+}
+
+trait IntoIns {
+    fn into_ins(self) -> Instruction;
+}
+impl IntoIns for InstructionKind {
+    fn into_ins(self) -> Instruction {
+        ins(None, self)
+    }
+}
+
+#[test]
+fn a_payload_borrow_that_is_not_used_again_allows_the_write() {
+    let head = vec![
+        ins(Some(3), variant_addr(0, Access::Borrow, UseMode::Borrow)),
+        ins(
+            Some(4),
+            InstructionKind::Load {
+                reference: value(3, UseMode::Borrow),
+            },
+        ),
+        ins(
+            Some(5),
+            InstructionKind::EnumNew {
+                ty: TypeId(0),
+                variant: 0,
+                payload: vec![],
+            },
+        ),
+        assign(0, value(5, UseMode::Consume)),
+    ];
+    let p = program(
+        vec![],
+        vec![],
+        vec![],
+        head,
+        vec![ref_i32(Access::Borrow), i32_ty(), enum_ty()],
+    );
+    assert!(loans(&p).is_empty(), "{:?}", loans(&p));
+}
