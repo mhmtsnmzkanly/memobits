@@ -73,3 +73,11 @@ source loan, so defer these results until reference provenance and escape
 checking can support them. The exact return type and range syntax remain
 open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.html#method.get) ·
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
+
+## Later String optimization
+
+After the first executable slice, evaluate `smol_str`, `compact_str`,
+`smartstring`, `arcstr`, `ecow`, `lasso`, and `string-interner` as design
+references from a local note. Compare promising approaches against the
+initial representation with representative workloads, measuring allocations
+and runtime while preserving owned moves, borrow rules, and valid UTF-8.
