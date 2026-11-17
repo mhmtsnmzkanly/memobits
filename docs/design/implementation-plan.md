@@ -145,7 +145,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 ### Enums (B1)
 
-- **Enum types as values, no `match` yet** (`memobits-analysis`, `-ir`, `-ownership`,
+- **Enum types as values (no `match` in B1)** (`memobits-analysis`, `-ir`, `-ownership`,
   `-wasm`): `type Shape [ Empty, Circle(f64), Rect(i32, i32) ]` declarations whose
   payloads are primitives, arrays, structs and enums in any nesting (by-value
   recursion is TE026, an empty enum TE027); construction `Shape::Empty` and
@@ -156,9 +156,22 @@ the implemented subset; a milestone is not complete merely because its crate exi
   repetition. IR: `Type::Enum`, `TypeDefKind::Enum`, `EnumNew`. Layout: a `u8`
   (up to 256 variants) or `u16` tag at offset 0, then the payload area aligned
   to the largest payload alignment, size the largest variant. Enums in exported
-  signatures are LE900. Enums cannot be inspected before `match` (B2); loans are
-  whole-enum conservative. Sequence, representation, the B2 plan and the gate
-  table are in `enum-implementation.md`.
+  signatures are LE900. Loans are whole-enum conservative. Sequence,
+  representation and the gate tables are in `enum-implementation.md`.
+
+### Enums (B2)
+
+- **Owned `match` with exhaustiveness** (`memobits-syntax`, `-resolve`, `-analysis`,
+  `-ir`, `-ownership`, `-wasm`): `match scrutinee { Enum::Variant(a, _) => expr,
+  Enum::Unit => { block }, _ => expr }` as an expression, in owned locals, call
+  results, constructions and owned parameters. Flat patterns only. Arms unify
+  like `if` branches (divergent arms allowed); missing variants are TE031,
+  wrong-enum / arity / unsupported patterns TE030, unreachable arms TE032,
+  non-enum or borrowed scrutinees TE029, matching a field or element TE022.
+  The scrutinee is consumed (BE001 afterwards) and payload bindings are owned
+  locals. IR: `EnumTag`, `VariantExtract`, `Switch`. Aliases of enum types now
+  resolve variant paths in the resolver. Details in the B2 checkpoint of
+  `enum-implementation.md`; example in `examples/projects/enums/`.
 
 ### Known limits of the implemented subset
 
@@ -264,19 +277,18 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Milestones 10-12 (A* and ENF consumers, optimization): not started.
 - Milestone 13 (later design): task/host coordination, parallel execution,
   static storage, property/extension systems, ABI compatibility, and cross-language calls.
-- Milestone 4 gaps: enum type analysis, enum exhaustiveness, and three-state
+- Milestone 4 gaps: borrow matching (B3) and three-state
   outcome distinctions. Struct forms beyond A4 (whole-struct `.copy()`, references to primitive fields) are gated, not analysed.
 
 ### Next step
 
 Fixed arrays of primitive and nested-array elements are complete (WP1-WP4),
-structs are complete through A4 (`struct-implementation.md`), and enum types as
-values are implemented (B1, `enum-implementation.md`). The next work is B2: owned
-`match` with exhaustiveness, on the `EnumTag` / `Switch` / `VariantAddr` plan
-written down in `enum-implementation.md`, reusing the whole-value destructuring
-and path-aware loans for variant payload patterns. Then B3 (borrow matching and
-enum parameters everywhere) and B4 (compiler-known `Option`, `Result`, `Attempt`
-and the `Error` hierarchy). The implicit primitive copy decided in `decisions.md`
+structs are complete through A4 (`struct-implementation.md`), and enums are
+implemented through B2 (values and owned `match`, `enum-implementation.md`). The
+next work is B3: borrow matching (`match v.borrow() { .. }`, matching through
+`borrow` / `share` parameters, fields and elements) with borrowed payload
+bindings, a `Step::Variant` loan path and `VariantAddr`, then B4 (compiler-known
+`Option`, `Result`, `Attempt` and the `Error` hierarchy). The implicit primitive copy decided in `decisions.md`
 is implemented. After that: copy of aggregates, references to primitive fields,
 and an external array ABI if exports ever need one. Keep TE017/TE022/LE900
 gating every form not listed under the fixed-array, struct and enum status above.

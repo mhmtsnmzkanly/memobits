@@ -1935,3 +1935,231 @@ fn enum_typed_struct_fields_and_array_elements_are_valid() {
     });
     assert_eq!(p.validate(), Ok(()));
 }
+
+fn plain_block(terminator: TerminatorKind) -> Block {
+    Block {
+        parameters: vec![],
+        instructions: vec![],
+        terminator: Terminator {
+            span: Some(span()),
+            kind: terminator,
+        },
+    }
+}
+
+/// `enum_program` followed by `tag := EnumTag(e); switch tag` over E's three
+/// variants into blocks 1 to 3, which each return. Value 2 is the tag.
+fn switch_program(edit: impl FnOnce(&mut Program)) -> Vec<String> {
+    let mut p = enum_program();
+    let f = &mut p.functions[0];
+    f.values.push(Type::Primitive(Primitive::U32));
+    f.blocks[0].instructions.push(ins(
+        Some(2),
+        InstructionKind::EnumTag {
+            base: operand(Source::Local(LocalId(0)), UseMode::Read),
+        },
+    ));
+    let edge = |target: u32| Edge {
+        target: BlockId(target),
+        arguments: vec![],
+    };
+    f.blocks[0].terminator.kind = TerminatorKind::Switch {
+        tag: val(2, UseMode::Read),
+        ty: TypeId(0),
+        targets: vec![(0, edge(1)), (1, edge(2)), (2, edge(3))],
+        default: None,
+    };
+    for _ in 0..3 {
+        f.blocks.push(plain_block(TerminatorKind::Return(None)));
+    }
+    edit(&mut p);
+    match p.validate() {
+        Ok(()) => vec![],
+        Err(errors) => errors.into_iter().map(|e| e.message).collect(),
+    }
+}
+
+fn switch_of(p: &mut Program) -> (&mut Vec<(u32, Edge)>, &mut Option<Edge>) {
+    match &mut p.functions[0].blocks[0].terminator.kind {
+        TerminatorKind::Switch {
+            targets, default, ..
+        } => (targets, default),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn accepts_enum_tag_and_a_covering_switch() {
+    assert_eq!(switch_program(|_| {}), Vec::<String>::new());
+    // A default may replace some targets, or sit beside all of them.
+    assert!(switch_program(|p| {
+        let (targets, default) = switch_of(p);
+        let edge = targets.pop().unwrap().1;
+        *default = Some(edge);
+    })
+    .is_empty());
+    assert!(switch_program(|p| {
+        let (_, default) = switch_of(p);
+        *default = Some(Edge {
+            target: BlockId(1),
+            arguments: vec![],
+        });
+    })
+    .is_empty());
+}
+
+#[test]
+fn rejects_invalid_switches() {
+    let errors = switch_program(|p| {
+        switch_of(p).0.pop();
+    });
+    assert!(
+        has(&errors, "must list every variant or have a default"),
+        "{errors:?}"
+    );
+    let errors = switch_program(|p| {
+        let (targets, _) = switch_of(p);
+        targets[1].0 = 0;
+    });
+    assert!(has(&errors, "variant 0 more than once"), "{errors:?}");
+    let errors = switch_program(|p| {
+        switch_of(p).0[2].0 = 9;
+    });
+    assert!(has(&errors, "variant 9 is out of range"), "{errors:?}");
+    let errors = switch_program(|p| {
+        switch_of(p).0[0].1.target = BlockId(40);
+    });
+    assert!(has(&errors, "out of range"), "{errors:?}");
+    let errors = switch_program(|p| {
+        switch_of(p).0[0].1.arguments = vec![val(0, UseMode::Read)];
+    });
+    assert!(has(&errors, "edge argument count"), "{errors:?}");
+    let errors = switch_program(|p| {
+        if let TerminatorKind::Switch { ty, .. } = &mut p.functions[0].blocks[0].terminator.kind {
+            *ty = TypeId(7);
+        }
+    });
+    assert!(has(&errors, "switch type"), "{errors:?}");
+    // The tag must be a u32.
+    let errors = switch_program(|p| {
+        if let TerminatorKind::Switch { tag, .. } = &mut p.functions[0].blocks[0].terminator.kind {
+            *tag = val(0, UseMode::Read);
+        }
+    });
+    assert!(has(&errors, "switch tag must be u32"), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_enum_tags() {
+    let errors = switch_program(|p| {
+        p.functions[0].values[2] = i32_ty();
+    });
+    assert!(has(&errors, "enum tag output must be u32"), "{errors:?}");
+    let errors = switch_program(|p| {
+        p.functions[0].blocks[0].instructions[3].kind = InstructionKind::EnumTag {
+            base: val(0, UseMode::Read),
+        };
+    });
+    assert!(has(&errors, "enum tag base must be an enum"), "{errors:?}");
+    // An owner must be read, not consumed.
+    let errors = switch_program(|p| {
+        p.functions[0].blocks[0].instructions[3].kind = InstructionKind::EnumTag {
+            base: operand(Source::Local(LocalId(0)), UseMode::Consume),
+        };
+    });
+    assert!(has(&errors, "enum tag base must be an enum"), "{errors:?}");
+}
+
+fn variant_extract(variant: u32, field: u32, mode: UseMode) -> InstructionKind {
+    InstructionKind::VariantExtract {
+        base: operand(Source::Local(LocalId(0)), mode),
+        variant,
+        field,
+    }
+}
+
+#[test]
+fn accepts_variant_extraction_of_payload_fields() {
+    // E::C(i32, Bool): extract both, the last consuming the enum.
+    let errors = switch_program(|p| {
+        let f = &mut p.functions[0];
+        f.values.push(i32_ty());
+        f.values.push(bool_ty());
+        f.blocks[3].instructions = vec![
+            ins(Some(3), variant_extract(2, 0, UseMode::Read)),
+            ins(Some(4), variant_extract(2, 1, UseMode::Consume)),
+        ];
+    });
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_variant_extractions() {
+    let with = |kind: InstructionKind, out: Type| {
+        switch_program(|p| {
+            let f = &mut p.functions[0];
+            f.values.push(out);
+            f.blocks[3].instructions = vec![ins(Some(3), kind)];
+        })
+    };
+    let errors = with(variant_extract(5, 0, UseMode::Read), i32_ty());
+    assert!(
+        has(&errors, "variant index 5 is out of range"),
+        "{errors:?}"
+    );
+    let errors = with(variant_extract(1, 3, UseMode::Read), i32_ty());
+    assert!(
+        has(&errors, "payload index 3 is out of range"),
+        "{errors:?}"
+    );
+    let errors = with(variant_extract(2, 1, UseMode::Read), i32_ty());
+    assert!(has(&errors, "differs from the payload type"), "{errors:?}");
+    let errors = with(variant_extract(1, 0, UseMode::Borrow), i32_ty());
+    assert!(has(&errors, "must be read or consumed"), "{errors:?}");
+    let errors = with(
+        InstructionKind::VariantExtract {
+            base: val(0, UseMode::Read),
+            variant: 1,
+            field: 0,
+        },
+        i32_ty(),
+    );
+    assert!(has(&errors, "must be an enum owner"), "{errors:?}");
+}
+
+#[test]
+fn an_aggregate_variant_extraction_must_be_followed_by_a_consuming_use() {
+    let array = Type::Array {
+        element: Box::new(i32_ty()),
+        len: 2,
+    };
+    let build = |last: UseMode| {
+        let array = array.clone();
+        switch_program(move |p| {
+            if let TypeDefKind::Enum { variants } = &mut p.types[0].kind {
+                variants.push(VariantDef {
+                    name: "D".into(),
+                    payload: vec![array.clone(), i32_ty()],
+                });
+            }
+            let f = &mut p.functions[0];
+            f.values.push(array);
+            f.values.push(i32_ty());
+            f.blocks[3].instructions = vec![
+                ins(Some(3), variant_extract(3, 0, UseMode::Read)),
+                ins(Some(4), variant_extract(3, 1, last)),
+            ];
+            // The new variant 3 goes to the default.
+            *switch_of(p).1 = Some(Edge {
+                target: BlockId(3),
+                arguments: vec![],
+            });
+        })
+    };
+    assert!(build(UseMode::Consume).is_empty());
+    let errors = build(UseMode::Read);
+    assert!(
+        has(&errors, "must be followed by a consuming use"),
+        "{errors:?}"
+    );
+}

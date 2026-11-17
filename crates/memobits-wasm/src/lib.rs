@@ -272,7 +272,9 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         InstructionKind::StructNew { .. }
         | InstructionKind::EnumNew { .. }
         | InstructionKind::FieldAddr { .. }
-        | InstructionKind::Extract { .. } => None,
+        | InstructionKind::Extract { .. }
+        | InstructionKind::EnumTag { .. }
+        | InstructionKind::VariantExtract { .. } => None,
         InstructionKind::Call { callee, .. } => match callee.source {
             Source::Function(_) => None,
             _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
@@ -848,9 +850,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     count(base);
                     count(index);
                 }
-                InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
-                    count(base)
-                }
+                InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::Extract { base, .. }
+                | InstructionKind::EnumTag { base }
+                | InstructionKind::VariantExtract { base, .. } => count(base),
                 InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
                 InstructionKind::EnumNew { payload, .. } => payload.iter().for_each(&mut count),
                 InstructionKind::Store { reference, value } => {
@@ -877,6 +880,17 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 count(condition);
                 count_edge(then_edge, &mut count);
                 count_edge(else_edge, &mut count);
+            }
+            TerminatorKind::Switch {
+                tag,
+                targets,
+                default,
+                ..
+            } => {
+                count(tag);
+                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                    count_edge(edge, &mut count);
+                }
             }
             TerminatorKind::Return(value) => value.iter().for_each(&mut count),
             TerminatorKind::Unreachable => {}
@@ -2353,6 +2367,71 @@ fn compile_instruction(
                 }
             }
         }
+        InstructionKind::EnumTag { base } => {
+            let output = output.ok_or("enum tag lacks an output")?;
+            let type_id = match value_type(function, base)? {
+                Type::Enum(type_id) => type_id,
+                Type::Reference { inner, .. } => match *inner {
+                    Type::Enum(type_id) => type_id,
+                    _ => return Err("enum tag base is not an enum".into()),
+                },
+                _ => return Err("enum tag base is not an enum".into()),
+            };
+            let enum_layout = layout
+                .structs
+                .get(type_id.0 as usize)
+                .and_then(|enum_type| enum_type.enum_layout.as_ref())
+                .ok_or("enum tag refers to a missing enum")?;
+            emit_operand(body, function, param_count, base, layout, frame)?;
+            match enum_layout.tag_size {
+                1 => emit_load(body, Primitive::U8),
+                2 => emit_load(body, Primitive::U16),
+                _ => emit_load(body, Primitive::U32),
+            }
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::VariantExtract {
+            base,
+            variant,
+            field,
+        } => {
+            let output = output.ok_or("variant extraction lacks an output")?;
+            let Type::Enum(type_id) = value_type(function, base)? else {
+                return Err("variant extraction base is not an enum".into());
+            };
+            let variant_layout = layout
+                .structs
+                .get(type_id.0 as usize)
+                .and_then(|enum_type| enum_type.enum_layout.as_ref())
+                .and_then(|enum_layout| enum_layout.variants.get(*variant as usize))
+                .ok_or("variant extraction refers to a missing variant")?;
+            let offset = *variant_layout
+                .offsets
+                .get(*field as usize)
+                .ok_or("variant extraction refers to a missing payload field")?;
+            match variant_layout.fields[*field as usize] {
+                FieldStorage::Primitive(kind) => {
+                    emit_operand(body, function, param_count, base, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    emit_load(body, kind);
+                    body.instruction(&WasmInstruction::LocalSet(output));
+                }
+                FieldStorage::Aggregate(size) => {
+                    let cell = array_cell_of(layout, Slot::Value(instruction.output.unwrap().0))?;
+                    let frame = frame.ok_or("aggregate cell requires frame")?;
+                    emit_address(body, frame, cell.offset);
+                    emit_operand(body, function, param_count, base, layout, Some(frame))?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    body.instruction(&WasmInstruction::I32Const(size as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+            }
+        }
         InstructionKind::FieldAddr { base, field, .. } => {
             let output = output.ok_or("field address lacks an output")?;
             // The base is a struct owner (its operand is the cell address) or
@@ -2702,6 +2781,54 @@ fn compile_terminator(
             )?;
             body.instruction(&WasmInstruction::Br(2));
             body.instruction(&WasmInstruction::End);
+        }
+        TerminatorKind::Switch {
+            tag,
+            targets,
+            default,
+            ..
+        } => {
+            // A compare chain over the tag: each listed variant tests the tag
+            // and takes its edge; the default (or, when every variant is
+            // listed and there is no default, the last target) is the fallthrough.
+            let (tested, fallthrough) = match default {
+                Some(edge) => (&targets[..], edge),
+                None => {
+                    let (last, rest) = targets
+                        .split_last()
+                        .ok_or("switch has neither targets nor a default")?;
+                    (rest, &last.1)
+                }
+            };
+            for (variant, edge) in tested {
+                emit_operand(body, function, param_count, tag, layout, frame)?;
+                body.instruction(&WasmInstruction::I32Const(*variant as i32));
+                body.instruction(&WasmInstruction::I32Eq);
+                body.instruction(&WasmInstruction::If(BlockType::Empty));
+                emit_edge(
+                    body,
+                    function,
+                    edge.target,
+                    &edge.arguments,
+                    pc,
+                    param_count,
+                    layout,
+                    frame,
+                )?;
+                body.instruction(&WasmInstruction::Br(2));
+                body.instruction(&WasmInstruction::End);
+            }
+            emit_edge(
+                body,
+                function,
+                fallthrough.target,
+                &fallthrough.arguments,
+                pc,
+                param_count,
+                layout,
+                frame,
+            )?;
+            body.instruction(&WasmInstruction::Br(1));
         }
         TerminatorKind::Return(value) => {
             if let Some(value) = value {

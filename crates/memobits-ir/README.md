@@ -51,7 +51,13 @@ the variant index, operand count, types, modes and the output type. Payload type
 the struct field rules (non-Unit primitives, structs, enums, arrays; no references); an
 empty enum, duplicate variant names and by-value recursion are rejected. Enums are
 aggregates for borrow/share references, owners, parameters, results and block parameters;
-a whole-enum `Load` is invalid. Tag reads, payload projection and `Switch` (B2) are
-specified in `docs/design/enum-implementation.md` but not yet part of the IR.
+a whole-enum `Load` is invalid. `EnumTag { base }` reads the tag of an enum owner (`Read`) or enum reference as a `u32`;
+`VariantExtract { base, variant, field }` is the enum twin of `Extract` (same
+consume-the-whole-value rule: an aggregate extraction with a `Read` base must be followed
+in the block by a consuming use of the base); `TerminatorKind::Switch { tag, ty, targets,
+default }` branches on a tag of enum `ty`. Validation checks the `u32` tag and enum type,
+unique in-range variants, that every variant has a target or a default exists, and each
+edge's block-parameter arguments. Payload references (`VariantAddr`) are not part of the IR
+until B3.
 
 Run tests with `cargo test --offline -p memobits-ir`.

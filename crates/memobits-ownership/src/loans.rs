@@ -535,6 +535,13 @@ fn edges(terminator: &TerminatorKind) -> Vec<&Edge> {
             else_edge,
             ..
         } => vec![then_edge, else_edge],
+        TerminatorKind::Switch {
+            targets, default, ..
+        } => targets
+            .iter()
+            .map(|(_, edge)| edge)
+            .chain(default.iter())
+            .collect(),
         TerminatorKind::Return(_) | TerminatorKind::Unreachable => Vec::new(),
     }
 }
@@ -581,9 +588,10 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Load { reference: operand } => vec![operand],
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
-        InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
-            vec![base]
-        }
+        InstructionKind::FieldAddr { base, .. }
+        | InstructionKind::Extract { base, .. }
+        | InstructionKind::EnumTag { base }
+        | InstructionKind::VariantExtract { base, .. } => vec![base],
         InstructionKind::StructNew { fields, .. } => fields.iter().collect(),
         InstructionKind::EnumNew { payload, .. } => payload.iter().collect(),
         InstructionKind::ArrayNew { init } => match init {
@@ -646,6 +654,19 @@ fn compute_block_entry(function: &Function, block: &Block, mut live: Vec<bool>) 
             mark_operand(&mut live, function, condition);
             for argument in then_edge.arguments.iter().chain(&else_edge.arguments) {
                 mark_operand(&mut live, function, argument);
+            }
+        }
+        TerminatorKind::Switch {
+            tag,
+            targets,
+            default,
+            ..
+        } => {
+            mark_operand(&mut live, function, tag);
+            for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                for argument in &edge.arguments {
+                    mark_operand(&mut live, function, argument);
+                }
             }
         }
         TerminatorKind::Return(Some(value)) => mark_operand(&mut live, function, value),
@@ -722,6 +743,21 @@ fn liveness(function: &Function, reachable: &[bool]) -> Liveness {
                 mark_operand(&mut live, function, condition);
                 for argument in then_edge.arguments.iter().chain(&else_edge.arguments) {
                     mark_operand(&mut live, function, argument);
+                }
+            }
+            TerminatorKind::Switch {
+                tag,
+                targets,
+                default,
+                ..
+            } => {
+                mark_operand(&mut term_live, function, tag);
+                mark_operand(&mut live, function, tag);
+                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                    for argument in &edge.arguments {
+                        mark_operand(&mut term_live, function, argument);
+                        mark_operand(&mut live, function, argument);
+                    }
                 }
             }
             TerminatorKind::Return(Some(value)) => {
@@ -1126,6 +1162,20 @@ fn terminator_operands(terminator: &TerminatorKind) -> Vec<&Operand> {
         } => std::iter::once(condition)
             .chain(&then_edge.arguments)
             .chain(&else_edge.arguments)
+            .collect(),
+        TerminatorKind::Switch {
+            tag,
+            targets,
+            default,
+            ..
+        } => std::iter::once(tag)
+            .chain(
+                targets
+                    .iter()
+                    .map(|(_, edge)| edge)
+                    .chain(default)
+                    .flat_map(|edge| &edge.arguments),
+            )
             .collect(),
         TerminatorKind::Return(Some(value)) => vec![value],
         TerminatorKind::Return(None) | TerminatorKind::Unreachable => Vec::new(),

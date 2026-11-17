@@ -61,7 +61,7 @@ Code, diagnostics, and documentation are written in English.
 - [Structs](docs/design/struct-implementation.md) — struct implementation
   sequence (A1 and A2 implemented) and checkpoints.
 - [Enums](docs/design/enum-implementation.md) — enum implementation sequence
-  (B1 implemented: enum types as values, no `match` yet) and checkpoints.
+  (B1 and B2 implemented: enum values and owned `match`) and checkpoints.
 - [Illustrative syntax guide](examples/design/language-guide.mb) (not executable).
 
 ## Examples
@@ -71,5 +71,7 @@ Code, diagnostics, and documentation are written in English.
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of
   public fields.
+- `examples/projects/enums/` — enums: variants, `match` with exhaustiveness, aliases of
+  enum types and a state machine stepped in a loop.
 - `examples/analysis/` — single files for the analysis and ownership commands.
 - `examples/design/` — illustrative target syntax.

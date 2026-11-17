@@ -7,8 +7,8 @@ list means the recovered AST must not be treated as successfully compiled code.
 Implemented syntax: functions, parameter access modes, basic named types,
 field/enum/alias declarations, path imports with aliases, explicit and inferred
 bindings, assignments, numeric/boolean expressions, calls, field access, blocks,
-if/else, return, loop, break, and continue. Nested block comments are supported.
-A block-like statement (`if`, `loop`, or a bare block) at the start of a statement
+if/else, `match` over enum variants, return, loop, break, and continue. Nested block comments are supported.
+A block-like statement (`if`, `match`, `loop`, or a bare block) at the start of a statement
 ends at its closing `}`: following `[`, `(`, `.`, or binary operators start a new
 statement or tail instead of continuing it. In other positions these forms are full expressions.
 The parser accepts member-call spellings such as `value.borrow()`,
@@ -33,7 +33,19 @@ SE001 reports lexical errors; SE002 reports unexpected or missing syntax.
 Locations are UTF-8 byte offsets. Name resolution, type checking, ownership,
 visibility, exhaustive matching, and control-flow legality are not performed.
 
-Strings, general generic types, match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
+`match scrutinee { Pattern => expr, Pattern => { block } }` parses to `ExprKind::Match`
+with one `MatchArm { pattern, body }` per arm, in source order. A pattern is `_`
+(`PatternKind::Wildcard`) or a variant path with optional slots
+(`PatternKind::Variant { path, slots }`; each `PatternSlot` is an identifier or `_`). Arms are
+separated by commas, which may be omitted after a block-like body (`{`, `if`, `match`);
+`return`, `break` and `continue` are accepted directly as an arm body (parsed as a
+one-statement block); `=>` is a token. The scrutinee is parsed like an `if` condition, so a
+struct literal there is SE002 (parenthesise it). Literal, nested and struct patterns, guards
+(`if` after a pattern), and a missing separator are SE002 with a message naming the gated
+form. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
+is left to analysis.
+
+Strings, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
 current accepted subset. The parser is handwritten and uses Pratt precedence.
 
 Fixed-array syntax includes structured `Array<T, N>` (including nested element

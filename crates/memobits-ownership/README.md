@@ -47,6 +47,13 @@ as a whole value (BE001 afterwards), and a `Borrow` of an enum owner is a loan r
 place. With no projection into an enum yet, every access overlaps the whole enum
 (BE005 for an assignment, move or conflicting reference while one is live).
 
+Owned `match` (B2): `EnumTag` is a read and `VariantExtract` follows `Extract` (a read, or the
+consuming use on the last payload of an arm). `Switch` is a branching terminator like
+`Branch`: its tag and edge arguments are operands, and availability and liveness flow along
+each edge, so a payload move is legal only on its arm's path and an enum consumed in some
+arms is unavailable after the join (BE001). Lowering moves the scrutinee into a hidden local
+first, which is the single consume of the source value.
+
 Field-disjoint loans (A4). Provenance and loans track *places*: a root (local, temporary,
 reference parameter, or external) plus a projection path of steps `Field(i)`,
 `Const(n)` (an index that is an integer `Constant` instruction) and `Dynamic` (any other

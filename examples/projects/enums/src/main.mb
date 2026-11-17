@@ -1,0 +1,63 @@
+// A shape calculator and a small state machine, both built on `match`.
+type Shape [ Empty, Circle(f64), Rect(f64, f64) ]
+
+type Job [ Waiting, Running(i32), Finished(i32) ]
+
+// An alias of an enum type names its variants too: `Figure::Circle(..)`.
+type Figure = Shape;
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Empty => 0.0,
+        Shape::Circle(r) => 3.0 * r * r,
+        Shape::Rect(w, h) => { w * h }
+    }
+}
+
+// `match` is an expression, so each arm yields the same result type.
+fn corners(s: Shape) -> i32 {
+    match s {
+        Shape::Empty => 0,
+        Shape::Circle(_) => 1,
+        Shape::Rect(_, _) => 4,
+    }
+}
+
+// Matching consumes the job, so each arm builds the next one.
+fn advance(j: Job) -> Job {
+    match j {
+        Job::Waiting => Job::Running(1),
+        Job::Running(done) => {
+            if done >= 3 {
+                Job::Finished(done * 100)
+            } else {
+                Job::Running(done + 1)
+            }
+        }
+        Job::Finished(total) => Job::Finished(total),
+    }
+}
+
+fn total(j: Job) -> i32 {
+    match j {
+        Job::Finished(total) => total,
+        _ => -1,
+    }
+}
+
+fn main() -> i32 {
+    let rect := area(Figure::Rect(2.0, 4.0));
+    let disc := area(Figure::Circle(2.0));
+    let shapes := if rect + disc == 20.0 { corners(Shape::Rect(1.0, 1.0)) } else { 0 };
+
+    var job := Job::Waiting;
+    var steps := 0;
+    loop {
+        job = advance(job);
+        steps += 1;
+        if steps == 5 {
+            break;
+        }
+    }
+    total(job) + shapes * 1000 + corners(Shape::Empty)
+}

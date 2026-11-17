@@ -1,7 +1,7 @@
 //! End-to-end enum programs (package B1): source runs and built artifacts,
-//! cross-module construction, and the diagnostics users see. Enums cannot be
-//! inspected before `match` (B2), so the programs return primitives computed
-//! next to the enum traffic and prove that enums compile, run and pass checks.
+//! cross-module construction, and the diagnostics users see. These programs
+//! never inspect an enum, so they return primitives computed next to the enum
+//! traffic; `match` programs live in `match_cli.rs`.
 use std::{
     fs,
     path::PathBuf,

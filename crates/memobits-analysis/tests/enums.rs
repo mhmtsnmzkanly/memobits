@@ -1,7 +1,7 @@
 //! Enum types as values (package B1): declarations in the type table, variant
 //! construction, aggregate behaviour (moves, parameters, joins, fields, arrays)
-//! and the diagnostics around misuse. There is no `match` yet, so enums are
-//! built, moved and passed but never inspected.
+//! and the diagnostics around misuse. Inspection with `match` is tested in
+//! `match_enums.rs`.
 use memobits_analysis::lower_module;
 use memobits_diagnostics::{Diagnostic, SourceId};
 use memobits_ir::{
@@ -294,7 +294,7 @@ fn enums_have_no_fields_indexing_or_arithmetic() {
     rejected(
         &body("let a := Shape::Empty; let b := Shape::Empty; let c := a == b;"),
         "TE007",
-        "equality",
+        "use `match`",
     );
 }
 

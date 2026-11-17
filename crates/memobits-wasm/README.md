@@ -73,7 +73,13 @@ variant extent rounded to the enum alignment, nested aggregates are inline, and 
 arithmetic is checked. The layout is internal, not a stable ABI. Enums in `main` or
 `[export]` signatures are rejected with LE900, and an enum frame over `[build].stack_size`
 is the usual stack diagnostic. In-crate tests read the tag and payload bytes through the
-test-only `__test_memory` export; no language feature reads a tag before `match` (B2).
+test-only `__test_memory` export.
+
+`match` on owned enums (B2): `EnumTag` loads the tag with its own width (`u8`/`u16`/`u32`,
+zero-extended) from the enum cell, `VariantExtract` loads a payload primitive at
+`base + variant offset` or `memory.copy`s an aggregate payload into the output's cell, and
+`Switch` compiles to a compare chain inside the `pc` dispatcher (one `if` per listed variant;
+the default, or the last listed variant when every variant is listed, is the fallthrough).
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

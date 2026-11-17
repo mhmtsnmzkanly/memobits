@@ -1,6 +1,7 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_syntax::{
-    Block, Expr, ExprKind, ItemKind, Module, StatementKind, Type, TypeArgument, TypeDefinition,
+    Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, Type, TypeArgument,
+    TypeDefinition,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,12 +36,16 @@ pub(crate) fn check(
     .collect();
     types.extend(prelude.keys().cloned());
     let mut variants = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
     for item in &module.items {
         match &item.kind {
             ItemKind::Type {
                 name, definition, ..
             } => {
                 types.insert(name.clone());
+                if let TypeDefinition::Alias(target) = definition {
+                    aliases.insert(name.clone(), target.path.clone());
+                }
                 if let TypeDefinition::Enum(v) = definition {
                     variants.insert(
                         name.clone(),
@@ -61,6 +66,7 @@ pub(crate) fn check(
         types,
         imports,
         variants,
+        aliases,
         scopes: vec![globals],
         diagnostics: vec![],
         qualified: vec![],
@@ -137,6 +143,9 @@ struct Checker {
     types: BTreeSet<String>,
     imports: BTreeMap<String, String>,
     variants: BTreeMap<String, BTreeSet<String>>,
+    /// Local `type Name = path;` aliases, followed when a variant path starts
+    /// with an alias name.
+    aliases: BTreeMap<String, Vec<String>>,
     scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
     qualified: Vec<(String, Span, bool)>,
@@ -157,6 +166,32 @@ impl Checker {
             self.qualified.push((path.clone(), ty.span, true));
         } else if !self.types.contains(&ty.path[0]) {
             self.error(3, ty.span, format!("unknown type '{}'", ty.path[0]));
+        }
+    }
+    /// A path of two or more segments: a local enum variant (possibly through
+    /// local aliases) is checked here, anything else goes to the module loader.
+    fn qualified_path(&mut self, path: &[String], span: Span) {
+        let mut head = vec![path[0].clone()];
+        let mut seen = BTreeSet::new();
+        while head.len() == 1 && seen.insert(head[0].clone()) {
+            match self.aliases.get(&head[0]) {
+                Some(target) => head = target.clone(),
+                None => break,
+            }
+        }
+        let mut full = head;
+        full.extend(path[1..].iter().cloned());
+        if full.len() == 2 && self.variants.contains_key(&full[0]) {
+            if !self.variants[&full[0]].contains(&full[1]) {
+                self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+            }
+        } else {
+            let expanded = if let Some(import) = self.imports.get(&full[0]) {
+                format!("{}::{}", import, full[1..].join("::"))
+            } else {
+                full.join("::")
+            };
+            self.qualified.push((expanded, span, false));
         }
     }
     fn error(&mut self, number: u16, span: Span, message: String) {
@@ -226,24 +261,7 @@ impl Checker {
                     self.error(1, expr.span, format!("unknown name '{}'", path[0]));
                 }
             }
-            ExprKind::Path(path) => {
-                if path.len() == 2 && self.variants.contains_key(&path[0]) {
-                    if !self.variants[&path[0]].contains(&path[1]) {
-                        self.error(
-                            4,
-                            expr.span,
-                            format!("unknown variant '{}'", path.join("::")),
-                        );
-                    }
-                } else {
-                    let expanded = if let Some(import) = self.imports.get(&path[0]) {
-                        format!("{}::{}", import, path[1..].join("::"))
-                    } else {
-                        path.join("::")
-                    };
-                    self.qualified.push((expanded, expr.span, false));
-                }
-            }
+            ExprKind::Path(path) => self.qualified_path(path, expr.span),
             ExprKind::Array(elements) => {
                 for element in elements {
                     self.expr(element);
@@ -289,6 +307,24 @@ impl Checker {
                     self.expr(e);
                 }
             }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.scopes.push(BTreeSet::new());
+                    if let PatternKind::Variant { path, slots } = &arm.pattern.kind {
+                        if path.len() > 1 {
+                            self.qualified_path(path, arm.pattern.span);
+                        }
+                        for slot in slots {
+                            if let Some(name) = &slot.name {
+                                self.scopes.last_mut().unwrap().insert(name.clone());
+                            }
+                        }
+                    }
+                    self.expr(&arm.body);
+                    self.scopes.pop();
+                }
+            }
             _ => {}
         }
     }
@@ -312,6 +348,58 @@ mod tests {
             assert_eq!(errors[0].code.to_string(), code);
             assert_eq!(errors[0].span.unwrap().start, source.rfind(member).unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod alias_variant_tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        check(&parsed.module, std::iter::empty())
+    }
+
+    #[test]
+    fn aliases_of_local_enums_resolve_variant_paths_in_expressions_and_patterns() {
+        let (diagnostics, qualified) = run(
+            "type Shape [ Empty, Circle(f64) ] type S = Shape; type T = S; \
+             fn f(s: S) -> f64 { let a := T::Circle(1.0); let b := S::Empty; \
+             match s { S::Empty => 0.0, T::Circle(r) => r } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn an_unknown_variant_through_an_alias_is_ne004() {
+        let (diagnostics, _) = run("type Shape [ Empty ] type S = Shape; \
+             fn f(s: S) -> i32 { let a := S::Missing; match s { S::Gone => 0, _ => 1 } }");
+        let codes: Vec<String> = diagnostics.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["NE004", "NE004"], "{diagnostics:?}");
+    }
+
+    #[test]
+    fn an_alias_of_an_imported_enum_is_checked_by_the_module_loader() {
+        let (diagnostics, qualified) =
+            run("type S = shapes::Shape; fn f() { let a := S::Circle(1.0); }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            qualified
+                .iter()
+                .any(|(path, _, _)| path == "shapes::Shape::Circle"),
+            "{qualified:?}"
+        );
+    }
+
+    #[test]
+    fn pattern_bindings_are_scoped_to_their_arm() {
+        let (diagnostics, _) =
+            run("type E [ A(i32), B ] fn f(e: E) -> i32 { match e { E::A(n) => n, E::B => n } }");
+        let codes: Vec<String> = diagnostics.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["NE001"], "{diagnostics:?}");
     }
 }
 

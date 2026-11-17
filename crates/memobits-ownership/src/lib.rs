@@ -73,6 +73,13 @@ fn reachable(function: &Function) -> Vec<bool> {
                 queue.push_back(then_edge.target);
                 queue.push_back(else_edge.target);
             }
+            TerminatorKind::Switch {
+                targets, default, ..
+            } => {
+                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                    queue.push_back(edge.target);
+                }
+            }
             TerminatorKind::Return(_) | TerminatorKind::Unreachable => {}
         }
     }
@@ -121,6 +128,19 @@ fn check_function(function: &Function) -> Vec<Diagnostic> {
                         changed |= meet(&mut states[edge.target.0 as usize], &edge_state);
                     }
                 }
+                TerminatorKind::Switch {
+                    tag,
+                    targets,
+                    default,
+                    ..
+                } => {
+                    transfer_operand(tag, &mut after, None, function);
+                    for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                        let mut edge_state = after.clone();
+                        transfer_edge(edge, &mut edge_state, None, function);
+                        changed |= meet(&mut states[edge.target.0 as usize], &edge_state);
+                    }
+                }
                 TerminatorKind::Return(value) => {
                     if let Some(value) = value {
                         transfer_operand(value, &mut after, None, function);
@@ -152,6 +172,18 @@ fn check_function(function: &Function) -> Vec<Diagnostic> {
                 let mut then_state = state.clone();
                 transfer_edge(then_edge, &mut then_state, Some(&mut diagnostics), function);
                 transfer_edge(else_edge, &mut state, Some(&mut diagnostics), function);
+            }
+            TerminatorKind::Switch {
+                tag,
+                targets,
+                default,
+                ..
+            } => {
+                transfer_operand(tag, &mut state, Some(&mut diagnostics), function);
+                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                    let mut edge_state = state.clone();
+                    transfer_edge(edge, &mut edge_state, Some(&mut diagnostics), function);
+                }
             }
             TerminatorKind::Return(value) => {
                 if let Some(value) = value {
@@ -195,7 +227,10 @@ fn transfer_instruction(
             transfer_operand(base, state, diagnostics.as_deref_mut(), function);
             transfer_operand(index, state, diagnostics, function);
         }
-        InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
+        InstructionKind::FieldAddr { base, .. }
+        | InstructionKind::Extract { base, .. }
+        | InstructionKind::EnumTag { base }
+        | InstructionKind::VariantExtract { base, .. } => {
             transfer_operand(base, state, diagnostics, function)
         }
         InstructionKind::StructNew { fields, .. } => {

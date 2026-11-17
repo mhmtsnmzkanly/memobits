@@ -14,8 +14,8 @@ use memobits_ir::{
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
-    Access, Block, Expr, ExprKind, FieldPattern, ItemKind, Module, Parameter, Statement,
-    StatementKind, Type,
+    Access, Block, Expr, ExprKind, FieldPattern, ItemKind, MatchArm, Module, Parameter,
+    PatternKind, Statement, StatementKind, Type,
 };
 
 mod typetable;
@@ -300,6 +300,17 @@ fn flow_expr(expr: &Expr) -> Flow {
                 breaks: then_flow.breaks || else_flow.breaks,
             })
         }
+        ExprKind::Match { scrutinee, arms } => {
+            let scrutinee = flow_expr(scrutinee);
+            let mut falls = arms.is_empty();
+            let mut breaks = false;
+            for arm in arms {
+                let arm_flow = flow_expr(&arm.body);
+                falls |= arm_flow.falls;
+                breaks |= arm_flow.breaks;
+            }
+            scrutinee.then(Flow { falls, breaks })
+        }
     }
 }
 
@@ -355,6 +366,22 @@ pub struct VariantUse {
     pub variant: u32,
 }
 
+/// A checked `match`. `expression` is the match expression; `arms` follow the
+/// source order of its arms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchFact {
+    pub expression: ExprId,
+    pub arms: Vec<MatchArmFact>,
+}
+
+/// One arm: the variant it selects (`None` for the `_` arm) and, for each
+/// payload slot of that variant, the owned local it binds (`None` for `_`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchArmFact {
+    pub variant: Option<u32>,
+    pub bindings: Vec<Option<LocalId>>,
+}
+
 /// Facts are indexed by function, then by fresh expression/local identities.
 /// The syntax module is deliberately not relabeled as checked syntax.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -367,6 +394,8 @@ pub struct FunctionFacts {
     pub path_uses: Vec<PathUse>,
     /// Enum variant constructions: a unit variant path or a payload call.
     pub variant_uses: Vec<VariantUse>,
+    /// `match` expressions over owned enums, with the pattern facts lowering needs.
+    pub matches: Vec<MatchFact>,
     next_expr: u32,
 }
 
@@ -579,6 +608,11 @@ impl Checker {
                 }
                 if let Some(other) = else_branch {
                     self.allow_array_value(other);
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.allow_array_value(&arm.body);
                 }
             }
             _ => {}
@@ -1525,6 +1559,271 @@ impl Checker {
         self.record_variant(id, variant);
         enum_ty
     }
+    /// `match scrutinee { pattern => body, ... }` over an owned enum value.
+    /// Patterns are flat (`Enum::Variant`, `Enum::Variant(a, _)`, `_`); the
+    /// scrutinee is consumed and each arm binds owned payload locals.
+    fn match_expr(
+        &mut self,
+        expr: &Expr,
+        id: Option<ExprId>,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        self.allow_array_value(scrutinee);
+        let scrutinee_ty = self.expr(scrutinee, None);
+        let table = Rc::clone(&self.table);
+        let mut enum_id = None;
+        match &scrutinee_ty {
+            Ty::Enum(found, _) => {
+                if matches!(
+                    scrutinee.kind,
+                    ExprKind::Index { .. } | ExprKind::Field { .. }
+                ) {
+                    self.error(
+                        22,
+                        scrutinee.span,
+                        "cannot move an enum out of an element or field to match on it; matching a place without consuming it needs borrow matching (B3), so match an owned local, a call result or a constructed value",
+                    );
+                } else {
+                    enum_id = Some(*found);
+                }
+            }
+            Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Enum(..)) => {
+                self.error(
+                    29,
+                    scrutinee.span,
+                    format!(
+                        "cannot match on a borrowed enum ({}); `match` consumes an owned enum, and borrowed payload bindings arrive with borrow matching (B3)",
+                        name(&scrutinee_ty)
+                    ),
+                );
+            }
+            Ty::Never | Ty::Error => {}
+            other => self.error(
+                29,
+                scrutinee.span,
+                format!("`match` requires an enum value, found {}", name(other)),
+            ),
+        }
+        let info = enum_id.map(|enum_id| &table.types[enum_id as usize]);
+        let mut covered: Vec<bool> =
+            info.map_or(Vec::new(), |info| vec![false; info.variants.len()]);
+        let mut wildcard_seen = false;
+        let mut result: Option<Ty> = None;
+        let mut facts = Vec::new();
+        for arm in arms {
+            self.scopes.push(HashMap::new());
+            let mut arm_fact = MatchArmFact {
+                variant: None,
+                bindings: Vec::new(),
+            };
+            let mut unreachable = wildcard_seen.then(|| {
+                "unreachable match arm: an earlier `_` arm already matches every variant"
+                    .to_string()
+            });
+            match &arm.pattern.kind {
+                PatternKind::Wildcard => {
+                    if unreachable.is_none() && !covered.is_empty() && covered.iter().all(|c| *c) {
+                        unreachable = Some(
+                            "unreachable `_` arm: every variant is already matched by an earlier arm"
+                                .into(),
+                        );
+                    }
+                    wildcard_seen = true;
+                }
+                PatternKind::Variant { path, slots } => {
+                    let resolved = if path.len() < 2 {
+                        self.error(
+                            30,
+                            arm.pattern.span,
+                            format!(
+                                "'{}' is not an enum variant pattern; binding patterns are not supported, write `_` to match anything",
+                                path.join("::")
+                            ),
+                        );
+                        None
+                    } else {
+                        match self.variant_path(path, arm.pattern.span) {
+                            None => {
+                                self.error(
+                                    30,
+                                    arm.pattern.span,
+                                    format!("'{}' does not name an enum variant", path.join("::")),
+                                );
+                                None
+                            }
+                            Some(found) => Some(found),
+                        }
+                    };
+                    let mut declared_payload: Option<&[Ty]> = None;
+                    if let Some((Ty::Enum(pattern_enum, pattern_name), variant)) = &resolved {
+                        let pattern_info = &table.types[*pattern_enum as usize];
+                        if let Some(expected_enum) = enum_id {
+                            if expected_enum != *pattern_enum {
+                                self.error(
+                                    30,
+                                    arm.pattern.span,
+                                    format!(
+                                        "pattern '{}' belongs to enum '{}', but the scrutinee has type '{}'",
+                                        path.join("::"),
+                                        pattern_name,
+                                        name(&scrutinee_ty)
+                                    ),
+                                );
+                            } else {
+                                match variant {
+                                    None => self.error(
+                                        30,
+                                        arm.pattern.span,
+                                        format!(
+                                            "enum '{}' has no variant '{}'",
+                                            pattern_info.name,
+                                            path[path.len() - 1]
+                                        ),
+                                    ),
+                                    Some(variant) => {
+                                        let declared = &pattern_info.variants[*variant as usize];
+                                        arm_fact.variant = Some(*variant);
+                                        declared_payload = Some(&declared.payload);
+                                        if slots.len() != declared.payload.len() {
+                                            self.error(
+                                                30,
+                                                arm.pattern.span,
+                                                format!(
+                                                    "variant '{}::{}' has {} payload value(s) but the pattern binds {}; bind each one by name or `_`",
+                                                    pattern_info.name,
+                                                    declared.name,
+                                                    declared.payload.len(),
+                                                    slots.len()
+                                                ),
+                                            );
+                                        }
+                                        if unreachable.is_none() {
+                                            if covered[*variant as usize] {
+                                                unreachable = Some(format!(
+                                                    "unreachable match arm: variant '{}::{}' is already matched by an earlier arm",
+                                                    pattern_info.name, declared.name
+                                                ));
+                                            } else {
+                                                covered[*variant as usize] = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut bound: Vec<&str> = Vec::new();
+                    for (index, slot) in slots.iter().enumerate() {
+                        let slot_ty = declared_payload
+                            .and_then(|payload| payload.get(index))
+                            .cloned()
+                            .unwrap_or(Ty::Error);
+                        let Some(binding) = &slot.name else {
+                            arm_fact.bindings.push(None);
+                            continue;
+                        };
+                        if bound.contains(&binding.as_str()) {
+                            self.error(
+                                30,
+                                slot.span,
+                                format!("binding '{binding}' is introduced more than once in the pattern"),
+                            );
+                        }
+                        bound.push(binding);
+                        let addr = slot as *const _ as usize;
+                        let local = self.register_local(
+                            binding,
+                            &slot_ty,
+                            false,
+                            IrAccess::Owned,
+                            slot.span,
+                            addr,
+                        );
+                        arm_fact.bindings.push(local);
+                        self.scopes.last_mut().unwrap().insert(
+                            binding.clone(),
+                            Binding {
+                                ty: slot_ty,
+                                mutable: false,
+                                access: IrAccess::Owned,
+                                id: local,
+                                origin: addr,
+                            },
+                        );
+                    }
+                }
+            }
+            if let Some(message) = unreachable {
+                self.error(32, arm.pattern.span, message);
+            }
+            facts.push(arm_fact);
+            let arm_expected = expected.or(result.as_ref().filter(|ty| **ty != Ty::Never));
+            let ty = self.expr(&arm.body, arm_expected);
+            self.reject_extraction(&arm.body, &ty);
+            self.scopes.pop();
+            if matches!(ty, Ty::Reference { .. }) {
+                self.error(
+                    17,
+                    arm.body.span,
+                    "reference-valued match arm results are not supported",
+                );
+            }
+            result = Some(match result.take() {
+                None => ty,
+                Some(previous) => {
+                    if !compatible(&ty, &previous) && !compatible(&previous, &ty) {
+                        self.error(
+                            13,
+                            arm.body.span,
+                            format!(
+                                "match arms have incompatible types: {} and {}",
+                                name(&previous),
+                                name(&ty)
+                            ),
+                        );
+                        Ty::Error
+                    } else if previous == Ty::Never {
+                        ty
+                    } else {
+                        previous
+                    }
+                }
+            });
+        }
+        if let Some(info) = info {
+            if !wildcard_seen {
+                let missing: Vec<String> = info
+                    .variants
+                    .iter()
+                    .zip(&covered)
+                    .filter(|(_, covered)| !**covered)
+                    .map(|(variant, _)| format!("{}::{}", info.name, variant.name))
+                    .collect();
+                if !missing.is_empty() {
+                    self.error(
+                        31,
+                        expr.span,
+                        format!(
+                            "non-exhaustive match: missing {}; add arms for them or a `_` arm",
+                            missing.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some((facts_out, expression)) = self.facts.as_mut().zip(id) {
+            facts_out.matches.push(MatchFact {
+                expression,
+                arms: facts,
+            });
+        }
+        if scrutinee_ty == Ty::Never {
+            return Ty::Never;
+        }
+        result.unwrap_or(Ty::Error)
+    }
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
             ExprKind::Path(path) if self.variant_path(path, expr.span).is_some() => {
@@ -1925,7 +2224,13 @@ impl Checker {
                         BOOL
                     }
                     "==" | "!=" => {
-                        if !numeric(&left_ty) && left_ty != BOOL && left_ty != Ty::Error {
+                        if matches!(left_ty, Ty::Enum(..)) {
+                            self.error(
+                                7,
+                                left.span,
+                                "enums cannot be compared with `==` or `!=` yet; use `match` to inspect the variant",
+                            );
+                        } else if !numeric(&left_ty) && left_ty != BOOL && left_ty != Ty::Error {
                             self.error(7, left.span, "equality requires numeric or Bool operands");
                         }
                         self.ensure(&right_ty, &left_ty, right.span);
@@ -2152,6 +2457,9 @@ impl Checker {
                 }
                 ty
             }
+            ExprKind::Match { scrutinee, arms } => {
+                self.match_expr(expr, id, scrutinee, arms, expected)
+            }
             ExprKind::If {
                 condition,
                 then_branch,
@@ -2311,6 +2619,7 @@ fn check_standalone(
                     expressions: Vec::new(),
                     path_uses: Vec::new(),
                     variant_uses: Vec::new(),
+                    matches: Vec::new(),
                     next_expr: 0,
                 });
             }
@@ -2529,6 +2838,7 @@ fn check_resolved_mode(
                         expressions: Vec::new(),
                         path_uses: Vec::new(),
                         variant_uses: Vec::new(),
+                        matches: Vec::new(),
                         next_expr: 0,
                     });
                     check_function_body(&mut c, parameters, body, params.clone(), *result.clone());

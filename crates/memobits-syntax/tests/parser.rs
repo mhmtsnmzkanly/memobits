@@ -6,6 +6,7 @@ fn parses_real_project_sources() {
     for source in [
         include_str!("../../../examples/projects/numeric/src/main.mb"),
         include_str!("../../../examples/projects/numeric/src/math.mb"),
+        include_str!("../../../examples/projects/enums/src/main.mb"),
     ] {
         let result = parse(SourceId(0), source);
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -451,4 +452,148 @@ fn malformed_struct_literals_and_destructuring_have_clear_diagnostics() {
             result.diagnostics
         );
     }
+}
+
+fn first_body(source: &str) -> memobits_syntax::Block {
+    let result = parse(SourceId(40), source);
+    assert!(
+        result.diagnostics.is_empty(),
+        "{source}: {:?}",
+        result.diagnostics
+    );
+    let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
+        panic!()
+    };
+    body.clone()
+}
+
+fn syntax_error(source: &str, text: &str) {
+    let result = parse(SourceId(41), source);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "SE002" && d.message.contains(text)),
+        "{source}: expected SE002 containing {text:?}, found {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn match_arms_patterns_and_optional_commas_parse() {
+    use memobits_syntax::PatternKind;
+    let body = first_body(
+        "fn f(s: Shape) -> i32 { match s { Shape::Empty => 0, Shape::Circle(r) => { 1 } \
+         Shape::Rect(w, _) => 2, _ => 3, } }",
+    );
+    let tail = body.tail.expect("match is the tail expression");
+    let ExprKind::Match { scrutinee, arms } = &tail.kind else {
+        panic!("{tail:?}")
+    };
+    assert!(matches!(&scrutinee.kind, ExprKind::Path(path) if path == &["s"]));
+    assert_eq!(arms.len(), 4);
+    let PatternKind::Variant { path, slots } = &arms[0].pattern.kind else {
+        panic!()
+    };
+    assert_eq!(path, &["Shape", "Empty"]);
+    assert!(slots.is_empty());
+    let PatternKind::Variant { slots, .. } = &arms[2].pattern.kind else {
+        panic!()
+    };
+    assert_eq!(slots[0].name.as_deref(), Some("w"));
+    assert_eq!(slots[1].name, None);
+    assert!(matches!(arms[3].pattern.kind, PatternKind::Wildcard));
+    assert!(matches!(arms[1].body.kind, ExprKind::Block(_)));
+}
+
+#[test]
+fn match_in_statement_position_ends_at_its_brace() {
+    let body = first_body("fn f(s: Shape) { match s { _ => {} } [1, 2]; match s { _ => 1 } + 2; }");
+    // Each match is a complete statement; `[1, 2]` and `+ 2` start new ones.
+    assert_eq!(body.statements.len(), 4);
+    assert!(matches!(
+        &body.statements[0].kind,
+        StatementKind::Expression(e) if matches!(e.kind, ExprKind::Match { .. })
+    ));
+    assert!(matches!(
+        &body.statements[1].kind,
+        StatementKind::Expression(e) if matches!(e.kind, ExprKind::Array(_))
+    ));
+}
+
+#[test]
+fn match_is_an_expression_and_nests() {
+    let body = first_body(
+        "fn f(a: A, b: B) -> i32 { let n := match a { A::X(v) => match b { B::Y => v, _ => 0 }, _ => 1 } + 1; n }",
+    );
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(&value.kind, ExprKind::Binary { left, .. } if matches!(left.kind, ExprKind::Match { .. }))
+    );
+}
+
+#[test]
+fn match_scrutinee_rejects_struct_literals_but_allows_parentheses() {
+    syntax_error(
+        "fn f() { match P { x: 1 } { _ => {} } }",
+        "match` scrutinee",
+    );
+    let body = first_body("fn f() { match (P { x: 1 }).x { _ => {} } }");
+    assert_eq!(body.statements.len() + usize::from(body.tail.is_some()), 1);
+    // A struct literal is fine inside an arm body.
+    first_body("fn f(s: S) -> P { match s { _ => P { x: 1 } } }");
+}
+
+#[test]
+fn unsupported_patterns_are_gated_with_messages() {
+    syntax_error("fn f(s: S) { match s { 1 => {} } }", "literal patterns");
+    syntax_error("fn f(s: S) { match s { true => {} } }", "literal patterns");
+    syntax_error(
+        "fn f(s: S) { match s { A::B(1) => {} } }",
+        "literal patterns",
+    );
+    syntax_error(
+        "fn f(s: S) { match s { A::B(C::D(x)) => {} } }",
+        "nested patterns",
+    );
+    syntax_error(
+        "fn f(s: S) { match s { A::B(x) if x > 1 => {} _ => {} } }",
+        "guards",
+    );
+    syntax_error(
+        "fn f(s: S) { match s { A { x } => {} } }",
+        "struct patterns",
+    );
+    syntax_error("fn f(s: S) { match s { A::B => 1 C::D => 2 } }", "','");
+}
+
+#[test]
+fn divergent_statements_can_be_arm_bodies_directly() {
+    let body = first_body(
+        "fn f(s: S) -> i32 { loop { let n := match s { A::X => return 1, A::Y(v) => break, _ => continue }; } 0 }",
+    );
+    let StatementKind::Loop(inner) = &body.statements[0].kind else {
+        panic!()
+    };
+    let StatementKind::Binding { value, .. } = &inner.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Match { arms, .. } = &value.kind else {
+        panic!()
+    };
+    let kinds: Vec<_> = arms
+        .iter()
+        .map(|arm| match &arm.body.kind {
+            ExprKind::Block(block) => match &block.statements[0].kind {
+                StatementKind::Return(Some(_)) => "return",
+                StatementKind::Break => "break",
+                StatementKind::Continue => "continue",
+                _ => "other",
+            },
+            _ => "expr",
+        })
+        .collect();
+    assert_eq!(kinds, ["return", "break", "continue"]);
 }

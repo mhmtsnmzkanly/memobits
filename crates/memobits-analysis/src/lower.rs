@@ -11,11 +11,12 @@ use memobits_ir::{
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
-    Block, Expr, ExprKind, FieldPattern, ItemKind, Module, Statement, StatementKind,
+    Block, Expr, ExprKind, FieldPattern, ItemKind, MatchArm, Module, Statement, StatementKind,
 };
 
 use crate::types::{
-    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget, TypeFact,
+    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, MatchFact, PathTarget,
+    TypeFact,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -404,6 +405,7 @@ struct Builder<'a> {
     expressions: HashMap<ExprId, Option<Type>>,
     paths: HashMap<ExprId, PathTarget>,
     variants: HashMap<ExprId, u32>,
+    matches: HashMap<ExprId, &'a MatchFact>,
     current: Option<BlockId>,
     last_value: Option<Operand>,
     loops: Vec<LoopTargets>,
@@ -434,6 +436,7 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|u| (u.expression, u.variant))
             .collect();
+        let matches = facts.matches.iter().map(|m| (m.expression, m)).collect();
         Self {
             function,
             facts,
@@ -442,6 +445,7 @@ impl<'a> Builder<'a> {
             expressions,
             paths,
             variants,
+            matches,
             current: Some(BlockId(0)),
             last_value: None,
             loops: Vec::new(),
@@ -1391,7 +1395,118 @@ impl<'a> Builder<'a> {
                 then_branch,
                 else_branch,
             } => self.lower_if(expr, condition, then_branch, else_branch.as_deref()),
+            ExprKind::Match { scrutinee, arms } => self.lower_match(expr, scrutinee, arms),
         }
+    }
+    /// `match` on an owned enum. The scrutinee is consumed once, into a hidden
+    /// local, so every arm reads the same cell. The tag is read once and a
+    /// `Switch` dispatches to one block per arm; an arm moves out the payloads
+    /// it binds with `VariantExtract` (the last one consumes the cell) and
+    /// joins its value like an `if` branch.
+    fn lower_match(&mut self, expr: &Expr, scrutinee: &Expr, arms: &[MatchArm]) -> Option<Operand> {
+        let fact = self.matches[&self.id(expr)];
+        let source = self.lower_expr(scrutinee)?;
+        let Some(Type::Enum(enum_id)) = self.operand_type(source) else {
+            unreachable!("checked match scrutinee")
+        };
+        let types = self.types;
+        let definition = &types[enum_id.0 as usize];
+        let span = scrutinee.span;
+        let cell = self.hidden_local("match scrutinee", Type::Enum(enum_id), span);
+        let moved = self.owned(source)?;
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: cell,
+                value: moved,
+                initialize: true,
+            },
+            None,
+        );
+        let tag = self.emit(
+            span,
+            InstructionKind::EnumTag {
+                base: read(op(Source::Local(cell), span)),
+            },
+            Some(Type::Primitive(Primitive::U32)),
+        )?;
+        let join_id = self.new_block();
+        let parameter = self.ty(expr).map(|ty| {
+            let id = self.new_value(ty);
+            self.function.blocks[join_id.0 as usize].parameters.push(id);
+            id
+        });
+        let mut targets = Vec::new();
+        let mut default = None;
+        let mut arm_blocks = Vec::new();
+        for arm_fact in &fact.arms {
+            let block = self.new_block();
+            arm_blocks.push(block);
+            let edge = Edge {
+                target: block,
+                arguments: Vec::new(),
+            };
+            match arm_fact.variant {
+                Some(variant) => targets.push((variant, edge)),
+                None => default = Some(edge),
+            }
+        }
+        let current = self.current.expect("scrutinee completed");
+        self.finish(
+            current,
+            TerminatorKind::Switch {
+                tag: read(tag),
+                ty: enum_id,
+                targets,
+                default,
+            },
+            Some(span),
+        );
+        let mut reaches = false;
+        for ((arm, arm_fact), block) in arms.iter().zip(&fact.arms).zip(arm_blocks) {
+            self.current = Some(block);
+            if let Some(variant) = arm_fact.variant {
+                let payload = &definition.variants[variant as usize].payload;
+                let bound: Vec<(usize, LocalId)> = arm_fact
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, local)| local.map(|local| (index, local)))
+                    .collect();
+                for (position, (index, local)) in bound.iter().enumerate() {
+                    let mut base = op(Source::Local(cell), arm.pattern.span);
+                    base.mode = if position + 1 == bound.len() {
+                        UseMode::Consume
+                    } else {
+                        UseMode::Read
+                    };
+                    let extracted = self.emit(
+                        arm.pattern.span,
+                        InstructionKind::VariantExtract {
+                            base,
+                            variant,
+                            field: *index as u32,
+                        },
+                        Some(payload[*index].clone()),
+                    )?;
+                    self.emit(
+                        arm.pattern.span,
+                        InstructionKind::Assign {
+                            target: *local,
+                            value: consume(extracted),
+                            initialize: true,
+                        },
+                        None,
+                    );
+                }
+            }
+            if let Some(value) = self.lower_expr(&arm.body) {
+                self.join(join_id, value, arm.body.span);
+                reaches = true;
+            }
+        }
+        self.current = reaches.then_some(join_id);
+        parameter.map(|id| op(Source::Value(id), expr.span))
     }
     /// An enum variant construction. Payload arguments are evaluated and
     /// captured left to right, then handed to `EnumNew` in declaration order.

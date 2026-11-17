@@ -185,6 +185,20 @@ arguments, an unknown variant in the standalone check) TE028. Payload arguments 
 owned-value positions evaluated left to right (aggregates move in, primitives copy). A unit
 variant must itself be in an owned-value position (TE017 as a temporary). Enums are
 whole-value aggregates everywhere structs are (bindings, moves, parameters, results,
-joins, fields, array elements, repetition); there is no equality, field access or `match`
-yet (TE007/TE024). Lowering emits `EnumNew { ty, variant, payload }`; `FunctionFacts::
+joins, fields, array elements, repetition); there is no equality or field access (TE007/TE024). Lowering emits `EnumNew { ty, variant, payload }`; `FunctionFacts::
 variant_uses` records which expressions are variant constructions.
+
+`match` on owned enums (B2, "B2 checkpoint" in `docs/design/enum-implementation.md`). The
+scrutinee is an owned local, a call result, a construction or a block/`if`/`match` yielding an
+enum; a `borrow`/`share` enum or `.borrow()`/`.share()` result is TE029 and a field or element
+is TE022, both pointing at B3 (borrow matching). Patterns are flat: `Enum::Variant`,
+`Enum::Variant(a, _)`, `_`; a pattern of another enum, an unknown variant, a bare identifier,
+a wrong payload count or a repeated binding is TE030. Arms unify like `if` branches (TE013;
+`return`/`break`/`continue` arms are `Never`). Without a `_` arm every variant must be matched
+(TE031 lists the missing ones); a duplicate variant arm, an arm after `_` and a `_` after full
+coverage are TE032 errors. Bindings are immutable owned locals scoped to their arm
+(`FunctionFacts::matches` records the selected variant and bound `LocalId` per arm).
+Lowering moves the scrutinee once into a hidden local, emits `EnumTag` and a `Switch` with one
+block per arm, extracts each arm's bound payloads with `VariantExtract` (the last consumes the
+cell) and joins arm values through a block parameter like `if`. `==`/`!=` on enums stays TE007
+and suggests `match`.

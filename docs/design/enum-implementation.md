@@ -17,13 +17,13 @@ array elements and repetition. The IR gets `Type::Enum`, `TypeDefKind::Enum` and
 observable at language level yet: there is no equality, no field access and no
 tag read until B2.
 
-**B2 — owned `match` with exhaustiveness (planned).**
+**B2 — owned `match` with exhaustiveness (implemented; see the B2 checkpoint).**
 `match v { Shape::Empty => .., Shape::Circle(r) => .., Shape::Rect(w, h) => .. }`
 over an owned scrutinee. Flat patterns only: a variant path with identifier or
 `_` payload bindings, plus a `_` arm. Exhaustiveness is a set difference over
 the variants (missing variants are named). All arms share one result type under
 the `if` rule. The scrutinee is consumed; each arm binds its payload by moving
-it out. See "The B2 plan" below.
+it out. See "The B2 plan" and the B2 checkpoint below.
 
 **B3 — borrow matching and enum parameters everywhere (planned).**
 `match v.borrow() { .. }` and `match` through `borrow E` / `share E`
@@ -117,7 +117,7 @@ detail and **not a stable ABI**: bytes outside the active variant's payload
 compared or copied for their meaning. An enum cannot appear in an exported
 signature (LE900), so no host observes the layout.
 
-## The B2 plan (representation written down now)
+## The B2 plan (written before B2; the checkpoint below records what was built)
 
 B1 defines the cell layout and the tag value so B2 only adds instructions.
 
@@ -180,7 +180,7 @@ B1 defines the cell layout and the tag value so B2 only adds instructions.
 
 | Form | Code |
 | --- | --- |
-| Inspecting an enum: `match`, `==` / `!=`, ordering, arithmetic on an enum | TE007 (`match` is not yet in the grammar) |
+| Inspecting an enum: `==` / `!=`, ordering, arithmetic on an enum | TE007 (B2 added `match`) |
 | Field access `e.x`, indexing `e[0]` on an enum | TE024, TE007 |
 | Unit variant used as a temporary (`Shape::Empty;`, `Shape::Empty + 1`) | TE017 |
 | `.copy()` of an enum | TE017 |
@@ -209,8 +209,92 @@ B1 defines the cell layout and the tag value so B2 only adds instructions.
 
 ### Not in B1
 
-Everything in B2 to B4 above. In particular there is no example project: an
-enum is not observable without `match`, so the first runnable enum example
-arrives with B2. B1's behaviour is covered by tests in every layer; the tag and
+Everything in B2 to B4 above. B1 had no example project because an enum was
+not observable without `match`; the first one (`examples/projects/enums/`)
+arrived with B2. B1's behaviour is covered by tests in every layer; the tag and
 payload bytes are checked by in-crate backend tests that read memory through the
 test-only `__test_memory` export, not by any language-level tag access.
+
+## B2 checkpoint
+
+### Executes
+
+- `match scrutinee { Pattern => expr, Pattern => { block } ... }` as an
+  expression; in statement position it ends at its `}` like `if`. Arms are
+  separated by commas, optional after a block-like body; `return`, `break` and
+  `continue` may be an arm body directly. The scrutinee may not be a bare struct
+  literal (SE002, parenthesise it).
+- Patterns: `Enum::Variant`, `Enum::Variant(a, _, c)` with one identifier or `_`
+  per payload slot, and `_`. The enum path may be local, `use`d, qualified or an
+  alias (`type S = Shape;` then `S::Circle(r)`); the resolver now follows local
+  aliases (chains too) when checking variant paths, which fixes B1's
+  `ME003 module 'S' is unavailable` for `S::Circle(1.0)`.
+- Scrutinees: an owned local (including owned and `var` parameters), a call
+  result, a variant construction, or a block / `if` / `match` yielding an enum.
+  Matching consumes the enum (BE001 afterwards). Each bound payload is a new
+  immutable owned local of the payload type in that arm only: an aggregate is
+  moved out, a primitive copied; a `_` slot drops its payload.
+- Types: all arms agree under the `if` rule (TE013 otherwise); `return`/`break`/
+  `continue` arms are `Never` and ignored; a match whose arms all diverge is
+  `Never`. A match may sit in any owned-value position (initialiser, argument,
+  result, assignment right-hand side), where its arm bodies are owned-value
+  positions too (an arm may produce a unit variant or a struct literal).
+- Exhaustiveness: every variant matched or a `_` arm present; the error lists
+  the missing variants as `Enum::Variant`.
+- Wasm: the tag is loaded with its own width (`u8`/`u16`/`u32`, zero-extended);
+  `Switch` is a compare chain (one `if` per listed variant, the default or the
+  last listed variant as the fallthrough), which fits the existing `pc`
+  dispatcher; payloads load from `base + variant payload offset` or are
+  `memory.copy`d out for aggregates.
+
+### Representation as built (deviations from the plan)
+
+- `InstructionKind::EnumTag { base }`, `VariantExtract { base, variant, field }`
+  and `TerminatorKind::Switch { tag, ty, targets, default }` exist.
+  **`Switch` carries the enum type id `ty`**, which the plan did not have: a
+  `u32` tag value alone does not say how many variants it ranges over, and the
+  validator needs that to check "every variant is listed or there is a default".
+  It also rejects duplicate or out-of-range variants and validates every edge's
+  block-parameter arguments. `EnumTag` accepts an enum owner (`Read`) or a
+  reference to an enum; B2 lowering only uses the owner form.
+- **`VariantAddr` and `Step::Variant` are not built.** Nothing in B2 projects a
+  reference into a payload; they arrive with B3's borrowed payload bindings.
+- Lowering does not match the scrutinee place directly. The scrutinee is moved
+  once into a hidden local (`Assign`, which is the single consume the move pass
+  sees), the tag is read from it, and each arm extracts its bound payloads from
+  that local with `VariantExtract`, the last one `Consume`. The extra
+  `memory.copy` of the enum is the price of one uniform path for locals,
+  temporaries and call results. An arm that binds nothing leaves the hidden
+  local untouched (it is never read again).
+- `VariantExtract` follows `Extract`'s rule: an aggregate extraction with a
+  `Read` base must be followed in the same block by a consuming use of the base.
+  Payload moves are legal only on the arm's path because they sit in the arm's
+  block, after the `Switch` edge; consumption at the join is the ordinary
+  must-availability meet. The ownership crate treats `Switch` like `Branch` and
+  the new instructions like `Extract` (operands for liveness and moves).
+- Facts: `FunctionFacts::matches` holds one `MatchFact` per match with, per arm,
+  the selected variant (`None` for `_`) and the `LocalId` bound for each payload
+  slot.
+
+### Diagnostics
+
+| Problem | Code |
+| --- | --- |
+| Scrutinee is not an enum; borrowed enum scrutinee (`borrow`/`share` parameter, `.borrow()`, `.share()`) | TE029 (the latter points at B3) |
+| Matching an enum in a field or element (`match h.s`, `match a[0]`) | TE022 (points at B3) |
+| Pattern names another enum, an unknown variant, a non-variant path, a bare identifier (binding pattern), has the wrong payload count, or binds a name twice | TE030 |
+| Missing variants without a `_` arm | TE031 (names them) |
+| Unreachable arm: duplicate variant, arm after `_`, or `_` after every variant is matched | TE032 (an error, not a warning) |
+| Arm result types disagree | TE013 |
+| Literal pattern, nested pattern, guard, struct pattern, malformed arm separator | SE002 (message says what is gated) |
+| `==` / `!=` on enums | TE007 ("use `match`") |
+| Use after the scrutinee was matched; reusing a moved payload | BE001 |
+| Moving or consuming an enum while a reference to it is live | BE005 |
+
+### Still gated
+
+Matching through a reference (`borrow`/`share` parameter or conversion), matching
+an enum place (field, element) without moving it, mutable matching, nested
+patterns, literal patterns, guards, or-patterns, bare binding patterns (`x =>`),
+`..` in patterns, enum equality, and enums in `main` / `[export]` signatures.
+Everything in B3 and B4 above.

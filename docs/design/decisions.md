@@ -178,6 +178,11 @@ only where explicitly stated; unresolved API spellings remain proposals.
   condition, where `{` would be ambiguous with the block; parenthesize it.
 - `match` arms are separated by commas; the comma is optional after an arm whose
   body is a block.
+- A struct literal may not appear directly as a `match` scrutinee either. An arm
+  that is not exhaustive is an error naming the missing variants. A duplicate
+  variant arm, an arm after a `_` arm, and a `_` arm after every variant is
+  already matched are errors (unreachable arms), not warnings. `return`,
+  `break` and `continue` may be written directly as an arm body.
 - Whole-value destructuring uses `let Type { field, field: alias } := value;`,
   or `var` for mutable bindings. Initial patterns name all accessible fields;
   implicit partial field moves and nested/omitting destructuring are deferred.

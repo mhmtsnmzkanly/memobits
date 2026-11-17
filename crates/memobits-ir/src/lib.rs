@@ -231,11 +231,6 @@ pub enum InstructionKind {
     /// declaration order, so a unit variant has none; the output type is
     /// `Type::Enum(ty)`. As for `StructNew`, source evaluation order is decided
     /// by the operands' earlier instructions.
-    ///
-    /// Planned for B2 (not yet part of this enum): `EnumTag { base }` reading the
-    /// tag of an enum owner or reference as a `u32`, `VariantAddr { loan, base,
-    /// variant, field, access }` projecting one payload field, and a `Switch`
-    /// terminator. See `docs/design/enum-implementation.md`.
     EnumNew {
         ty: TypeId,
         variant: u32,
@@ -258,6 +253,25 @@ pub enum InstructionKind {
     /// always consumed exactly once and no partial move is ever observable.
     Extract {
         base: Operand,
+        field: u32,
+    },
+    /// Read the tag of an enum as a `u32` (the variant's index). `base` is an
+    /// enum owner used with `Read`, or a `Borrow`/`Share` reference to one. A
+    /// pure read.
+    EnumTag {
+        base: Operand,
+    },
+    /// Enum twin of `Extract`: read payload field `field` of variant `variant`
+    /// out of an enum owner into a fresh owned value of the payload type (a
+    /// primitive is copied, an aggregate is moved by a bitwise copy). `base` is
+    /// used with `Read`, or with `Consume` on the last extraction; an aggregate
+    /// extraction with a `Read` base must be followed, in the same block, by a
+    /// consuming use of the base. It is only meaningful on a path where the
+    /// enum's tag is `variant` (the `Switch` edge for it); the validator checks
+    /// indices and types, not dominance.
+    VariantExtract {
+        base: Operand,
+        variant: u32,
         field: u32,
     },
     /// Read the referent. The output is read-only provenance and cannot escape
@@ -318,6 +332,16 @@ pub enum TerminatorKind {
         condition: Operand,
         then_edge: Edge,
         else_edge: Edge,
+    },
+    /// Multi-way branch on an enum tag. `tag` is a `u32` produced by `EnumTag`
+    /// of an enum of type `ty`; `targets` maps distinct variant indices to
+    /// edges; `default` takes every variant not listed. Every variant must be
+    /// listed or a default must exist, so a `Switch` never fails at run time.
+    Switch {
+        tag: Operand,
+        ty: TypeId,
+        targets: Vec<(u32, Edge)>,
+        default: Option<Edge>,
     },
     Return(Option<Operand>),
     Unreachable,
@@ -797,12 +821,15 @@ fn validate_extract_consumption(
     id: FunctionId,
     block: BlockId,
 ) {
-    let Some(Instruction {
-        kind: InstructionKind::Extract { base, .. },
-        output: Some(output),
-        ..
-    }) = rest.first()
-    else {
+    let Some((base, output)) = (match rest.first() {
+        Some(Instruction {
+            kind:
+                InstructionKind::Extract { base, .. } | InstructionKind::VariantExtract { base, .. },
+            output: Some(output),
+            ..
+        }) => Some((base, output)),
+        _ => None,
+    }) else {
         return;
     };
     let aggregate = function
@@ -813,7 +840,8 @@ fn validate_extract_consumption(
         return;
     }
     let consumed = rest[1..].iter().any(|later| match &later.kind {
-        InstructionKind::Extract { base: other, .. } => {
+        InstructionKind::Extract { base: other, .. }
+        | InstructionKind::VariantExtract { base: other, .. } => {
             other.source == base.source && other.mode == UseMode::Consume
         }
         InstructionKind::Capture(operand) => {
@@ -1576,6 +1604,129 @@ fn validate_instruction(
                 _ => {}
             }
         }
+        InstructionKind::EnumTag { base } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            let enum_type = match (&actual, base.mode) {
+                (Some(Type::Enum(type_id)), UseMode::Read) => Some(*type_id),
+                (Some(Type::Reference { access, inner }), mode)
+                    if matches!(inner.as_ref(), Type::Enum(_))
+                        && use_mode_for_access(*access) == Some(mode) =>
+                {
+                    match inner.as_ref() {
+                        Type::Enum(type_id) => Some(*type_id),
+                        _ => None,
+                    }
+                }
+                (None, _) => None,
+                _ => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "enum tag base must be an enum owner read, or a reference to an enum",
+                    );
+                    None
+                }
+            };
+            if let Some(type_id) = enum_type {
+                if !matches!(
+                    program.types.get(type_id.0 as usize),
+                    Some(TypeDef {
+                        kind: TypeDefKind::Enum { .. },
+                        ..
+                    })
+                ) {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        format!("enum tag type {:?} does not name an enum", type_id),
+                    );
+                }
+            }
+            if out != Some(&Type::Primitive(Primitive::U32)) {
+                push(errors, id, Some(block), "enum tag output must be u32");
+            }
+        }
+        InstructionKind::VariantExtract {
+            base,
+            variant,
+            field,
+        } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            if base.mode == UseMode::Borrow || base.mode == UseMode::Share {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "variant extraction base must be read or consumed",
+                );
+            }
+            let payload_type = match actual {
+                Some(Type::Enum(type_id)) => match program.types.get(type_id.0 as usize) {
+                    Some(TypeDef {
+                        kind: TypeDefKind::Enum { variants },
+                        ..
+                    }) => match variants.get(*variant as usize) {
+                        None => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                format!("variant index {variant} is out of range"),
+                            );
+                            None
+                        }
+                        Some(declared) => match declared.payload.get(*field as usize) {
+                            None => {
+                                push(
+                                    errors,
+                                    id,
+                                    Some(block),
+                                    format!("payload index {field} is out of range"),
+                                );
+                                None
+                            }
+                            Some(ty) => Some(ty.clone()),
+                        },
+                    },
+                    _ => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("enum type {:?} is out of range or names a struct", type_id),
+                        );
+                        None
+                    }
+                },
+                Some(_) => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "variant extraction base must be an enum owner",
+                    );
+                    None
+                }
+                None => None,
+            };
+            match (out, payload_type) {
+                (None, _) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "variant extraction requires an output value",
+                ),
+                (Some(output), Some(expected)) if output != &expected => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "variant extraction output differs from the payload type",
+                ),
+                _ => {}
+            }
+        }
         InstructionKind::Load { reference } => {
             let actual = operand_type(program, function, reference, errors, id, block);
             if instruction.output.is_none() {
@@ -1927,9 +2078,10 @@ fn validate_read_only_loaded_values(
                     report(block_id, base, false);
                     report(block_id, index, false);
                 }
-                InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
-                    report(block_id, base, false)
-                }
+                InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::Extract { base, .. }
+                | InstructionKind::EnumTag { base }
+                | InstructionKind::VariantExtract { base, .. } => report(block_id, base, false),
                 InstructionKind::StructNew { fields, .. } => {
                     for field in fields {
                         report(block_id, field, true);
@@ -1985,6 +2137,19 @@ fn validate_read_only_loaded_values(
                     }
                 }
             }
+            TerminatorKind::Switch {
+                tag,
+                targets,
+                default,
+                ..
+            } => {
+                report(block_id, tag, false);
+                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                    for argument in &edge.arguments {
+                        report(block_id, argument, false);
+                    }
+                }
+            }
             TerminatorKind::Return(Some(value)) => report(block_id, value, true),
             TerminatorKind::Return(None) | TerminatorKind::Unreachable => {}
         }
@@ -2003,6 +2168,13 @@ fn outgoing_edges(terminator: &TerminatorKind) -> Vec<&Edge> {
             else_edge,
             ..
         } => vec![then_edge, else_edge],
+        TerminatorKind::Switch {
+            targets, default, ..
+        } => targets
+            .iter()
+            .map(|(_, edge)| edge)
+            .chain(default.iter())
+            .collect(),
         TerminatorKind::Return(_) | TerminatorKind::Unreachable => Vec::new(),
     }
 }
@@ -2079,6 +2251,65 @@ fn validate_terminator(
             }
             validate_edge(program, function, then_edge, errors, id, block);
             validate_edge(program, function, else_edge, errors, id, block);
+        }
+        TerminatorKind::Switch {
+            tag,
+            ty,
+            targets,
+            default,
+        } => {
+            let actual = operand_type(program, function, tag, errors, id, block);
+            if actual.is_some_and(|actual| actual != Type::Primitive(Primitive::U32)) {
+                push(errors, id, Some(block), "switch tag must be u32");
+            }
+            let variants = match program.types.get(ty.0 as usize) {
+                Some(TypeDef {
+                    kind: TypeDefKind::Enum { variants },
+                    ..
+                }) => Some(variants.len()),
+                _ => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        format!("switch type {:?} is out of range or names a struct", ty),
+                    );
+                    None
+                }
+            };
+            let mut seen = HashSet::new();
+            for (variant, edge) in targets {
+                if !seen.insert(*variant) {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        format!("switch lists variant {variant} more than once"),
+                    );
+                }
+                if variants.is_some_and(|count| *variant as usize >= count) {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        format!("switch variant {variant} is out of range"),
+                    );
+                }
+                validate_edge(program, function, edge, errors, id, block);
+            }
+            if let Some(count) = variants {
+                if default.is_none() && (0..count as u32).any(|variant| !seen.contains(&variant)) {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "switch must list every variant or have a default",
+                    );
+                }
+            }
+            if let Some(edge) = default {
+                validate_edge(program, function, edge, errors, id, block);
+            }
         }
         TerminatorKind::Return(value) => {
             let actual = value

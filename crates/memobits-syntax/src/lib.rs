@@ -159,6 +159,39 @@ pub enum ExprKind {
         then_branch: Block,
         else_branch: Option<Box<Expr>>,
     },
+    /// `match scrutinee { Pattern => expr, ... }`. Arms keep source order.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchArm {
+    pub span: Span,
+    pub pattern: Pattern,
+    pub body: Expr,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pattern {
+    pub span: Span,
+    pub kind: PatternKind,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternKind {
+    /// `_`: matches any value.
+    Wildcard,
+    /// `Type::Variant` or `Type::Variant(a, _)`; a unit variant has no slots.
+    /// The parser does not check the path against any declaration.
+    Variant {
+        path: Vec<String>,
+        slots: Vec<PatternSlot>,
+    },
+}
+/// One payload slot of a variant pattern: an identifier, or `_` (`name: None`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternSlot {
+    pub span: Span,
+    pub name: Option<String>,
 }
 /// One `field` or `field: alias` entry of a destructuring pattern.
 #[derive(Clone, Debug, PartialEq)]
@@ -296,7 +329,8 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
             }
             TokenKind::Number(text[start..i].into())
         } else if let Some(op) = [
-            "::", ":=", "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
+            "::", ":=", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
+            "%=",
         ]
         .into_iter()
         .find(|op| text[i..].starts_with(op))
@@ -433,7 +467,7 @@ impl Parser {
                 if ![
                     "pub", "fn", "use", "as", "type", "let", "var", "borrow", "share", "return",
                     "loop", "break", "continue", "if", "else", "true", "false", "while", "struct",
-                    "enum", "import", "export",
+                    "enum", "import", "export", "match",
                 ]
                 .contains(&s.as_str()) =>
             {
@@ -796,7 +830,7 @@ impl Parser {
         } else {
             // A block-like expression at the start of a statement ends at its
             // closing brace: no postfix or binary continuation.
-            let block_start = self.at("{") || self.at("if");
+            let block_start = self.at("{") || self.at("if") || self.at("match");
             let e = if block_start {
                 self.block_like(true)?
             } else {
@@ -848,6 +882,9 @@ impl Parser {
                 kind: ExprKind::Block(b),
             });
         }
+        if self.at("match") {
+            return self.match_expr();
+        }
         self.expect("if")?;
         let saved = std::mem::replace(&mut self.no_struct, true);
         let condition = self.expr(0);
@@ -873,6 +910,128 @@ impl Parser {
                 then_branch,
                 else_branch,
             },
+        })
+    }
+    /// `match scrutinee { pattern => body, ... }`, starting at `match`. An arm
+    /// whose body is block-like (`{`, `if`, `match`) may omit its comma.
+    fn match_expr(&mut self) -> PResult<Expr> {
+        let start = self.current().span.start;
+        self.expect("match")?;
+        let saved = std::mem::replace(&mut self.no_struct, true);
+        let scrutinee = self.expr(0);
+        self.no_struct = saved;
+        let scrutinee = Box::new(scrutinee?);
+        self.expect("{")?;
+        let mut arms = Vec::new();
+        self.nested(|p| {
+            while !p.at("}") && !p.eof() {
+                let arm_start = p.current().span.start;
+                let pattern = p.pattern()?;
+                if p.at("if") {
+                    return p.fail("match guards are not supported yet");
+                }
+                p.expect("=>")?;
+                let block_start = p.at("{") || p.at("if") || p.at("match");
+                let body = if block_start {
+                    p.block_like(true)?
+                } else if p.at("return") || p.at("break") || p.at("continue") {
+                    p.divergent_arm()?
+                } else {
+                    p.expr(0)?
+                };
+                arms.push(MatchArm {
+                    span: p.span(arm_start),
+                    pattern,
+                    body,
+                });
+                if !p.eat(",") && !block_start && !p.at("}") {
+                    return p.fail("expected ',' or '}' after match arm");
+                }
+            }
+            Ok(())
+        })?;
+        self.expect("}")?;
+        Ok(Node {
+            span: self.span(start),
+            kind: ExprKind::Match { scrutinee, arms },
+        })
+    }
+    /// `return [expr]`, `break` or `continue` written directly as an arm body.
+    /// It is parsed as a one-statement block, which never falls through.
+    fn divergent_arm(&mut self) -> PResult<Expr> {
+        let start = self.current().span.start;
+        let kind = if self.eat("return") {
+            let value = if self.at(",") || self.at("}") {
+                None
+            } else {
+                Some(self.expr(0)?)
+            };
+            StatementKind::Return(value)
+        } else if self.eat("break") {
+            StatementKind::Break
+        } else {
+            self.expect("continue")?;
+            StatementKind::Continue
+        };
+        let span = self.span(start);
+        Ok(Node {
+            span,
+            kind: ExprKind::Block(Block {
+                span,
+                statements: vec![Node { span, kind }],
+                tail: None,
+            }),
+        })
+    }
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let start = self.current().span.start;
+        if matches!(self.current().kind, TokenKind::Number(_))
+            || self.at("true")
+            || self.at("false")
+            || self.at("-")
+        {
+            return self.fail("literal patterns are not supported yet; match on enum variants");
+        }
+        let path = self.path()?;
+        if path == ["_"] {
+            return Ok(Pattern {
+                span: self.span(start),
+                kind: PatternKind::Wildcard,
+            });
+        }
+        if self.at("{") {
+            return self.fail("struct patterns are not supported in `match` yet");
+        }
+        let mut slots = Vec::new();
+        if self.eat("(") {
+            while !self.at(")") && !self.eof() {
+                let slot_start = self.current().span.start;
+                if matches!(self.current().kind, TokenKind::Number(_))
+                    || self.at("true")
+                    || self.at("false")
+                    || self.at("-")
+                {
+                    return self.fail("literal patterns are not supported yet");
+                }
+                let name = self.name()?;
+                if self.at("(") || self.at("::") || self.at("{") {
+                    return self.fail(
+                        "nested patterns are not supported yet; bind the payload and match it in a second `match`",
+                    );
+                }
+                slots.push(PatternSlot {
+                    span: self.span(slot_start),
+                    name: (name != "_").then_some(name),
+                });
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect(")")?;
+        }
+        Ok(Pattern {
+            span: self.span(start),
+            kind: PatternKind::Variant { path, slots },
         })
     }
     /// Parse inside delimiters, where a `{` can no longer be mistaken for the
@@ -958,7 +1117,7 @@ impl Parser {
                 span: self.span(start),
                 kind,
             }
-        } else if self.at("{") || self.at("if") {
+        } else if self.at("{") || self.at("if") || self.at("match") {
             self.block_like(false)?
         } else if self.eat("(") {
             let e = self.nested(|p| p.expr(0))?;
@@ -981,7 +1140,7 @@ impl Parser {
                     let path = self.path()?;
                     if self.at("{") && self.no_struct && self.looks_like_struct_fields() {
                         return self.fail(
-                            "a struct literal is not allowed directly in an `if` condition; wrap it in parentheses",
+                            "a struct literal is not allowed directly in an `if` condition or `match` scrutinee; wrap it in parentheses",
                         );
                     }
                     if self.at("{") && !self.no_struct {

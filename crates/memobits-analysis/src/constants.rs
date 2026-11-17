@@ -154,6 +154,12 @@ fn check_expr(
                 check_expr(other, types, diagnostics);
             }
         }
+        ExprKind::Match { scrutinee, arms } => {
+            check_expr(scrutinee, types, diagnostics);
+            for arm in arms {
+                check_expr(&arm.body, types, diagnostics);
+            }
+        }
     }
     match evaluate(expr, types) {
         Value::Overflow => diagnostics.push(diagnostic(

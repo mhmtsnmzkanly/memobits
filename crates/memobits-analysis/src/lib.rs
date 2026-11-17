@@ -101,6 +101,12 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
                 check_expr(else_branch, in_loop, diagnostics);
             }
         }
+        ExprKind::Match { scrutinee, arms } => {
+            check_expr(scrutinee, in_loop, diagnostics);
+            for arm in arms {
+                check_expr(&arm.body, in_loop, diagnostics);
+            }
+        }
     }
 }
 
@@ -126,7 +132,8 @@ mod constants;
 mod types;
 pub use types::{
     check_resolved_types, check_typed_module, check_types, ExprId, ExpressionFact, FieldFact,
-    FunctionFacts, LocalFact, PathTarget, PathUse, TypeFact, TypedModule, VariantFact, VariantUse,
+    FunctionFacts, LocalFact, MatchArmFact, MatchFact, PathTarget, PathUse, TypeFact, TypedModule,
+    VariantFact, VariantUse,
 };
 
 mod lower;
