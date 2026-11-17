@@ -20,7 +20,7 @@ their original spans.
 The IR includes reference-typed parameters and explicit `Borrow`, `Load`, and
 `Store` instructions as a data model. Validation checks their structural types
 and prevents loaded reference values from being consumed or escaping as owned
-values. It does not check loan lifetimes or implement borrow/share semantics;
+values (a loaded primitive reaches an owned position through `Copy`). It does not check loan lifetimes or implement borrow/share semantics;
 the ownership gate now checks reference-handle availability and loan conflicts. The Wasm backend still rejects these operations.
 
 `Program::types` holds nominal user-defined types (`TypeDef`, identified by

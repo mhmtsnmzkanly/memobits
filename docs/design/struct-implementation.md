@@ -60,9 +60,9 @@ independently. Until then every field loan overlaps the whole struct.
 - **Loans.** A `FieldAddr` loan is rooted at the whole struct local. A live
   reference to any field therefore conflicts with a write to any other field of
   the same struct (BE005). This is conservative; field-disjoint loans are A4.
-- **Primitive copies (pending).** `decisions.md` says primitive fields are copied
-  implicitly, so `let q := p.x;` will become valid. The current implementation
-  still rejects it with TE022. See the checkpoint below.
+- **Primitive copies.** `decisions.md` says primitive fields are copied
+  implicitly, so `let q := p.x;` is valid. See the implicit primitive copy
+  checkpoint below.
 
 ## A1 checkpoint
 
@@ -87,7 +87,6 @@ independently. Until then every field loan overlaps the whole struct.
 
 | Form | Code |
 | --- | --- |
-| Moving a primitive field out without `.copy()`: `let q := p.x;`, tails, `return`, arguments, array elements, branch tails, assignment, struct field initialisers | TE022 |
 | `var` struct binding, field assignment `p.x = v` / `p.x op= v` | TE017 |
 | Whole-struct use as a value: `let q := p;`, `p;`, `q = p;`, passing or returning | TE017 |
 | Struct literal outside a `let` initialiser (temporaries, branch values, array elements, `P { .. }.x`) | TE017 |
@@ -123,8 +122,16 @@ Two field references to different fields of one struct also conflict (BE005).
 
 ### Not in A1
 
-Everything in packages A2 to A4 above. In particular, implicit primitive copies
-(TE022 on primitive fields is the current behaviour and will be removed by that
-change), `var` structs, whole-struct values, struct parameters and results, nested
+Everything in packages A2 to A4 above. In particular, `var` structs, whole-struct values, struct parameters and results, nested
 or array-typed fields, destructuring, and field-disjoint loans are all still
 gated.
+
+## Implicit primitive copy checkpoint
+
+Primitive fields are copied implicitly. `let q := p.x;`, tails, `return p.x;`,
+owned arguments (`f(p.x)`), array elements, branch tails, assignment and struct
+field initialisers all read the field through `FieldAddr` + `Load` + `Copy` and
+leave the struct whole and usable. `.copy()` on a field is optional. TE022
+("a struct field cannot be moved out by field access") no longer fires for
+primitive fields; the check remains in place for field types that are not
+primitive, which become reachable with nested and array-typed fields in A3.

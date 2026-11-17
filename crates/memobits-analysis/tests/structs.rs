@@ -272,7 +272,7 @@ fn field_access_errors() {
 }
 
 #[test]
-fn moving_a_field_out_needs_an_explicit_copy() {
+fn reading_a_primitive_field_into_an_owned_position_copies_it() {
     for (source, what) in [
         ("let q := p.x; q", "binding"),
         ("let q: i32 = p.x; q", "annotated binding"),
@@ -285,13 +285,14 @@ fn moving_a_field_out_needs_an_explicit_copy() {
         ("let q := P { x: p.x, y: 1 }; 0", "struct field initialiser"),
     ] {
         let source = format!("{P} fn f(a: i32) -> i32 {{ a }} fn main() -> i32 {{ let p := P {{ x: 1, y: 2 }}; {source} }}");
-        rejected(&source, "TE022", "struct field cannot be moved out");
-        let found = diagnostics(&source);
-        assert!(
-            found.iter().any(|d| d.message.contains("use `.copy()`")),
-            "{what}: {found:?}"
-        );
+        let program = lower(&source);
+        let moves = memobits_ownership::check_moves(&program);
+        assert!(moves.is_empty(), "{what}: {moves:?}");
     }
+    // The struct stays whole and its field stays readable after copies.
+    lower(&format!(
+        "{P} fn f(a: i32) -> i32 {{ a }} fn main() -> i32 {{ let p := P {{ x: 1, y: 2 }}; f(p.x) + f(p.x) + p.y }}"
+    ));
     lower(&format!(
         "{P} fn main() -> i32 {{ let p := P {{ x: 1, y: 2 }}; let q := p.x.copy(); q }}"
     ));

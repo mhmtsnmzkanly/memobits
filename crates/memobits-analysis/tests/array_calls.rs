@@ -208,12 +208,20 @@ fn constant_indices_are_checked_through_references() {
 }
 
 #[test]
-fn element_extraction_through_references_stays_rejected() {
+fn element_extraction_through_references_copies_primitives_and_rejects_rows() {
     for source in [
         "fn f(a: borrow Array<i32, 2>) { let x := a[0]; }",
         "fn f(a: borrow Array<i32, 2>) -> i32 { a[0] }",
         "fn f(a: share Array<i32, 2>) { a[1] = a[0]; }",
         "fn g(x: i32) {} fn f(a: borrow Array<i32, 2>) { g(a[0]); }",
+    ] {
+        lower(source);
+    }
+    for source in [
+        "fn f(a: borrow Array<Array<i32, 2>, 2>) { let x := a[0]; }",
+        "fn f(a: borrow Array<Array<i32, 2>, 2>) -> Array<i32, 2> { a[0] }",
+        "fn f(a: share Array<Array<i32, 2>, 2>) { a[1] = a[0]; }",
+        "fn g(x: Array<i32, 2>) {} fn f(a: borrow Array<Array<i32, 2>, 2>) { g(a[0]); }",
     ] {
         assert!(codes(source).contains(&"TE022".into()), "{source}");
     }

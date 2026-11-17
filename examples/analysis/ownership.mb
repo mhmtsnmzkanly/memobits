@@ -1,11 +1,12 @@
 // Run with `mb ownership examples/analysis/ownership.mb`.
-fn consume_pair(first: i32, second: i32) {}
+fn consume_pair(first: Array<i32, 2>, second: i32) {}
 
 fn main() -> i32 {
-    var value := 10;
-    // The first argument consumes the old value before the second restores it.
-    consume_pair(value, { value = 20; 0 });
-    let total := value + value;
-    let total := total;
-    total
+    var values := [10, 11];
+    // The first argument moves the array before the second restores it.
+    consume_pair(values, { values = [20, 21]; 0 });
+    // Primitive reads copy implicitly, so repeated reads and shadowing are free.
+    let total := values[0] + values[1];
+    let again := total;
+    total + again
 }

@@ -70,7 +70,7 @@ fn annotated_empty_arrays_and_dynamic_indices_lower() {
 }
 
 #[test]
-fn extracting_an_element_into_an_owned_position_is_rejected() {
+fn extracting_a_primitive_element_into_an_owned_position_copies_it() {
     for source in [
         "fn main() { let a := [1, 2]; let x := a[1]; }",
         "fn main() { let a := [1, 2]; var x := 0; x = a[1]; }",
@@ -79,8 +79,14 @@ fn extracting_an_element_into_an_owned_position_is_rejected() {
         "fn take(x: i32) {} fn main() { let a := [1, 2]; take(a[1]); }",
         "fn main() { let a := [1, 2]; let b := [a[0], 1]; }",
         "fn main() -> i32 { let a := [1, 2]; if true { a[0] } else { 1 } }",
+        "fn main() { let a := [true, false]; let b := a[1]; }",
+        "fn main() { let a := [1, 2]; let b := [a[0]; 3]; }",
     ] {
-        assert!(codes(source).contains(&"TE022".into()), "{source}");
+        let program = lower(source);
+        assert!(
+            memobits_ownership::check_moves(&program).is_empty(),
+            "{source}"
+        );
     }
     lower("fn main() { let a := [1, 2]; var x := 0; x += a[1]; }");
 }
@@ -128,8 +134,8 @@ fn mutable_arrays_assignment_and_whole_array_moves_lower() {
     lower("fn main() -> i32 { var a := [1, 2, 3]; var i := 1; a[i] = a[0] + 1; a[i - 1] += a[2]; a[0] + 0 }");
     lower("fn main() { var a := [1, 2]; let b := a; var c := [5, 6]; c = b; c = [7, 8]; c = [0; 2]; }");
     lower("fn main() { var a := [1.5, 2.5]; a[0] += 1.0; let b: Array<u8, 2> = [1; 2]; }");
-    // The extraction rule also covers the right-hand side of an element write.
-    assert!(codes("fn main() { var a := [1, 2]; a[0] = a[1]; }").contains(&"TE022".into()));
+    // A primitive element may be copied into another element.
+    lower("fn main() { var a := [1, 2]; a[0] = a[1]; }");
 }
 
 #[test]
@@ -223,15 +229,16 @@ fn repetition_of_zero_and_one_needs_no_loop() {
 }
 
 #[test]
-fn repeating_an_owned_binding_is_a_repeated_move() {
-    let repeated = lower("fn main() { let x := 5; let a := [x; 3]; }");
+fn repeating_an_aggregate_binding_is_a_repeated_move_but_primitives_repeat() {
+    let repeated = lower("fn main() { let x := [5, 6]; let a := [x; 3]; }");
     let codes = memobits_ownership::check_moves(&repeated)
         .iter()
         .map(|d| d.code.to_string())
         .collect::<Vec<_>>();
     assert!(codes.contains(&"BE001".into()), "{codes:?}");
-    // Zero and one repetitions evaluate the element at most once.
+    // Primitive values repeat freely; zero and one repetitions evaluate once.
     for source in [
+        "fn main() { let x := 5; let a := [x; 3]; let b := [x; 3]; }",
         "fn main() { let x := 5; let a := [x; 1]; }",
         "fn main() { let x := 5; let a: Array<i32, 0> = [x; 0]; }",
         "fn main() { let x := 5; let a := [x + 0; 3]; }",

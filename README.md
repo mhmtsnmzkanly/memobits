@@ -66,7 +66,7 @@ Code, diagnostics, and documentation are written in English.
 
 - `examples/projects/` — buildable projects with a `project.toml`.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
-- `examples/projects/structs/` — structs: literals, field reads, `.copy()` and a
+- `examples/projects/structs/` — structs: literals, field reads with implicit copies, and a
   two-module use of public fields.
 - `examples/analysis/` — single files for the analysis and ownership commands.
 - `examples/design/` — illustrative target syntax.

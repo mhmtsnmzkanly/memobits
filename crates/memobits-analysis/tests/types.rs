@@ -78,11 +78,21 @@ fn primitive_references_support_reads_and_target_writes() {
 }
 
 #[test]
+fn primitive_reads_through_references_copy_into_owned_positions() {
+    for source in [
+        "fn get(r: borrow i32) -> i32 { r }",
+        "fn get(r: share i32) -> i32 { return r; }",
+        "fn consume(x: i32) {} fn f(x: borrow i32) { consume(x); }",
+        "fn f(x: borrow i32) { let y: i32 = x; }",
+        "fn f(x: borrow Bool) -> Bool { x }",
+    ] {
+        assert!(codes(source).is_empty(), "{source}: {:?}", codes(source));
+    }
+}
+
+#[test]
 fn primitive_reference_escapes_and_invalid_writes_are_rejected() {
     for source in [
-        "fn f(x: borrow i32) -> i32 { x }",
-        "fn f(x: share i32) -> i32 { return x; }",
-        "fn consume(x: i32) {} fn f(x: borrow i32) { consume(x); }",
         "fn f(var x: i32) { var r := x.share(); r = x.share(); }",
         "fn f() { let r := 1.borrow(); }",
         "fn f() { let r := { let x := 1; x.borrow() }; }",

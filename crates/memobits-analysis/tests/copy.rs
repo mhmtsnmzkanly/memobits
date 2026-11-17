@@ -138,19 +138,16 @@ fn copy_is_a_read_with_respect_to_loans() {
 }
 
 #[test]
-fn copy_of_a_moved_local_is_rejected() {
+fn copy_is_optional_because_primitive_uses_do_not_move() {
+    accepted("fn main() -> i32 { let x := 1; let y := x; let z := x.copy(); y + z + x }");
+    accepted("fn take(v: i32) {} fn main() { let x := 1; take(x); let y := x.copy(); take(x); }");
+}
+
+#[test]
+fn copy_is_a_read_that_respects_live_shares() {
     rejected(
-        "fn main() -> i32 { let x := 1; let y := x; let z := x.copy(); y + z }",
-        "BE001",
-    );
-    rejected(
-        "fn take(v: i32) {} fn main() { let x := 1; take(x); let y := x.copy(); }",
-        "BE001",
-    );
-    // The original is still moved by an ordinary use.
-    rejected(
-        "fn main() -> i32 { let x := 1; let y := x.copy(); let z := x; y + z + x }",
-        "BE001",
+        "fn main() -> i32 { var x := 1; var s := x.share(); let y := x.copy(); s += 1; y }",
+        "BE005",
     );
 }
 
@@ -179,8 +176,14 @@ fn copy_of_aggregates_and_bad_forms_are_rejected() {
 }
 
 #[test]
-fn extraction_diagnostic_recommends_copy_and_arithmetic_still_works() {
-    let errors = rejected("fn main() { let a := [1, 2]; let x := a[1]; }", "TE022");
-    assert!(errors.iter().any(|m| m.contains("`.copy()`")), "{errors:?}");
-    accepted("fn main() -> i32 { let a := [1, 2]; let x := a[1] + 0; x }");
+fn extraction_diagnostic_covers_aggregates_only() {
+    let errors = rejected(
+        "fn main() { let m := [[1, 2], [3, 4]]; let x := m[1]; }",
+        "TE022",
+    );
+    assert!(
+        errors.iter().any(|m| m.contains("only primitive values")),
+        "{errors:?}"
+    );
+    accepted("fn main() -> i32 { let a := [1, 2]; let x := a[1]; let y := a[1] + 0; x + y }");
 }

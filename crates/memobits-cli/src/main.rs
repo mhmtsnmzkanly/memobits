@@ -435,7 +435,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                     .map(|d| render(d, Some(source)))
                     .collect());
             }
-            return Ok(format!("Ownership check passed: {} (owned primitive moves checked; primitive loans checked; internal primitive references supported)\n", path.display()));
+            return Ok(format!("Ownership check passed: {} (owned moves checked; primitive loans checked; internal primitive references supported)\n", path.display()));
         }
         if command == "analyze" {
             return Ok(format!("Primitive analysis passed: {} (standalone types and loop control checked; ownership not checked)\n", path.display()));

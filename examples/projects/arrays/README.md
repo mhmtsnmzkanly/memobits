@@ -12,9 +12,10 @@ updates (`a[i] = v`, `a[i] += v`), element reads inside arithmetic, `loop` with
 a `borrow Array<i32, 3>` parameter (`sum`), a `share Array<i32, 3>` parameter
 that the caller observes (`scale`), and an array result (`make`). Nested:
 `[[0; 3]; 2]`, `grid[r][c]` reads and writes, whole-row replacement
-`grid[1] = [4, 5, 6];` and lending a row with `grid[1].borrow()`. `squares[7].copy()`
-reads an element into a fresh owned value (a plain `let x := a[0];` is TE022,
-and arrays or rows cannot be copied yet). See
+`grid[1] = [4, 5, 6];` and lending a row with `grid[1].borrow()`. A primitive
+element is copied implicitly into a binding (`let peak := squares[7];`, with
+`squares` staying whole); extracting a row (`let r := grid[0];`) is TE022, and
+arrays or rows cannot be copied yet. See
 `docs/design/implementation-plan.md` for the full supported subset.
 
 ```sh
@@ -27,7 +28,7 @@ Observed output of each command (the build path is shown relative to the reposit
 
 ```text
 Result: i32(493)
-Built examples/projects/arrays/target/memobits/app.wasm: 1 export(s), 3615 bytes
+Built examples/projects/arrays/target/memobits/app.wasm: 1 export(s), 3621 bytes
 Result: i32(493)
 ```
 

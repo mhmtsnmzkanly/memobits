@@ -744,7 +744,7 @@ fn checked_integer_wasm_matches_rust_checked_operations_at_boundaries_and_sample
 
 #[test]
 fn rejects_move_errors_before_emission() {
-    let program = lower("fn main() { let x := 1; let y := x; let z := x; }");
+    let program = lower("fn main() { let x := [1]; let y := x; let z := x; }");
     let errors = memobits_wasm::compile(&program, &exports("main", 0)).unwrap_err();
     assert!(errors.iter().any(|error| error.code.to_string() == "BE001"));
 }

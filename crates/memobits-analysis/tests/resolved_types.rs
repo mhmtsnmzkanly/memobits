@@ -152,8 +152,8 @@ fn lower_resolved_preserves_canonical_function_identity_for_aliases() {
 fn lower_resolved_ownership_tracks_moves_across_modules() {
     let f = Fixture::new(
         "",
-        "use math::take; fn main() { let x := 1; take(x); x + 1; }",
-        "pub fn take(value: i32) {}",
+        "use math::take; fn main() { let x := [1]; take(x); x[0] + 1; }",
+        "pub fn take(value: Array<i32, 1>) {}",
         "",
     );
     let project = Project::load(&f.0, None).unwrap();

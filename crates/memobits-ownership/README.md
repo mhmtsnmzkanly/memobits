@@ -4,7 +4,10 @@
 typed IR control-flow graph. Each parameter, including a reference handle, begins available. Other
 locals become available after assignment or initialization. A `Consume` makes
 a local or temporary unavailable; `Read`, `Borrow`, and `Share` require availability without consuming the source. Assignment
-evaluates its value before restoring the target, including `x = x`.
+evaluates its value before restoring the target, including `x = x`. Lowering
+never emits `Consume` for primitive values (it emits `Copy`, a `Read`), so only
+aggregates and reference handles become unavailable after a use; the pass itself
+is type-agnostic.
 
 At joins, a value is available only if every incoming path has it available.
 Loops are iterated to a fixed point. Unreachable blocks are ignored. The pass

@@ -554,11 +554,12 @@ impl Checker {
         self.allowed_arrays
             .contains(&(expr as *const Expr as usize))
     }
-    /// D1: an element read is not an owned value. It may feed arithmetic,
-    /// comparisons and conditions, but not a binding, assignment, return, call
-    /// argument, array element or block result.
-    fn reject_extraction(&mut self, expr: &Expr) {
+    /// TE022: an aggregate element or field read is not an owned value; it may
+    /// not feed a binding, assignment, return, call argument, array element or
+    /// block result. Primitive reads are copied implicitly and are allowed.
+    fn reject_extraction(&mut self, expr: &Expr, ty: &Ty) {
         if self.executable
+            && !matches!(ty, Ty::Primitive(_))
             && !self.failed_fields.contains(&(expr as *const Expr as usize))
             && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
         {
@@ -570,7 +571,7 @@ impl Checker {
             self.error(
                 22,
                 expr.span,
-                format!("{what}; use `.copy()` to copy the value, or use it inside an arithmetic or comparison expression"),
+                format!("{what}; only primitive values are copied implicitly, so borrow or share the aggregate or read a primitive inside it"),
             );
         }
     }
@@ -590,6 +591,12 @@ impl Checker {
         }
     }
     fn ensure(&mut self, actual: &Ty, expected: &Ty, span: Span) {
+        // A primitive read through a reference is copied implicitly.
+        if let (Ty::Reference { inner, .. }, Ty::Primitive(_)) = (actual, expected) {
+            if matches!(inner.as_ref(), Ty::Primitive(_)) {
+                return self.ensure(inner, expected, span);
+            }
+        }
         if matches!(actual, Ty::Reference { .. })
             && !matches!(expected, Ty::Reference { .. } | Ty::Error)
         {
@@ -649,7 +656,7 @@ impl Checker {
                         self.allowed_structs.insert(value as *const Expr as usize);
                     }
                     let inferred = self.expr(value, annotation.as_ref());
-                    self.reject_extraction(value);
+                    self.reject_extraction(value, &inferred);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
                     }
@@ -840,7 +847,7 @@ impl Checker {
                     }
                     let value_ty = self.expr(value, Some(&target_ty));
                     if operator == "=" {
-                        self.reject_extraction(value);
+                        self.reject_extraction(value, &value_ty);
                     }
                     if matches!(value_ty, Ty::Reference { .. }) {
                         self.error(
@@ -868,7 +875,7 @@ impl Checker {
                 StatementKind::Expression(expr) => {
                     let ty = self.expr(expr, None);
                     if matches!(ty, Ty::Array(..)) {
-                        self.reject_extraction(expr);
+                        self.reject_extraction(expr, &ty);
                     }
                 }
                 StatementKind::Return(value) => {
@@ -880,7 +887,7 @@ impl Checker {
                         .map(|e| self.expr(e, Some(&self.result.clone())))
                         .unwrap_or(UNIT.clone());
                     if let Some(value) = value {
-                        self.reject_extraction(value);
+                        self.reject_extraction(value, &actual);
                     }
                     self.ensure(
                         &actual,
@@ -896,7 +903,7 @@ impl Checker {
         }
         let tail_ty = if let Some(tail) = &block.tail {
             let ty = self.expr(tail, expected);
-            self.reject_extraction(tail);
+            self.reject_extraction(tail, &ty);
             ty
         } else {
             UNIT.clone()
@@ -1185,7 +1192,7 @@ impl Checker {
                 for element in elements {
                     self.allow_array_value(element);
                     let actual = self.expr(element, element_ty.as_ref());
-                    self.reject_extraction(element);
+                    self.reject_extraction(element, &actual);
                     if matches!(actual, Ty::Reference { .. }) {
                         self.error(17, element.span, "array elements cannot be references yet");
                     }
@@ -1232,7 +1239,7 @@ impl Checker {
                 // repetition and ownership are deliberately gated from typed IR.
                 self.allow_array_value(value);
                 let element = self.expr(value, context);
-                self.reject_extraction(value);
+                self.reject_extraction(value, &element);
                 if matches!(element, Ty::Reference { .. }) {
                     self.error(17, value.span, "array elements cannot be references yet");
                 }
@@ -1617,7 +1624,7 @@ impl Checker {
                             .get(i)
                             .is_none_or(|parameter| parameter.access == IrAccess::Owned)
                         {
-                            self.reject_extraction(arg);
+                            self.reject_extraction(arg, &actual);
                         }
                         if let Some(param) = params.get(i) {
                             if param.access == IrAccess::Owned {
@@ -1727,7 +1734,7 @@ impl Checker {
                     seen.push(&init.name);
                     let expected_field = declared.map(|field| field.ty.clone());
                     let actual = self.expr(&init.value, expected_field.as_ref());
-                    self.reject_extraction(&init.value);
+                    self.reject_extraction(&init.value, &actual);
                     if let Some(want) = &expected_field {
                         self.ensure(&actual, want, init.value.span);
                     }

@@ -209,7 +209,7 @@ fn failed_build_preserves_existing_artifact_and_rejects_type_exports() {
     );
     f.write(
         "src/app.mb",
-        "fn main() { let x := 1; let y := x; let z := x; }",
+        "fn main() { let x := [1]; let y := x; let z := x; }",
     );
     f.write("previous.wasm", "previous artifact");
     let message = err(f.run(&["build", "--output", "previous.wasm"]), "BE001");
@@ -339,7 +339,7 @@ fn run_reports_runtime_and_compile_failures_with_nonzero_status() {
 
     f.write(
         "src/app.mb",
-        "fn main() { let value := 1; let moved := value; let again := value; }",
+        "fn main() { let value := [1]; let moved := value; let again := value; }",
     );
     let message = err(f.run(&["run"]), "BE001");
     assert!(message.contains("app.mb:1:"), "{message}");
@@ -355,10 +355,10 @@ fn ownership_project_checks_resolved_roots_and_imported_moves() {
         "project.toml",
         "[package]\nname='demo'\nentry='main::main'\n[export]\nconsume='api::consume'\n",
     );
-    f.write("src/api.mb", "pub fn consume(value: i32) {}");
+    f.write("src/api.mb", "pub fn consume(value: Array<i32, 1>) {}");
     f.write(
         "src/main.mb",
-        "use api::consume; fn main() { let value := 1; consume(value); consume(value); }",
+        "use api::consume; fn main() { let value := [1]; consume(value); consume(value); }",
     );
     let message = err(f.run(&["ownership-project"]), "BE001");
     assert!(message.contains("main.mb:1:"), "{message}");
@@ -502,7 +502,7 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
     let f = Fixture::new();
     f.write(
         "moves.mb",
-        "fn main() { let x := 1; let y := x; let z := x; }",
+        "fn main() { let x := [1]; let y := x; let z := x; }",
     );
     let message = err(f.run(&["ownership", "moves.mb"]), "BE001");
     assert!(message.contains("moves.mb:1:"), "{message}");
@@ -515,7 +515,7 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("owned primitive moves checked"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("owned moves checked"));
 
     f.write(
         "reinit.mb",
@@ -733,7 +733,7 @@ fn fixed_array_syntax_is_inspectable_and_read_only_arrays_are_executable() {
     );
     f.write(
         "moved.mb",
-        "fn main() { let x := 1; let values := [x; 3]; }",
+        "fn main() { let x := [1, 2]; let values := [x; 3]; }",
     );
     assert!(err(f.run(&["ownership", "moved.mb"]), "BE001").contains("'x'"));
     f.write("nested.mb", "fn main() { let values := [[1; 2]; 3]; }");
@@ -873,10 +873,10 @@ fn array_programs_run_from_source_and_artifact_with_dynamic_bounds_traps() {
     assert_eq!(artifact.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&artifact.stderr).contains("RE007"));
 
-    // Extracting an element into a binding is a compile-time error.
+    // Extracting an aggregate element into a binding is a compile-time error.
     f.write(
         "src/app.mb",
-        "fn main() -> i32 { let a := [1, 2, 3]; let x := a[1]; 0 }",
+        "fn main() -> i32 { let a := [[1, 2], [3, 4]]; let x := a[1]; 0 }",
     );
     err(f.run(&["run"]), "TE022");
 }
@@ -1082,17 +1082,49 @@ fn primitive_copy_runs_from_source_and_artifact_and_is_checked() {
             "TE017",
         ),
         (
-            "fn main() -> i32 { let x := 1; let y := x; let z := x.copy(); z }",
+            "fn main() -> i32 { let a := [1, 2]; let b := a; a[0] + b[0] }",
             "BE001",
         ),
         (
-            "fn main() -> i32 { let a := [1, 2]; let x := a[1]; 0 }",
+            "fn main() -> i32 { let a := [[1, 2], [3, 4]]; let x := a[1]; 0 }",
             "TE022",
         ),
     ] {
         f.write("src/app.mb", source);
         err(f.run(&["run"]), code);
     }
+}
+
+#[test]
+fn implicit_primitive_copies_run_from_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='implicit'\nentry='app::main'\n",
+    );
+    let out = run_both(
+        &f,
+        "type P { x: i32, y: i32 } \
+         fn bump(n: i32) -> i32 { n + 1 } \
+         fn mk(v: i32) -> Array<i32, 3> { [v, v + 1, v + 2] } \
+         fn get(r: borrow i32) -> i32 { r } \
+         fn swap(a: share Array<i32, 3>) { let t := a[0]; a[0] = a[2]; a[2] = t; } \
+         fn main() -> i32 { \
+           let x := 4; let y := x; \
+           var i := 0; var acc := 0; loop { if i >= 3 { break; } acc += bump(i); i += 1; } \
+           var a := mk(1); swap(a.share()); \
+           let rep := [x; 3]; let p := P { x: 5, y: 6 }; let flags := [false, true]; let on := flags[1]; \
+           let g := get(x.borrow()); \
+           if on { x + y + acc + a[0] * 100 + rep[2] + bump(p.x) + g } else { 0 } }",
+    );
+    // 4 + 4 + 6 + 300 + 4 + 6 + 4
+    assert!(out.contains("328"), "{out}");
+    // Implicit copies are reads: a live share still conflicts.
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { var x := 1; var s := x.share(); let y := x; s += 1; y }",
+    );
+    err(f.run(&["run"]), "BE005");
 }
 
 #[test]
@@ -1224,11 +1256,6 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "let p := P { x: 1, y: 2 }; p.z + 1",
             "TE024",
             "has no field 'z'",
-        ),
-        (
-            "let p := P { x: 1, y: 2 }; let q := p.x; q",
-            "TE022",
-            "use `.copy()`",
         ),
         (
             "var p := P { x: 1, y: 2 }; 0",

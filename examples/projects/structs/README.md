@@ -9,12 +9,11 @@ It covers the supported A1 subset: type declarations `type Size { .. }` with
 trailing commas, literals whose fields are written in a different order from
 the declaration, `let` bindings of struct values, primitive field reads inside
 arithmetic (`s.width * s.height`) and in an `if` condition on a `Bool` field,
-`.copy()` of a field into a binding (`s.width.copy()`, `s.scale.copy()` with a
-`u8` annotation), and the `main() -> i32` entry point.
+implicit copies of a field into a binding (`let width := s.width;`,
+`let level: u8 = s.scale;`), and the `main() -> i32` entry point.
 
-Structs cannot be moved, passed, returned or assigned as whole values, and a
-field cannot be read into a binding without `.copy()` (a plain `let w := s.width;`
-is TE022). See `docs/design/struct-implementation.md` for the checkpoint.
+Structs cannot be moved, passed, returned or assigned as whole values; reading a
+primitive field copies it implicitly and leaves the struct whole. See `docs/design/struct-implementation.md` for the checkpoint.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/structs/project.toml

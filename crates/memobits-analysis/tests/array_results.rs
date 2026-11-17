@@ -179,10 +179,11 @@ fn row_extraction_into_owned_positions_is_rejected_with_te022() {
         "fn f(m: borrow Array<Array<i32, 2>, 2>) -> Array<i32, 2> { return m[0]; }",
         "fn main() { let m := [[1, 2], [3, 4]]; let n := [m[0], m[1]]; }",
         "fn main() { let m := [[1, 2], [3, 4]]; m[0]; }",
-        "fn main() { let m := [1, 2]; let x := m[0]; }",
     ] {
         assert!(codes(source).contains(&"TE022".into()), "{source}");
     }
+    // Primitive elements are copied implicitly.
+    lower("fn main() { let m := [1, 2]; let x := m[0]; }");
 }
 
 #[test]

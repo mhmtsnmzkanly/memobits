@@ -1,5 +1,5 @@
 // Structs with primitive fields: declarations, literals with fields in any
-// order, field reads in arithmetic and conditions, `.copy()` of a field, and a
+// order, field reads in arithmetic and conditions, implicit copies of fields, and a
 // public struct from another module.
 use geom::Point;
 
@@ -16,9 +16,9 @@ fn main() -> i32 {
 
     let area := s.width * s.height;
     let offset := p.x * p.y;
-    let width := s.width.copy();
+    let width := s.width;
 
-    let level: u8 = s.scale.copy();
+    let level: u8 = s.scale;
     let bonus := if level == 2 { 1 } else { 0 };
 
     if s.square {

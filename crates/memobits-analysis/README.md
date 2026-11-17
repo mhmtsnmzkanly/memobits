@@ -61,8 +61,10 @@ which modules are loaded, so library lowering excludes an unrelated application
 entry. Wasm emission subsequently removes functions outside the selected export call closure, including unrelated same-module entry functions. Both lowering APIs reuse retained expression types and local/function
 identities. Control flow uses explicit
 blocks for `if`, short-circuit Boolean operators, loops, `break`, and
-`continue`. Owned bindings, calls, assignments, and returns use consuming
-operands; arithmetic and conditions read their inputs. Run
+`continue`. Owned bindings, calls, assignments, and returns consume aggregates
+and reference handles; primitive values (integers, floats, `Bool`) are copied
+implicitly with an IR `Copy` instead of being moved, and arithmetic and
+conditions read their inputs. Run
 `memobits-ownership::check_moves` on the resulting program for availability
 diagnostics. Lowering does not check ownership or implement user-defined types.
 
@@ -83,7 +85,8 @@ retains IEEE behavior; unknown integer divisors are checked during execution.
 Source references are now supported through the ownership gate, including calls
 across resolved local modules. Reference bindings move by default. Arithmetic,
 comparisons, unary operators, and Bool conditions read the primitive referent;
-owned arguments and returns do not implicitly extract it. Reference-valued block
+a primitive referent is copied implicitly into owned arguments, bindings with an
+annotation and returns (`fn get(r: borrow i32) -> i32 { r }`). Reference-valued block
 and if expressions remain conservatively unsupported, as do reference returns,
 aggregate references, and reference rebinding assignments. Wasm reference
 execution remains disabled. See `examples/analysis/references.mb`.
@@ -97,10 +100,10 @@ arrays (`Array<Array<i32, 2>, 3>`, `m[i][j]`, `m[i] = [..]`, rows lent with
 repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
 evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
 reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
-`let` arrays), and whole-array moves (`let b := a;`, `b = a;`). `TE022` rejects
-moving an element into an owned position; use `a[i].copy()` (primitive `expr.copy()`
-reads a local, element or reference referent and yields an owned value; arrays
-and rows cannot be copied yet, TE017). Arrays also cross internal calls as
+`let` arrays), and whole-array moves (`let b := a;`, `b = a;`). Primitive elements
+are copied implicitly into owned positions (`let x := a[i];`, `a[i] = a[j];`);
+`TE022` rejects moving an aggregate element (a row) into an owned position. The
+primitive `expr.copy()` is optional; arrays and rows cannot be copied yet (TE017). Arrays also cross internal calls as
 owned, `borrow` and `share` parameters (`Reference { inner: Array }` in IR), with
 element reads through either reference, element writes through `share`, local
 `.borrow()` / `.share()` bindings and reborrows; argument/parameter length or
@@ -123,8 +126,8 @@ element types, field types, literals); an alias cycle is TE026. Standalone check
 
 Executable support is the first slice (A1): a struct literal `P { y: 2, x: 1 }` (all
 fields exactly once, any order, evaluated in source order) as the initialiser of a
-`let` binding, and primitive field reads `p.x` inside expressions (TE022 rejects
-moving a field out; `p.x.copy()` gives an owned value). Fields are primitives only.
+`let` binding, and primitive field reads `p.x` (copied implicitly into owned
+positions such as `f(p.x)`; `p.x.copy()` is optional). Fields are primitives only.
 Literal shape errors (missing, unknown or duplicate field, non-struct name) are TE023,
 field access on a non-struct or an unknown field is TE024, field privacy (reading a
 private field of another module's struct, or building such a struct from another

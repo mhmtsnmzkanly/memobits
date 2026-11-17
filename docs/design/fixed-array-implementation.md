@@ -319,9 +319,21 @@ WP4 finishes fixed arrays for primitive and nested-array elements.
 Still gated, with the diagnostic: references to primitive elements
 (`m[0][0].share()`, TE017); indexing or borrowing a temporary (`make()[0]`,
 `[1, 2].borrow()`, TE017); extracting an element or row into an owned position
-(TE022; write `a[i].copy()` for a primitive element; whole-row or array
-copy is not available); whole arrays used as
+(TE022 for rows only; primitive elements are copied implicitly; whole-row or
+array copy is not available); whole arrays used as
 operands or expression statements (TE017); reference-typed elements and
 returned references (TE017, `a` where `a` is a `borrow`/`share` array); `Unit`
 elements (TE017); arrays and array references in exported signatures
 (parameters and results, LE900); reference rebinding (TE017).
+
+## Implicit primitive copy checkpoint
+
+The decision that primitives are copied implicitly supersedes the earlier
+element-extraction wording in this document. Where it says that TE022 rejects
+moving an element into a binding, `=` right-hand side (`a[i] = a[j]`), return,
+tail, owned argument or array element, that now holds for aggregate elements
+(rows of a nested array) only; a primitive element is read into any owned
+position through `Load` + `Copy` and the array stays whole. Repeating a
+primitive (`[x; 3]`, `[a[0]; 3]`) is fine, so the repeated-move BE001 applies
+only to aggregate elements. `.copy()` on a primitive element is optional. The
+swap `let t := a[0]; a[0] = a[2]; a[2] = t;` is now the natural spelling.

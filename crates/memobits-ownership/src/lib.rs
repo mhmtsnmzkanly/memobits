@@ -21,7 +21,8 @@ pub fn check_ownership(program: &Program) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check local availability after moves. Numeric values are consumed too.
+/// Check local availability after moves. Primitive values are copied implicitly
+/// (lowering reads them), so only aggregates and handles are consumed.
 /// Borrow and share check availability without consuming their source.
 /// Structural IR failures are reported as BE003 before move analysis runs.
 pub fn check_moves(program: &Program) -> Vec<Diagnostic> {

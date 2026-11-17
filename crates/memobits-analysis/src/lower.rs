@@ -1,5 +1,5 @@
 //! Lower a successfully checked standalone primitive module to control-flow IR.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
@@ -135,11 +135,11 @@ pub fn lower_module(
         builder.lower_block(body);
         if let Some(current) = builder.current {
             let value = builder.last_value.take();
-            let result = builder.function.signature.result.as_ref();
-            let returned = if result == &Type::Primitive(Primitive::Unit) {
+            let result = builder.function.signature.result.as_ref().clone();
+            let returned = if result == Type::Primitive(Primitive::Unit) {
                 None
             } else {
-                value.map(consume)
+                value.and_then(|value| builder.owned_to(value, &result))
             };
             builder.finish(current, TerminatorKind::Return(returned), Some(body.span));
         }
@@ -286,7 +286,8 @@ pub fn lower_resolved(
                     {
                         None
                     } else {
-                        value.map(consume)
+                        let result = builder.function.signature.result.as_ref().clone();
+                        value.and_then(|value| builder.owned_to(value, &result))
                     };
                     builder.finish(current, TerminatorKind::Return(returned), Some(body.span));
                 }
@@ -385,6 +386,9 @@ struct Builder<'a> {
     last_value: Option<Operand>,
     loops: Vec<LoopTargets>,
     next_loan: u32,
+    /// Values produced by `Load`: read-only provenance that must be copied
+    /// before it can be used as an owned value.
+    loaded: HashSet<u32>,
 }
 impl<'a> Builder<'a> {
     fn new(function: Function, facts: &'a FunctionFacts, types: &'a [StructFact]) -> Self {
@@ -414,6 +418,7 @@ impl<'a> Builder<'a> {
             last_value: None,
             loops: Vec::new(),
             next_loan: 0,
+            loaded: HashSet::new(),
         }
     }
     fn id(&self, expr: &Expr) -> ExprId {
@@ -478,14 +483,61 @@ impl<'a> Builder<'a> {
     fn scalar(&mut self, mut operand: Operand) -> Option<Operand> {
         if let Some(Type::Reference { access, inner }) = self.operand_type(operand) {
             operand.mode = access_mode(access);
-            self.emit(
-                operand.span.unwrap_or(self.function.span),
-                InstructionKind::Load { reference: operand },
-                Some(*inner),
-            )
+            let span = operand.span.unwrap_or(self.function.span);
+            self.load(operand, *inner, span)
         } else {
             Some(operand)
         }
+    }
+    fn load(&mut self, reference: Operand, inner: Type, span: Span) -> Option<Operand> {
+        let value = self.emit(span, InstructionKind::Load { reference }, Some(inner))?;
+        if let Source::Value(id) = value.source {
+            self.loaded.insert(id.0);
+        }
+        Some(value)
+    }
+    /// Operand for an owned position. Primitive locals and loaded primitives
+    /// (read-only provenance) are copied implicitly into a fresh owned value
+    /// with an IR `Copy`, which only reads its source. Other temporaries and
+    /// aggregates are consumed (moved).
+    fn owned(&mut self, operand: Operand) -> Option<Operand> {
+        let primitive = matches!(
+            self.operand_type(operand),
+            Some(Type::Primitive(kind)) if kind != Primitive::Unit
+        );
+        match operand.source {
+            Source::Local(_) if primitive => self.copy_of(operand),
+            Source::Value(id) if primitive && self.loaded.contains(&id.0) => self.copy_of(operand),
+            _ => Some(consume(operand)),
+        }
+    }
+    fn copy_of(&mut self, operand: Operand) -> Option<Operand> {
+        let ty = self.operand_type(operand);
+        let span = operand.span.unwrap_or(self.function.span);
+        let copy = self.emit(
+            span,
+            InstructionKind::Copy {
+                source: read(operand),
+            },
+            ty,
+        )?;
+        Some(consume(copy))
+    }
+    /// `owned` for a destination of type `target`: a reference read into a
+    /// non-reference destination is loaded first (the checker only allows this
+    /// for primitive referents).
+    fn owned_to(&mut self, operand: Operand, target: &Type) -> Option<Operand> {
+        let operand = if matches!(target, Type::Reference { .. }) {
+            operand
+        } else {
+            self.scalar(operand)?
+        };
+        self.owned(operand)
+    }
+    /// `owned_to` followed by a capture, so locals are read in source order.
+    fn owned_captured(&mut self, operand: Operand, target: &Type) -> Option<Operand> {
+        let operand = self.owned_to(operand, target)?;
+        Some(consume(self.capture(operand)?))
     }
     fn borrow(&mut self, mut owner: Operand, access: Access) -> Option<Operand> {
         let ty = self.operand_type(owner).expect("checked borrow source");
@@ -550,15 +602,18 @@ impl<'a> Builder<'a> {
                     let rhs = self.lower_expr(value);
                     if let Some(rhs) = rhs {
                         let target = self.local(statement);
-                        self.emit(
-                            statement.span,
-                            InstructionKind::Assign {
-                                target,
-                                value: consume(rhs),
-                                initialize: true,
-                            },
-                            None,
-                        );
+                        let ty = self.function.locals[target.0 as usize].ty.clone();
+                        if let Some(rhs) = self.owned_to(rhs, &ty) {
+                            self.emit(
+                                statement.span,
+                                InstructionKind::Assign {
+                                    target,
+                                    value: rhs,
+                                    initialize: true,
+                                },
+                                None,
+                            );
+                        }
                     }
                 }
                 StatementKind::Assign {
@@ -599,6 +654,9 @@ impl<'a> Builder<'a> {
                             )
                             .expect("live compound result")
                         };
+                        let Some(assigned) = self.owned(assigned) else {
+                            continue;
+                        };
                         let kind = if matches!(
                             self.function.locals[local.0 as usize].ty,
                             Type::Reference { .. }
@@ -607,12 +665,12 @@ impl<'a> Builder<'a> {
                             reference.mode = UseMode::Share;
                             InstructionKind::Store {
                                 reference,
-                                value: consume(assigned),
+                                value: assigned,
                             }
                         } else {
                             InstructionKind::Assign {
                                 target: local,
-                                value: consume(assigned),
+                                value: assigned,
                                 initialize: false,
                             }
                         };
@@ -624,7 +682,11 @@ impl<'a> Builder<'a> {
                 }
                 StatementKind::Return(value) => {
                     let returned = match value {
-                        Some(expr) => self.lower_expr(expr).map(consume),
+                        Some(expr) => {
+                            let result = self.function.signature.result.as_ref().clone();
+                            self.lower_expr(expr)
+                                .and_then(|value| self.owned_to(value, &result))
+                        }
                         None => None,
                     };
                     if let Some(current) = self.current {
@@ -734,7 +796,7 @@ impl<'a> Builder<'a> {
         let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
             unreachable!("element address is a reference")
         };
-        self.emit(span, InstructionKind::Load { reference }, Some(*inner))
+        self.load(reference, *inner, span)
     }
     /// `a[i] = v` and `a[i] op= v`. The index is evaluated and captured first,
     /// then the right-hand side; the checked element address and the store are
@@ -772,12 +834,13 @@ impl<'a> Builder<'a> {
                 )?
             }
         };
+        let assigned = self.owned(assigned)?;
         let reference = self.address_chain(array, &positions, Access::Share, span)?;
         self.emit(
             span,
             InstructionKind::Store {
                 reference,
-                value: consume(assigned),
+                value: assigned,
             },
             None,
         );
@@ -799,7 +862,11 @@ impl<'a> Builder<'a> {
     /// an owned element expression is a repeated move that ownership rejects.
     fn lower_repeat(&mut self, expr: &Expr, value: &Expr) -> Option<Operand> {
         let ty = self.ty(expr).expect("checked repeat type");
-        let Type::Array { len, .. } = ty else {
+        let Type::Array {
+            len,
+            element: element_ty,
+        } = ty.clone()
+        else {
             unreachable!("checked repeat type")
         };
         let span = expr.span;
@@ -814,8 +881,7 @@ impl<'a> Builder<'a> {
         }
         if len == 1 {
             let element = self.lower_expr(value)?;
-            let element = self.scalar(element)?;
-            let element = consume(self.capture(consume(element))?);
+            let element = self.owned_captured(element, &element_ty)?;
             return self.emit(
                 span,
                 InstructionKind::ArrayNew {
@@ -887,8 +953,8 @@ impl<'a> Builder<'a> {
         self.current = Some(body);
         let produced = self
             .lower_expr(value)
-            .and_then(|operand| self.scalar(operand))
-            .and_then(|operand| self.capture(consume(operand)));
+            .and_then(|operand| self.owned_to(operand, &element_ty))
+            .and_then(|operand| self.capture(operand));
         if let Some(produced) = produced {
             let position = self.capture(op(Source::Local(counter), span))?;
             let reference = self.element_addr(
@@ -955,12 +1021,18 @@ impl<'a> Builder<'a> {
         self.current?;
         match &expr.kind {
             ExprKind::Array(elements) => {
+                let Some(Type::Array {
+                    element: element_ty,
+                    ..
+                }) = self.ty(expr)
+                else {
+                    unreachable!("checked array literal type")
+                };
                 let mut operands = Vec::with_capacity(elements.len());
                 for element in elements {
                     let value = self.lower_expr(element)?;
-                    let value = self.scalar(value)?;
                     // Capture locals now so every element is read in source order.
-                    operands.push(consume(self.capture(consume(value))?));
+                    operands.push(self.owned_captured(value, &element_ty)?);
                 }
                 self.emit(
                     expr.span,
@@ -1091,7 +1163,7 @@ impl<'a> Builder<'a> {
                 for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
                     let argument = self.lower_expr(argument)?;
                     if parameter.access == Access::Owned {
-                        args.push(consume(self.capture(consume(argument))?));
+                        args.push(self.owned_captured(argument, &parameter.ty)?);
                     } else {
                         let mut argument = self.borrow(argument, parameter.access)?;
                         argument.mode = access_mode(parameter.access);
@@ -1151,13 +1223,13 @@ impl<'a> Builder<'a> {
                 let mut slots: Vec<Option<Operand>> = vec![None; definition.fields.len()];
                 for init in fields {
                     let value = self.lower_expr(&init.value)?;
-                    let value = self.scalar(value)?;
-                    let operand = consume(self.capture(consume(value))?);
                     let index = definition
                         .fields
                         .iter()
                         .position(|field| field.name == init.name)
                         .expect("checked struct field");
+                    let operand =
+                        self.owned_captured(value, &definition.fields[index].ty.clone())?;
                     slots[index] = Some(operand);
                 }
                 self.emit(
@@ -1181,7 +1253,10 @@ impl<'a> Builder<'a> {
         }
     }
     fn join(&mut self, target: BlockId, value: Operand, span: Span) {
-        self.goto(target, vec![consume(value)], span);
+        let Some(value) = self.owned(value) else {
+            return;
+        };
+        self.goto(target, vec![value], span);
     }
     fn lower_if(
         &mut self,

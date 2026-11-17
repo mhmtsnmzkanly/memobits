@@ -45,11 +45,16 @@ fn lowers_calls_and_detects_repeated_owned_move() {
     assert!(
         move_codes("fn id(x: i32) -> i32 { x } fn main() -> i32 { let x := 1; id(x) }").is_empty()
     );
+    assert!(move_codes(
+        "fn g(a: Array<i32, 1>, b: Array<i32, 1>) {} fn main() { let x := [1]; g(x, x); }"
+    )
+    .contains(&"BE001".into()));
     assert!(
-        move_codes("fn g(a: i32, b: i32) {} fn main() { let x := 1; g(x, x); }")
-            .contains(&"BE001".into())
+        move_codes("fn main() { let x := [1]; let y := x; x[0] + 1; }").contains(&"BE001".into())
     );
-    assert!(move_codes("fn main() { let x := 1; let y := x; x + 1; }").contains(&"BE001".into()));
+    // Primitives are copied implicitly.
+    assert!(move_codes("fn g(a: i32, b: i32) {} fn main() { let x := 1; g(x, x); }").is_empty());
+    assert!(move_codes("fn main() -> i32 { let x := 1; let y := x; x + y }").is_empty());
 }
 
 #[test]
@@ -61,7 +66,12 @@ fn captures_operands_before_later_side_effects() {
     let instructions = &main.blocks[0].instructions;
     let first_capture = instructions
         .iter()
-        .position(|i| matches!(i.kind, InstructionKind::Capture(_)))
+        .position(|i| {
+            matches!(
+                i.kind,
+                InstructionKind::Capture(_) | InstructionKind::Copy { .. }
+            )
+        })
         .unwrap();
     let reassignment = instructions
         .iter()
@@ -77,8 +87,9 @@ fn captures_operands_before_later_side_effects() {
         .unwrap();
     assert!(first_capture < reassignment);
 
-    let invalid =
-        lower("fn g(a: i32, b: i32) {} fn main() { var x := 1; g(x, { let y := x; 0 }); }");
+    let invalid = lower(
+        "fn g(a: Array<i32, 1>, b: i32) {} fn main() { let x := [1]; g(x, { let y := x; 0 }); }",
+    );
     assert!(memobits_ownership::check_moves(&invalid)
         .iter()
         .any(|diagnostic| diagnostic.code.to_string() == "BE001"));
@@ -148,15 +159,15 @@ fn accepts_integer_boundaries_dynamic_values_and_ieee_float_results() {
 #[test]
 fn branch_join_and_reinitialization_have_expected_availability() {
     assert!(
-        move_codes("fn main() { var x := 1; if true { let y := x; } else {} x + 1; }")
+        move_codes("fn main() { var x := [1]; if true { let y := x; } else {} x[0] + 1; }")
             .contains(&"BE001".into())
     );
+    assert!(move_codes(
+        "fn main() { var x := [1]; loop { let y := x; x = [2]; break; } x[0] + 1; }"
+    )
+    .is_empty());
     assert!(
-        move_codes("fn main() { var x := 1; loop { let y := x; x = 2; break; } x + 1; }")
-            .is_empty()
-    );
-    assert!(
-        move_codes("fn main() { var x := 1; loop { let y := x; break; } x + 1; }")
+        move_codes("fn main() { var x := [1]; loop { let y := x; break; } x[0] + 1; }")
             .contains(&"BE001".into())
     );
 }
