@@ -21,11 +21,11 @@ and `borrow`/`share` of a whole struct. Owned struct arguments and results
 follow the array model: the callee owns a copy in its own frame cell, and
 struct-return storage belongs to the caller. Field-level references stay gated.
 
-**A3 — nested structs, array fields, arrays of structs (planned).**
+**A3 — nested structs, array fields, arrays of structs (implemented; see the A3 checkpoint).**
 Struct-typed and array-typed fields (a struct inside a struct, `Array<T, N>`
-fields) and `Array<S, N>` with struct elements. These need the layout to nest
-(size and alignment computed recursively) and element moves to follow the same
-TE022 rule as arrays.
+fields) and `Array<S, N>` with struct elements. The layout nests (size and
+alignment computed recursively) and sub-aggregate moves follow the TE022 rule
+of arrays.
 
 **A4 — destructuring and field-disjoint loans (planned).**
 Whole-value destructuring `let P { x, y: alias } := p;` (and `var` for mutable
@@ -93,7 +93,7 @@ independently. Until then every field loan overlaps the whole struct.
 | Struct parameters, results, `borrow`/`share` parameters, struct-typed signatures including `pub` `main` | TE017 |
 | `.borrow()` / `.share()` of a struct, `.copy()` of a struct | TE017 |
 | Field access on a non-local base (`f().x`), and `1.field` | TE017 |
-| Struct-typed fields, array-typed fields, arrays of structs (`Array<P, N>`, `type G = Array<P, 2>`) | TE017 |
+| Struct-typed fields, array-typed fields, arrays of structs (`Array<P, N>`, `type G = Array<P, 2>`) (lifted by A3) | TE017 |
 | Enum types used as value types | TE001 (declaration TE016) |
 | Destructuring `let P { x } := p;` | SE002 |
 | Struct literal directly in an unparenthesised `if` condition | SE002 |
@@ -192,7 +192,7 @@ struct references", "cannot return structs"); there is no external struct ABI.
 | `make().x`, `P { .. }.x`, a struct literal as a temporary | TE017 |
 | `p.x.borrow()` / `p.x.share()` (field-level references) | TE017 |
 | `p.copy()` (whole-struct copy) | TE017 |
-| Struct-typed fields, array fields, arrays of structs | TE017 |
+| Struct-typed fields, array fields, arrays of structs (lifted by A3) | TE017 |
 | Struct or struct reference in `main` / `[export]` signature | LE900 |
 | `var` on a `borrow`/`share` parameter | TE017 |
 
@@ -204,7 +204,7 @@ struct (BE005); field-disjoint loans are A4.
 
 ### Still gated
 
-Struct-typed fields, array-typed fields, arrays of structs (A3); destructuring
+Struct-typed fields, array-typed fields, arrays of structs (lifted by A3, below); destructuring
 and field-disjoint loans (A4); `p.x.share()` and `p.x.borrow()`; whole-struct
 `.copy()`; field access on a call result or literal; structs and struct
 references in exported signatures (LE900); returning or storing references;
@@ -219,3 +219,92 @@ leave the struct whole and usable. `.copy()` on a field is optional. TE022
 ("a struct field cannot be moved out by field access") no longer fires for
 primitive fields; the check remains in place for field types that are not
 primitive, which become reachable with nested and array-typed fields in A3.
+
+## A3 checkpoint
+
+A3 makes every combination of arrays and structs nest, using chained
+projections on intermediate references, exactly as nested arrays already did.
+No new IR instruction and no new ownership rule were needed.
+
+### Design
+
+- **Projections.** A place is a root local plus a chain of steps, each an index
+  or a field name (`a[i].pts[j].x`). Lowering evaluates and captures the root
+  and every index left to right (`lower_place`), forms the whole chain of
+  checked addresses only afterwards (`address_chain`: `ElementAddr` for an
+  index step, `FieldAddr` for a field step, each yielding a `Reference` to the
+  next level with the requested access on every level) and ends in `Load`
+  (read), `Store` (write) or the chain's final reference (a lent
+  sub-aggregate). Previously separate paths for elements and fields (reads,
+  assignments, `.borrow()`/`.share()`) are one path; `lower_field_assign` and
+  the element-only chain were merged.
+- **Evaluation order.** For `a[f()].pts[g()] = h()`: f, g, then h, then the
+  share chain and the store adjacent, so every bounds trap fires after the
+  right-hand side's effects (the D2 rule for elements, now on every level). A
+  compound write reads the place through a Borrow chain first. Field steps
+  have no bounds check.
+- **Struct literals.** A field initialiser is an owned-value position, so a
+  nested literal, a call result or a named aggregate (a move) feeds a field.
+  An array element or repetition element may be a struct literal; repetition
+  evaluates it per element.
+- **Types and IR.** `Ty::Array` accepts struct elements and the type table
+  accepts struct and array fields. The IR validator accepts non-Unit
+  primitive, struct and array types for fields and array elements, and
+  rejects by-value cycles (`struct 'A' contains itself by value`), so the
+  backend never sees one. Analysis reports recursion, directly or through
+  arrays and other structs, as TE026 on the offending field.
+- **Layout.** `struct_layouts` lays out dependencies first. A nested struct or
+  array field is stored inline at its own natural alignment
+  (`FieldStorage::Aggregate(size)`, written with `memory.copy` from the
+  field operand's value cell); array layout is element size times length with
+  `checked_mul`, and a struct size is rounded to its largest alignment, so an
+  array of structs strides by the struct size. Layout cost depends on type
+  depth only. A frame over `[build].stack_size` is the usual LE900 diagnostic,
+  a type whose size overflows 32 bits a layout-overflow diagnostic.
+- **Loans.** Unchanged: every `FieldAddr`/`ElementAddr` loan is rooted at the
+  root local, so any live reference to a sub-aggregate blocks writes anywhere
+  in the root. Writing `l.b.x` while `l.a.borrow()` is live is BE005. This is
+  deliberately conservative; A4 (field-disjoint loans) will accept it for
+  proven disjoint fields.
+- **References to primitive fields.** `l.a.x.share()` / `a[i].x.borrow()` stay
+  TE017, matching `m[i][j].share()` for arrays ("references to primitive
+  elements and struct fields are not supported"). The IR could express them,
+  but the rule is kept consistent across arrays and structs until the
+  field-disjoint loan work decides how element and field references are lent.
+
+### Executes
+
+- Struct-typed fields: `type Line { a: P, b: P }`; nested literals
+  `Line { a: P { x: 1, y: 2 }, b: make_p() }`; reads `l.a.x`; writes
+  `l.a.x = v`, `l.a.x += v` (through a `var` owner or a `share` reference);
+  whole-field replacement `l.a = P { .. }` and `l.a = other` (moves `other`).
+- Array-typed fields: `type Poly { pts: Array<i32, 4> }`; `p.pts[i]` reads and
+  writes with bounds checks, `p.pts[i] += v`, `p.pts = [..]`.
+- Arrays of structs `Array<P, 3>`: literals, repetition
+  `[P { x: 0, y: 0 }; 8]`, `a[i].x` reads and writes, `a[i] = P { .. }`, and
+  arbitrary nesting (arrays of structs holding arrays of structs).
+- Sub-aggregates lent to `borrow P` / `share P` / `borrow Array<..>` parameters
+  with `l.a.borrow()`, `a[i].share()`, `p.pts.borrow()`, and bound to local
+  reference handles (`let r := l.a.borrow();`, `var s := a[i].share();`).
+- Aggregates with sub-aggregates pass by value (moves) as parameters, results,
+  `if` values and elements like any other aggregate.
+
+### Diagnostics
+
+| Problem | Code |
+| --- | --- |
+| Moving a sub-aggregate out: `let q := l.a;`, `let r := a[i];`, `f(l.a)` to an owned parameter, `return l.a;`, tail `l.a`, `l.b = l.a;`, `[a[0], a[1]]`, `l.a;` | TE022 ("a struct or array field/element cannot be moved out by field access/indexing; ... partial moves are deferred") |
+| Struct containing itself by value, also through arrays (`type A { xs: Array<A, 2> }`) | TE026 |
+| `l.a.x.share()`, `a[i].x.borrow()`, `p.pts[0].share()` | TE017 |
+| Write through a `let`, `borrow` or immutable root (`l.a.x = 1` on `let l`) | TE004 |
+| Constant index out of range at any level | TE008 |
+| Dynamic index out of range at any level | RE007 (trap, after the right-hand side) |
+| Write to `l.b.x` while `l.a.borrow()` is live | BE005 |
+| Nested aggregate in a `main` / `[export]` signature | LE900 |
+| Frame (including nested cells) over the configured stack | LE900 |
+
+### Still gated
+
+Whole-struct `.copy()`; references to primitive fields and elements; field
+access or indexing on a call result or literal (`make().a.x`); destructuring
+and field-disjoint loans (A4); aggregates in exported signatures (LE900).

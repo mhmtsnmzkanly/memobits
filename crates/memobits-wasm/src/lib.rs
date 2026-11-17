@@ -285,6 +285,7 @@ fn supported_type(ty: &Type) -> bool {
         Type::Array { element, .. } => match element.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             nested @ Type::Array { .. } => supported_type(nested),
+            Type::Struct(_) => true,
             _ => false,
         },
         _ => false,
@@ -318,60 +319,145 @@ struct FrameLayout {
     size: u32,
 }
 
+/// How one struct field is stored: a primitive written with a typed store, or a
+/// nested array or struct copied as `size` bytes from its value cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldStorage {
+    Primitive(Primitive),
+    Aggregate(u32),
+}
+
 /// Natural-alignment layout of a struct: fields in declaration order, each at
-/// the next offset aligned to its own size, total size rounded up to the largest
-/// field alignment. Fields are non-Unit primitives (validated).
+/// the next offset aligned to its own alignment, total size rounded up to the
+/// largest field alignment. A nested struct or array field is laid out inline
+/// with its own size and alignment (the validator rejects by-value cycles).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StructLayout {
     size: u32,
     align: u32,
     offsets: Vec<u32>,
-    fields: Vec<Primitive>,
+    fields: Vec<FieldStorage>,
 }
 
 const STRUCT_LAYOUT_OVERFLOW: &str = "struct layout overflows the 32-bit address space";
 
 fn struct_layouts(types: &[TypeDef]) -> Result<Vec<StructLayout>, String> {
-    types
-        .iter()
-        .map(|definition| {
-            let TypeDefKind::Struct { fields } = &definition.kind;
-            let mut offset = 0u32;
-            let mut align = 1u32;
-            let mut offsets = Vec::with_capacity(fields.len());
-            let mut primitives = Vec::with_capacity(fields.len());
-            for field in fields {
-                let Type::Primitive(kind) = field.ty else {
-                    return Err(format!(
-                        "field '{}' of struct '{}' is not a primitive",
-                        field.name, definition.path.name
-                    ));
-                };
-                let (size, field_align) = storage_layout(kind)?;
-                offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                offsets.push(offset);
-                primitives.push(kind);
-                offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                align = align.max(field_align);
-            }
-            Ok(StructLayout {
-                size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
-                align,
-                offsets,
-                fields: primitives,
-            })
-        })
-        .collect()
+    let mut done: Vec<Option<StructLayout>> = vec![None; types.len()];
+    for index in 0..types.len() {
+        struct_layout_at(types, index, &mut done, &mut Vec::new())?;
+    }
+    Ok(done
+        .into_iter()
+        .map(|layout| layout.expect("laid out"))
+        .collect())
 }
 
-/// Size and alignment of an array or struct type.
-fn aggregate_layout(structs: &[StructLayout], ty: &Type) -> Result<(u32, u32), String> {
+fn struct_layout_at(
+    types: &[TypeDef],
+    index: usize,
+    done: &mut Vec<Option<StructLayout>>,
+    active: &mut Vec<usize>,
+) -> Result<(), String> {
+    if done[index].is_some() {
+        return Ok(());
+    }
+    if active.contains(&index) {
+        return Err(format!(
+            "struct '{}' contains itself by value",
+            types[index].path.name
+        ));
+    }
+    active.push(index);
+    let definition = &types[index];
+    let TypeDefKind::Struct { fields } = &definition.kind;
+    let mut offset = 0u32;
+    let mut align = 1u32;
+    let mut offsets = Vec::with_capacity(fields.len());
+    let mut storage = Vec::with_capacity(fields.len());
+    for field in fields {
+        let (size, field_align, kind) = match &field.ty {
+            Type::Primitive(kind) => {
+                let (size, field_align) = storage_layout(*kind)?;
+                (size, field_align, FieldStorage::Primitive(*kind))
+            }
+            nested @ (Type::Array { .. } | Type::Struct(_)) => {
+                nested_struct_layouts(types, nested, done, active)?;
+                let (size, field_align) = type_layout(
+                    &|id| {
+                        done.get(id as usize)
+                            .and_then(Option::as_ref)
+                            .map(|layout| (layout.size, layout.align))
+                    },
+                    nested,
+                )?;
+                (size, field_align, FieldStorage::Aggregate(size))
+            }
+            _ => {
+                return Err(format!(
+                    "field '{}' of struct '{}' has an unsupported type",
+                    field.name, definition.path.name
+                ))
+            }
+        };
+        offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+        offsets.push(offset);
+        storage.push(kind);
+        offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+        align = align.max(field_align);
+    }
+    done[index] = Some(StructLayout {
+        size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+        align,
+        offsets,
+        fields: storage,
+    });
+    active.pop();
+    Ok(())
+}
+
+/// Lay out every struct reachable from a field type before the field itself.
+fn nested_struct_layouts(
+    types: &[TypeDef],
+    ty: &Type,
+    done: &mut Vec<Option<StructLayout>>,
+    active: &mut Vec<usize>,
+) -> Result<(), String> {
     match ty {
-        Type::Struct(id) => structs
-            .get(id.0 as usize)
-            .map(|layout| (layout.size, layout.align))
-            .ok_or_else(|| "struct type is out of range".to_string()),
-        other => array_layout(other),
+        Type::Struct(id) => struct_layout_at(types, id.0 as usize, done, active),
+        Type::Array { element, .. } => nested_struct_layouts(types, element, done, active),
+        _ => Ok(()),
+    }
+}
+
+/// Size and alignment of an array or struct type. Arrays multiply the element
+/// size by the length with checked arithmetic at every level; the cost depends
+/// on the nesting depth of the type only, never on a source-supplied count.
+fn aggregate_layout(structs: &[StructLayout], ty: &Type) -> Result<(u32, u32), String> {
+    type_layout(
+        &|id| {
+            structs
+                .get(id as usize)
+                .map(|layout| (layout.size, layout.align))
+        },
+        ty,
+    )
+}
+
+fn type_layout(
+    struct_layout: &dyn Fn(u32) -> Option<(u32, u32)>,
+    ty: &Type,
+) -> Result<(u32, u32), String> {
+    match ty {
+        Type::Primitive(kind) => storage_layout(*kind),
+        Type::Struct(id) => {
+            struct_layout(id.0).ok_or_else(|| "struct type is out of range".to_string())
+        }
+        Type::Array { element, len } => {
+            let (size, align) = type_layout(struct_layout, element)?;
+            let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
+            Ok((bytes, align))
+        }
+        _ => Err("array elements must be primitives, structs or arrays in frame layout".into()),
     }
 }
 
@@ -710,21 +796,6 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
 }
 
 const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
-
-/// Size and alignment of an array type: element size times length with checked
-/// multiplication. Nested arrays recurse over the type only, so the cost depends
-/// on nesting depth and never on any source-supplied count.
-fn array_layout(ty: &Type) -> Result<(u32, u32), String> {
-    match ty {
-        Type::Primitive(kind) => storage_layout(*kind),
-        Type::Array { element, len } => {
-            let (size, align) = array_layout(element)?;
-            let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
-            Ok((bytes, align))
-        }
-        _ => Err("array elements must be primitive or arrays in frame layout".into()),
-    }
-}
 
 /// Byte size of the pointee of an aggregate operand type (array or struct,
 /// owner or reference).
@@ -1810,7 +1881,7 @@ fn compile_instruction(
             let Type::Array { element, len } = function.values[value.0 as usize].clone() else {
                 return Err("array creation output must have an array type".into());
             };
-            let (size, _) = array_layout(&element)?;
+            let (size, _) = aggregate_layout(&layout.structs, &element)?;
             match init {
                 ArrayInit::Elements(elements) => {
                     if elements.len() != len as usize {
@@ -1872,7 +1943,17 @@ fn compile_instruction(
                     .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
                 emit_address(body, frame, destination);
                 emit_operand(body, function, param_count, operand, layout, Some(frame))?;
-                emit_store(body, struct_layout.fields[index]);
+                match struct_layout.fields[index] {
+                    FieldStorage::Primitive(kind) => emit_store(body, kind),
+                    FieldStorage::Aggregate(size) => {
+                        // A nested struct or array field is copied from its cell.
+                        body.instruction(&WasmInstruction::I32Const(size as i32));
+                        body.instruction(&WasmInstruction::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
             }
         }
         InstructionKind::FieldAddr { base, field, .. } => {
@@ -1910,7 +1991,7 @@ fn compile_instruction(
                 },
                 _ => return Err("element address base is not an array".into()),
             };
-            let (size, _) = array_layout(&element)?;
+            let (size, _) = aggregate_layout(&layout.structs, &element)?;
             let wide = matches!(
                 value_type(function, index)?,
                 Type::Primitive(Primitive::I64 | Primitive::U64)
@@ -2715,6 +2796,42 @@ mod struct_layout_tests {
         let empty = lower("type U {} fn main() {}");
         let layouts = struct_layouts(&empty.types).unwrap();
         assert_eq!((layouts[0].size, layouts[0].align), (0, 1));
+    }
+
+    #[test]
+    fn nested_aggregates_are_laid_out_inline_with_their_own_alignment() {
+        let program = lower(
+            "type Q { a: u8, b: i64, f: f32, ok: Bool } \
+             type R { tag: u8, q: Q, xs: Array<Q, 2>, last: i16 } \
+             type Z { e: Array<Q, 0>, n: u8 } \
+             type W { g: Array<Array<R, 2>, 3> } fn main() {}",
+        );
+        let layouts = struct_layouts(&program.types).unwrap();
+        // Q: u8 @0, i64 @8, f32 @16, Bool @20; size 24, align 8.
+        assert_eq!((layouts[0].size, layouts[0].align), (24, 8));
+        assert_eq!(layouts[0].offsets, [0, 8, 16, 20]);
+        // R: u8 @0, Q @8, [Q; 2] @32 (48 bytes), i16 @80; size 88, align 8.
+        assert_eq!(layouts[1].offsets, [0, 8, 32, 80]);
+        assert_eq!((layouts[1].size, layouts[1].align), (88, 8));
+        assert_eq!(
+            layouts[1].fields,
+            [
+                FieldStorage::Primitive(Primitive::U8),
+                FieldStorage::Aggregate(24),
+                FieldStorage::Aggregate(48),
+                FieldStorage::Primitive(Primitive::I16)
+            ]
+        );
+        // A zero-length array of structs is empty but keeps the element alignment.
+        assert_eq!(layouts[2].offsets, [0, 0]);
+        assert_eq!((layouts[2].size, layouts[2].align), (8, 8));
+        // [[R; 2]; 3] is 3 * 2 * 88 bytes.
+        assert_eq!(layouts[3].size, 528);
+        // Overflow is reported, never wrapped.
+        let huge = lower(
+            "type P { x: i64 } type A { a: Array<Array<Array<P, 65536>, 65536>, 65536> } fn main() {}",
+        );
+        assert!(struct_layouts(&huge.types).is_err());
     }
 
     #[test]

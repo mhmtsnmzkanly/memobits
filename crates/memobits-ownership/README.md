@@ -36,8 +36,11 @@ Struct owners follow the array rules: `StructNew` consumes its field operands,
 creates a loan, and any field loan overlaps the whole struct (no field-disjoint
 reasoning yet). Whole structs move like arrays (`Assign`, `Capture`, call arguments,
 returns, join arguments); a field write or a move while a borrow of the struct is live
-is BE005, and two `Share` arguments of one struct in a call are BE005. A2 needed no
-new rules.
+is BE005, and two `Share` arguments of one struct in a call are BE005. A2 and A3
+(nested structs, array fields, arrays of structs; mixed `FieldAddr`/`ElementAddr` chains)
+needed no new rules: every address in a chain is a loan rooted at the root local, so a
+live reference to any sub-aggregate blocks writes anywhere in the root (field-disjoint
+loans are a later package).
 
 Run tests with `cargo test --offline -p memobits-ownership`.
 

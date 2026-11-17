@@ -1464,25 +1464,65 @@ fn accepts_struct_signatures_references_and_block_parameters() {
 
 #[test]
 fn rejects_invalid_struct_definitions() {
-    // Recursive and nested aggregate fields cannot be represented.
+    // A struct that contains itself by value has no finite size, directly,
+    // through an array, or through another struct.
     let errors = struct_errors(|p| {
         p.types
             .push(struct_def("Node", vec![("next", Type::Struct(TypeId(1)))]));
     });
-    assert!(has(&errors, "must be a non-Unit primitive"), "{errors:?}");
+    assert!(has(&errors, "contains itself by value"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types.push(struct_def(
+            "Node",
+            vec![(
+                "kids",
+                Type::Array {
+                    element: Box::new(Type::Struct(TypeId(1))),
+                    len: 2,
+                },
+            )],
+        ));
+    });
+    assert!(has(&errors, "contains itself by value"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types
+            .push(struct_def("A", vec![("b", Type::Struct(TypeId(2)))]));
+        p.types
+            .push(struct_def("B", vec![("a", Type::Struct(TypeId(1)))]));
+    });
+    assert!(has(&errors, "contains itself by value"), "{errors:?}");
+    // Nested struct and array fields are valid, at any depth.
+    let mut program = struct_program();
+    {
+        let p = &mut program;
+        p.types
+            .push(struct_def("Outer", vec![("p", Type::Struct(TypeId(0)))]));
+        p.types.push(struct_def(
+            "Grid",
+            vec![(
+                "cells",
+                Type::Array {
+                    element: Box::new(Type::Array {
+                        element: Box::new(Type::Struct(TypeId(1))),
+                        len: 2,
+                    }),
+                    len: 2,
+                },
+            )],
+        ));
+    }
+    assert_eq!(program.validate(), Ok(()));
+    // A reference or Unit-array field is not a value type.
     let errors = struct_errors(|p| {
         p.types[0] = struct_def(
             "P",
-            vec![
-                ("x", i32_ty()),
-                (
-                    "y",
-                    Type::Array {
-                        element: Box::new(i32_ty()),
-                        len: 2,
-                    },
-                ),
-            ],
+            vec![(
+                "y",
+                Type::Array {
+                    element: Box::new(Type::Primitive(Primitive::Unit)),
+                    len: 2,
+                },
+            )],
         );
     });
     assert!(has(&errors, "must be a non-Unit primitive"), "{errors:?}");

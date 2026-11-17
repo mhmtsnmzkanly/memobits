@@ -163,11 +163,12 @@ fn name(ty: &Ty) -> String {
         Ty::Error => "unknown".into(),
     }
 }
-/// The named local at the root of an indexing chain `a[i][j]...`.
-fn index_root(expr: &Expr) -> Option<&Vec<String>> {
+/// The named local at the root of a projection chain: any mix of indexing and
+/// field access such as `a[i].pts[j].x`.
+fn place_root(expr: &Expr) -> Option<&Vec<String>> {
     match &expr.kind {
         ExprKind::Path(path) => Some(path),
-        ExprKind::Index { base, .. } => index_root(base),
+        ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => place_root(base),
         _ => None,
     }
 }
@@ -496,16 +497,19 @@ impl Checker {
     fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
         self.type_path(ty)
     }
-    /// Executable arrays hold non-Unit primitive elements or nested arrays.
+    /// Executable arrays hold non-Unit primitive, struct or nested array elements.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
         if self.executable
-            && !matches!(element, Ty::Error | Ty::Never | Ty::Array(..))
+            && !matches!(
+                element,
+                Ty::Error | Ty::Never | Ty::Array(..) | Ty::Struct(..)
+            )
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
         {
             self.error(
                 17,
                 span,
-                "executable arrays support non-Unit primitive and nested array elements only",
+                "executable arrays support non-Unit primitive, struct and nested array elements only",
             );
         }
     }
@@ -554,15 +558,55 @@ impl Checker {
             && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
         {
             let what = if matches!(expr.kind, ExprKind::Field { .. }) {
-                "a struct field cannot be moved out by field access"
+                "a struct or array field cannot be moved out by field access"
             } else {
-                "an array element cannot be moved out by indexing"
+                "a struct or array element cannot be moved out by indexing"
             };
             self.error(
                 22,
                 expr.span,
-                format!("{what}; only primitive values are copied implicitly, so borrow or share the aggregate or read a primitive inside it"),
+                format!("{what}; only primitive values are copied implicitly and partial moves are deferred, so borrow or share the aggregate, or read a primitive inside it"),
             );
+        }
+    }
+    /// TE004: a write through a projection chain (`a[i].x`, `l.pts[j]`) needs
+    /// the root binding to be a `var` owner or a share reference.
+    fn check_place_writable(&mut self, target: &Expr, root: &str, binding: &Binding) {
+        let writable = binding.mutable || binding.access == IrAccess::Share;
+        let aggregate = |ty: &Ty| match ty {
+            Ty::Array(..) => Some("an element of immutable array"),
+            Ty::Struct(..) => Some("a field of immutable struct"),
+            _ => None,
+        };
+        match &binding.ty {
+            ty @ (Ty::Array(..) | Ty::Struct(..)) if !writable => {
+                let what = aggregate(ty).expect("aggregate root");
+                self.error(
+                    4,
+                    target.span,
+                    format!("cannot assign to {what} binding '{root}'; declare it with var"),
+                );
+            }
+            Ty::Reference {
+                access: IrAccess::Borrow,
+                inner,
+                ..
+            } if matches!(inner.as_ref(), Ty::Array(..) | Ty::Struct(..)) => self.error(
+                4,
+                target.span,
+                format!("cannot assign through borrow binding '{root}'"),
+            ),
+            Ty::Reference {
+                access: IrAccess::Share,
+                inner,
+                ..
+            } if matches!(inner.as_ref(), Ty::Array(..) | Ty::Struct(..)) && !writable => self
+                .error(
+                    4,
+                    target.span,
+                    format!("cannot assign through immutable share binding '{root}'"),
+                ),
+            _ => {}
         }
     }
     fn type_path(&mut self, ty: &Type) -> Ty {
@@ -743,118 +787,23 @@ impl Checker {
                                 }
                             }
                         }
-                        ExprKind::Index { base, .. } => {
-                            let element = self.expr(target, None);
-                            match index_root(base) {
+                        ExprKind::Index { .. } | ExprKind::Field { .. } => {
+                            // Reads the place (privacy, existence, bounds of constant
+                            // indices) and yields its type.
+                            let place = self.expr(target, None);
+                            match place_root(target) {
                                 Some(path) if path.len() == 1 => {
                                     if let Some(binding) = self.lookup(&path[0]).cloned() {
-                                        match &binding.ty {
-                                            Ty::Array(..)
-                                                if !binding.mutable
-                                                    && binding.access != IrAccess::Share =>
-                                            {
-                                                self.error(
-                                                    4,
-                                                    target.span,
-                                                    format!(
-                                                        "cannot assign to an element of immutable array binding '{}'; declare it with var",
-                                                        path[0]
-                                                    ),
-                                                );
-                                            }
-                                            Ty::Reference {
-                                                access: IrAccess::Borrow,
-                                                inner,
-                                                ..
-                                            } if matches!(inner.as_ref(), Ty::Array(..)) => {
-                                                self.error(
-                                                    4,
-                                                    target.span,
-                                                    format!(
-                                                        "cannot assign to an element through borrow binding '{}'",
-                                                        path[0]
-                                                    ),
-                                                );
-                                            }
-                                            Ty::Reference {
-                                                access: IrAccess::Share,
-                                                inner,
-                                                ..
-                                            } if matches!(inner.as_ref(), Ty::Array(..))
-                                                && !binding.mutable
-                                                && binding.access != IrAccess::Share =>
-                                            {
-                                                self.error(
-                                                    4,
-                                                    target.span,
-                                                    format!(
-                                                        "cannot assign to an element through immutable share binding '{}'",
-                                                        path[0]
-                                                    ),
-                                                );
-                                            }
-                                            _ => {}
-                                        }
+                                        self.check_place_writable(target, &path[0], &binding);
                                     }
                                 }
                                 _ => self.error(
                                     6,
                                     target.span,
-                                    "element assignment requires a named local array or a row of one",
+                                    "assignment through an element or field requires a place rooted at a named local array or struct",
                                 ),
                             }
-                            element
-                        }
-                        ExprKind::Field { base, .. } => {
-                            // Reads the field (privacy, existence) and yields its type.
-                            let field = self.expr(target, None);
-                            if let ExprKind::Path(path) = &base.kind {
-                                if let Some(binding) =
-                                    path.first().and_then(|name| self.lookup(name)).cloned()
-                                {
-                                    let name = &path[0];
-                                    let writable =
-                                        binding.mutable || binding.access == IrAccess::Share;
-                                    match &binding.ty {
-                                        Ty::Struct(..) if !writable => self.error(
-                                            4,
-                                            target.span,
-                                            format!(
-                                                "cannot assign to a field of immutable struct binding '{name}'; declare it with var"
-                                            ),
-                                        ),
-                                        Ty::Reference {
-                                            access: IrAccess::Borrow,
-                                            inner,
-                                            ..
-                                        } if matches!(inner.as_ref(), Ty::Struct(..)) => self
-                                            .error(
-                                                4,
-                                                target.span,
-                                                format!(
-                                                    "cannot assign to a field through borrow binding '{name}'"
-                                                ),
-                                            ),
-                                        Ty::Reference {
-                                            access: IrAccess::Share,
-                                            inner,
-                                            ..
-                                        } if matches!(inner.as_ref(), Ty::Struct(..))
-                                            && !writable =>
-                                        {
-                                            self.error(
-                                                4,
-                                                target.span,
-                                                format!(
-                                                    "cannot assign to a field through immutable share binding '{name}'"
-                                                ),
-                                            )
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            field
+                            place
                         }
                         _ => {
                             self.expr(target, None);
@@ -894,7 +843,7 @@ impl Checker {
                 }
                 StatementKind::Expression(expr) => {
                     let ty = self.expr(expr, None);
-                    if matches!(ty, Ty::Array(..)) {
+                    if matches!(ty, Ty::Array(..) | Ty::Struct(..)) {
                         self.reject_extraction(expr, &ty);
                     }
                 }
@@ -1002,18 +951,18 @@ impl Checker {
             return Ty::Error;
         }
 
-        let is_row = matches!(base.kind, ExprKind::Index { .. });
-        let owner_binding = match index_root(base) {
+        // `m[i].borrow()`, `l.a.share()`: a projection of a named local.
+        let is_row = matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. });
+        let owner_binding = match place_root(base) {
             Some(path) if path.len() == 1 => self.lookup(&path[0]).cloned(),
             _ => None,
         };
         if owner_binding.is_none() {
-            let message = if matches!(base.kind, ExprKind::Field { .. }) {
-                "borrow/share of a struct field is not supported yet: borrow or share the whole struct"
-            } else {
-                "borrow/share conversion requires a named local owner or reference"
-            };
-            self.error(17, base.span, message);
+            self.error(
+                17,
+                base.span,
+                "borrow/share conversion requires a named local owner or reference",
+            );
             self.expr(base, None);
             return Ty::Error;
         }
@@ -1024,16 +973,21 @@ impl Checker {
         // An array owner may be borrowed or shared as a whole.
         self.index_base = base as *const Expr as usize;
         let base_ty = self.expr(base, expected_inner);
-        if is_row && !matches!(base_ty, Ty::Array(..) | Ty::Error | Ty::Never) {
+        if is_row
+            && !matches!(
+                base_ty,
+                Ty::Array(..) | Ty::Struct(..) | Ty::Error | Ty::Never
+            )
+        {
             self.error(
                 17,
                 base.span,
-                "borrow/share conversion of an element supports nested array rows only; references to primitive elements are not supported",
+                "borrow/share conversion of an element or field supports sub-aggregates (arrays and structs) only; references to primitive elements and struct fields are not supported",
             );
             return Ty::Error;
         }
         let (inner, origin, current_access) = match base_ty {
-            Ty::Array(..) if is_row => {
+            Ty::Array(..) | Ty::Struct(..) if is_row => {
                 let binding = owner_binding.as_ref().expect("row root checked above");
                 let access = match &binding.ty {
                     Ty::Reference { access, .. } => *access,
@@ -1136,10 +1090,13 @@ impl Checker {
                         ExprKind::Path(path) if path.len() == 1 => {
                             self.index_base = base as *const Expr as usize;
                         }
+                        // A sub-aggregate of a projection chain; its own arm
+                        // marks the root.
+                        ExprKind::Index { .. } | ExprKind::Field { .. } => {}
                         _ => self.error(
                             17,
                             base.span,
-                            "field access is supported on named local structs only; bind the struct to a local first",
+                            "field access is supported on named local structs and projections of them only; bind the struct to a local first",
                         ),
                     }
         }
@@ -1300,12 +1257,13 @@ impl Checker {
                         ExprKind::Path(path) if path.len() == 1 => {
                             self.index_base = base.as_ref() as *const Expr as usize;
                         }
-                        // A row of a nested array; its own arm marks the root.
-                        ExprKind::Index { .. } => {}
+                        // A row, field or element of a projection chain; its own
+                        // arm marks the root.
+                        ExprKind::Index { .. } | ExprKind::Field { .. } => {}
                         _ => self.error(
                             17,
                             base.span,
-                            "indexing is supported on named local arrays and their rows only; bind the array to a local first",
+                            "indexing is supported on named local arrays and projections of them only; bind the array to a local first",
                         ),
                     }
                 }
@@ -1744,6 +1702,9 @@ impl Checker {
                     }
                     seen.push(&init.name);
                     let expected_field = declared.map(|field| field.ty.clone());
+                    // A field initialiser is an owned-value position, so a nested
+                    // struct or array literal, a call or a named aggregate is moved in.
+                    self.allow_array_value(&init.value);
                     let actual = self.expr(&init.value, expected_field.as_ref());
                     self.reject_extraction(&init.value, &actual);
                     if let Some(want) = &expected_field {

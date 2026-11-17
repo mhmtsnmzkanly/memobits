@@ -54,7 +54,12 @@ owned struct parameters are copied into the callee's cell, `borrow`/`share` para
 are the owner's address, results go through the hidden trailing pointer, struct block
 parameters are frame cells, and whole-struct `Assign`/`Capture`/`Store` are
 `memory.copy`. `main` and `[export]` signatures with structs or struct references are
-rejected with LE900 (no external struct ABI).
+rejected with LE900 (no external struct ABI). Aggregates nest (A3): a struct or array field
+is stored inline at its own natural alignment (written with `memory.copy` from the field
+operand's cell), arrays of structs stride by the struct size, and layout is computed
+dependencies first with checked arithmetic (overflow is a diagnostic, an oversized frame
+the usual stack-size diagnostic). Chained `ElementAddr`/`FieldAddr` add runtime-checked
+element offsets and constant field offsets to the root cell address.
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

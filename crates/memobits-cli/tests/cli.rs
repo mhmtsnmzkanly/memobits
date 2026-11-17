@@ -1289,19 +1289,9 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "alias cycle",
         ),
         (
-            "type P { x: i32 } type Q { p: P } fn main() -> i32 { 0 }",
-            "TE017",
-            "struct-typed fields",
-        ),
-        (
-            "type Q { a: Array<i32, 2> } fn main() -> i32 { 0 }",
-            "TE017",
-            "array-typed fields",
-        ),
-        (
-            "type P { x: i32 } fn main() -> i32 { let a := [P { x: 1 }]; 0 }",
-            "TE017",
-            "primitive and nested array elements only",
+            "type A { xs: Array<A, 2> } fn main() -> i32 { 0 }",
+            "TE026",
+            "recursive struct",
         ),
         (
             "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",

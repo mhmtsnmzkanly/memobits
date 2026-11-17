@@ -124,10 +124,10 @@ followed to their targets wherever a type is named (annotations, signatures, arr
 element types, field types, literals); an alias cycle is TE026. Standalone checking
 (`check_types`, `lower_module`) uses the same table with a single unnamed module.
 
-Executable support covers A1 and A2. A1: a struct literal `P { y: 2, x: 1 }` (all
+Executable support covers A1, A2 and A3. A1: a struct literal `P { y: 2, x: 1 }` (all
 fields exactly once, any order, evaluated in source order) as the initialiser of a
 `let` binding, and primitive field reads `p.x` (copied implicitly into owned
-positions such as `f(p.x)`; `p.x.copy()` is optional). Fields are primitives only.
+positions such as `f(p.x)`; `p.x.copy()` is optional).
 A2 adds `var` struct bindings; field writes `p.x = v` / `p.x op= v` (through a `var`
 owner, a `var` owned parameter, a `share` parameter or a `var` share binding; TE004
 otherwise), whole-struct moves and assignment (`let q := p;`, `q = p;`, literal or call
@@ -143,8 +143,21 @@ field access on a non-struct or an unknown field is TE024, field privacy (readin
 private field of another module's struct, or building such a struct from another
 module unless every field is `pub`) is TE025, and a struct that contains itself by value
 (or an alias cycle) is TE026. Still TE017: struct literals as temporaries or field
-bases, field access on a call result (`make().x`), field-level references
-(`p.x.share()`), `p.copy()`, struct-typed and array-typed fields, arrays of structs.
+bases, field access on a call result (`make().x`), references to primitive fields
+(`p.x.share()`, like `m[i][j].share()`) and `p.copy()`.
+A3 (nesting) accepts struct-typed fields, array-typed fields and arrays of structs in
+every combination and depth. A place is a root local plus a chain of index and field
+steps (`a[i].pts[j].x`); lowering (`lower_place` / `address_chain`) evaluates the root
+and each index left to right, then forms the checked address chain (`ElementAddr` /
+`FieldAddr`, with the requested access on every level) and ends in `Load`, `Store` or the
+reference itself (`l.a.borrow()`, `a[i].share()`, `p.pts.borrow()`). Supported forms:
+nested literals (a field initialiser is an owned-value position), `l.a.x`, `p.pts[i]`,
+`a[i].x` reads; writes and compound writes through any chain (TE004 through `let`, `borrow`
+or immutable roots); whole sub-aggregate replacement (`l.a = P { .. }`, `a[i] = P { .. }`,
+`p.pts = [..]`); repetition of a struct literal (evaluated per element). Moving a
+sub-aggregate out (`let q := l.a;`, `let r := a[i];`, as an owned argument, returned) is
+TE022 (partial moves are deferred). A struct containing itself by value, also through
+arrays, is TE026.
 Structs in exported signatures are rejected later by the backend (LE900). Enum types used as value types report TE001 (and the declaration TE016).
 Lowering emits `StructNew` and `FieldAddr` + `Load`; `TypedModule::types` carries the
 checked struct definitions.

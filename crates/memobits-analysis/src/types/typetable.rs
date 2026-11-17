@@ -196,48 +196,34 @@ impl TypeTable {
         for ((id, _), infos) in field_types.iter().zip(&resolved) {
             table.structs[*id].fields = infos.iter().map(|(info, _)| info.clone()).collect();
         }
-        // Struct-typed and array-typed fields are outside this package; a struct
-        // that contains itself by value is an error whatever the package.
+        // A struct that contains itself by value, directly or through struct-typed
+        // fields and arrays, would have infinite size.
         for ((id, _), infos) in field_types.iter().zip(&resolved) {
             for (info, span) in infos {
-                match &info.ty {
-                    Ty::Struct(target, target_name) => {
-                        if table.reaches(*target as usize, *id) {
-                            diagnostics.push(diagnostic(
-                                26,
-                                *span,
-                                format!(
-                                    "recursive struct: '{}' contains '{}' by value, so '{}' would have infinite size",
-                                    table.structs[*id].name, target_name, table.structs[*id].name
-                                ),
-                            ));
-                        } else {
-                            diagnostics.push(diagnostic(
-                                17,
-                                *span,
-                                format!(
-                                    "field '{}' has struct type '{}'; struct-typed fields are not supported yet",
-                                    info.name, target_name
-                                ),
-                            ));
-                        }
+                let mut contained = Vec::new();
+                contained_structs(&info.ty, &mut contained);
+                for target in contained {
+                    if table.reaches(target, *id) {
+                        diagnostics.push(diagnostic(
+                            26,
+                            *span,
+                            format!(
+                                "recursive struct: '{}' contains '{}' by value, so '{}' would have infinite size",
+                                table.structs[*id].name,
+                                table.structs[target].name,
+                                table.structs[*id].name
+                            ),
+                        ));
+                        break;
                     }
-                    Ty::Array(..) => diagnostics.push(diagnostic(
-                        17,
-                        *span,
-                        format!(
-                            "field '{}' has an array type; array-typed fields are not supported yet",
-                            info.name
-                        ),
-                    )),
-                    _ => {}
                 }
             }
         }
         (table, diagnostics)
     }
 
-    /// Whether struct `from` reaches struct `to` through struct-typed fields.
+    /// Whether struct `from` reaches struct `to` by value, through struct-typed
+    /// fields and array-typed fields of any depth.
     fn reaches(&self, from: usize, to: usize) -> bool {
         let mut seen = HashSet::new();
         let mut pending = vec![from];
@@ -249,9 +235,7 @@ impl TypeTable {
                 continue;
             }
             for field in &self.structs[current].fields {
-                if let Ty::Struct(next, _) = &field.ty {
-                    pending.push(*next as usize);
-                }
+                contained_structs(&field.ty, &mut pending);
             }
         }
         false
@@ -301,12 +285,6 @@ impl TypeTable {
                     message: "array length exceeds implementation limit u32::MAX".into(),
                 });
             };
-            if matches!(element, Ty::Struct(..)) {
-                return Err(failure(
-                    17,
-                    "arrays of structs are not supported yet".into(),
-                ));
-            }
             return Ok(Ty::Array(Box::new(element), count));
         }
         if !ty.arguments.is_empty() {
@@ -367,5 +345,15 @@ impl TypeTable {
             )),
             None => Err(unresolved()),
         }
+    }
+}
+
+/// Struct ids contained by value in a field type: the struct itself, or the
+/// structs inside an array of any depth.
+fn contained_structs(ty: &Ty, out: &mut Vec<usize>) {
+    match ty {
+        Ty::Struct(id, _) => out.push(*id as usize),
+        Ty::Array(element, _) => contained_structs(element, out),
+        _ => {}
     }
 }

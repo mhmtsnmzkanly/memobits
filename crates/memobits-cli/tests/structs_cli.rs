@@ -264,7 +264,7 @@ fn still_gated_struct_forms_have_clear_diagnostics() {
         (
             "type P { x: i32 } fn make() -> P { P { x: 1 } } fn main() -> i32 { make().x }",
             "TE017",
-            "named local structs only",
+            "named local structs and projections of them only",
         ),
         (
             "type P { x: i32 } fn main() -> i32 { var p := P { x: 1 }; let r := p.x.share(); 0 }",
@@ -277,14 +277,9 @@ fn still_gated_struct_forms_have_clear_diagnostics() {
             "copy is currently available only for primitive values",
         ),
         (
-            "type P { x: i32 } type L { p: P } fn main() -> i32 { 0 }",
+            "type P { x: i32 } fn main() -> i32 { let a := [P { x: 1 }; 2]; let r := a[0].x.share(); 0 }",
             "TE017",
-            "struct-typed fields",
-        ),
-        (
-            "type P { x: i32 } fn main() -> i32 { let a := [P { x: 1 }]; 0 }",
-            "TE017",
-            "executable arrays support",
+            "struct fields",
         ),
     ] {
         let message = f.error(source, code);

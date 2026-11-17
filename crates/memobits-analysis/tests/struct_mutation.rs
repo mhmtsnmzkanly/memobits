@@ -416,12 +416,12 @@ fn field_reads_on_call_results_stay_gated() {
     rejected(
         &main_body("let x := make().x;"),
         "TE017",
-        "named local structs only",
+        "named local structs and projections of them only",
     );
     rejected(
         &main_body("let x := P { x: 1, y: 2 }.x;"),
         "TE017",
-        "named local structs only",
+        "named local structs and projections of them only",
     );
 }
 
@@ -442,11 +442,7 @@ fn field_borrows_and_struct_copies_stay_gated() {
         "TE017",
         "copy is currently available only for primitive values",
     );
-    rejected(
-        &main_body("let a := [make()];"),
-        "TE017",
-        "executable arrays support",
-    );
+    accepted(&main_body("let a := [make()];"));
 }
 
 #[test]

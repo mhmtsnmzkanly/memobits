@@ -30,8 +30,10 @@ field is addressed by `FieldAddr { loan, base, field, access }`, the bounds-chec
 twin of `ElementAddr` that yields a `Reference` to the field type and is read with
 `Load`. Validation checks type and field indices, operand count and types, access
 modes and shared loan IDs. `FieldAddr` accepts a struct owner or a `Reference` to a
-struct (with at most the referent's access). Struct fields are non-Unit primitives
-for now (so recursive or nested struct types are rejected). Structs may be owned,
+struct (with at most the referent's access). Struct fields and array elements are non-Unit primitives, structs or arrays of
+those at any depth; a struct that contains itself by value, directly or through arrays
+and other structs, is rejected by validation. Mixed `FieldAddr` / `ElementAddr` chains
+(`a[i].pts[j].x`) address nested aggregates level by level. Structs may be owned,
 `borrow` or `share` parameters, function results and block parameters, and a
 reference may refer to a struct; a whole-struct `Load` is invalid (fields are
 addressed and loaded one by one).

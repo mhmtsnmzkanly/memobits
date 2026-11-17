@@ -1,6 +1,7 @@
 // Structs with primitive fields: a constructor function, a function that
 // mutates its argument through `share`, a function that reads through `borrow`,
-// field reads and writes, and a public struct from another module.
+// field reads and writes, and a public struct from another module. Aggregates
+// nest: a struct inside a struct and an array of structs.
 use geom::Point;
 
 type Size {
@@ -31,6 +32,22 @@ fn area(s: borrow Size) -> i32 {
     }
 }
 
+// A struct inside a struct: `Segment` holds two `Point`s by value.
+type Segment {
+    from: Point,
+    to: Point,
+}
+
+// A sub-aggregate is lent like a whole value: `seg.to.borrow()`.
+fn manhattan(p: borrow Point) -> i32 {
+    p.x + p.y
+}
+
+// An array of structs is read through a `borrow` parameter, level by level.
+fn total_area(sizes: borrow Array<Size, 2>) -> i32 {
+    area(sizes[0].borrow()) + area(sizes[1].borrow())
+}
+
 fn main() -> i32 {
     var s := make_size(3, 4);
     grow(s.share(), 2);
@@ -39,6 +56,17 @@ fn main() -> i32 {
     let p := Point { y: 5, x: 2 };
     let offset := p.x * p.y;
 
+    // Nested writes: `seg.to.x` is a field of a field.
+    var seg := Segment { from: Point { x: 0, y: 0 }, to: p };
+    seg.to.x += 1;
+    seg.from = Point { x: 1, y: 1 };
+    let reach := manhattan(seg.to.borrow()) + seg.from.x;
+
+    // An array of structs: element 0 is built by a call, element 1 by a literal.
+    var sizes := [make_size(1, 1), Size { width: 2, height: 2, square: true, scale: 2 }];
+    sizes[1].width = 3;
+    let extra := total_area(sizes.borrow());
+
     // `s` is borrowed for the call and stays usable afterwards.
-    area(s.borrow()) + offset
+    area(s.borrow()) + offset + reach + extra
 }

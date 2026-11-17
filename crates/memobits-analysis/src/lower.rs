@@ -370,6 +370,12 @@ fn unary_op(value: &str) -> UnaryOp {
         _ => unreachable!("checked operator"),
     }
 }
+/// One step of a place: an indexed element (its position already evaluated and
+/// captured) or a named field.
+enum Projection {
+    Index(Operand),
+    Field(String),
+}
 struct LoopTargets {
     header: BlockId,
     exit: BlockId,
@@ -621,12 +627,8 @@ impl<'a> Builder<'a> {
                     operator,
                     value,
                 } => {
-                    if matches!(target.kind, ExprKind::Index { .. }) {
-                        self.lower_element_assign(statement.span, target, operator, value);
-                        continue;
-                    }
-                    if matches!(target.kind, ExprKind::Field { .. }) {
-                        self.lower_field_assign(statement.span, target, operator, value);
+                    if matches!(target.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                        self.lower_place_assign(statement.span, target, operator, value);
                         continue;
                     }
                     let PathTarget::Local(local) = self.path(target) else {
@@ -764,35 +766,51 @@ impl<'a> Builder<'a> {
             _ => unreachable!("checked array index base"),
         }
     }
-    /// Evaluate the root and every index of `a[i][j]...` left to right, each index
-    /// captured at its evaluation point. No address is formed yet, so index
-    /// effects precede any bounds check and the right-hand side of a write.
-    fn lower_place(&mut self, expr: &Expr) -> Option<(Operand, Vec<Operand>)> {
-        let ExprKind::Index { base, index } = &expr.kind else {
-            unreachable!("checked index place")
+    /// Evaluate the root and every index of a projection chain such as
+    /// `a[i].pts[j].x` left to right, each index captured at its evaluation
+    /// point. No address is formed yet, so index effects precede any bounds
+    /// check and the right-hand side of a write.
+    fn lower_place(&mut self, expr: &Expr) -> Option<(Operand, Vec<Projection>)> {
+        let (base, step) = match &expr.kind {
+            ExprKind::Index { base, .. } => (base, None),
+            ExprKind::Field { base, name } => (base, Some(name)),
+            _ => unreachable!("checked projection place"),
         };
-        let (root, mut positions) = if matches!(base.kind, ExprKind::Index { .. }) {
-            self.lower_place(base)?
-        } else {
-            (self.lower_expr(base)?, Vec::new())
-        };
-        let position = self.lower_expr(index)?;
-        let position = self.scalar(position)?;
-        positions.push(self.capture(position)?);
-        Some((root, positions))
+        let (root, mut projections) =
+            if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                self.lower_place(base)?
+            } else {
+                (self.lower_expr(base)?, Vec::new())
+            };
+        match (&expr.kind, step) {
+            (ExprKind::Index { index, .. }, _) => {
+                let position = self.lower_expr(index)?;
+                let position = self.scalar(position)?;
+                projections.push(Projection::Index(self.capture(position)?));
+            }
+            (_, Some(name)) => projections.push(Projection::Field(name.clone())),
+            _ => unreachable!(),
+        }
+        Some((root, projections))
     }
-    /// Chain of checked element addresses from `root` through `positions`. Every
-    /// level carries `access`, so a write needs `Share` rows down to the element.
+    /// Chain of checked element and field addresses from `root` through
+    /// `projections`. Every level carries `access`, so a write needs `Share`
+    /// references down to the target.
     fn address_chain(
         &mut self,
         root: Operand,
-        positions: &[Operand],
+        projections: &[Projection],
         access: Access,
         span: Span,
     ) -> Option<Operand> {
         let mut current = root;
-        for position in positions {
-            current = self.element_addr(current, *position, access, span)?;
+        for projection in projections {
+            current = match projection {
+                Projection::Index(position) => {
+                    self.element_addr(current, *position, access, span)?
+                }
+                Projection::Field(name) => self.field_addr(current, name, access, span)?,
+            };
         }
         Some(current)
     }
@@ -802,10 +820,14 @@ impl<'a> Builder<'a> {
         };
         self.load(reference, *inner, span)
     }
-    /// `a[i] = v` and `a[i] op= v`. The index is evaluated and captured first,
-    /// then the right-hand side; the checked element address and the store are
-    /// adjacent, so a bounds trap fires after the right-hand side's effects.
-    fn lower_element_assign(
+    /// `a[i] = v`, `p.x = v`, `a[i].pts[j] += v` and every other projection
+    /// chain, plain or compound. The root and every index are evaluated and
+    /// captured first, then the right-hand side; the checked address chain and
+    /// the store are adjacent, so a bounds trap fires after the right-hand
+    /// side's effects. A compound write reads the place first. A
+    /// whole-aggregate target (`l.a = P { .. }`, `m[i] = [..]`) stores the
+    /// consumed aggregate with a memory copy.
+    fn lower_place_assign(
         &mut self,
         span: Span,
         target: &Expr,
@@ -892,57 +914,6 @@ impl<'a> Builder<'a> {
         )?;
         reference.mode = access_mode(access);
         Some(reference)
-    }
-    /// `p.x = v` and `p.x op= v`. The base is evaluated first, then the
-    /// right-hand side; the field address and the store are adjacent. A
-    /// compound write reads the field first, then evaluates the right-hand side.
-    fn lower_field_assign(
-        &mut self,
-        span: Span,
-        target: &Expr,
-        operator: &str,
-        value: &Expr,
-    ) -> Option<()> {
-        let ExprKind::Field { base, name } = &target.kind else {
-            unreachable!("checked field place")
-        };
-        let owner = self.lower_expr(base)?;
-        let previous = if operator == "=" {
-            None
-        } else {
-            let reference = self.field_addr(owner, name, Access::Borrow, span)?;
-            Some(self.load_element(reference, span)?)
-        };
-        let rhs = self.lower_expr(value)?;
-        let rhs = self.scalar(rhs)?;
-        let assigned = match previous {
-            None => rhs,
-            Some(previous) => {
-                let field = self
-                    .operand_type(previous)
-                    .expect("compound field read is a value");
-                self.emit(
-                    span,
-                    InstructionKind::Binary {
-                        op: binary_op(operator),
-                        left: read(previous),
-                        right: read(rhs),
-                    },
-                    Some(field),
-                )?
-            }
-        };
-        let assigned = self.owned(assigned)?;
-        let reference = self.field_addr(owner, name, Access::Share, span)?;
-        self.emit(
-            span,
-            InstructionKind::Store {
-                reference,
-                value: assigned,
-            },
-            None,
-        );
-        Some(())
     }
     fn hidden_local(&mut self, name: &str, ty: Type, span: Span) -> LocalId {
         let id = LocalId(self.function.locals.len() as u32);
@@ -1140,9 +1111,10 @@ impl<'a> Builder<'a> {
                     self.ty(expr),
                 )
             }
-            ExprKind::Index { .. } => {
-                let (array, positions) = self.lower_place(expr)?;
-                let reference = self.address_chain(array, &positions, Access::Borrow, expr.span)?;
+            ExprKind::Index { .. } | ExprKind::Field { .. } => {
+                let (root, projections) = self.lower_place(expr)?;
+                let reference =
+                    self.address_chain(root, &projections, Access::Borrow, expr.span)?;
                 self.load_element(reference, expr.span)
             }
             ExprKind::RepeatArray { value, .. } => self.lower_repeat(expr, value),
@@ -1243,11 +1215,12 @@ impl<'a> Builder<'a> {
                         "share" => Access::Share,
                         _ => unreachable!("checked conversion"),
                     };
-                    if matches!(base.kind, ExprKind::Index { .. }) {
-                        // A row of a nested array: the element address is itself
-                        // the reference, with `access` on every level.
-                        let (array, positions) = self.lower_place(base)?;
-                        return self.address_chain(array, &positions, access, expr.span);
+                    if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                        // A row, element or field that is itself an aggregate: the
+                        // chain of addresses is the reference, with `access` on
+                        // every level.
+                        let (root, projections) = self.lower_place(base)?;
+                        return self.address_chain(root, &projections, access, expr.span);
                     }
                     let owner = self.lower_expr(base)?;
                     return self.borrow(owner, access);
@@ -1276,12 +1249,6 @@ impl<'a> Builder<'a> {
                     },
                     self.ty(expr),
                 )
-            }
-            ExprKind::Field { base, name } => {
-                // Field read: address of the field, then a load.
-                let owner = self.lower_expr(base)?;
-                let reference = self.field_addr(owner, name, Access::Borrow, expr.span)?;
-                self.load_element(reference, expr.span)
             }
             ExprKind::Struct { fields, .. } => {
                 let Some(Type::Struct(id)) = self.ty(expr) else {

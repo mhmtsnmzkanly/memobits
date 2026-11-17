@@ -267,7 +267,7 @@ fn field_access_errors() {
     rejected(
         "fn main() -> i32 { 1.field }",
         "TE017",
-        "named local structs only",
+        "named local structs and projections of them only",
     );
 }
 
@@ -303,21 +303,33 @@ fn gated_forms_are_diagnostics_not_panics() {
     let p = "let p := P { x: 1, y: 2 };";
     for (source, text) in [
         // temporaries: a struct literal is only an owned value
-        (format!("{P} fn main() {{ P {{ x: 1, y: 2 }}; }}"), "struct literals must be used as an owned value"),
-        (format!("{P} fn main() {{ let x := P {{ x: 1, y: 2 }}.x; }}"), "named local structs only"),
-        (format!("{P} fn main() {{ let a := [P {{ x: 1, y: 2 }}]; }}"), "executable arrays support"),
+        (
+            format!("{P} fn main() {{ P {{ x: 1, y: 2 }}; }}"),
+            "struct literals must be used as an owned value",
+        ),
+        (
+            format!("{P} fn main() {{ let x := P {{ x: 1, y: 2 }}.x; }}"),
+            "named local structs and projections of them only",
+        ),
         // whole-struct use outside an owned position
-        (format!("{P} fn main() {{ {p} p; }}"), "whole arrays and structs can only be moved"),
+        (
+            format!("{P} fn main() {{ {p} p; }}"),
+            "whole arrays and structs can only be moved",
+        ),
         // field-level references and whole-struct copies
-        (format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; let r := p.x.share(); }}"), "borrow/share of a struct field"),
-        (format!("{P} fn main() {{ {p} let q := p.copy(); }}"), "copy is currently available only for primitive values"),
-        // struct-typed and array-typed fields, arrays of structs
-        (format!("{P} type L {{ a: P }} fn main() {{}}"), "struct-typed fields are not supported"),
-        ("type L { a: Array<i32, 2> } fn main() {}".to_string(), "array-typed fields are not supported"),
-        (format!("{P} fn main() {{ let a: Array<P, 2> = [P {{ x: 1, y: 2 }}, P {{ x: 1, y: 2 }}]; }}"), "arrays of structs"),
-        (format!("{P} type G = Array<P, 2>; fn main() {{}}"), "arrays of structs"),
+        (
+            format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; let r := p.x.share(); }}"),
+            "references to primitive elements and struct fields",
+        ),
+        (
+            format!("{P} fn main() {{ {p} let q := p.copy(); }}"),
+            "copy is currently available only for primitive values",
+        ),
         // field access on a non-local base
-        (format!("{P} fn f() -> i32 {{ 1 }} fn main() -> i32 {{ f().x + 1 }}"), "named local structs only"),
+        (
+            format!("{P} fn f() -> i32 {{ 1 }} fn main() -> i32 {{ f().x + 1 }}"),
+            "named local structs and projections of them only",
+        ),
     ] {
         rejected(&source, "TE017", text);
     }

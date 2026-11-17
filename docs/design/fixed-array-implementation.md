@@ -337,3 +337,18 @@ position through `Load` + `Copy` and the array stays whole. Repeating a
 primitive (`[x; 3]`, `[a[0]; 3]`) is fine, so the repeated-move BE001 applies
 only to aggregate elements. `.copy()` on a primitive element is optional. The
 swap `let t := a[0]; a[0] = a[2]; a[2] = t;` is now the natural spelling.
+
+
+## Arrays of structs and array fields (A3)
+
+Arrays of structs, struct-typed elements inside nested arrays, and array-typed
+struct fields now execute. The projection machinery above (chained
+`ElementAddr`, `Share`/`Borrow` chains, whole-element `Store` as `memory.copy`,
+TE022 for extracting an aggregate element, per-element repetition) is reused
+unchanged and generalised to mixed chains of `ElementAddr` and `FieldAddr`
+(`a[i].pts[j].x`). An element that is a struct is an aggregate element for the
+purposes of every rule above: `a[i] = P { .. }` replaces it in place, `a[i]`
+cannot be moved out (TE022), and `a[i].borrow()` / `a[i].share()` lend it. See
+the A3 checkpoint in `struct-implementation.md`. References to primitive
+elements (`m[i][j].share()`) remain gated, and so do references to primitive
+fields.

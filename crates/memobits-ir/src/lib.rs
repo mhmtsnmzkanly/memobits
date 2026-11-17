@@ -483,14 +483,68 @@ impl Program {
                         path.name, field.name
                     ));
                 }
-                if !matches!(&field.ty, Type::Primitive(kind) if *kind != Primitive::Unit) {
+                if !field_type_is_valid(&field.ty, self.types.len()) {
                     report(format!(
-                        "field '{}' of struct '{}' must be a non-Unit primitive; array, struct (nested or recursive) and reference fields are not supported",
+                        "field '{}' of struct '{}' must be a non-Unit primitive, a struct or an array of such types; reference fields are not supported",
                         field.name, path.name
                     ));
                 }
             }
         }
+        // A struct that contains itself by value, directly or through arrays
+        // and other structs, has no finite size.
+        for start in 0..self.types.len() {
+            if self.type_reaches(start, start) {
+                errors.push(ValidationError {
+                    function: None,
+                    block: None,
+                    message: format!(
+                        "struct '{}' contains itself by value",
+                        self.types[start].path.name
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Whether struct `from` contains struct `to` by value (one or more steps).
+    fn type_reaches(&self, from: usize, to: usize) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending = vec![from];
+        let mut first = true;
+        while let Some(current) = pending.pop() {
+            if !first && current == to {
+                return true;
+            }
+            first = false;
+            if !seen.insert(current) {
+                continue;
+            }
+            let TypeDefKind::Struct { fields } = &self.types[current].kind;
+            for field in fields {
+                collect_struct_ids(&field.ty, &mut pending, self.types.len());
+            }
+        }
+        false
+    }
+}
+
+fn collect_struct_ids(ty: &Type, out: &mut Vec<usize>, count: usize) {
+    match ty {
+        Type::Struct(id) if (id.0 as usize) < count => out.push(id.0 as usize),
+        Type::Array { element, .. } => collect_struct_ids(element, out, count),
+        _ => {}
+    }
+}
+
+/// Field and array-element types: non-Unit primitives, structs in range, and
+/// arrays of those, at any depth.
+fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
+    match ty {
+        Type::Primitive(kind) => *kind != Primitive::Unit,
+        Type::Struct(id) => (id.0 as usize) < type_count,
+        Type::Array { element, .. } => field_type_is_valid(element, type_count),
+        _ => false,
     }
 }
 
@@ -620,12 +674,16 @@ fn validate_type_shape(
         }
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
-            Type::Array { .. } => validate_type_shape(type_count, element, errors, id, context),
+            Type::Array { .. } | Type::Struct(_) => {
+                validate_type_shape(type_count, element, errors, id, context)
+            }
             _ => push(
                 errors,
                 id,
                 None,
-                format!("{context} array element must be a non-Unit primitive or an array"),
+                format!(
+                    "{context} array element must be a non-Unit primitive, a struct or an array"
+                ),
             ),
         },
     }
