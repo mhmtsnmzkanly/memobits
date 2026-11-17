@@ -160,6 +160,7 @@ fn program(
                 name: "E".into(),
             },
             span: span(0),
+            error_ancestry: None,
             kind: TypeDefKind::Enum {
                 variants: vec![
                     VariantDef {

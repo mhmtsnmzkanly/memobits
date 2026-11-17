@@ -1142,6 +1142,7 @@ fn struct_def(name: &str, fields: Vec<(&str, Type)>) -> TypeDef {
             name: name.into(),
         },
         span: span(),
+        error_ancestry: None,
         kind: TypeDefKind::Struct {
             fields: fields
                 .into_iter()
@@ -1668,6 +1669,7 @@ fn enum_def(name: &str, variants: Vec<(&str, Vec<Type>)>) -> TypeDef {
             name: name.into(),
         },
         span: span(),
+        error_ancestry: None,
         kind: TypeDefKind::Enum {
             variants: variants
                 .into_iter()

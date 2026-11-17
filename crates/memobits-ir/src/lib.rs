@@ -60,10 +60,18 @@ pub enum TypeDefKind {
     Enum { variants: Vec<VariantDef> },
 }
 
+/// Nominal links for the compiler-known Error hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorAncestry {
+    Root,
+    Derived(TypeId),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDef {
     pub path: CanonicalType,
     pub span: Span,
+    pub error_ancestry: Option<ErrorAncestry>,
     pub kind: TypeDefKind,
 }
 
@@ -540,9 +548,37 @@ impl Program {
 }
 
 impl Program {
+    fn has_error_ancestor(&self, actual: &Type, expected: &Type) -> bool {
+        let (Type::Struct(mut child), Type::Struct(ancestor)) = (actual, expected) else {
+            return false;
+        };
+        if child == *ancestor {
+            return false;
+        }
+        // Validation also runs on IR with malformed or cyclic parent links.
+        for _ in &self.types {
+            let Some(ErrorAncestry::Derived(parent)) = self
+                .types
+                .get(child.0 as usize)
+                .and_then(|ty| ty.error_ancestry)
+            else {
+                break;
+            };
+            if parent == *ancestor {
+                return true;
+            }
+            child = parent;
+        }
+        false
+    }
+
     fn validate_types(&self, errors: &mut Vec<ValidationError>) {
         let mut paths = HashSet::new();
-        for definition in &self.types {
+        let root = self
+            .types
+            .iter()
+            .position(|ty| ty.error_ancestry == Some(ErrorAncestry::Root));
+        for (index, definition) in self.types.iter().enumerate() {
             let mut report = |message: String| {
                 errors.push(ValidationError {
                     function: None,
@@ -560,6 +596,44 @@ impl Program {
             }
             if !paths.insert(path) {
                 report(format!("duplicate canonical type path '{}'", path.name));
+            }
+            match definition.error_ancestry {
+                Some(ErrorAncestry::Root) => {
+                    if Some(index) != root
+                        || path.module != ["__prelude"]
+                        || path.name != "Error"
+                        || !matches!(&definition.kind, TypeDefKind::Struct { fields }
+                            if matches!(fields.as_slice(), [field]
+                                if field.name == "code" && field.ty == Type::Primitive(Primitive::U32)))
+                    {
+                        report("invalid compiler-known Error root".into());
+                    }
+                }
+                Some(ErrorAncestry::Derived(parent)) => {
+                    if !root.is_some_and(|root| {
+                        self.has_error_ancestor(
+                            &Type::Struct(TypeId(index as u32)),
+                            &Type::Struct(TypeId(root as u32)),
+                        )
+                    }) {
+                        report(format!(
+                            "error type '{}' has no valid Error ancestor",
+                            path.name
+                        ));
+                    }
+                    if !matches!(
+                        (&definition.kind, self.types.get(parent.0 as usize)),
+                        (TypeDefKind::Struct { fields }, Some(TypeDef {
+                            kind: TypeDefKind::Struct { fields: inherited }, ..
+                        })) if fields.starts_with(inherited)
+                    ) {
+                        report(format!(
+                            "error type '{}' does not preserve its parent's field prefix",
+                            path.name
+                        ));
+                    }
+                }
+                None => {}
             }
             match &definition.kind {
                 TypeDefKind::Struct { fields } => {
@@ -2076,12 +2150,18 @@ fn validate_instruction(
                         .zip(argument_types)
                         .zip(&signature.parameters)
                     {
+                        // Internal direct calls pass the original reference address.
+                        let pointee_matches = |inner: &Type| {
+                            inner == &parameter.ty
+                                || matches!(callee.source, Source::Function(_))
+                                    && program.has_error_ancestor(inner, &parameter.ty)
+                        };
                         let type_matches = actual.as_ref().is_some_and(|actual| {
                             match (parameter.access, actual) {
                                 (Access::Owned, actual) => actual == &parameter.ty,
                                 (Access::Borrow, Type::Reference { access, inner }) => {
                                     matches!(access, Access::Borrow | Access::Share)
-                                        && inner.as_ref() == &parameter.ty
+                                        && pointee_matches(inner)
                                 }
                                 (
                                     Access::Share,
@@ -2089,7 +2169,7 @@ fn validate_instruction(
                                         access: Access::Share,
                                         inner,
                                     },
-                                ) => inner.as_ref() == &parameter.ty,
+                                ) => pointee_matches(inner),
                                 _ => false,
                             }
                         });

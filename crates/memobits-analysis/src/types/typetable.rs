@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Diagnostic, Span};
+use memobits_ir::{ErrorAncestry, TypeId};
 use memobits_syntax::{Field, ItemKind, Module, Type, TypeDefinition};
 
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
@@ -74,7 +75,7 @@ pub(super) struct TypeTable {
     types: Vec<StructInfo>,
     instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
-    derived_errors: HashSet<u32>,
+    error_parents: HashMap<u32, u32>,
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
 }
@@ -201,7 +202,31 @@ impl TypeTable {
     }
 
     fn is_error_type(&self, id: u32) -> bool {
-        self.derived_errors.contains(&id) || self.instance_template(id) == Some(TemplateId::Error)
+        self.error_parents.contains_key(&id)
+            || self.instance_template(id) == Some(TemplateId::Error)
+    }
+
+    pub(super) fn error_ancestry(&self, id: u32) -> Option<ErrorAncestry> {
+        if let Some(&parent) = self.error_parents.get(&id) {
+            Some(ErrorAncestry::Derived(TypeId(parent)))
+        } else if self.instance_template(id) == Some(TemplateId::Error) {
+            Some(ErrorAncestry::Root)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn has_error_ancestor(&self, actual: &Ty, expected: &Ty) -> bool {
+        let (Ty::Struct(mut child, _), Ty::Struct(ancestor, _)) = (actual, expected) else {
+            return false;
+        };
+        while let Some(&parent) = self.error_parents.get(&child) {
+            if parent == *ancestor {
+                return true;
+            }
+            child = parent;
+        }
+        false
     }
 
     pub(super) fn check_template_argument(
@@ -248,7 +273,7 @@ impl TypeTable {
             types: Vec::new(),
             instances: RefCell::new(Vec::new()),
             defs: HashMap::new(),
-            derived_errors: HashSet::new(),
+            error_parents: HashMap::new(),
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
         }
@@ -358,7 +383,7 @@ impl TypeTable {
         // Ordinary structs first, then valid derivations in base-first order.
         let plain_structs = field_types.iter().enumerate().filter_map(|(id, fields)| {
             fields
-                .filter(|_| !table.derived_errors.contains(&(id as u32)))
+                .filter(|_| !table.error_parents.contains_key(&(id as u32)))
                 .map(|_| (id as u32, None))
         });
         let field_order: Vec<_> = plain_structs
@@ -532,7 +557,7 @@ impl TypeTable {
                 chain.push((child, parent));
                 if self.is_error_type(parent) {
                     for (child, parent) in chain.drain(..).rev() {
-                        self.derived_errors.insert(child);
+                        self.error_parents.insert(child, parent);
                         ordered.push((child, parent));
                     }
                     break;

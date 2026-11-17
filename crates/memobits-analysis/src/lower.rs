@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
-    Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
-    Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UnaryOp, UseMode, ValueId, VariantDef,
+    Constant, Edge, ErrorAncestry, FieldDef, Function, Instruction, InstructionKind, LoanId, Local,
+    LocalId, Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef,
+    TypeDefKind, UnaryOp, UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -31,10 +31,15 @@ fn program_types(
         .map(|definition| TypeDef {
             path: CanonicalType {
                 package: package.into(),
-                module: module_of(&definition.module),
+                module: if definition.error_ancestry == Some(ErrorAncestry::Root) {
+                    vec![definition.module.clone()]
+                } else {
+                    module_of(&definition.module)
+                },
                 name: definition.name.clone(),
             },
             span: definition.span,
+            error_ancestry: definition.error_ancestry,
             kind: if definition.is_enum {
                 TypeDefKind::Enum {
                     variants: definition
@@ -1343,6 +1348,8 @@ impl<'a> Builder<'a> {
                     if parameter.access == Access::Owned {
                         args.push(self.owned_captured(argument, &parameter.ty)?);
                     } else {
+                        // Keep the original pointee and loan. Only the call
+                        // boundary can view an error reference as its ancestor.
                         let mut argument = self.borrow(argument, parameter.access)?;
                         argument.mode = access_mode(parameter.access);
                         args.push(argument);

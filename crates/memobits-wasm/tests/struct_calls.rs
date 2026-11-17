@@ -44,6 +44,79 @@ fn run(source: &str) -> i32 {
 const P: &str = "type P { x: i32, y: i32 } ";
 
 #[test]
+fn error_ancestor_share_replaces_only_the_padded_prefix() {
+    let source = "
+        type Base: Error { status: u8 }
+        type Alias = Base;
+        type Middle: Alias { middle: u8 }
+        type Leaf: Middle { detail: u8 }
+        fn replace(e: share Alias) { e = Base { code: 70, status: 8 }; }
+        fn read(e: borrow Error) -> u32 { e.code }
+        fn relay(e: share Leaf) -> u32 {
+            replace(e);
+            read(e.borrow())
+        }
+        fn main() -> u32 {
+            var values := [Leaf { code: 1, status: 2, middle: 3, detail: 4 },
+                           Leaf { code: 5, status: 6, middle: 7, detail: 8 }];
+            let code := relay(values[0].share());
+            let other := values[1].borrow();
+            if code == 70 && values[0].status == 8 && values[0].middle == 3
+                && values[0].detail == 4 && read(other) == 5 {
+                code
+            } else { 0 }
+        }";
+    assert_eq!(run_as::<u32>(source).unwrap(), 70);
+}
+
+#[test]
+fn backend_rejects_calls_with_invalid_error_ancestry() {
+    use memobits_ir::{ErrorAncestry, FunctionId, TypeDefKind, TypeId};
+
+    let program = lower(
+        "type Base: Error { status: u8 }
+         type Leaf: Base {}
+         fn read(e: borrow Base) -> u32 { e.code }
+         fn main() -> u32 { let e := Leaf { code: 1, status: 2 }; read(e.borrow()) }",
+    );
+    let leaf = program
+        .types
+        .iter()
+        .position(|ty| ty.path.name == "Leaf")
+        .unwrap();
+    let exports = BTreeMap::from([("main".to_string(), FunctionId(1))]);
+    let exported_reference = BTreeMap::from([("read".to_string(), FunctionId(0))]);
+    let errors = memobits_wasm::compile(&program, &exported_reference).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("external struct ABI")),
+        "{errors:?}"
+    );
+
+    let mut lookalike = program.clone();
+    lookalike.types[leaf].error_ancestry = None;
+    let mut cycle = program.clone();
+    cycle.types[leaf].error_ancestry = Some(ErrorAncestry::Derived(TypeId(leaf as u32)));
+    let mut bad_prefix = program;
+    let TypeDefKind::Struct { fields } = &mut bad_prefix.types[leaf].kind else {
+        unreachable!()
+    };
+    fields.swap(0, 1);
+    for (program, expected) in [
+        (lookalike, "call argument type or reference access differs"),
+        (cycle, "has no valid Error ancestor"),
+        (bad_prefix, "does not preserve its parent's field prefix"),
+    ] {
+        let errors = memobits_wasm::compile(&program, &exports).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains(expected)),
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
 fn var_struct_field_writes_and_compound_writes() {
     assert_eq!(
         run(&format!(

@@ -405,14 +405,6 @@ fn error_derivation_preserves_nominal_type_checks() {
     for (use_error, message) in [
         ("owned(e)", "expected Error, found ParseError"),
         (
-            "read(e.borrow())",
-            "expected borrow Error, found borrow ParseError",
-        ),
-        (
-            "write(e.share())",
-            "expected share Error, found share ParseError",
-        ),
-        (
             "let failed: Result<i32, Error> = Err(e);",
             "expected Error, found ParseError",
         ),
@@ -421,12 +413,89 @@ fn error_derivation_preserves_nominal_type_checks() {
             &format!(
                 "type ParseError: Error {{}}
                  fn owned(e: Error) {{}}
-                 fn read(e: borrow Error) {{}}
-                 fn write(e: share Error) {{}}
                  fn main() {{ var e := ParseError {{ code: 7 }}; {use_error} }}"
             ),
             "TE002",
             message,
+        );
+    }
+}
+
+#[test]
+fn error_reference_calls_require_ancestry_and_compatible_access() {
+    let types = "type Base: Error {}
+                 type Leaf: Base {}
+                 type Sibling: Base {}
+                 type Lookalike { code: u32 }
+                 fn read(e: borrow Error) {}
+                 fn leaf(e: borrow Leaf) {}
+                 fn write(e: share Error) {}";
+    for (body, code, message) in [
+        (
+            "let e := Lookalike { code: 7 }; read(e.borrow());",
+            "TE002",
+            "found borrow Lookalike",
+        ),
+        (
+            "let e := Sibling { code: 7 }; leaf(e.borrow());",
+            "TE002",
+            "found borrow Sibling",
+        ),
+        (
+            "let e := Error { code: 7 }; leaf(e.borrow());",
+            "TE002",
+            "found borrow Error",
+        ),
+        (
+            "let e := Leaf { code: 7 }; write(e.borrow());",
+            "TE017",
+            "does not match the share",
+        ),
+    ] {
+        rejects(&format!("{types} fn main() {{ {body} }}"), code, message);
+    }
+}
+
+#[test]
+fn error_ancestor_call_reborrows_keep_the_original_loan() {
+    let declarations = "type Base: Error {} type Leaf: Base {}
+                        fn read(e: borrow Error) -> u32 { e.code }
+                        fn write(e: share Base) { e.code = 12; }
+                        fn both(a: share Error, b: borrow Leaf) {}";
+    let valid = lower(&format!(
+        "{declarations} fn main() -> u32 {{
+            var e := Leaf {{ code: 7 }};
+            var r := e.share();
+            let before := read(r);
+            write(r);
+            let after := read(r.borrow());
+            e.code = 20;
+            before + after + e.code
+        }}"
+    ));
+    assert!(memobits_ownership::check_ownership(&valid).is_empty());
+
+    for (body, message) in [
+        (
+            "var r := e.share(); both(r, e.borrow());",
+            "another argument",
+        ),
+        (
+            "let r := e.borrow(); write(e.share()); read(r);",
+            "while it is borrowed",
+        ),
+        (
+            "let r := e.share(); write(r);",
+            "immutable reference handle",
+        ),
+    ] {
+        let program = lower(&format!(
+            "{declarations} fn main() {{ var e := Leaf {{ code: 7 }}; {body} }}"
+        ));
+        let errors = memobits_ownership::check_ownership(&program);
+        assert!(
+            errors.iter().any(|error| error.message.contains(message)),
+            "{body}: {errors:?}"
         );
     }
 }

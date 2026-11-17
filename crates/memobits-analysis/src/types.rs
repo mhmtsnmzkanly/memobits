@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Access as IrAccess, FunctionId, LocalId, ParameterType, Primitive, Signature, Type as IrType,
-    TypeId,
+    Access as IrAccess, ErrorAncestry, FunctionId, LocalId, ParameterType, Primitive, Signature,
+    Type as IrType, TypeId,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -133,28 +133,23 @@ fn compatible(actual: &Ty, expected: &Ty) -> bool {
         }
     }
 }
-fn parameter_accepts(actual: &Ty, parameter: &FunctionParameter) -> bool {
-    match (parameter.access, actual) {
-        (IrAccess::Owned, actual) => compatible(actual, &parameter.ty),
+fn reference_access_matches(actual: &Ty, access: IrAccess) -> bool {
+    matches!(
+        (access, actual),
         (
             IrAccess::Borrow,
             Ty::Reference {
                 access: IrAccess::Borrow | IrAccess::Share,
-                inner,
                 ..
             },
-        ) => compatible(inner, &parameter.ty),
-        (
+        ) | (
             IrAccess::Share,
             Ty::Reference {
                 access: IrAccess::Share,
-                inner,
                 ..
             },
-        ) => compatible(inner, &parameter.ty),
-        (_, Ty::Error | Ty::Never) => true,
-        _ => false,
-    }
+        ) | (_, Ty::Error | Ty::Never)
+    )
 }
 fn name(ty: &Ty) -> String {
     match ty {
@@ -430,6 +425,7 @@ pub struct TypeFact {
     pub name: String,
     pub span: Span,
     pub is_enum: bool,
+    pub error_ancestry: Option<ErrorAncestry>,
     pub fields: Vec<FieldFact>,
     pub variants: Vec<VariantFact>,
 }
@@ -445,11 +441,13 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
     table
         .definitions()
         .iter()
-        .map(|info| TypeFact {
+        .enumerate()
+        .map(|(id, info)| TypeFact {
             module: info.module.clone(),
             name: info.name.clone(),
             span: info.span,
             is_enum: info.is_enum,
+            error_ancestry: table.error_ancestry(id as u32),
             fields: info
                 .fields
                 .iter()
@@ -2441,6 +2439,8 @@ impl Checker {
                 }
                 let ty = self.expr(callee, None);
                 if let Ty::Function(params, result) = ty {
+                    let direct = matches!(&callee.kind, ExprKind::Path(path)
+                        if path.len() != 1 || self.lookup(&path[0]).is_none());
                     if params.len() != arguments.len() {
                         self.error(
                             10,
@@ -2475,7 +2475,9 @@ impl Checker {
                         if let Some(param) = params.get(i) {
                             if param.access == IrAccess::Owned {
                                 self.ensure(&actual, &param.ty, arg.span);
-                            } else if matches!(&actual, Ty::Reference { inner, .. } if !compatible(inner, &param.ty))
+                            } else if matches!(&actual, Ty::Reference { inner, .. }
+                                if !(compatible(inner, &param.ty)
+                                    || direct && self.table.has_error_ancestor(inner, &param.ty)))
                             {
                                 self.error(
                                     2,
@@ -2487,7 +2489,7 @@ impl Checker {
                                         name(&actual)
                                     ),
                                 );
-                            } else if !parameter_accepts(&actual, param) {
+                            } else if !reference_access_matches(&actual, param.access) {
                                 self.error(
                                     17,
                                     arg.span,

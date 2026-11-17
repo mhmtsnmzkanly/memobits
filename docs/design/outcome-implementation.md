@@ -44,6 +44,15 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
   evidence against the bound before reporting any missing arguments.
   Derived errors use ordinary struct construction, field access, destructuring,
   and moves, including when constructing and matching outcome payloads.
+- Direct internal calls accept a derived error reference for a borrow or share
+  parameter of any nominal ancestor, including ancestors named through aliases.
+  Pass an existing reference or create one with `.borrow()` or `.share()`.
+  A share can be reborrowed for a borrow parameter. A share parameter still
+  requires exclusive access. The call reborrows the same place with ordinary
+  loan conflict and last-use rules. IR validation checks the nominal parent
+  chain and inherited field prefix. Wasm passes the original address and places
+  each type's new fields after the padded layout of its parent, so even a
+  whole-value assignment through an ancestor share preserves descendant fields.
 - Project resolution checks imported alias-qualified variants by following
   aliases in their defining modules. An unknown variant on a visible alias
   produces ME006 and use of a private alias from another module produces ME007.
@@ -53,11 +62,11 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
 
 ## Remaining gates
 
-1. Add concrete runtime error identity to values and artifact metadata. Add
-   borrow/share coercions from a derived error to an ancestor. For now,
-   supplying an owned derived value or a borrowed/shared derived reference
-   where the corresponding ancestor type is expected produces TE002.
-   Explicit owned ancestor conversion still has no spelling.
+1. Add concrete runtime error identity to values and artifact metadata.
+   Ancestor reference coercion is currently limited to direct internal call
+   arguments. Implicit owned conversion, downcasts, and conversions between
+   unrelated types are rejected. Explicit owned ancestor conversion still has
+   no spelling.
    `message: String` depends on string support.
 2. Implement reference type arguments and embedded-loan tracking together.
    Dependency tracking must preserve loans through construction, aggregate moves,
@@ -74,13 +83,16 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
 Analysis tests cover alias interning, nested outcomes, inference and arity
 failures, shadowing, the Error bound, exhaustiveness, and aggregate moves.
 They also cover ancestor-first layout, non-error bases, duplicate inherited
-fields, derivation cycles, recursive value layouts, and rejected ancestor
-conversions. Resolver tests cover imported aliases, invalid variants, and
+fields, derivation cycles, recursive value layouts, and rejection of invalid
+ancestor calls. Loan tests cover last-use release, overlapping call arguments,
+live loans, and immutable share handles. Wasm tests exercise transitive
+reborrows, whole ancestor stores on array elements, and invalid IR ancestry.
+Resolver tests cover imported aliases, invalid variants, and
 nested public signature privacy. CLI tests cover cross-module derivation and
-field privacy, validate Wasm, and compare source and standalone artifact
+coercion, field privacy, and source and standalone artifact
 execution with a primitive entry result. A counter checks once-only
 evaluation of success and failure payloads.
 
-Completing B4 also requires tests for concrete error identity and ancestor
-coercions, last-use release and rejected escapes or loan conflicts through
-branches and calls, and source/artifact parity for outcome entry results.
+Completing B4 also requires tests for concrete error identity, embedded-loan
+release, escapes and conflicts through branches and calls, and source/artifact
+parity for outcome entry results.

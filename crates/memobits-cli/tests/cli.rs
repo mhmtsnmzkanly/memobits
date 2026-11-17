@@ -169,7 +169,9 @@ fn derived_errors_execute_across_modules_in_source_and_artifact() {
     f.write(
         "src/origin.mb",
         "pub type Base: Error { pub stage: u32 }
-         pub type Parent = Base;",
+         pub type Parent = Base;
+         pub fn bump(e: share Parent) { e.code += 4; }
+         pub fn code(e: borrow Error) -> u32 { e.code }",
     );
     f.write(
         "src/model.mb",
@@ -193,9 +195,10 @@ fn derived_errors_execute_across_modules_in_source_and_artifact() {
          }
          fn main() -> i32 {
              var err := ParseError { line: 3, code: 1, stage: 2 };
-             err.code += 4;
+             origin::bump(err.share());
+             let n := origin::code(err.borrow());
              let failed: Work = Failed(ParseError { stage: 9, code: 7, line: 8 });
-             if inspect(wrap(err)) + inspect(failed) == 332 { 332 } else { 0 }
+             if n == 5 && inspect(wrap(err)) + inspect(failed) == 332 { 332 } else { 0 }
          }",
     );
     let source = f.run(&["run"]);

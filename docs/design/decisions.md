@@ -105,9 +105,10 @@ only where explicitly stated; unresolved API spellings remain proposals.
   accessed directly (`e.code`) and initialized explicitly in a literal like any
   other field.
 - A borrow or share of an error is accepted wherever a borrow or share of one
-  of its ancestors is expected. An owned error converts to an ancestor type
-  only explicitly; the conversion drops the derived fields and keeps the
-  recorded concrete identity. Its spelling is not designed yet.
+  of its ancestors is expected. The current compiler implements this for
+  direct internal call arguments, including reborrows. An owned error converts
+  to an ancestor type only explicitly; the conversion drops the derived fields
+  and keeps the recorded concrete identity. Its spelling is not designed yet.
 - The error parameter `E` of `Result<T, E>` and `Attempt<T, E>` must be `Error`
   or a type derived from it. There are no separate standard error types per
   result type; simple programs use `Error` directly. An entry function may

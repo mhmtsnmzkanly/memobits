@@ -7,9 +7,9 @@
 //! experimental and do not define a stable Memobits ABI.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    ArrayInit, BinaryOp, BlockId, Constant, Function, FunctionId, Instruction, InstructionKind,
-    LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UnaryOp,
+    ArrayInit, BinaryOp, BlockId, Constant, ErrorAncestry, Function, FunctionId, Instruction,
+    InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, TypeDef,
+    TypeDefKind, UnaryOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_encoder::{
@@ -38,9 +38,11 @@ fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
 /// validated and checked before this artifact selection.
 ///
 /// Internal direct calls support borrow/share references to non-Unit primitives,
-/// to (nested) fixed arrays of them and to structs, owned array and struct
-/// parameters (copied into the callee's frame) and array and struct results
-/// (written through a hidden pointer to caller-allocated storage). Exported
+/// to (nested) fixed arrays of them and to structs. Error references can be
+/// passed to parameters of a nominal ancestor at the same address. Calls also
+/// support owned array and struct parameters (copied into the callee's frame)
+/// and array and struct results (written through a hidden pointer to
+/// caller-allocated storage). Exported
 /// signatures remain primitive-only; reference, array and struct ABIs are not
 /// defined. Indirect calls, reference results and other
 /// pointees are rejected.
@@ -474,7 +476,18 @@ fn struct_layout_at(
             let mut align = 1u32;
             let mut offsets = Vec::with_capacity(fields.len());
             let mut storage = Vec::with_capacity(fields.len());
-            for field in fields {
+            if let Some(ErrorAncestry::Derived(parent)) = definition.error_ancestry {
+                let parent = parent.0 as usize;
+                struct_layout_at(types, parent, done, active)?;
+                let base = done[parent].as_ref().expect("laid out parent");
+                // Whole stores through a Share of the ancestor copy its padded size.
+                // Reserve that entire prefix before placing any descendant fields.
+                offset = base.size;
+                align = base.align;
+                offsets.extend_from_slice(&base.offsets);
+                storage.extend_from_slice(&base.fields);
+            }
+            for field in &fields[offsets.len()..] {
                 let Some((size, field_align, kind)) =
                     member_layout(types, &field.ty, done, active)?
                 else {
