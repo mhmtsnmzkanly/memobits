@@ -160,6 +160,159 @@ fn project_outcomes_reject_invalid_error_argument_and_missing_context() {
 }
 
 #[test]
+fn derived_errors_execute_across_modules_in_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/origin.mb",
+        "pub type Base: Error { pub stage: u32 }
+         pub type Parent = Base;",
+    );
+    f.write(
+        "src/model.mb",
+        "use origin::Parent as Ancestor;
+         pub type ParseError: Ancestor { pub line: u32 }
+         pub type Read = Result<u32, ParseError>;
+         pub type Work = Attempt<Read, ParseError>;
+         pub fn wrap(e: ParseError) -> Work { Done(Err(e)) }",
+    );
+    f.write(
+        "src/main.mb",
+        "use model::ParseError;
+         use model::Work;
+         use model::wrap;
+         fn inspect(work: Work) -> u32 {
+             match work {
+                 Done(read) => match read { Err(e) => e.code + 10 * e.stage + 100 * e.line, Ok(n) => n },
+                 Failed(e) => e.code,
+                 Skipped => 0
+             }
+         }
+         fn main() -> i32 {
+             var err := ParseError { line: 3, code: 1, stage: 2 };
+             err.code += 4;
+             let failed: Work = Failed(ParseError { stage: 9, code: 7, line: 8 });
+             if inspect(wrap(err)) + inspect(failed) == 332 { 332 } else { 0 }
+         }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(332)\n");
+    let build = f.run(&["build", "--output", "errors.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bare = Fixture::new();
+    fs::copy(f.0.join("errors.wasm"), bare.0.join("errors.wasm")).unwrap();
+    let artifact = bare.run(&["run", "errors.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(source.stdout, artifact.stdout);
+}
+
+#[test]
+fn inherited_private_fields_keep_their_declaring_module() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/origin.mb",
+        "use model::Leaf;
+         pub type Base: Error { secret: u32 }
+         pub fn make() -> Leaf {
+             var value := Leaf { code: 2, secret: 3, line: 5 };
+             value.secret += 1;
+             value
+         }
+         pub fn read(value: Leaf) -> u32 {
+             let Leaf { code, secret, line } := value;
+             code + secret + line
+         }",
+    );
+    f.write(
+        "src/model.mb",
+        "use origin::Base;
+         pub type Mid: Base {}
+         pub type Leaf: Mid { pub line: u32 }",
+    );
+    f.write(
+        "src/main.mb",
+        "use origin::make;
+         use origin::read;
+         fn main() -> u32 { read(make()) }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(11)\n");
+
+    for (body, expected) in [
+        (
+            "let value := Leaf { code: 2, secret: 3, line: 5 };",
+            "cannot construct struct 'Leaf' outside module 'origin'",
+        ),
+        (
+            "let value := origin::make(); let n := value.secret;",
+            "field 'secret' of struct 'Leaf' is private to module 'origin'",
+        ),
+        (
+            "var value := origin::make(); value.secret = 6;",
+            "field 'secret' of struct 'Leaf' is private to module 'origin'",
+        ),
+        (
+            "let Leaf { code, secret, line } := origin::make();",
+            "cannot destructure struct 'Leaf' outside module 'origin'",
+        ),
+    ] {
+        // The descendant's own module has no extra access to inherited private fields.
+        f.write(
+            "src/model.mb",
+            &format!(
+                "use origin::Base;
+                 pub type Mid: Base {{}}
+                 pub type Leaf: Mid {{ pub line: u32 }}
+                 fn invalid() {{ {body} }}"
+            ),
+        );
+        let message = err(f.run(&["analyze-project"]), "TE025");
+        assert!(message.contains(expected), "{message}");
+        assert!(message.contains("model.mb:"), "{message}");
+    }
+}
+
+#[test]
+fn project_error_derivation_checks_base_visibility_and_cross_module_cycles() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use origin::Base;
+         pub type Derived: Base {}
+         fn main() {}",
+    );
+    f.write("src/origin.mb", "type Base: Error {}");
+    let message = err(f.run(&["analyze-project"]), "ME007");
+    assert!(message.contains("'origin::Base' is private"), "{message}");
+
+    f.write("src/origin.mb", "pub type Base: main::Derived {}");
+    let message = err(f.run(&["analyze-project"]), "TE026");
+    assert!(message.contains("error derivation cycle"), "{message}");
+
+    f.write(
+        "src/main.mb",
+        "type Base: Error {}
+         pub type Derived: Base {}
+         fn main() {}",
+    );
+    let message = err(f.run(&["analyze-project"]), "ME010");
+    assert!(message.contains("exposes private type 'Base'"), "{message}");
+}
+
+#[test]
 fn outcome_entry_results_remain_gated() {
     let f = Fixture::new();
     f.write(
@@ -169,6 +322,8 @@ fn outcome_entry_results_remain_gated() {
     for source in [
         "fn main() -> Result<i32, Error> { Ok(7) }",
         "fn main() -> Attempt<i32, Error> { Skipped }",
+        "type ParseError: Error {} fn main() -> Result<i32, ParseError> { Err(ParseError { code: 5 }) }",
+        "type ParseError: Error {} fn main() -> Attempt<i32, ParseError> { Failed(ParseError { code: 5 }) }",
     ] {
         f.write("src/main.mb", source);
         err(f.run(&["build"]), "LE900");

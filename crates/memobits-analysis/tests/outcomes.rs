@@ -3,19 +3,6 @@ use memobits_analysis::lower_module;
 use memobits_diagnostics::SourceId;
 use memobits_syntax::parse;
 
-#[test]
-fn unfinished_error_derivation_cannot_silently_lower_as_plain_struct() {
-    let parsed = parse(
-        SourceId(91),
-        "type Base { pub code: u32 } type Derived: Base { pub line: u32 } fn main() {}",
-    );
-    assert!(parsed.diagnostics.is_empty());
-    let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
-    assert!(errors
-        .iter()
-        .any(|error| error.code.to_string() == "TE017" && error.message.contains("derivation")));
-}
-
 fn lower(source: &str) -> memobits_ir::Program {
     let parsed = parse(SourceId(91), source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -229,12 +216,12 @@ fn the_error_bound_checks_identity_and_inferred_payload_evidence() {
     rejects(
         "type Lookalike { pub code: u32 } fn main() { let value: Result<i32, Lookalike> = Ok(7); }",
         "TE002",
-        "requires Error for its error type argument, found Lookalike",
+        "requires Error or a type derived from it for its error type argument, found Lookalike",
     );
     rejects(
         "type Bad = Attempt<i32, u32>; fn main() {}",
         "TE002",
-        "requires Error for its error type argument, found u32",
+        "requires Error or a type derived from it for its error type argument, found u32",
     );
     rejects(
         "fn main() { let value := Err(7); }",
@@ -298,4 +285,148 @@ fn diverging_outcome_payloads_lower_without_constructing_a_variant() {
         "fn annotated() -> i32 { let value: Result<i32, Error> = Ok({ return 7; }); 0 }
          fn main() -> i32 { let value := Some({ return annotated(); }); 0 }",
     );
+}
+
+#[test]
+fn error_derivation_flattens_fields_in_ancestor_first_order() {
+    let program = lower(
+        "type Handled = Result<u32, ParseError>;
+         type ParseError: BaseAlias { pub line: u32 }
+         type BaseAlias = BaseError;
+         type BaseError: Root { pub stage: u32, pub column: u32 }
+         type Root = Error;
+         fn main() -> u32 {
+             let failed: Handled = Err(ParseError { column: 11, line: 23, stage: 7, code: 5 });
+             match failed {
+                 Err(e) => { let ParseError { stage, code, line, column } := e; code + stage + column + line },
+                 Ok(n) => n
+             }
+         }",
+    );
+    let derived = program
+        .types
+        .iter()
+        .find(|ty| ty.path.name == "ParseError")
+        .unwrap();
+    let memobits_ir::TypeDefKind::Struct { fields } = &derived.kind else {
+        panic!("expected a struct")
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["code", "stage", "column", "line"]
+    );
+    assert!(memobits_ownership::check_ownership(&program).is_empty());
+}
+
+#[test]
+fn error_derivation_rejects_non_error_bases() {
+    for (declarations, base) in [
+        ("type Lookalike { pub code: u32 }", "Lookalike"),
+        ("type Something [ Yes ]", "Something"),
+        ("", "u32"),
+        ("", "Array<u32, 2>"),
+        (
+            "type Wrapped = Result<i32, Valid>; type Valid: Error {}",
+            "Wrapped",
+        ),
+    ] {
+        let source = format!("type Derived: {base} {{}} {declarations} fn main() {{}}");
+        let parsed = parse(SourceId(91), &source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+        assert_eq!(errors[0].code.to_string(), "TE017");
+        assert!(errors[0]
+            .message
+            .contains("error derivation requires Error"));
+    }
+    rejects("type Bad: Missing {}", "TE001", "unresolved type 'Missing'");
+}
+
+#[test]
+fn error_derivation_diagnoses_collisions_and_cycles() {
+    for (source, code, message) in [
+        (
+            "type Leaf: Error { code: u32 }",
+            "TE023",
+            "redeclares inherited field 'code'",
+        ),
+        (
+            "type Leaf: Mid { pub secret: u32 } type Mid: Base {} type Base: Error { secret: u32 }",
+            "TE023",
+            "redeclares inherited field 'secret'",
+        ),
+        (
+            "type Leaf: Error {} fn main() { let value := Leaf {}; }",
+            "TE023",
+            "missing field(s) in 'Leaf' literal: code",
+        ),
+        ("type A: A {}", "TE026", "error derivation cycle"),
+        (
+            "type A: B {} type B: C {} type C = A;",
+            "TE026",
+            "error derivation cycle",
+        ),
+        (
+            "type Base: Error { next: Result<i32, Leaf> } type Leaf: Base {}",
+            "TE026",
+            "'Leaf' would have infinite size",
+        ),
+    ] {
+        rejects(source, code, message);
+    }
+}
+
+#[test]
+fn derived_errors_are_moved_into_outcomes_and_require_context() {
+    let program = lower(
+        "type ParseError: Error {}
+         fn main() {
+             let error := ParseError { code: 7 };
+             let failed: Attempt<i32, ParseError> = Failed(error);
+             let reused: Result<i32, ParseError> = Err(error);
+         }",
+    );
+    assert!(memobits_ownership::check_ownership(&program)
+        .iter()
+        .any(|error| error.code.to_string() == "BE001"));
+    rejects(
+        "type ParseError: Error {} fn main() { let failed := Err(ParseError { code: 7 }); }",
+        "TE002",
+        "Result<T, E> annotation",
+    );
+}
+
+#[test]
+fn error_derivation_preserves_nominal_type_checks() {
+    for (use_error, message) in [
+        ("owned(e)", "expected Error, found ParseError"),
+        (
+            "read(e.borrow())",
+            "expected borrow Error, found borrow ParseError",
+        ),
+        (
+            "write(e.share())",
+            "expected share Error, found share ParseError",
+        ),
+        (
+            "let failed: Result<i32, Error> = Err(e);",
+            "expected Error, found ParseError",
+        ),
+    ] {
+        rejects(
+            &format!(
+                "type ParseError: Error {{}}
+                 fn owned(e: Error) {{}}
+                 fn read(e: borrow Error) {{}}
+                 fn write(e: share Error) {{}}
+                 fn main() {{ var e := ParseError {{ code: 7 }}; {use_error} }}"
+            ),
+            "TE002",
+            message,
+        );
+    }
 }

@@ -3,7 +3,7 @@
 //! assignment, array parameters, results and `if`/block results); every other array form is
 //! gated with TE017.
 //! Name resolution across modules and ownership checking are separate passes.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
@@ -22,7 +22,7 @@ mod templates;
 mod typetable;
 use memobits_syntax::templates::{self as registry, Template};
 use templates::ResolvedArgument;
-use typetable::TypeTable;
+use typetable::{StructInfo, TypeTable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
@@ -866,26 +866,7 @@ impl Checker {
                     ),
                 );
             }
-            if info.module != self.module {
-                let private: Vec<&str> = info
-                    .fields
-                    .iter()
-                    .filter(|field| !field.public)
-                    .map(|field| field.name.as_str())
-                    .collect();
-                if !private.is_empty() {
-                    self.error(
-                        25,
-                        statement.span,
-                        format!(
-                            "cannot destructure struct '{}' outside module '{}': field(s) {} are private",
-                            info.name,
-                            info.module,
-                            private.join(", ")
-                        ),
-                    );
-                }
-            }
+            self.check_field_visibility(info, "destructure", statement.span);
         }
         // The bindings start after the initialiser, like `let`.
         for (pattern, ty) in bindings {
@@ -1325,6 +1306,26 @@ impl Checker {
             origin,
         }
     }
+    fn check_field_visibility(&mut self, info: &StructInfo, operation: &str, span: Span) {
+        let mut private: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for field in &info.fields {
+            if !field.visible_in(&self.module) {
+                private.entry(&field.module).or_default().push(&field.name);
+            }
+        }
+        for (module, fields) in private {
+            self.error(
+                25,
+                span,
+                format!(
+                    "cannot {operation} struct '{}' outside module '{module}': field(s) {} are private",
+                    info.name,
+                    fields.join(", ")
+                ),
+            );
+        }
+    }
+
     /// `base.field`: a read of one field of a named local struct.
     fn field_read(&mut self, base: &Expr, field_name: &str, expr: &Expr) -> Ty {
         if self.executable {
@@ -1363,15 +1364,15 @@ impl Checker {
                         Ty::Error
                     }
                     Some(field) => {
-                        if !field.public && info.module != self.module {
+                        if !field.visible_in(&self.module) {
                             self.error(
-                                        25,
-                                        expr.span,
-                                        format!(
-                                            "field '{field_name}' of struct '{struct_name}' is private to module '{}'",
-                                            info.module
-                                        ),
-                                    );
+                                25,
+                                expr.span,
+                                format!(
+                                    "field '{field_name}' of struct '{struct_name}' is private to module '{}'",
+                                    field.module
+                                ),
+                            );
                         }
                         field.ty.clone()
                     }
@@ -2602,26 +2603,7 @@ impl Checker {
                             ),
                         );
                     }
-                    if info.module != self.module {
-                        let private: Vec<&str> = info
-                            .fields
-                            .iter()
-                            .filter(|field| !field.public)
-                            .map(|field| field.name.as_str())
-                            .collect();
-                        if !private.is_empty() {
-                            self.error(
-                                25,
-                                expr.span,
-                                format!(
-                                    "cannot construct struct '{}' outside module '{}': field(s) {} are private",
-                                    info.name,
-                                    info.module,
-                                    private.join(", ")
-                                ),
-                            );
-                        }
-                    }
+                    self.check_field_visibility(info, "construct", expr.span);
                 }
                 target
             }

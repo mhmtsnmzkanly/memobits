@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Diagnostic, Span};
-use memobits_syntax::{ItemKind, Module, Type, TypeDefinition};
+use memobits_syntax::{Field, ItemKind, Module, Type, TypeDefinition};
 
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
 
@@ -16,7 +16,15 @@ use super::{diagnostic, Ty};
 pub(super) struct FieldInfo {
     pub name: String,
     pub public: bool,
+    pub module: String,
     pub ty: Ty,
+    ty_span: Span,
+}
+
+impl FieldInfo {
+    pub(super) fn visible_in(&self, module: &str) -> bool {
+        self.public || self.module == module
+    }
 }
 
 /// One enum variant: its payload types in declaration order.
@@ -66,6 +74,7 @@ pub(super) struct TypeTable {
     types: Vec<StructInfo>,
     instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
+    derived_errors: HashSet<u32>,
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
 }
@@ -121,7 +130,9 @@ impl TypeTable {
                 fields: vec![FieldInfo {
                     name: "code".into(),
                     public: true,
+                    module: "__prelude".into(),
                     ty: Ty::Primitive("u32"),
+                    ty_span: span,
                 }],
                 variants: Vec::new(),
             },
@@ -189,6 +200,10 @@ impl TypeTable {
         self.instance_template(id).map(templates::by_id)
     }
 
+    fn is_error_type(&self, id: u32) -> bool {
+        self.derived_errors.contains(&id) || self.instance_template(id) == Some(TemplateId::Error)
+    }
+
     pub(super) fn check_template_argument(
         &self,
         template: &Template,
@@ -197,13 +212,13 @@ impl TypeTable {
         span: Span,
     ) -> Result<(), TypeFailure> {
         if matches!(kind, ParameterKind::ErrorType)
-            && !matches!(ty, Ty::Struct(id, _) if self.instance_template(*id) == Some(TemplateId::Error))
+            && !matches!(ty, Ty::Struct(id, _) if self.is_error_type(*id))
         {
             return Err(TypeFailure {
                 span,
                 code: 2,
                 message: format!(
-                    "{} requires Error for its error type argument, found {}",
+                    "{} requires Error or a type derived from it for its error type argument, found {}",
                     template.name,
                     super::name(ty)
                 ),
@@ -233,6 +248,7 @@ impl TypeTable {
             types: Vec::new(),
             instances: RefCell::new(Vec::new()),
             defs: HashMap::new(),
+            derived_errors: HashSet::new(),
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
         }
@@ -250,7 +266,8 @@ impl TypeTable {
         let mut table = Self::empty();
         table.imports = imports;
         let mut diagnostics = Vec::new();
-        let mut field_types: Vec<(usize, Vec<(&memobits_syntax::Field, String)>)> = Vec::new();
+        let mut field_types: Vec<Option<&[Field]>> = Vec::new();
+        let mut bases = HashMap::new();
         let mut variant_types: Vec<(usize, &[memobits_syntax::Variant], String)> = Vec::new();
         let mut alias_items = Vec::new();
         for (module, syntax) in modules {
@@ -264,13 +281,6 @@ impl TypeTable {
                 else {
                     continue;
                 };
-                if let Some(base) = base {
-                    diagnostics.push(diagnostic(
-                        17,
-                        base.span,
-                        "error type derivation is parsed but its semantics are not implemented yet",
-                    ));
-                }
                 if templates::lookup(std::slice::from_ref(name)).is_some() {
                     diagnostics.push(diagnostic(
                         3,
@@ -289,10 +299,10 @@ impl TypeTable {
                             fields: Vec::new(),
                             variants: Vec::new(),
                         });
-                        field_types.push((
-                            id,
-                            fields.iter().map(|f| (f, (*module).to_owned())).collect(),
-                        ));
+                        field_types.push(Some(fields));
+                        if let Some(base) = base {
+                            bases.insert(id as u32, base);
+                        }
                         Def::Named(id as u32)
                     }
                     TypeDefinition::Alias(target) => {
@@ -312,6 +322,7 @@ impl TypeTable {
                             fields: Vec::new(),
                             variants: Vec::new(),
                         });
+                        field_types.push(None);
                         variant_types.push((id, variants, (*module).to_owned()));
                         if variants.is_empty() {
                             diagnostics.push(diagnostic(
@@ -334,6 +345,8 @@ impl TypeTable {
                 }
             }
         }
+        // Establish hierarchy membership before resolving any outcome arguments.
+        let derivations = table.check_derivations(&bases, &mut diagnostics);
         // Aliases: resolve each so its own declaration reports its failures.
         for (alias_key, target) in alias_items {
             if let Err(failure) = table.resolve_alias(&alias_key) {
@@ -342,22 +355,44 @@ impl TypeTable {
                 }
             }
         }
-        // Struct fields.
-        let mut resolved: Vec<Vec<(FieldInfo, Span)>> = Vec::new();
-        for (id, fields) in &field_types {
-            let mut infos: Vec<(FieldInfo, Span)> = Vec::new();
-            for (field, module) in fields {
-                if infos.iter().any(|(known, _)| known.name == field.name) {
+        // Ordinary structs first, then valid derivations in base-first order.
+        let plain_structs = field_types.iter().enumerate().filter_map(|(id, fields)| {
+            fields
+                .filter(|_| !table.derived_errors.contains(&(id as u32)))
+                .map(|_| (id as u32, None))
+        });
+        let field_order: Vec<_> = plain_structs
+            .chain(derivations.into_iter().map(|(id, base)| (id, Some(base))))
+            .collect();
+        for (id, base) in field_order {
+            let mut infos = base.map_or_else(Vec::new, |base| table.info(base).fields);
+            let inherited_count = infos.len();
+            let info = &table.types[id as usize];
+            let mut declared = HashSet::new();
+            for field in field_types[id as usize].expect("struct fields") {
+                if !declared.insert(&field.name) {
                     diagnostics.push(diagnostic(
                         23,
                         field.span,
                         format!(
                             "struct '{}' declares field '{}' more than once",
-                            table.types[*id].name, field.name
+                            info.name, field.name
+                        ),
+                    ));
+                } else if infos[..inherited_count]
+                    .iter()
+                    .any(|inherited| inherited.name == field.name)
+                {
+                    diagnostics.push(diagnostic(
+                        23,
+                        field.span,
+                        format!(
+                            "error type '{}' redeclares inherited field '{}'",
+                            info.name, field.name
                         ),
                     ));
                 }
-                let ty = match table.resolve(module, &field.ty) {
+                let ty = match table.resolve(&info.module, &field.ty) {
                     Ok(ty) => ty,
                     Err(failure) => {
                         if within(failure.span, field.ty.span) {
@@ -370,19 +405,15 @@ impl TypeTable {
                         Ty::Error
                     }
                 };
-                infos.push((
-                    FieldInfo {
-                        name: field.name.clone(),
-                        public: field.public,
-                        ty,
-                    },
-                    field.ty.span,
-                ));
+                infos.push(FieldInfo {
+                    name: field.name.clone(),
+                    public: field.public,
+                    module: info.module.clone(),
+                    ty,
+                    ty_span: field.ty.span,
+                });
             }
-            resolved.push(infos);
-        }
-        for ((id, _), infos) in field_types.iter().zip(&resolved) {
-            table.types[*id].fields = infos.iter().map(|(info, _)| info.clone()).collect();
+            table.types[id as usize].fields = infos;
         }
         // Enum variants: payload types are resolved like field types.
         let mut payload_spans: Vec<(usize, Vec<Span>)> = Vec::new();
@@ -445,9 +476,9 @@ impl TypeTable {
                 }
             }
         };
-        for ((id, _), infos) in field_types.iter().zip(&resolved) {
-            for (info, span) in infos {
-                recursion(*id, &info.ty, *span, &table);
+        for (id, info) in table.types.iter().enumerate() {
+            for field in &info.fields {
+                recursion(id, &field.ty, field.ty_span, &table);
             }
         }
         for (id, spans) in &payload_spans {
@@ -461,6 +492,113 @@ impl TypeTable {
             }
         }
         (table, diagnostics)
+    }
+
+    /// Validate ancestry and return the parent links in base-first order.
+    fn check_derivations(
+        &mut self,
+        bases: &HashMap<u32, &Type>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Vec<(u32, u32)> {
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::new();
+        for id in 0..self.types.len() as u32 {
+            let mut child = id;
+            let mut chain = Vec::new();
+            while let Some(&base) = bases.get(&child) {
+                if !visited.insert(child) {
+                    break;
+                }
+                let module = &self.types[child as usize].module;
+                let parent = match self.resolve_error_base(module, base) {
+                    Ok(parent) if self.is_error_type(parent) || bases.contains_key(&parent) => {
+                        parent
+                    }
+                    Ok(_) => {
+                        diagnostics.push(diagnostic(17, base.span, non_error_base(base)));
+                        break;
+                    }
+                    Err(failure) => {
+                        if within(failure.span, base.span) {
+                            diagnostics.push(diagnostic(
+                                failure.code,
+                                failure.span,
+                                failure.message,
+                            ));
+                        }
+                        break;
+                    }
+                };
+                chain.push((child, parent));
+                if self.is_error_type(parent) {
+                    for (child, parent) in chain.drain(..).rev() {
+                        self.derived_errors.insert(child);
+                        ordered.push((child, parent));
+                    }
+                    break;
+                }
+                child = parent;
+            }
+            if let Some(&(last, parent)) = chain.last() {
+                if chain.iter().any(|&(child, _)| child == parent) {
+                    let span = bases[&last].span;
+                    let name = &self.types[parent as usize].name;
+                    diagnostics.push(diagnostic(
+                        26,
+                        span,
+                        format!("error derivation cycle through '{name}'"),
+                    ));
+                }
+            }
+        }
+        ordered
+    }
+
+    /// Follow nominal aliases without instantiating templates that may depend on
+    /// the hierarchy being built (for example, `Result<i32, Derived>`).
+    fn resolve_error_base(&self, module: &str, base: &Type) -> Result<u32, TypeFailure> {
+        let mut module = module;
+        let mut ty = base;
+        let mut aliases = HashSet::new();
+        loop {
+            if templates::lookup(&ty.path).is_some_and(|template| template.id == TemplateId::Error)
+            {
+                let Ty::Struct(id, _) = self.resolve(module, ty)? else {
+                    unreachable!("Error is a struct");
+                };
+                return Ok(id);
+            }
+            if templates::lookup(&ty.path).is_some()
+                || matches!(ty.path.as_slice(), [name] if primitive(name).is_some())
+            {
+                return Err(TypeFailure {
+                    span: base.span,
+                    code: 17,
+                    message: non_error_base(base),
+                });
+            }
+            match self.lookup_definition(module, ty) {
+                Some((_, Def::Named(id))) if ty.arguments.is_empty() => return Ok(*id),
+                Some((
+                    key,
+                    Def::Alias {
+                        module: owner,
+                        target,
+                    },
+                )) if ty.arguments.is_empty() => {
+                    if !aliases.insert(key) {
+                        return Err(TypeFailure {
+                            span: ty.span,
+                            code: 26,
+                            message: format!("type alias cycle through '{}'", ty.path.join("::")),
+                        });
+                    }
+                    module = owner;
+                    ty = target;
+                }
+                _ => return Err(unresolved_type(ty)),
+            }
+        }
     }
 
     /// Whether type `from` reaches type `to` by value, through struct fields,
@@ -538,37 +676,13 @@ impl TypeTable {
         if !ty.arguments.is_empty() {
             return Err(failure(1, "unsupported type arguments".into()));
         }
-        let unresolved = || {
-            failure(
-                1,
-                format!("unsupported or unresolved type '{}'", ty.path.join("::")),
-            )
-        };
         if let [name] = ty.path.as_slice() {
             if let Some(primitive) = primitive(name) {
                 return Ok(primitive);
             }
         }
-        let imports = self.imports.get(module);
-        let expanded = if let [name] = ty.path.as_slice() {
-            if self.defs.contains_key(&key(module, name)) {
-                key(module, name)
-            } else {
-                match imports.and_then(|imports| imports.get(name)) {
-                    Some(path) => normalize(path).to_owned(),
-                    None => return Err(unresolved()),
-                }
-            }
-        } else {
-            let first = &ty.path[0];
-            match imports.and_then(|imports| imports.get(first)) {
-                Some(target) => format!("{}::{}", target, ty.path[1..].join("::")),
-                None => ty.path.join("::"),
-            }
-        };
-        let definition_key = normalize(&expanded);
-        match self.defs.get(definition_key) {
-            Some(Def::Named(id)) => {
+        match self.lookup_definition(module, ty) {
+            Some((_, Def::Named(id))) => {
                 let info = &self.types[*id as usize];
                 let name = info.name.as_str().into();
                 Ok(if info.is_enum {
@@ -577,7 +691,7 @@ impl TypeTable {
                     Ty::Struct(*id, name)
                 })
             }
-            Some(Def::Alias { .. }) => {
+            Some((definition_key, Def::Alias { .. })) => {
                 if matches!(
                     self.aliases.borrow().get(definition_key),
                     Some(AliasState::Resolving)
@@ -589,9 +703,42 @@ impl TypeTable {
                 }
                 self.resolve_alias(definition_key)
             }
-            None => Err(unresolved()),
+            None => Err(unresolved_type(ty)),
         }
     }
+
+    fn lookup_definition(&self, module: &str, ty: &Type) -> Option<(&String, &Def)> {
+        let imports = self.imports.get(module);
+        let expanded = if let [name] = ty.path.as_slice() {
+            if self.defs.contains_key(&key(module, name)) {
+                key(module, name)
+            } else {
+                normalize(imports?.get(name)?).to_owned()
+            }
+        } else {
+            let first = &ty.path[0];
+            match imports.and_then(|imports| imports.get(first)) {
+                Some(target) => format!("{}::{}", target, ty.path[1..].join("::")),
+                None => ty.path.join("::"),
+            }
+        };
+        self.defs.get_key_value(normalize(&expanded))
+    }
+}
+
+fn unresolved_type(ty: &Type) -> TypeFailure {
+    TypeFailure {
+        span: ty.span,
+        code: 1,
+        message: format!("unsupported or unresolved type '{}'", ty.path.join("::")),
+    }
+}
+
+fn non_error_base(base: &Type) -> String {
+    format!(
+        "error derivation requires Error or a type derived from it as its base, found '{}'",
+        base.path.join("::")
+    )
 }
 
 /// Struct and enum ids contained by value in a field or payload type: the type

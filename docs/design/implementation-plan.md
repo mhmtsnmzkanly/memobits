@@ -215,7 +215,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` use the enum pipeline
 for construction, internal calls, and `match`. The compiler-known `Error`
-root has a public `code: u32` field and is currently the only valid error
-argument. The [outcome implementation plan](outcome-implementation.md)
-tracks embedded reference payloads, error derivation, and host reporting of
-returned errors.
+root has a public `code: u32` field. Derived error types inherit fields in
+ancestor-first order and also qualify as error arguments. The
+[outcome implementation plan](outcome-implementation.md) tracks concrete error
+identity, ancestor coercions, embedded reference payloads, and host reporting
+of returned errors.

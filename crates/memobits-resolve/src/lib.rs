@@ -282,16 +282,20 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 ItemKind::Type {
                     public: true,
                     definition,
+                    base,
                     ..
-                } => match definition {
-                    memobits_syntax::TypeDefinition::Alias(ty) => exposed.push(ty),
-                    memobits_syntax::TypeDefinition::Struct(fields) => {
-                        exposed.extend(fields.iter().filter(|f| f.public).map(|f| &f.ty))
+                } => {
+                    exposed.extend(base.iter());
+                    match definition {
+                        memobits_syntax::TypeDefinition::Alias(ty) => exposed.push(ty),
+                        memobits_syntax::TypeDefinition::Struct(fields) => {
+                            exposed.extend(fields.iter().filter(|f| f.public).map(|f| &f.ty))
+                        }
+                        memobits_syntax::TypeDefinition::Enum(variants) => {
+                            exposed.extend(variants.iter().flat_map(|v| &v.payload))
+                        }
                     }
-                    memobits_syntax::TypeDefinition::Enum(variants) => {
-                        exposed.extend(variants.iter().flat_map(|v| &v.payload))
-                    }
-                },
+                }
                 _ => {}
             }
             while let Some(ty) = exposed.pop() {

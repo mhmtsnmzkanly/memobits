@@ -25,44 +25,62 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
   name that same instance. Payloads evaluate once and follow ordinary enum
   ownership rules, including consumption of aggregate operands. If a payload
   exits the current control flow, no enum value is constructed.
-- A resolved `E` must have the compiler-known Error root's type identity.
-  Aliases to that root qualify. Structs with a matching shape do not qualify.
+- `type ParseError: Error { pub line: u32 }` declares a nominal error type.
+  Bases resolve in the declaring module and can name aliases or other derived
+  errors. Fields are laid out from the root through each ancestor in
+  declaration order, followed by the new fields. The root supplies the public
+  field `code: u32`. Every field needs an explicit initializer. Inherited
+  private fields remain private to the module that declared them for reads,
+  writes, literals, and destructuring (TE025).
+- A base outside the Error hierarchy is rejected with TE017. An inherited
+  field name cannot be redeclared, even if the ancestor field is private
+  (TE023). Derivation cycles, including cycles through aliases, are rejected
+  with TE026. Inherited fields also participate in recursive value layout
+  checks (TE026).
+- A resolved `E` must be the compiler-known `Error` or a type derived from it.
+  Aliases to those types qualify. A matching field layout does not qualify.
   Invalid written arguments get TE002 at the argument span. When a short error
   constructor supplies the only evidence for `E`, analysis checks that
   evidence against the bound before reporting any missing arguments.
-  The root has the public field `code: u32`.
+  Derived errors use ordinary struct construction, field access, destructuring,
+  and moves, including when constructing and matching outcome payloads.
 - Project resolution checks imported alias-qualified variants by following
   aliases in their defining modules. An unknown variant on a visible alias
   produces ME006 and use of a private alias from another module produces ME007.
   Public signatures and type definitions also check nested type arguments for
-  private types (ME010).
+  private types (ME010). Base references use ordinary module visibility
+  (ME007), and public derivations cannot expose a private local base (ME010).
 
 ## Remaining gates
 
-1. Implement Error derivation, ancestor-first fields, and cycle checks. Derived
-   declarations are parsed and rejected with TE017. Only the compiler-known
-   root currently qualifies as `E`. Concrete runtime error identity and
-   borrowed ancestor access remain pending. The spelling of owned ancestor
-   conversion is open. `message: String` depends on string support.
+1. Add concrete runtime error identity to values and artifact metadata. Add
+   borrow/share coercions from a derived error to an ancestor. For now,
+   supplying an owned derived value or a borrowed/shared derived reference
+   where the corresponding ancestor type is expected produces TE002.
+   Explicit owned ancestor conversion still has no spelling.
+   `message: String` depends on string support.
 2. Implement reference type arguments and embedded-loan tracking together.
    Dependency tracking must preserve loans through construction, aggregate moves,
    branch joins, calls, destructuring, and matching, including nested outcomes.
    B3 borrowing of an enum's storage remains available for owned payloads.
 3. Implement outcome entry results and artifact metadata so source and artifact
    execution report the same success, absence, and concrete error identity.
-   Guest traps remain separate from returned errors. Outcomes currently cross
-   internal calls, with aggregate entry and export signatures still gated by
-   LE900.
+   Guest traps remain separate from returned errors. Outcomes and derived
+   errors can cross internal calls. Aggregate entry and export signatures
+   still produce LE900.
 
 ## Acceptance evidence
 
 Analysis tests cover alias interning, nested outcomes, inference and arity
 failures, shadowing, the Error bound, exhaustiveness, and aggregate moves.
-Resolver tests cover imported aliases, invalid variants, and nested public
-signature privacy. CLI tests validate Wasm and compare source and standalone
-artifact execution with a primitive entry result. A counter checks once-only
+They also cover ancestor-first layout, non-error bases, duplicate inherited
+fields, derivation cycles, recursive value layouts, and rejected ancestor
+conversions. Resolver tests cover imported aliases, invalid variants, and
+nested public signature privacy. CLI tests cover cross-module derivation and
+field privacy, validate Wasm, and compare source and standalone artifact
+execution with a primitive entry result. A counter checks once-only
 evaluation of success and failure payloads.
 
-Completing B4 also requires tests for inherited fields and error identity,
-last-use release and rejected escapes or loan conflicts through branches and
-calls, and source/artifact parity for outcome entry results.
+Completing B4 also requires tests for concrete error identity and ancestor
+coercions, last-use release and rejected escapes or loan conflicts through
+branches and calls, and source/artifact parity for outcome entry results.
