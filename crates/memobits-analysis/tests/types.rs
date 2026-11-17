@@ -12,6 +12,18 @@ fn codes(source: &str) -> Vec<String> {
 }
 
 #[test]
+fn string_literals_report_execution_is_pending() {
+    let source = "fn f() { let s := \"é\"; }";
+    let diagnostics = check(source);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code.to_string(), "TE017");
+    assert!(diagnostic.message.contains("string literal execution"));
+    let span = diagnostic.span.unwrap();
+    assert_eq!(&source[span.start..span.end], "\"é\"");
+}
+
+#[test]
 fn accepts_defaults_annotations_and_local_calls() {
     for source in [
         "fn main() { let a := 1; let b := 1.5; let c: i64 = 9; let d: f32 = 2.5; a + 2; b + 3.0; c + 3; d + 4.0; }",

@@ -29,6 +29,11 @@ already exercises that distinction.
 
 ## Proposed first executable slice
 
+The frontend parses double-quoted literals and preserves their UTF-8 text
+and byte spans. Escapes, LF and CR inside a literal, and unterminated
+literals produce lexical errors. Analysis reports TE017 for literal
+execution until String typing and lowering land.
+
 - Support single-line, double-quoted literals with direct UTF-8 text,
   including the empty literal. Keep escape grammar, raw literals, and
   interpolation outside this first slice. Accepted interpolation semantics

@@ -61,7 +61,10 @@ fn check_block(block: &Block, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) 
 
 fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
     match &expr.kind {
-        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::Path(_) => {}
+        ExprKind::Number(_)
+        | ExprKind::StringLiteral(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Path(_) => {}
         ExprKind::Array(elements) => {
             for element in elements {
                 check_expr(element, in_loop, diagnostics);

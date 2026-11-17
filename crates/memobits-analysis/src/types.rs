@@ -248,7 +248,10 @@ fn flow_block(block: &Block) -> Flow {
 }
 fn flow_expr(expr: &Expr) -> Flow {
     match &expr.kind {
-        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::Path(_) => Flow::NEXT,
+        ExprKind::Number(_)
+        | ExprKind::StringLiteral(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Path(_) => Flow::NEXT,
         ExprKind::Array(elements) => elements
             .iter()
             .fold(Flow::NEXT, |flow, element| flow.then(flow_expr(element))),
@@ -2241,6 +2244,14 @@ impl Checker {
                     }
                 }
                 chosen
+            }
+            ExprKind::StringLiteral(_) => {
+                self.error(
+                    17,
+                    expr.span,
+                    "string literal execution is not supported yet",
+                );
+                Ty::Error
             }
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {

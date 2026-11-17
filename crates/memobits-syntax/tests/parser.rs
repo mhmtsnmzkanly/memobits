@@ -15,6 +15,63 @@ fn parses_real_project_sources() {
 }
 
 #[test]
+fn string_literals_preserve_utf8_and_quoted_byte_spans() {
+    let source = "fn f() { let empty := \"\"; \"café 😀 // /* }\" }";
+    let result = parse(SourceId(0), source);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
+        panic!()
+    };
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    for (expr, expected) in [
+        (value, ""),
+        (body.tail.as_deref().unwrap(), "café 😀 // /* }"),
+    ] {
+        assert_eq!(expr.kind, ExprKind::StringLiteral(expected.into()));
+        assert_eq!(
+            &source[expr.span.start..expr.span.end],
+            format!("\"{expected}\"")
+        );
+    }
+}
+
+#[test]
+fn malformed_string_literals_report_lexical_errors_and_recover() {
+    for (source, message) in [
+        (
+            r#"fn f() { "é\"ok"; } fn next() {}"#,
+            "escapes in string literals",
+        ),
+        (
+            "fn f() { \"é\n; } fn next() {}",
+            "newline in string literal",
+        ),
+        (
+            "fn f() { \"é\r\n; } fn next() {}",
+            "newline in string literal",
+        ),
+        ("fn f() { \"é", "unterminated string literal"),
+    ] {
+        let lexed = lex(SourceId(0), source);
+        assert_eq!(lexed.diagnostics.len(), 1, "{source:?}");
+        let error = &lexed.diagnostics[0];
+        assert_eq!(error.code.to_string(), "SE001");
+        assert!(error.message.contains(message), "{error:?}");
+        let span = error.span.unwrap();
+        assert!(source.get(span.start..span.end).is_some(), "{span:?}");
+        if source.contains("fn next") {
+            let parsed = parse(SourceId(0), source);
+            assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+            assert!(
+                matches!(&parsed.module.items[1].kind, ItemKind::Function { name, .. } if name == "next")
+            );
+        }
+    }
+}
+
+#[test]
 fn precedence_and_access_modes_are_preserved() {
     let result = parse(
         SourceId(1),

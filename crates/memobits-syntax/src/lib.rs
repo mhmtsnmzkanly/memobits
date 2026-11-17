@@ -136,6 +136,7 @@ pub enum ExprKind {
         index: Box<Expr>,
     },
     Number(String),
+    StringLiteral(String),
     Bool(bool),
     Path(Vec<String>),
     Unary {
@@ -218,6 +219,7 @@ pub struct FieldInit {
 pub enum TokenKind {
     Word(String),
     Number(String),
+    StringLiteral(String),
     Symbol(String),
     Eof,
 }
@@ -244,7 +246,7 @@ fn diagnostic(number: u16, span: Span, message: impl Into<String>) -> Diagnostic
     d
 }
 /// Lex UTF-8 text; all locations are byte offsets on scalar boundaries.
-/// SE001 denotes an unrecognized character or unterminated block comment.
+/// SE001 denotes a lexical error.
 pub fn lex(source: SourceId, text: &str) -> LexResult {
     let mut tokens = Vec::new();
     let mut diagnostics = Vec::new();
@@ -287,7 +289,11 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
             }
             continue;
         }
-        let kind = if c == '_' || c.is_alphabetic() {
+        let kind = if c == '"' {
+            let (end, token) = lex_string(source, text, start, &mut diagnostics);
+            i = end;
+            token
+        } else if c == '_' || c.is_alphabetic() {
             i += c.len_utf8();
             while let Some(c) = text[i..].chars().next() {
                 if c == '_' || c.is_alphanumeric() {
@@ -383,6 +389,56 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
         diagnostics,
     }
 }
+
+fn lex_string(
+    source: SourceId,
+    text: &str,
+    start: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (usize, TokenKind) {
+    let body = start + 1;
+    let mut escaped = false;
+    let mut reported_escape = false;
+    for (offset, c) in text[body..].char_indices() {
+        let end = body + offset;
+        if matches!(c, '\n' | '\r') {
+            diagnostics.push(diagnostic(
+                1,
+                Span { source, start, end },
+                "newline in string literal",
+            ));
+            return (end, TokenKind::StringLiteral(text[body..end].into()));
+        }
+        if escaped {
+            // Skip an escaped quote for recovery only. The literal is invalid.
+            escaped = false;
+        } else if c == '"' {
+            return (end + 1, TokenKind::StringLiteral(text[body..end].into()));
+        } else if c == '\\' {
+            if !reported_escape {
+                diagnostics.push(diagnostic(
+                    1,
+                    Span {
+                        source,
+                        start: end,
+                        end: end + 1,
+                    },
+                    "escapes in string literals are not supported yet",
+                ));
+                reported_escape = true;
+            }
+            escaped = true;
+        }
+    }
+    let end = text.len();
+    diagnostics.push(diagnostic(
+        1,
+        Span { source, start, end },
+        "unterminated string literal",
+    ));
+    (end, TokenKind::StringLiteral(text[body..end].into()))
+}
+
 /// Parse declarations, recovering at declaration and statement boundaries.
 /// SE002 denotes an unexpected token or a missing required token.
 pub fn parse(source: SourceId, text: &str) -> ParseResult {
@@ -1174,6 +1230,10 @@ impl Parser {
                 TokenKind::Number(n) => {
                     self.bump();
                     ExprKind::Number(n)
+                }
+                TokenKind::StringLiteral(text) => {
+                    self.bump();
+                    ExprKind::StringLiteral(text)
                 }
                 TokenKind::Word(s) if s == "true" || s == "false" => {
                     self.bump();

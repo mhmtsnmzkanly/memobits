@@ -218,8 +218,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   UTF-8 token handling and parser conformance require a protocol reference.
 - The [guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
   validates fixed byte buffers with explicit lengths and byte-offset errors.
-  The [first text slice](utf8-text-slice.md) is design only. Guest string and
-  scalar iteration APIs remain pending.
+  The [first text slice](utf8-text-slice.md) supports parsing ordinary
+  UTF-8 literals. Execution, byte length and scalar iteration remain pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

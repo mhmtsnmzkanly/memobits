@@ -1234,6 +1234,7 @@ impl<'a> Builder<'a> {
                 };
                 self.constant(expr.span, value, ty)
             }
+            ExprKind::StringLiteral(_) => unreachable!("string literals fail type checking"),
             ExprKind::Bool(value) => self.constant(
                 expr.span,
                 Constant::Bool(*value),
