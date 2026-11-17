@@ -1,0 +1,88 @@
+// A 5 by 5 grid indexed as grid[y][x]. True marks a wall.
+pub type Grid = Array<Array<Bool, 5>, 5>;
+
+fn inside(x: i32, y: i32) -> Bool {
+    0 <= x && x < 5 && 0 <= y && y < 5
+}
+
+fn passable(grid: borrow Grid, x: i32, y: i32) -> Bool {
+    // Short-circuit before indexing if the coordinates are outside the grid.
+    inside(x, y) && !grid[y][x]
+}
+
+fn magnitude(value: i32) -> i32 {
+    if value < 0 { -value } else { value }
+}
+
+fn estimate(cell: i32, goal_x: i32, goal_y: i32) -> i32 {
+    // Each step changes one coordinate by one. Manhattan distance is a
+    // consistent lower bound even with walls, which can only add steps.
+    magnitude(cell % 5 - goal_x) + magnitude(cell / 5 - goal_y)
+}
+
+type Frontier {
+    open: Array<Bool, 25>,
+    distance: Array<i32, 25>,
+}
+
+fn lowest(frontier: borrow Frontier, goal_x: i32, goal_y: i32) -> Option<i32> {
+    var best := -1;
+    var best_score := 0;
+    var cell := 0;
+    loop {
+        if cell == 25 { break; }
+        if frontier.open[cell] {
+            let score := frontier.distance[cell] + estimate(cell, goal_x, goal_y);
+            // Ties keep the first cell in row-major order.
+            if best < 0 || score < best_score {
+                best = cell;
+                best_score = score;
+            }
+        }
+        cell += 1;
+    }
+    if best < 0 { None } else { Some(best) }
+}
+
+pub fn shortest_cost(grid: borrow Grid, start_x: i32, start_y: i32,
+                     goal_x: i32, goal_y: i32) -> Option<i32> {
+    if !passable(grid, start_x, start_y) || !passable(grid, goal_x, goal_y) {
+        return None;
+    }
+    let start := start_y * 5 + start_x;
+    let goal := goal_y * 5 + goal_x;
+    // A reachable shortest path visits at most 25 cells, so 25 means unseen.
+    var frontier := Frontier { open: [false; 25], distance: [25; 25] };
+    frontier.distance[start] = 0;
+    frontier.open[start] = true;
+    let dx := [1, -1, 0, 0];
+    let dy := [0, 0, 1, -1];
+
+    loop {
+        let cell := match lowest(frontier.borrow(), goal_x, goal_y) {
+            Some(next) => next,
+            None => { return None; },
+        };
+        let cost := frontier.distance[cell];
+        // With a consistent heuristic, a cell selected at minimum g + h
+        // already has its optimal distance. Stop when we select the goal.
+        if cell == goal { return Some(cost); }
+        frontier.open[cell] = false;
+
+        var direction := 0;
+        loop {
+            if direction == 4 { break; }
+            let x := cell % 5 + dx[direction];
+            let y := cell / 5 + dy[direction];
+            direction += 1;
+            if !passable(grid, x, y) { continue; }
+
+            let neighbor := y * 5 + x;
+            let candidate := cost + 1;
+            if candidate < frontier.distance[neighbor] {
+                frontier.distance[neighbor] = candidate;
+                frontier.open[neighbor] = true;
+            }
+        }
+    }
+}

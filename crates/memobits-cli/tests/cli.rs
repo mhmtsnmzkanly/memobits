@@ -8,6 +8,24 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/projects/astar/project.toml");
+    let manifest = manifest.to_str().unwrap();
+    // Build into an isolated directory so the standalone run uses only Wasm.
+    let f = Fixture::new();
+    let source = f.run(&["run", "--project", manifest]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(i32(12))\n");
+
+    let build = f.run(&["build", "--project", manifest, "--output", "astar.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "astar.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
 fn compiler_error_root_executes_as_an_owned_value() {
     let f = Fixture::new();
     f.write(

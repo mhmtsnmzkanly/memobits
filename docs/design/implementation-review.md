@@ -56,7 +56,9 @@ that unrelated executable bodies must not enter the artifact.
   feature. `check_loans` is separate, while `check_moves` rejects references.
   Running both is not yet a usable combined reference-safety pipeline.
 - General aggregate types, strings, collections, matching, and outcome types
-  remain unavailable in the executable subset. A* and ENF consumers are pending.
+  were unavailable in the executable subset at the time of review.
+  The [fixed-grid A* consumer](../../examples/projects/astar/README.md) has
+  since landed. The ENF consumer remains pending.
 - Dependencies, import selection, external packaging, and dependency cycle
   checks are not implemented merely because manifest fields are parsed.
 - Per-definition incremental compilation/cache artifacts are not implemented.

@@ -1,0 +1,32 @@
+use self::grid::Grid;
+use self::grid::shortest_cost;
+
+fn main() -> Result<i32, Error> {
+    // Start and goal sit on opposite sides of a wall with one gap.
+    // S.#.G
+    // ..#..
+    // ..#..
+    // ..#..
+    // .....
+    var grid: Grid = [
+        [false, false, true, false, false],
+        [false, false, true, false, false],
+        [false, false, true, false, false],
+        [false, false, true, false, false],
+        [false, false, false, false, false],
+    ];
+    let cost := match shortest_cost(grid.borrow(), 0, 0, 4, 0) {
+        Some(steps) => steps,
+        None => { return Err(Error { code: 1 }); },
+    };
+    // Every route must walk down four rows, cross four columns, and
+    // climb four rows. A path along the perimeter attains that bound.
+    if cost != 12 { return Err(Error { code: 2 }); }
+
+    // Close the gap. The goal is still open, but the frontier must run out.
+    grid[4][2] = true;
+    match shortest_cost(grid.borrow(), 0, 0, 4, 0) {
+        Some(_) => Err(Error { code: 3 }),
+        None => Ok(cost),
+    }
+}

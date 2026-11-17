@@ -209,8 +209,17 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `Result` and `Attempt` functions with primitive success payloads.
 - Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
-- Local and remote package dependencies, A* and ENF validation consumers,
+- Local and remote package dependencies, the ENF validation consumer,
   optimization, and a stable external ABI remain later milestones.
+
+### A* validation consumer
+
+The [A* example project](../../examples/projects/astar/README.md) completes
+the fixed-grid consumer milestone. It uses four-neighbor movement with unit
+costs, Manhattan distance, and a fixed-array frontier scanned for the lowest
+estimated total cost. The example checks a known optimal cost and an
+unreachable goal. CLI integration coverage runs both checks from source and
+from a standalone Wasm build.
 
 ### Compiler-known outcome types
 
