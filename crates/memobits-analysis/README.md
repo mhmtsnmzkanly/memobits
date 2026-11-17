@@ -1,118 +1,50 @@
 # memobits-analysis
 
+This crate provides parsing-independent semantic checks and lowering for the
+implemented language subset. Run `cargo test --offline -p memobits-analysis` for
+its unit and integration coverage.
+
 `check_control_flow(&Module)` reports `TE020` for `break` and `TE021` for
 `continue` outside a loop. It traverses nested blocks and expressions.
 
-`check_types(&Module)` checks the standalone primitive subset: `Bool`, internal
-Unit, `i8/i16/i32/i64`, `u8/u16/u32/u64`, and `f32/f64`. Integer and float
-literals default to `i32` and `f64`; annotations and parameter types can
-constrain literals. The pass checks local bindings and shadowing, arithmetic,
-logical and comparison operators, `if` conditions and branch results, local
-function calls, assignments, explicit returns, and function tail results.
-It checks integer literal ranges, including the signed minimum written with
-unary minus. A non-Unit function must have a tail value or a provable return
-on every branch. Loops with no reachable break are divergent, including loops that return from
-the function. A reachable break permits normal completion and therefore requires
-a suitable result afterward. Nested loop breaks remain local. Conditions are
-not constant-folded by this flow pass.
+`check_types(&Module)` checks standalone source types and control-flow results.
+The supported set includes `Bool`, internal Unit, signed and unsigned integers
+through 64 bits, `f32`/`f64`, fixed arrays, structs, enums, aliases, calls,
+assignments, matches, and primitive/aggregate `borrow` and `share` parameters.
+It checks literal ranges, branch and function results, and the supported
+operator rules. Standalone source imports and unresolved qualified paths require
+project resolution and are diagnosed here. This pass checks types, not ownership.
 
-This pass reports imports (standalone), unresolved qualified
-function paths and non-struct field access. Struct, enum and alias declarations are
-supported (see below). Primitive borrow/share parameters and named-owner conversions are supported for analysis and IR lowering. It does not resolve modules,
-check ownership, or decide a public spelling for Unit annotations. `TE001`–
-`TE017` and `TE022` are type-pass diagnostics; `TE020` and `TE021` are reserved for control
-flow. Parse first and handle syntax diagnostics separately. Both analysis
-passes return source-spanned diagnostics and must be called independently.
+`check_typed_module(&Module)` retains checked identities and type facts for
+functions, locals, expressions, paths, and enum variants. `check_resolved_types`
+and project lowering operate across reachable resolved modules, including local
+imports and prelude aliases. Resolution is module-granular: all declarations in
+a loaded module are checked, even if one function in it is unreachable from the
+selected entry. The selected target determines which modules are loaded.
 
-`check_typed_module(&Module)` runs the standalone type and control-flow checks
-and returns retained facts only when both succeed. Each function has a
-`FunctionId`; its parameters and local bindings have fresh `LocalId` values,
-including distinct IDs for shadowed names. Expressions have per-function
-`ExprId` values and IR types where they produce a value. Path uses identify
-either a local or a function, so a later lowering pass can use the checked
-identity without resolving names again. These facts use `memobits-ir` types.
-A divergent expression has no value type. For a signed-minimum literal such
-as `-128` constrained to `i8`, only the unary expression has a type fact: the
-positive operand alone does not fit `i8`. Project lowering retains equivalent
-facts across every resolved source module.
+`lower_module` and `lower_resolved` produce validated `memobits-ir::Program`
+values from successful checks. Lowering keeps function/local identities and
+emits explicit control-flow blocks for branches, short-circuit operators, loops,
+`break`, and `continue`. Primitive values are copied implicitly into owned
+positions; aggregates and reference handles move. Run
+`memobits-ownership::check_moves` on the resulting program to check supported
+move and loan rules. A successful type check alone is not an ownership check.
 
-Parameter `Access` is retained independently from local rebinding mutability in
-function signatures, local facts, and local path-use facts. Primitive borrow and share parameters retain reference types. Named-owner conversions produce explicit loans; scalar operations read via Load and share assignments lower to Store. `TE017` still rejects unsupported reference escapes and access conversions.
+The analysis and lowering passes intentionally reject language forms that are
+not implemented yet. Errors use source-spanned diagnostics; type-pass codes are
+`TE001`–`TE017` and `TE022`–`TE032`, while `TE020` and `TE021` are control-flow
+diagnostics. Parse source before invoking these APIs and handle parse errors
+separately.
 
-`check_resolved_types(&Project, &Resolution)` checks the same primitive subset
-across reachable modules after successful resolution. It accepts local function
-calls, imported and prelude aliases, and qualified calls. Function identities
-remain module qualified, so equally named functions in separate modules retain
-their own signatures. The pass returns no type diagnostics when resolution has
-errors. It is still a subset check: it does not check ownership, user-defined
-types, or complete project semantics.
-
-`lower_module(&Module, package, module_path)` lowers a successfully checked
-standalone module to validated `memobits-ir::Program`. `lower_resolved(&Project,
-&Resolution)` checks a successful target-rooted resolution once, retains facts
-across its modules, and lowers them to one program with canonical package/module
-function identities. Function IDs follow sorted module order and source function
-order; imported aliases, prelude aliases, and qualified references point to the
-same function identity. Invalid resolutions return their existing diagnostics,
-and type or control-flow errors prevent IR output. Resolution is module-granular,
-so all functions in each loaded module are included even if a function within
-that module is unreachable from the selected root. The selected target controls
-which modules are loaded, so library lowering excludes an unrelated application
-entry. Wasm emission subsequently removes functions outside the selected export call closure, including unrelated same-module entry functions. Both lowering APIs reuse retained expression types and local/function
-identities. Control flow uses explicit
-blocks for `if`, short-circuit Boolean operators, loops, `break`, and
-`continue`. Owned bindings, calls, assignments, and returns consume aggregates
-and reference handles; primitive values (integers, floats, `Bool`) are copied
-implicitly with an IR `Copy` instead of being moved, and arithmetic and
-conditions read their inputs. Run
-`memobits-ownership::check_moves` on the resulting program for availability
-diagnostics. Lowering does not check ownership or implement user-defined types.
-
-Before producing IR, both lowering APIs also fold pure integer literal unary and
-arithmetic expressions using their retained integer type facts. `LE001` reports
-provable overflow and `LE002` reports a statically known zero divisor. The pass
-covers signed and unsigned widths through 64 bits, including signed minimum
-divided by negative one. Calls and local values are not folded; floating-point
-operations keep IEEE behavior. Dynamic integer operations remain for runtime
-checking.
-
-Run tests with `cargo test --offline -p memobits-analysis`.
-
-Known integer-zero divisors are rejected before IR output even when their
-numerator is dynamic (`x / 0`, `x % (2 - 2)`). Floating-point zero division
-retains IEEE behavior; unknown integer divisors are checked during execution.
-
-Source references are now supported through the ownership gate, including calls
-across resolved local modules. Reference bindings move by default. Arithmetic,
-comparisons, unary operators, and Bool conditions read the primitive referent;
-a primitive referent is copied implicitly into owned arguments, bindings with an
-annotation and returns (`fn get(r: borrow i32) -> i32 { r }`). Reference-valued block
-and if expressions remain conservatively unsupported, as do reference returns,
-aggregate references, and reference rebinding assignments. Wasm reference
-execution remains disabled. See `examples/analysis/references.mb`.
-
-Fixed arrays are supported by the type-only APIs (`check_types` and
-`check_resolved_types`): homogeneous inference, nested arrays, contextual numeric
+Fixed arrays support homogeneous inference, nested arrays, contextual numeric
 literals, length matching, empty contextual literals, and repetition counts.
-Executable typed facts/lowering accept arrays of primitive elements and nested
-arrays (`Array<Array<i32, 2>, 3>`, `m[i][j]`, `m[i] = [..]`, rows lent with
-`m[i].borrow()` / `m[i].share()`): literals,
-repetition `[e; N]` (lowered to a loop over a hidden accumulator; zero count
-evaluates nothing, count one evaluates once), `let`/`var` bindings, indexed
-reads inside expressions, element assignment (`a[i] = v`, `a[i] op= v`, TE004 on
-`let` arrays), and whole-array moves (`let b := a;`, `b = a;`). Primitive elements
-are copied implicitly into owned positions (`let x := a[i];`, `a[i] = a[j];`);
-`TE022` rejects moving an aggregate element (a row) into an owned position. The
-primitive `expr.copy()` is optional; arrays and rows cannot be copied yet (TE017). Arrays also cross internal calls as
-owned, `borrow` and `share` parameters (`Reference { inner: Array }` in IR), with
-element reads through either reference, element writes through `share`, local
-`.borrow()` / `.share()` bindings and reborrows; argument/parameter length or
-element mismatches are TE002 and writes through a borrow are TE004. Arrays are
-also function results and `if`/block values (an array-typed join parameter in
-IR). Every other array form (references to primitive elements, indexing a
-temporary such as `make()[0]`, borrowing a temporary, whole arrays outside an
-owned-value position, reference elements) is still gated with TE017. Repetition expressions are
-type-checked once even at zero count; analysis facts never expand them.
+Executable typed facts and lowering support primitive and nested-array elements,
+indexed reads and writes, whole-array moves, array-valued branches/results,
+internal owned/borrow/share calls, and row loans. Repetition `[e; N]` evaluates
+the initializer once per element; zero count evaluates it zero times. Moving an
+aggregate row out of an array, references to primitive elements, and other
+unsupported array forms remain rejected. See the fixed-array implementation
+document for the complete supported boundary.
 
 ## Structs and type aliases
 

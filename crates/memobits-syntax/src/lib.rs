@@ -1,5 +1,7 @@
 //! Source-spanned syntax for the initial Memobits language subset.
 //! Parsing does not perform name, type, ownership, or control-flow checks.
+pub mod templates;
+
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +34,7 @@ pub enum ItemKind {
         public: bool,
         name: String,
         definition: TypeDefinition,
+        base: Option<Type>,
     },
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -502,12 +505,25 @@ impl Parser {
         let path = self.path()?;
         let mut arguments = Vec::new();
         if self.eat("<") {
-            if path != ["Array"] {
-                return self.fail("only Array supports type arguments");
+            let Some(template) = templates::lookup(&path) else {
+                return self.fail("only compiler-known templates support type arguments");
+            };
+            if template.parameters.is_empty() {
+                return self.fail(template.argument_error);
             }
-            arguments.push(TypeArgument::Type(self.ty()?));
-            self.expect(",")?;
-            arguments.push(TypeArgument::Integer(self.integer_literal()?));
+            for (index, parameter) in template.parameters.iter().enumerate() {
+                if index > 0 {
+                    self.expect(",")?;
+                }
+                arguments.push(match parameter {
+                    templates::ParameterKind::Type | templates::ParameterKind::ErrorType => {
+                        TypeArgument::Type(self.ty()?)
+                    }
+                    templates::ParameterKind::Integer => {
+                        TypeArgument::Integer(self.integer_literal()?)
+                    }
+                });
+            }
             self.expect(">")?;
         } else if path == ["Array"] {
             return self.fail("expected Array<element type, length>");
@@ -587,6 +603,14 @@ impl Parser {
             }
         } else if self.eat("type") {
             let name = self.name()?;
+            let base = if self.eat(":") {
+                Some(self.ty()?)
+            } else {
+                None
+            };
+            if base.is_some() && !self.at("{") {
+                return self.fail("a derived error type requires a field body");
+            }
             let definition = if self.eat("=") {
                 let ty = self.ty()?;
                 self.expect(";")?;
@@ -644,6 +668,7 @@ impl Parser {
                 public,
                 name,
                 definition,
+                base,
             }
         } else {
             return self.fail("expected function, type, or use declaration");

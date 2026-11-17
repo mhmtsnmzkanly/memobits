@@ -35,40 +35,28 @@ Successful commands exit 0 and write stdout; failures exit 1 and write stderr.
 Tests launch the real `mb` executable with isolated temporary directories and
 require no network access: `cargo test --offline -p memobits-cli`.
 
-`mb analyze FILE` runs standalone primitive type and loop-control checks after
-successful parsing. It reports source diagnostics and rejects unsupported imports,
-imports and borrow/share parameters (struct, enum and alias declarations and owned `match` are supported). Ownership is not checked. This
-command is an incremental compiler tool, not a project build or safety guarantee.
+`mb analyze FILE` parses and checks standalone types and loop control. It does
+not perform ownership checking; standalone imports require project resolution.
+Structs, enums, aliases, arrays, matches, and supported references are covered
+within the implemented subset.
 
-`mb ownership FILE` parses and type-checks a standalone source file, lowers it to
-typed IR, and checks owned primitive move availability. Repeated arithmetic reads
-are allowed, while reading a local after moving it reports a source diagnostic.
-Borrow/share parameters remain unsupported (currently rejected by the type pass).
-A successful result is limited to this owned primitive move analysis and is not
-a safety guarantee.
-
-`mb analyze-project [--project PATH] [--lib]` resolves the selected project roots
-and checks primitive function signatures across local modules, including imports,
-prelude aliases, and qualified calls. Loop control is checked in loaded modules.
-User-defined types and ownership remain unsupported by this analysis path.
-
-`mb ownership-project [--project PATH] [--lib]` resolves application entry modules
-or library exports, lowers the supported typed primitive subset, and checks owned
-primitive move availability across reachable modules. Source diagnostics are
-rendered with their originating file and span. A successful check is limited to
-that supported primitive subset and does not guarantee borrow safety.
+`mb ownership FILE` checks supported typed IR moves and loans for one source
+file. `mb analyze-project` and `mb ownership-project` apply the corresponding
+checks across reachable local modules after project resolution. These commands
+report successful completion of their implemented subset, not a proof of safety
+for every possible language feature.
 
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
-application entry or library exports to the supported primitive IR and compiles
-them to WebAssembly. Application builds export the manifest entry as `main`;
-library builds preserve export aliases. Type exports are currently unsupported.
-The backend reports unsupported Wasm instructions as source diagnostics. By
-default, application builds write `target/memobits/app.wasm` and library builds
-write `target/memobits/library.wasm`, relative to the selected manifest's
-directory. `--output` selects another path relative to the current directory.
-The output is replaced atomically only after resolution, type and ownership
-checks, lowering, and backend compilation all succeed, so a failed build leaves
-an existing artifact intact.
+application entry or library exports to WebAssembly. The implemented subset
+includes primitives, fixed arrays, structs, enums, internal calls, and internal
+primitive/aggregate references. External imports and aggregate/reference export
+signatures remain unsupported. Application builds export the manifest entry as
+`main`; library builds preserve export aliases. Type exports are currently
+unsupported. The output is replaced atomically only after resolution, checking,
+lowering, and backend compilation succeed. By default, application builds write
+`target/memobits/app.wasm` and library builds write
+`target/memobits/library.wasm` relative to the manifest; `--output` is relative
+to the current directory.
 
 `mb run [--project PATH]` lowers and compiles the selected application entry in
 memory, then executes its `main` WebAssembly export. `mb run FILE.wasm

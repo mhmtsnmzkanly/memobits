@@ -1,7 +1,7 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_syntax::{
-    Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, Type, TypeArgument,
-    TypeDefinition,
+    templates, Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, Type,
+    TypeArgument, TypeDefinition,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -103,7 +103,13 @@ pub(crate) fn check(
         }
     }
     for item in &module.items {
-        if let ItemKind::Type { definition, .. } = &item.kind {
+        if let ItemKind::Type {
+            definition, base, ..
+        } = &item.kind
+        {
+            if let Some(base) = base {
+                checker.ty(base);
+            }
             match definition {
                 TypeDefinition::Alias(ty) => checker.ty(ty),
                 TypeDefinition::Struct(fields) => {
@@ -157,7 +163,7 @@ impl Checker {
                 self.ty(element);
             }
         }
-        if ty.path == ["Array"] {
+        if templates::lookup(&ty.path).is_some() {
             return;
         }
         if ty.path.len() > 1 {
@@ -181,6 +187,15 @@ impl Checker {
         }
         let mut full = head;
         full.extend(path[1..].iter().cloned());
+        if let [head, _] = full.as_slice() {
+            if !self.imports.contains_key(head)
+                && templates::lookup(std::slice::from_ref(head))
+                    .is_some_and(|template| !template.variants.is_empty())
+            {
+                // Local aliases expanded to a built-in template have no module to load.
+                return;
+            }
+        }
         if full.len() == 2 && self.variants.contains_key(&full[0]) {
             if !self.variants[&full[0]].contains(&full[1]) {
                 self.error(4, span, format!("unknown variant '{}'", path.join("::")));
@@ -257,7 +272,9 @@ impl Checker {
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Path(path) if path.len() == 1 => {
-                if !self.scopes.iter().rev().any(|s| s.contains(&path[0])) {
+                if !self.scopes.iter().rev().any(|s| s.contains(&path[0]))
+                    && templates::variant(&path[0]).is_none()
+                {
                     self.error(1, expr.span, format!("unknown name '{}'", path[0]));
                 }
             }

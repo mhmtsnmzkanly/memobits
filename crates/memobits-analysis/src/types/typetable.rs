@@ -5,8 +5,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Diagnostic, Span};
-use memobits_syntax::{ItemKind, Module, Type, TypeArgument, TypeDefinition};
+use memobits_syntax::{ItemKind, Module, Type, TypeDefinition};
 
+use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
+
+use super::templates::{resolve_arguments, ResolvedArgument};
 use super::{diagnostic, Ty};
 
 #[derive(Clone, Debug)]
@@ -60,7 +63,8 @@ enum AliasState {
 }
 
 pub(super) struct TypeTable {
-    pub types: Vec<StructInfo>,
+    types: Vec<StructInfo>,
+    instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
@@ -96,9 +100,138 @@ fn primitive(name: &str) -> Option<Ty> {
 }
 
 impl TypeTable {
+    fn error_type(&self, span: Span) -> Ty {
+        let mut instances = self.instances.borrow_mut();
+        if let Some((index, _)) = instances
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.0 == TemplateId::Error)
+        {
+            return Ty::Struct((self.types.len() + index) as u32, "Error".into());
+        }
+        let id = (self.types.len() + instances.len()) as u32;
+        instances.push((
+            TemplateId::Error,
+            Vec::new(),
+            StructInfo {
+                name: "Error".into(),
+                module: "__prelude".into(),
+                span,
+                is_enum: false,
+                fields: vec![FieldInfo {
+                    name: "code".into(),
+                    public: true,
+                    ty: Ty::Primitive("u32"),
+                }],
+                variants: Vec::new(),
+            },
+        ));
+        Ty::Struct(id, "Error".into())
+    }
+
+    pub(super) fn instantiate_enum(
+        &self,
+        template: &Template,
+        arguments: Vec<ResolvedArgument>,
+        span: Span,
+    ) -> Ty {
+        let mut instances = self.instances.borrow_mut();
+        if let Some((index, (_, _, info))) = instances
+            .iter()
+            .enumerate()
+            .find(|(_, (id, args, _))| *id == template.id && *args == arguments)
+        {
+            return Ty::Enum((self.types.len() + index) as u32, info.name.as_str().into());
+        }
+        let names = arguments
+            .iter()
+            .map(|argument| match argument {
+                ResolvedArgument::Type(ty) => super::name(ty),
+                ResolvedArgument::Integer(value) => value.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let name = format!("{}<{}>", template.name, names.join(", "));
+        let id = (self.types.len() + instances.len()) as u32;
+        let info = StructInfo {
+            name: name.clone(),
+            module: format!("__prelude::instance{id}"),
+            span,
+            is_enum: true,
+            fields: Vec::new(),
+            variants: template
+                .variants
+                .iter()
+                .map(|variant| VariantInfo {
+                    name: variant.name.into(),
+                    payload: variant
+                        .payload
+                        .iter()
+                        .map(|index| match &arguments[*index] {
+                            ResolvedArgument::Type(ty) => ty.clone(),
+                            ResolvedArgument::Integer(_) => {
+                                unreachable!("enum payload templates require type arguments")
+                            }
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        instances.push((template.id, arguments, info));
+        Ty::Enum(id, name.into())
+    }
+
+    fn instance_template(&self, id: u32) -> Option<TemplateId> {
+        let index = (id as usize).checked_sub(self.types.len())?;
+        self.instances.borrow().get(index).map(|entry| entry.0)
+    }
+
+    pub(super) fn enum_template(&self, id: u32) -> Option<&'static Template> {
+        self.instance_template(id).map(templates::by_id)
+    }
+
+    pub(super) fn check_template_argument(
+        &self,
+        template: &Template,
+        kind: ParameterKind,
+        ty: &Ty,
+        span: Span,
+    ) -> Result<(), TypeFailure> {
+        if matches!(kind, ParameterKind::ErrorType)
+            && !matches!(ty, Ty::Struct(id, _) if self.instance_template(*id) == Some(TemplateId::Error))
+        {
+            return Err(TypeFailure {
+                span,
+                code: 2,
+                message: format!(
+                    "{} requires Error for its error type argument, found {}",
+                    template.name,
+                    super::name(ty)
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn info(&self, id: u32) -> StructInfo {
+        let id = id as usize;
+        if id < self.types.len() {
+            self.types[id].clone()
+        } else {
+            self.instances.borrow()[id - self.types.len()].2.clone()
+        }
+    }
+
+    /// Snapshot all definitions in their ID order for retained IR type facts.
+    pub fn definitions(&self) -> Vec<StructInfo> {
+        let mut definitions = self.types.clone();
+        definitions.extend(self.instances.borrow().iter().map(|entry| entry.2.clone()));
+        definitions
+    }
+
     pub fn empty() -> Self {
         Self {
             types: Vec::new(),
+            instances: RefCell::new(Vec::new()),
             defs: HashMap::new(),
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
@@ -123,11 +256,28 @@ impl TypeTable {
         for (module, syntax) in modules {
             for item in &syntax.items {
                 let ItemKind::Type {
-                    name, definition, ..
+                    name,
+                    definition,
+                    base,
+                    ..
                 } = &item.kind
                 else {
                     continue;
                 };
+                if let Some(base) = base {
+                    diagnostics.push(diagnostic(
+                        17,
+                        base.span,
+                        "error type derivation is parsed but its semantics are not implemented yet",
+                    ));
+                }
+                if templates::lookup(std::slice::from_ref(name)).is_some() {
+                    diagnostics.push(diagnostic(
+                        3,
+                        item.span,
+                        format!("'{}' is reserved for a compiler-known type", name),
+                    ));
+                }
                 let def = match definition {
                     TypeDefinition::Struct(fields) => {
                         let id = table.types.len();
@@ -274,7 +424,7 @@ impl TypeTable {
             for target in contained {
                 if table.reaches(target, id) {
                     let what = |index: usize| {
-                        if table.types[index].is_enum {
+                        if table.info(index as u32).is_enum {
                             "enum"
                         } else {
                             "struct"
@@ -287,7 +437,7 @@ impl TypeTable {
                             "recursive {}: '{}' contains '{}' by value, so '{}' would have infinite size",
                             what(id),
                             table.types[id].name,
-                            table.types[target].name,
+                            table.info(target as u32).name,
                             table.types[id].name
                         ),
                     ));
@@ -325,10 +475,10 @@ impl TypeTable {
             if !seen.insert(current) {
                 continue;
             }
-            for field in &self.types[current].fields {
+            for field in &self.info(current as u32).fields {
                 contained_types(&field.ty, &mut pending);
             }
-            for variant in &self.types[current].variants {
+            for variant in &self.info(current as u32).variants {
                 for ty in &variant.payload {
                     contained_types(ty, &mut pending);
                 }
@@ -364,24 +514,26 @@ impl TypeTable {
             code,
             message,
         };
-        if ty.path == ["Array"] {
-            let [TypeArgument::Type(element), TypeArgument::Integer(count)] =
-                ty.arguments.as_slice()
-            else {
-                return Err(failure(
-                    2,
-                    "Array requires an element type and integer literal length".into(),
-                ));
-            };
-            let element = self.resolve(module, element)?;
-            let Ok(count) = count.raw.replace('_', "").parse::<u32>() else {
-                return Err(TypeFailure {
-                    span: count.span,
-                    code: 8,
-                    message: "array length exceeds implementation limit u32::MAX".into(),
-                });
-            };
-            return Ok(Ty::Array(Box::new(element), count));
+        if let Some(template) = templates::lookup(&ty.path) {
+            let arguments = resolve_arguments(template, ty, |kind, argument| {
+                let resolved = self.resolve(module, argument)?;
+                self.check_template_argument(template, kind, &resolved, argument.span)?;
+                Ok(resolved)
+            })?;
+            match template.id {
+                TemplateId::Error => return Ok(self.error_type(ty.span)),
+                TemplateId::Option | TemplateId::Result | TemplateId::Attempt => {
+                    return Ok(self.instantiate_enum(template, arguments, ty.span));
+                }
+                TemplateId::Array => {
+                    let [ResolvedArgument::Type(element), ResolvedArgument::Integer(count)] =
+                        arguments.as_slice()
+                    else {
+                        unreachable!("template argument contract checked above");
+                    };
+                    return Ok(Ty::Array(Box::new(element.clone()), *count));
+                }
+            }
         }
         if !ty.arguments.is_empty() {
             return Err(failure(1, "unsupported type arguments".into()));
@@ -449,5 +601,39 @@ fn contained_types(ty: &Ty, out: &mut Vec<usize>) {
         Ty::Struct(id, _) | Ty::Enum(id, _) => out.push(*id as usize),
         Ty::Array(element, _) => contained_types(element, out),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    #[test]
+    fn option_instances_share_alias_identity_and_keep_distinct_payloads() {
+        let parsed = memobits_syntax::parse(SourceId(0),
+            "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;");
+        assert!(parsed.diagnostics.is_empty());
+        let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let a = table.resolve_alias("::A").unwrap();
+        assert_eq!(a, table.resolve_alias("::B").unwrap());
+        assert_ne!(a, table.resolve_alias("::C").unwrap());
+        assert_ne!(a, table.resolve_alias("::D").unwrap());
+        assert_eq!(table.definitions().len(), 3);
+        let Ty::Enum(id, _) = a else {
+            panic!("expected enum")
+        };
+        let info = table.info(id);
+        assert_eq!(info.variants[0].payload, vec![Ty::Primitive("i32")]);
+        assert!(info.variants[1].payload.is_empty());
+    }
+
+    #[test]
+    fn option_does_not_hide_recursive_value_layouts() {
+        let parsed = memobits_syntax::parse(SourceId(0), "type Node { next: Option<Node> }");
+        assert!(parsed.diagnostics.is_empty());
+        let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
+        assert!(!diagnostics.is_empty());
     }
 }

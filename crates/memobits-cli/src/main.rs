@@ -16,7 +16,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone primitive types and loop control\n  ownership FILE   Check primitive moves and loans in one source file\n  analyze-project  Check primitive types across reachable local modules\n  ownership-project Check primitive moves and loans across reachable local modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. Build supports the primitive Wasm subset and exported functions only. Run uses the same WebAssembly runtime for project source and artifacts, applies a bounded default fuel budget (see --fuel), and prints scalar results without using them as the process exit code. The project ownership command checks the supported primitive subset; success is not a borrow-safety guarantee. The standalone ownership command checks primitive moves and loans; internal primitive references execute in Wasm; external reference signatures remain unsupported, and success is not a complete safety guarantee. check is not supported yet.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; external aggregate/reference signatures and imports remain unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. check is not supported yet.\n";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -609,10 +609,10 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                     .map(|d| render(d, Some(source)))
                     .collect());
             }
-            return Ok(format!("Ownership check passed: {} (owned moves checked; primitive loans checked; internal primitive references supported)\n", path.display()));
+            return Ok(format!("Ownership check passed: {} (supported moves, loans and aggregate access checked)\n", path.display()));
         }
         if command == "analyze" {
-            return Ok(format!("Primitive analysis passed: {} (standalone types and loop control checked; ownership not checked)\n", path.display()));
+            return Ok(format!("Analysis passed: {} (standalone types and loop control checked; ownership not checked)\n", path.display()));
         }
         return Ok(format!(
             "Syntax valid: {} ({} declarations; semantics not checked)\n",
@@ -768,10 +768,10 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             "application entry"
         };
         if command == "analyze-project" {
-            return Ok(format!("Primitive project analysis passed: {target_name} ({} reachable modules; ownership not checked)\n", result.modules.len()));
+            return Ok(format!("Project analysis passed: {target_name} ({} reachable modules; ownership not checked)\n", result.modules.len()));
         }
         if command == "ownership-project" {
-            return Ok(format!("Ownership project check passed: {target_name} ({} reachable modules; supported primitive moves and loans checked; borrow safety not guaranteed)\n", result.modules.len()));
+            return Ok(format!("Ownership project check passed: {target_name} ({} reachable modules; supported moves, loans and aggregate access checked; complete language safety not established)\n", result.modules.len()));
         }
         let mut output = format!(
             "Resolved {target_name}: {} reachable module(s) (names checked; further semantics, types, and ownership not checked)\n",

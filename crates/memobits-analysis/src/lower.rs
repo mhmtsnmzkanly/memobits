@@ -16,7 +16,7 @@ use memobits_syntax::{
 
 use crate::types::{
     check_resolved_typed, check_typed_module, ExprId, FunctionFacts, MatchFact, PathTarget,
-    TypeFact,
+    TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -404,7 +404,7 @@ struct Builder<'a> {
     expression_ids: HashMap<usize, ExprId>,
     expressions: HashMap<ExprId, Option<Type>>,
     paths: HashMap<ExprId, PathTarget>,
-    variants: HashMap<ExprId, u32>,
+    variants: HashMap<ExprId, VariantUse>,
     matches: HashMap<ExprId, &'a MatchFact>,
     current: Option<BlockId>,
     last_value: Option<Operand>,
@@ -434,7 +434,7 @@ impl<'a> Builder<'a> {
         let variants = facts
             .variant_uses
             .iter()
-            .map(|u| (u.expression, u.variant))
+            .map(|u| (u.expression, *u))
             .collect();
         let matches = facts.matches.iter().map(|m| (m.expression, m)).collect();
         Self {
@@ -1605,10 +1605,16 @@ impl<'a> Builder<'a> {
     /// An enum variant construction. Payload arguments are evaluated and
     /// captured left to right, then handed to `EnumNew` in declaration order.
     fn lower_variant(&mut self, expr: &Expr, arguments: &[Expr]) -> Option<Operand> {
-        let Some(Type::Enum(id)) = self.ty(expr) else {
-            unreachable!("checked variant type")
+        let VariantUse {
+            enum_id, variant, ..
+        } = self.variants[&self.id(expr)];
+        let Some(id) = enum_id else {
+            // Inference stopped at a diverging payload, so there is no enum to build.
+            for argument in arguments {
+                self.lower_expr(argument)?;
+            }
+            unreachable!("variant without an inferred type must diverge");
         };
-        let variant = self.variants[&self.id(expr)];
         let types = self.types;
         let declared = &types[id.0 as usize].variants[variant as usize];
         let mut payload = Vec::with_capacity(arguments.len());

@@ -35,11 +35,14 @@ loan path (like a field path). Mutable matching stays deferred: matching
 through a `share` binds read-only too.
 
 **B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy (planned).**
+Implementation sequence and acceptance gates: `outcome-implementation.md`.
 The standard generic enums, written once as prelude declarations and
 monomorphised per instantiation in analysis, so IR and Wasm see plain enums.
-Needs minimal generic enum syntax (`Option<i32>`), bringing `Some`/`None`/`Ok`/
-`Err` into scope, and reference payloads (`Option<borrow i32>`) on top of B3's
-loans.
+Type arguments such as `Option<i32>` instantiate compiler-known declarations;
+user-defined generic declarations remain deferred, as required by `decisions.md`.
+Prelude variants are `Some`/`None`, `Ok`/`Err`, and `Done`/`Skipped`/`Failed`.
+Reference payloads (`Option<borrow i32>`) must preserve loans through construction,
+moves, calls and matching; B3 alone does not establish this lifetime tracking.
 
 ## Design notes confirmed in the code
 

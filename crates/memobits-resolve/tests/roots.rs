@@ -288,3 +288,53 @@ fn prelude_alias_cannot_hide_private_type_in_public_signature() {
         result.diagnostics
     );
 }
+
+#[test]
+fn imported_outcome_alias_variants_check_names_and_visibility() {
+    let f = Fixture::new(
+        "use inner::Read as Inner;
+         pub type Maybe = Option<i32>;
+         pub type Read = Inner;
+         type Hidden = Attempt<i32, Error>;",
+    );
+    fs::write(
+        f.0.join("src/inner.mb"),
+        "pub type Read = Result<i32, Error>;",
+    )
+    .unwrap();
+    for (source, expected) in [
+        (
+            "use math::Maybe; use math::Read as R; fn main() { Maybe::Some(7); R::Ok(7); }",
+            None,
+        ),
+        ("fn main() { math::Read::Done(7); }", Some("ME006")),
+        ("fn main() { math::Hidden::Skipped; }", Some("ME007")),
+    ] {
+        fs::write(f.0.join("src/main.mb"), source).unwrap();
+        let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);
+        let codes: Vec<_> = result
+            .diagnostics
+            .iter()
+            .map(|d| d.code.to_string())
+            .collect();
+        assert_eq!(codes, expected.into_iter().collect::<Vec<_>>(), "{source}");
+    }
+}
+
+#[test]
+fn public_outcome_signatures_cannot_expose_private_nested_types() {
+    let f = Fixture::new(
+        "type Hidden { pub value: i32 }
+         pub fn make() -> Option<Attempt<Array<Hidden, 2>, Error>> { None }",
+    );
+    fs::write(f.0.join("src/main.mb"), "use math::make; fn main() {}").unwrap();
+    let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "ME010" && d.message.contains("Hidden")),
+        "{:?}",
+        result.diagnostics
+    );
+}

@@ -18,7 +18,10 @@ use memobits_syntax::{
     PatternKind, Statement, StatementKind, Type,
 };
 
+mod templates;
 mod typetable;
+use memobits_syntax::templates::{self as registry, Template};
+use templates::ResolvedArgument;
 use typetable::TypeTable;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,11 +360,12 @@ pub struct PathUse {
 }
 
 /// A construction of an enum variant. `expression` is the path expression of a
-/// unit variant, or the call expression of a payload variant; the expression's
-/// type is the enum.
+/// unit variant, or the call expression of a payload variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VariantUse {
     pub expression: ExprId,
+    /// Absent when a diverging payload prevents inference of the enum type.
+    pub enum_id: Option<TypeId>,
     /// Index into the enum's variants.
     pub variant: u32,
 }
@@ -439,7 +443,7 @@ pub struct TypedModule {
 fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
     let unit = || IrType::Primitive(Primitive::Unit);
     table
-        .types
+        .definitions()
         .iter()
         .map(|info| TypeFact {
             module: info.module.clone(),
@@ -779,8 +783,8 @@ impl Checker {
         };
         let target = self.type_path(&pattern_type);
         let table = Rc::clone(&self.table);
-        let info = match &target {
-            Ty::Struct(id, _) => Some(&table.types[*id as usize]),
+        let info_storage = match &target {
+            Ty::Struct(id, _) => Some(table.info(*id)),
             Ty::Error => None,
             other => {
                 self.error(
@@ -791,6 +795,7 @@ impl Checker {
                 None
             }
         };
+        let info = info_storage.as_ref();
         self.allow_array_value(value);
         let inferred = self.expr(value, Some(&target));
         self.reject_extraction(value, &inferred);
@@ -1347,7 +1352,7 @@ impl Checker {
         match base_ty {
             Ty::Struct(id, struct_name) => {
                 let table = Rc::clone(&self.table);
-                let info = &table.types[id as usize];
+                let info = &table.info(id);
                 match info.fields.iter().find(|field| field.name == field_name) {
                     None => {
                         self.error(
@@ -1411,17 +1416,153 @@ impl Checker {
         let Ty::Enum(id, _) = &resolved else {
             return None;
         };
-        let index = self.table.types[*id as usize]
+        let index = self
+            .table
+            .info(*id)
             .variants
             .iter()
             .position(|candidate| &candidate.name == variant)
             .map(|index| index as u32);
         Some((resolved, index))
     }
-    fn record_variant(&mut self, id: Option<ExprId>, variant: u32) {
+    fn contextual_variant(
+        &self,
+        path: &[String],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Option<(Ty, Option<u32>)> {
+        if let Some((template, index)) = self.prelude_variant(path) {
+            if let Some(as_ty @ Ty::Enum(id, _)) = expected {
+                if self
+                    .table
+                    .enum_template(*id)
+                    .is_some_and(|expected| expected.id == template.id)
+                {
+                    return Some((as_ty.clone(), Some(index as u32)));
+                }
+            }
+        }
+        self.variant_path(path, span)
+    }
+
+    fn prelude_variant(&self, path: &[String]) -> Option<(&'static Template, usize)> {
+        let [name] = path else { return None };
+        if self.lookup(name).is_some()
+            || self.functions.contains_key(name)
+            || self.imports.contains_key(name)
+        {
+            return None;
+        }
+        registry::variant(name)
+    }
+
+    /// An unqualified prelude constructor without a concrete instance in context.
+    fn infer_variant(
+        &mut self,
+        expr: &Expr,
+        id: Option<ExprId>,
+        template: &Template,
+        variant: usize,
+        arguments: Option<&[Expr]>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let declared = &template.variants[variant];
+        let payload = arguments.unwrap_or_default();
+        if declared.payload.is_empty() && arguments.is_some() {
+            self.error(
+                28,
+                expr.span,
+                format!(
+                    "variant '{}::{}' has no payload; write it without parentheses",
+                    template.name, declared.name
+                ),
+            );
+        } else if payload.len() != declared.payload.len() {
+            self.error(
+                if arguments.is_none() { 28 } else { 10 },
+                expr.span,
+                format!(
+                    "variant '{}::{}' expects {} payload argument(s), found {}",
+                    template.name,
+                    declared.name,
+                    declared.payload.len(),
+                    payload.len()
+                ),
+            );
+        } else if let Some(want) = expected.filter(|ty| !matches!(ty, Ty::Error | Ty::Never)) {
+            self.error(
+                2,
+                expr.span,
+                format!(
+                    "variant '{}' belongs to {}, but expected {}",
+                    declared.name,
+                    template.name,
+                    name(want)
+                ),
+            );
+        } else {
+            let mut inferred = vec![None; template.parameters.len()];
+            for (argument, &index) in payload.iter().zip(declared.payload) {
+                self.allow_array_value(argument);
+                let actual = self.expr(argument, None);
+                self.reject_extraction(argument, &actual);
+                if actual == Ty::Never {
+                    self.record_variant(id, None, variant as u32);
+                    return Ty::Never;
+                }
+                if actual == Ty::Error {
+                    return Ty::Error;
+                }
+                if matches!(actual, Ty::Reference { .. } | Ty::Function(..)) || actual == UNIT {
+                    self.error(
+                        17,
+                        argument.span,
+                        format!("this {} payload type is not supported yet", template.name),
+                    );
+                    return Ty::Error;
+                }
+                if let Err(failure) = self.table.check_template_argument(
+                    template,
+                    template.parameters[index],
+                    &actual,
+                    argument.span,
+                ) {
+                    self.error(failure.code, failure.span, failure.message);
+                    return Ty::Error;
+                }
+                inferred[index] = Some(ResolvedArgument::Type(actual));
+            }
+            if let Some(resolved) = inferred.into_iter().collect() {
+                let ty = self.table.instantiate_enum(template, resolved, expr.span);
+                let Ty::Enum(enum_id, _) = ty else {
+                    unreachable!("enum template instantiation")
+                };
+                self.record_variant(id, Some(TypeId(enum_id)), variant as u32);
+                return ty;
+            }
+            self.error(
+                2,
+                expr.span,
+                format!(
+                    "cannot determine {}'s outcome type; provide an {} annotation",
+                    declared.name,
+                    template.annotation()
+                ),
+            );
+            return Ty::Error;
+        }
+        for argument in payload {
+            self.allow_array_value(argument);
+            self.expr(argument, None);
+        }
+        Ty::Error
+    }
+
+    fn record_variant(&mut self, id: Option<ExprId>, enum_id: Option<TypeId>, variant: u32) {
         if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
             facts.variant_uses.push(VariantUse {
                 expression,
+                enum_id,
                 variant,
             });
         }
@@ -1440,7 +1581,7 @@ impl Checker {
             unreachable!("variant paths name enums")
         };
         let table = Rc::clone(&self.table);
-        let info = &table.types[*enum_id as usize];
+        let info = &table.info(*enum_id);
         let Some(variant) = variant else {
             self.error(
                 28,
@@ -1476,7 +1617,7 @@ impl Checker {
                 "enum values must be used as an owned value (binding initializer, assignment, argument, result, field, element or branch value); they cannot be a temporary",
             );
         }
-        self.record_variant(id, variant);
+        self.record_variant(id, Some(TypeId(*enum_id)), variant);
         enum_ty
     }
     /// `Enum::Variant(payload...)`: arity and payload types are checked like a
@@ -1493,7 +1634,7 @@ impl Checker {
             unreachable!("variant paths name enums")
         };
         let table = Rc::clone(&self.table);
-        let info = &table.types[*enum_id as usize];
+        let info = &table.info(*enum_id);
         let ExprKind::Call { callee, .. } = &expr.kind else {
             unreachable!("variant calls are calls")
         };
@@ -1556,11 +1697,12 @@ impl Checker {
             }
             diverges |= actual == Ty::Never;
         }
+        self.record_variant(id, Some(TypeId(*enum_id)), variant);
         if diverges {
-            return Ty::Never;
+            Ty::Never
+        } else {
+            enum_ty
         }
-        self.record_variant(id, variant);
-        enum_ty
     }
     /// `match scrutinee { pattern => body, ... }`. Patterns are flat
     /// (`Enum::Variant`, `Enum::Variant(a, _)`, `_`). An owned scrutinee is
@@ -1603,7 +1745,8 @@ impl Checker {
                 format!("`match` requires an enum value, found {}", name(other)),
             ),
         }
-        let info = enum_id.map(|enum_id| &table.types[enum_id as usize]);
+        let info_storage = enum_id.map(|enum_id| table.info(enum_id));
+        let info = info_storage.as_ref();
         let mut covered: Vec<bool> =
             info.map_or(Vec::new(), |info| vec![false; info.variants.len()]);
         let mut wildcard_seen = false;
@@ -1630,32 +1773,38 @@ impl Checker {
                     wildcard_seen = true;
                 }
                 PatternKind::Variant { path, slots } => {
-                    let resolved = if path.len() < 2 {
+                    let expected_enum = enum_id.map(|id| Ty::Enum(id, table.info(id).name.into()));
+                    let contextual =
+                        self.contextual_variant(path, arm.pattern.span, expected_enum.as_ref());
+                    let resolved = if contextual.is_some() {
+                        contextual
+                    } else if let Some((template, _)) = self.prelude_variant(path) {
                         self.error(
                             30,
                             arm.pattern.span,
                             format!(
-                                "'{}' is not an enum variant pattern; binding patterns are not supported, write `_` to match anything",
-                                path.join("::")
+                                "pattern '{}' belongs to {}, but the scrutinee has type '{}'",
+                                path[0],
+                                template.name,
+                                name(&scrutinee_ty)
                             ),
                         );
                         None
                     } else {
-                        match self.variant_path(path, arm.pattern.span) {
-                            None => {
-                                self.error(
-                                    30,
-                                    arm.pattern.span,
-                                    format!("'{}' does not name an enum variant", path.join("::")),
-                                );
-                                None
-                            }
-                            Some(found) => Some(found),
-                        }
+                        let message = if path.len() == 1 {
+                            format!(
+                                "'{}' is not an enum variant pattern; binding patterns are not supported, write `_` to match anything",
+                                path[0]
+                            )
+                        } else {
+                            format!("'{}' does not name an enum variant", path.join("::"))
+                        };
+                        self.error(30, arm.pattern.span, message);
+                        None
                     };
-                    let mut declared_payload: Option<&[Ty]> = None;
+                    let mut declared_payload: Option<Vec<Ty>> = None;
                     if let Some((Ty::Enum(pattern_enum, pattern_name), variant)) = &resolved {
-                        let pattern_info = &table.types[*pattern_enum as usize];
+                        let pattern_info = &table.info(*pattern_enum);
                         if let Some(expected_enum) = enum_id {
                             if expected_enum != *pattern_enum {
                                 self.error(
@@ -1682,7 +1831,7 @@ impl Checker {
                                     Some(variant) => {
                                         let declared = &pattern_info.variants[*variant as usize];
                                         arm_fact.variant = Some(*variant);
-                                        declared_payload = Some(&declared.payload);
+                                        declared_payload = Some(declared.payload.clone());
                                         if slots.len() != declared.payload.len() {
                                             self.error(
                                                 30,
@@ -1714,6 +1863,7 @@ impl Checker {
                     let mut bound: Vec<&str> = Vec::new();
                     for (index, slot) in slots.iter().enumerate() {
                         let slot_ty = declared_payload
+                            .as_ref()
                             .and_then(|payload| payload.get(index))
                             .cloned()
                             .unwrap_or(Ty::Error);
@@ -1837,21 +1987,23 @@ impl Checker {
     }
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
-            ExprKind::Path(path) if self.variant_path(path, expr.span).is_some() => {
+            ExprKind::Path(path)
+                if self.contextual_variant(path, expr.span, expected).is_some() =>
+            {
                 let (enum_ty, variant) = self
-                    .variant_path(path, expr.span)
+                    .contextual_variant(path, expr.span, expected)
                     .expect("checked variant path");
                 self.unit_variant(expr, id, path, enum_ty, variant)
             }
             ExprKind::Call { callee, arguments }
                 if matches!(&callee.kind, ExprKind::Path(path)
-                    if self.variant_path(path, callee.span).is_some()) =>
+                    if self.contextual_variant(path, callee.span, expected).is_some()) =>
             {
                 let ExprKind::Path(path) = &callee.kind else {
                     unreachable!("checked variant callee")
                 };
                 let (enum_ty, variant) = self
-                    .variant_path(path, callee.span)
+                    .contextual_variant(path, callee.span, expected)
                     .expect("checked variant path");
                 self.variant_call(expr, id, arguments, enum_ty, variant)
             }
@@ -2038,6 +2190,9 @@ impl Checker {
             }
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {
+                if let Some((template, variant)) = self.prelude_variant(path) {
+                    return self.infer_variant(expr, id, template, variant, None, expected);
+                }
                 if path.len() != 1 {
                     let expanded = self.imports.get(&path[0]).map_or_else(
                         || path.join("::"),
@@ -2258,6 +2413,18 @@ impl Checker {
                 }
             }
             ExprKind::Call { callee, arguments } => {
+                if let ExprKind::Path(path) = &callee.kind {
+                    if let Some((template, variant)) = self.prelude_variant(path) {
+                        return self.infer_variant(
+                            expr,
+                            id,
+                            template,
+                            variant,
+                            Some(arguments),
+                            expected,
+                        );
+                    }
+                }
                 if let ExprKind::Field { base, name } = &callee.kind {
                     let access = match name.as_str() {
                         "borrow" => Some(IrAccess::Borrow),
@@ -2372,8 +2539,8 @@ impl Checker {
                 };
                 let target = self.type_path(&literal_type);
                 let table = Rc::clone(&self.table);
-                let info = match &target {
-                    Ty::Struct(id, _) => Some(&table.types[*id as usize]),
+                let info_storage = match &target {
+                    Ty::Struct(id, _) => Some(table.info(*id)),
                     Ty::Error => None,
                     other => {
                         self.error(
@@ -2384,6 +2551,7 @@ impl Checker {
                         None
                     }
                 };
+                let info = info_storage.as_ref();
                 let mut seen: Vec<&str> = Vec::new();
                 // Field initialisers are checked (and later evaluated) in source order.
                 for init in fields {

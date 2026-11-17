@@ -6,6 +6,175 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn compiler_error_root_executes_as_an_owned_value() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn make() -> Error { Error { code: 17 } }
+        fn main() -> u32 { let error := make(); error.code }",
+    );
+    let output = f.run(&["run"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.stdout, b"Result: u32(17)\n");
+}
+
+#[test]
+fn inferred_options_execute_payload_once_in_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/helper.mb",
+        "pub fn bump(n: share i32) -> i32 { n += 1; n }",
+    );
+    f.write(
+        "src/main.mb",
+        "use helper::bump;
+        fn main() -> i32 {
+            var count := 0;
+            let value := Some(Some(bump(count.share())));
+            let empty: Option<i32> = None;
+            let result := match value {
+                Some(inner) => match inner { Some(n) => n, None => 0 },
+                None => 0
+            };
+            result + count * 10 + match empty { Some(n) => n, None => 0 }
+        }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{:?}", source);
+    assert_eq!(source.stdout, b"Result: i32(11)\n");
+    let build = f.run(&["build", "--output", "option.wasm"]);
+    assert!(build.status.success(), "{:?}", build);
+    let bytes = fs::read(f.0.join("option.wasm")).unwrap();
+    assert!(wasm_exports(&bytes).contains(&"main".to_owned()));
+    let bare = Fixture::new();
+    fs::write(bare.0.join("option.wasm"), bytes).unwrap();
+    let artifact = bare.run(&["run", "option.wasm"]);
+    assert!(artifact.status.success(), "{:?}", artifact);
+    assert_eq!(source.stdout, artifact.stdout);
+}
+
+#[test]
+fn unresolved_none_preserves_previous_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() { let value := None; }");
+    f.write("option.wasm", "existing artifact");
+    let message = err(f.run(&["build", "--output", "option.wasm"]), "TE002");
+    assert!(message.contains("Option<T> annotation"), "{message}");
+    assert_eq!(
+        fs::read(f.0.join("option.wasm")).unwrap(),
+        b"existing artifact"
+    );
+}
+
+#[test]
+fn owned_outcomes_execute_once_through_imported_aliases_in_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/model.mb",
+        "pub type Maybe = Option<u32>;
+         pub type Failure = Error;
+         pub type Read = Result<u32, Failure>;
+         pub type Work = Attempt<Read, Failure>;
+         pub fn bump(n: share u32) -> u32 { n += 1; n }
+         pub fn fail(n: share u32) -> Failure { Error { code: bump(n) } }
+         pub fn zero() -> u32 { 0 }",
+    );
+    f.write(
+        "src/main.mb",
+        "use model::Maybe;
+         use model::Read as R;
+         use model::Work;
+         use model::bump;
+         use model::fail;
+         use model::zero as Skipped;
+         fn read(value: Work) -> u32 {
+             match value {
+                 Work::Done(r) => match r { Ok(n) => n, R::Err(e) => e.code },
+                 Work::Skipped => Skipped(),
+                 Failed(e) => e.code
+             }
+         }
+         fn main() -> i32 {
+             var count: u32 = 0;
+             let value := Work::Done(Ok(bump(count.share())));
+             let failure: Work = Failed(fail(count.share()));
+             let miss := model::Work::Skipped;
+             let optional := match Maybe::Some(7) { Maybe::Some(n) => n, Maybe::None => 0 };
+             if optional + read(value) + read(failure) + read(miss) + count * 10 == 30 { 30 } else { 0 }
+         }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(30)\n");
+
+    let build = f.run(&["build", "--output", "outcomes.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bytes = fs::read(f.0.join("outcomes.wasm")).unwrap();
+    assert!(wasm_exports(&bytes).contains(&"main".to_owned()));
+    let bare = Fixture::new();
+    fs::write(bare.0.join("outcomes.wasm"), bytes).unwrap();
+    let artifact = bare.run(&["run", "outcomes.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(source.stdout, artifact.stdout);
+}
+
+#[test]
+fn project_outcomes_reject_invalid_error_argument_and_missing_context() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    for (source, diagnostic) in [
+        (
+            "fn main() { let value := Ok(7); }",
+            "Result<T, E> annotation",
+        ),
+        (
+            "fn main() { let value: Attempt<i32, u32> = Done(7); }",
+            "requires Error",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let message = err(f.run(&["analyze-project"]), "TE002");
+        assert!(message.contains(diagnostic), "{message}");
+    }
+}
+
+#[test]
+fn outcome_entry_results_remain_gated() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    for source in [
+        "fn main() -> Result<i32, Error> { Ok(7) }",
+        "fn main() -> Attempt<i32, Error> { Skipped }",
+    ] {
+        f.write("src/main.mb", source);
+        err(f.run(&["build"]), "LE900");
+    }
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -378,8 +547,8 @@ fn ownership_project_checks_resolved_roots_and_imported_moves() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("library exports"));
-    assert!(text.contains("supported primitive moves and loans checked"));
-    assert!(text.contains("borrow safety not guaranteed"));
+    assert!(text.contains("supported moves, loans and aggregate access checked"));
+    assert!(text.contains("complete language safety not established"));
 }
 
 #[test]
@@ -519,7 +688,8 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("owned moves checked"));
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("supported moves, loans and aggregate access checked"));
 
     f.write(
         "reinit.mb",

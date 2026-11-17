@@ -3,7 +3,7 @@
 mod names;
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
 use memobits_project::Project;
-use memobits_syntax::{ItemKind, Module};
+use memobits_syntax::{templates, ItemKind, Module, TypeArgument, TypeDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +56,73 @@ fn split(path: &str, project: &Project) -> Option<(String, String)> {
     Some((module.into(), name.into()))
 }
 
+/// Follow a variant's type aliases in their defining modules. The references
+/// collected from each alias declaration independently check target visibility.
+fn variant_exists(
+    mut module: String,
+    mut name: String,
+    variant: &str,
+    project: &Project,
+    modules: &BTreeMap<String, SourceModule>,
+    imports: &BTreeMap<String, BTreeMap<String, String>>,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert((module.clone(), name.clone())) {
+            // Analysis diagnoses alias cycles at the declaration.
+            return true;
+        }
+        let Some(source) = modules.get(&module) else {
+            return false;
+        };
+        let definition = source
+            .syntax
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Type {
+                    name: candidate,
+                    definition,
+                    ..
+                } if candidate == &name => Some(definition),
+                _ => None,
+            });
+        match definition {
+            Some(TypeDefinition::Enum(variants)) => {
+                return variants.iter().any(|candidate| candidate.name == variant);
+            }
+            Some(TypeDefinition::Alias(target)) => {
+                if let Some(template) = templates::lookup(&target.path) {
+                    return template.variant_index(variant).is_some();
+                }
+                let [head, tail @ ..] = target.path.as_slice() else {
+                    return false;
+                };
+                if tail.is_empty()
+                    && source.syntax.items.iter().any(
+                        |item| matches!(&item.kind, ItemKind::Type { name, .. } if name == head),
+                    )
+                {
+                    name = head.clone();
+                    continue;
+                }
+                let expanded = match imports[&module].get(head) {
+                    Some(path) if tail.is_empty() => path.clone(),
+                    Some(path) => format!("{}::{}", path, tail.join("::")),
+                    None if tail.is_empty() => return false,
+                    None => target.path.join("::"),
+                };
+                let Some((target_module, target_name)) = split(&expanded, project) else {
+                    return false;
+                };
+                module = target_module;
+                name = target_name;
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Resolve explicit imports from a target's modules. Binary/source dependency
 /// loading are not implemented by this pass yet.
 pub fn resolve(project: &Project, target: Target) -> Resolution {
@@ -98,6 +165,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
     }
     let mut visited = BTreeSet::new();
     let mut references = Vec::new();
+    let mut imports = BTreeMap::new();
     while let Some(reference) = pending.pop() {
         let Some((module, _)) = split(&reference.path, project) else {
             result.diagnostics.push(error(
@@ -226,7 +294,11 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 },
                 _ => {}
             }
-            for ty in exposed {
+            while let Some(ty) = exposed.pop() {
+                exposed.extend(ty.arguments.iter().filter_map(|argument| match argument {
+                    TypeArgument::Type(ty) => Some(ty),
+                    TypeArgument::Integer(_) => None,
+                }));
                 let qualified = if ty.path.len() == 1 {
                     type_imports
                         .get(&ty.path[0])
@@ -270,6 +342,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 requires_type,
             });
         }
+        imports.insert(module.clone(), type_imports);
         result.modules.insert(
             module,
             SourceModule {
@@ -300,18 +373,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                     public, name: n, ..
                 } if n == definition_name => {
                     let is_type = matches!(item.kind, ItemKind::Type { .. });
-                    let valid_variant = match (&item.kind, variant) {
-                        (_, None) => true,
-                        (
-                            ItemKind::Type {
-                                definition: memobits_syntax::TypeDefinition::Enum(variants),
-                                ..
-                            },
-                            Some(v),
-                        ) => variants.iter().any(|candidate| candidate.name == v),
-                        _ => false,
-                    };
-                    valid_variant.then_some((*public, is_type && variant.is_none()))
+                    Some((*public, is_type))
                 }
                 _ => None,
             });
@@ -328,11 +390,32 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                     reference.span,
                 ))
             }
-            Some((_, false)) if reference.requires_type => result.diagnostics.push(error(
-                8,
-                format!("definition '{}::{name}' is not a type", module),
-                reference.span,
-            )),
+            Some((_, is_type))
+                if variant.is_some_and(|variant| {
+                    !is_type
+                        || !variant_exists(
+                            module.clone(),
+                            definition_name.to_owned(),
+                            variant,
+                            project,
+                            &result.modules,
+                            &imports,
+                        )
+                }) =>
+            {
+                result.diagnostics.push(error(
+                    6,
+                    format!("definition '{}::{name}' does not exist", module),
+                    reference.span,
+                ))
+            }
+            Some((_, is_type)) if reference.requires_type && (!is_type || variant.is_some()) => {
+                result.diagnostics.push(error(
+                    8,
+                    format!("definition '{}::{name}' is not a type", module),
+                    reference.span,
+                ))
+            }
             Some((_, is_type))
                 if reference.from.is_none()
                     && !reference.public
