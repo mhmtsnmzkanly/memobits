@@ -15,7 +15,11 @@ metering at all. `run` uses `RunOptions::default()`, which is metered with
 
 Errors distinguish invalid modules, unsupported imports, instantiation failures,
 missing exports, unsupported signatures, traps, fuel exhaustion, and stack
-overflow. This is a small execution
+overflow. A checked failure (integer overflow, division by zero, array bounds)
+is `RunError::Checked` with a `TrapReason` and, when the module carries the
+`memobits.traps` custom section, a `SourceLocation`; `TrapTable` and
+`with_trap_table` write and read that section. Modules without it keep the
+generic `RunError::Trap`. This is a small execution
 API for the compiler pipeline; it does not claim a complete sandbox or host
 ABI.
 

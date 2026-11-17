@@ -1070,7 +1070,8 @@ fn independent_parameter_contract_is_enforced_at_calls() {
     program.validate().unwrap();
     assert!(check_loans(&program)
         .iter()
-        .any(|d| d.code.to_string() == "BE005" && d.message.contains("call arguments")));
+        .any(|d| d.code.to_string() == "BE005"
+            && d.message.contains("another argument of this call")));
 }
 
 #[test]

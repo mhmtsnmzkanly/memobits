@@ -24,7 +24,9 @@ IR. Run it alongside `check_moves` when both availability and loan checks are
 needed. It tracks reference provenance through captures, reborrows, assignments,
 and block parameters; reference liveness ends after its last use. It checks
 owner writes and consumes, overlapping `Share` access, call argument loans,
-and repeated live `Share` loan sites in loops. BE005 reports loan conflicts.
+and repeated live `Share` loan sites in loops. BE005 reports loan conflicts in source terms (for example "cannot write `l.a.x`
+while it is shared") with notes at the place where the live loan began and where
+it is used later; identical diagnostics (same code and span) are reported once.
 Invalid IR is rejected with BE003, and reference-valued function returns are
 currently unsupported and reported with BE006. This pass is conservative at
 control-flow joins and does not yet model returned-reference provenance or

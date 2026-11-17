@@ -4,6 +4,12 @@
 //! results. It preserves Wasm's numeric representation; it has no source type
 //! metadata to distinguish signed from unsigned integers.
 
+mod traps;
+pub use traps::{
+    custom_section, with_custom_section, with_trap_table, SourceLocation, TrapReason, TrapTable,
+    TRAP_SECTION,
+};
+
 use wasmi::{
     Config, Engine, Error as WasmiError, ExternType, Instance, Module, Store, TrapCode, Val,
     ValType,
@@ -67,6 +73,12 @@ pub enum RunError {
     Trap(String),
     /// The guest ran out of its configured stack (`[build].stack_size`).
     StackOverflow,
+    /// A checked operation failed (overflow, division by zero, array bounds).
+    /// `location` is known when the module carries a `memobits.traps` table.
+    Checked {
+        reason: TrapReason,
+        location: Option<SourceLocation>,
+    },
 }
 
 impl std::fmt::Display for RunError {
@@ -83,6 +95,15 @@ impl std::fmt::Display for RunError {
             Self::Signature(message) => write!(f, "unsupported function signature: {message}"),
             Self::FuelExhausted => f.write_str("WebAssembly execution fuel exhausted"),
             Self::Trap(message) => write!(f, "WebAssembly execution trapped: {message}"),
+            Self::Checked { reason, location } => {
+                f.write_str(reason.message())?;
+                match location {
+                    Some(location) => {
+                        write!(f, " at {}:{}:{}", location.file, location.line, location.column)
+                    }
+                    None => Ok(()),
+                }
+            }
             Self::StackOverflow => f.write_str(
                 "stack overflow: the program exhausted its stack; raise [build].stack_size or reduce recursion depth",
             ),
@@ -171,11 +192,15 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
         let overflowed = instance
             .get_global(&store, STACK_OVERFLOW_EXPORT)
             .is_some_and(|flag| flag.get(&store).i32() == Some(1));
+        let record = instance
+            .get_global(&store, traps::TRAP_EXPORT)
+            .and_then(|global| global.get(&store).i32())
+            .unwrap_or(0);
         return Err(
             if overflowed && error.as_trap_code() != Some(TrapCode::OutOfFuel) {
                 RunError::StackOverflow
             } else {
-                classify_call(error)
+                checked_trap(&error, record, bytes).unwrap_or_else(|| classify_call(error))
             },
         );
     }
@@ -190,6 +215,27 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
             value.ty()
         ))),
     }
+}
+
+/// Interpret the trap record after a trap. Explicit checks trap with
+/// `unreachable`; division sites record their code and let Wasm trap natively.
+fn checked_trap(error: &WasmiError, record: i32, module: &[u8]) -> Option<RunError> {
+    let record = record as u32;
+    let (code, location) = ((record & 0xff) as u8, record >> 8);
+    let reason = match (error.as_trap_code()?, code) {
+        (TrapCode::UnreachableCodeReached, code) => TrapReason::from_explicit_code(code)?,
+        (TrapCode::IntegerDivisionByZero, 5) => TrapReason::DivisionByZero,
+        (TrapCode::IntegerDivisionByZero, 6) => TrapReason::RemainderByZero,
+        (TrapCode::IntegerOverflow, 5) => TrapReason::DivisionOverflow,
+        _ => return None,
+    };
+    // Without the location table (stripped, or built by an older compiler) the
+    // record cannot be trusted to mean anything: keep the generic trap.
+    let table = custom_section(module, TRAP_SECTION).and_then(TrapTable::decode)?;
+    Some(RunError::Checked {
+        reason,
+        location: table.get(location).cloned(),
+    })
 }
 
 fn classify_instantiation(error: WasmiError) -> RunError {
@@ -212,7 +258,10 @@ fn classify_call(error: WasmiError) -> RunError {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_with, RunError, RunOptions, RunValue};
+    use super::{
+        custom_section, run_with, with_trap_table, RunError, RunOptions, RunValue, SourceLocation,
+        TrapReason, TrapTable, TRAP_SECTION,
+    };
     use wasm_encoder::{
         BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
         ImportSection, Instruction, Module, StartSection, TypeSection, ValType,
@@ -489,5 +538,144 @@ mod tests {
                 assert!(matches!(result, Err(RunError::Trap(_))));
             }
         }
+    }
+
+    /// A module whose `entry` stores `record` into the exported `__mb_trap`
+    /// global and then runs `body`.
+    fn trapping_module(record: i32, body: &[Instruction<'static>]) -> Vec<u8> {
+        use wasm_encoder::{ConstExpr, GlobalSection, GlobalType};
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut globals = GlobalSection::new();
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+        module.section(&globals);
+        let mut exports = ExportSection::new();
+        exports.export("entry", ExportKind::Func, 0);
+        exports.export("__mb_trap", ExportKind::Global, 0);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::I32Const(record));
+        function.instruction(&Instruction::GlobalSet(0));
+        for instruction in body {
+            function.instruction(instruction);
+        }
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module.section(&code);
+        module.finish()
+    }
+
+    fn table() -> TrapTable {
+        TrapTable {
+            locations: vec![SourceLocation {
+                file: "src/app.mb".into(),
+                line: 3,
+                column: 7,
+                width: 5,
+                text: "let x := a[9];".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn trap_table_round_trips_through_a_custom_section() {
+        let module = with_trap_table(&trapping_module(0, &[]), &table());
+        let payload = custom_section(&module, TRAP_SECTION).unwrap();
+        assert_eq!(TrapTable::decode(payload), Some(table()));
+        assert_eq!(custom_section(&module, "other"), None);
+        wasmi::Module::new(&wasmi::Engine::default(), &module[..]).unwrap();
+        assert_eq!(TrapTable::decode(b"nonsense"), None);
+        assert_eq!(table().get(0), None);
+        assert_eq!(table().get(2), None);
+    }
+
+    #[test]
+    fn explicit_checked_traps_report_reason_and_location() {
+        let module = with_trap_table(
+            &trapping_module((1 << 8) | 8, &[Instruction::Unreachable]),
+            &table(),
+        );
+        let error = run_with_fuel(&module, "entry", 1000).unwrap_err();
+        assert_eq!(
+            error,
+            RunError::Checked {
+                reason: TrapReason::IndexOutOfBounds,
+                location: table().get(1).cloned(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "array index out of bounds at src/app.mb:3:7"
+        );
+        // The same record without a table keeps the generic trap.
+        assert!(matches!(
+            run_with_fuel(
+                &trapping_module((1 << 8) | 8, &[Instruction::Unreachable]),
+                "entry",
+                1000
+            ),
+            Err(RunError::Trap(_))
+        ));
+        // An unknown code is not a checked trap.
+        let unknown = with_trap_table(&trapping_module(99, &[Instruction::Unreachable]), &table());
+        assert!(matches!(
+            run_with_fuel(&unknown, "entry", 1000),
+            Err(RunError::Trap(_))
+        ));
+    }
+
+    #[test]
+    fn native_division_traps_are_refined_by_the_recorded_site() {
+        let divide_by_zero = [
+            Instruction::I32Const(1),
+            Instruction::I32Const(0),
+            Instruction::I32DivS,
+            Instruction::Drop,
+        ];
+        let overflow = [
+            Instruction::I32Const(i32::MIN),
+            Instruction::I32Const(-1),
+            Instruction::I32DivS,
+            Instruction::Drop,
+        ];
+        for (record, body, reason) in [
+            ((1 << 8) | 5, &divide_by_zero, TrapReason::DivisionByZero),
+            ((1 << 8) | 6, &divide_by_zero, TrapReason::RemainderByZero),
+            ((1 << 8) | 5, &overflow, TrapReason::DivisionOverflow),
+        ] {
+            let module = with_trap_table(&trapping_module(record, body), &table());
+            let Err(RunError::Checked {
+                reason: found,
+                location,
+            }) = run_with_fuel(&module, "entry", 1000)
+            else {
+                panic!("expected a checked trap");
+            };
+            assert_eq!(found, reason);
+            assert_eq!(location, table().get(1).cloned());
+        }
+        // A division code left over from a successful division must not label
+        // an unrelated `unreachable`.
+        let stale = with_trap_table(
+            &trapping_module((1 << 8) | 5, &[Instruction::Unreachable]),
+            &table(),
+        );
+        assert!(matches!(
+            run_with_fuel(&stale, "entry", 1000),
+            Err(RunError::Trap(_))
+        ));
     }
 }

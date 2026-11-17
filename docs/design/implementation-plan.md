@@ -226,7 +226,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   owner is live. TE022 covers aggregate elements (rows, structs) and aggregate fields; reference handles keep their transport rules
   (TE017). Aggregates keep move semantics (BE001).
 - Frame memory is an experimental fixed 64 KiB page with addresses below 16
-  reserved. Traps lack detailed source mapping, do not unwind caller frames, and
+  reserved. Checked traps report their reason and source line/column (see
+  `wasm-backend.md`, "Trap reporting"); traps do not unwind caller frames and
   discard the instance; no persistent-instance reset policy exists.
 - The Wasm output ABI is experimental: no imports or aggregate exports; artifact
   results use raw numeric representations.

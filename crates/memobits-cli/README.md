@@ -92,7 +92,10 @@ host imports.
 Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported
 signature, `RE006` fuel exhaustion (raise the budget with `--fuel N` or use
-`--no-fuel-limit`), `RE007` guest trap, and `RE008` stack overflow.
+`--no-fuel-limit`), `RE007` guest trap, and `RE008` stack overflow. A checked failure (integer
+overflow, division by zero, array index out of bounds) is an RE007 that names the
+reason and shows the source line and column, for source runs and built artifacts
+alike; an artifact without the `memobits.traps` section reports the generic trap.
 
 `[build].stack_size` (bytes, default 1048576, multiple of 16, 4096 to 268435456)
 sets the stack used by `mb build` and `mb run`. A function frame larger than the

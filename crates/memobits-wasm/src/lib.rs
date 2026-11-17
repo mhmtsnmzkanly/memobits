@@ -44,9 +44,10 @@ fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
 /// signatures remain primitive-only; reference, array and struct ABIs are not
 /// defined. Indirect calls, reference results and other
 /// pointees are rejected.
-/// Integer arithmetic is checked in every profile; a failed runtime check
-/// traps with Wasm `unreachable` until the host runtime maps traps to language
-/// runtime diagnostics.
+/// Integer arithmetic and array indexing are checked in every profile. A failed
+/// check records its reason and source location in the exported `__mb_trap`
+/// global (see [`TrapReason`]) and then traps with Wasm `unreachable`, so the
+/// host runtime can report a language-level runtime error.
 pub fn compile(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
@@ -98,6 +99,26 @@ pub fn compile_with(
     exports: &BTreeMap<String, FunctionId>,
     options: &CompileOptions,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    compile_traced(program, exports, options).map(|compiled| compiled.bytes)
+}
+
+/// A compiled module together with the source spans of its trap sites.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compiled {
+    pub bytes: Vec<u8>,
+    /// `trap_sites[i]` is the span of location id `i + 1` as stored in the
+    /// `__mb_trap` global. The caller owns source text, so it maps spans to
+    /// file, line and column and may embed the result in a custom section named
+    /// [`TRAP_SECTION`].
+    pub trap_sites: Vec<Span>,
+}
+
+/// Like [`compile_with`], also returning the trap-site spans.
+pub fn compile_traced(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    options: &CompileOptions,
+) -> Result<Compiled, Vec<Diagnostic>> {
     let stack_size = options.stack_size;
     if stack_size == 0 || !stack_size.is_multiple_of(16) || memory_pages(stack_size).is_none() {
         return Err(vec![diagnostic(
@@ -218,7 +239,9 @@ pub fn compile_with(
         return Err(errors);
     }
 
-    encode(program, exports, stack_size).map_err(|message| vec![diagnostic(message, None)])
+    encode(program, exports, stack_size)
+        .map(|(bytes, trap_sites)| Compiled { bytes, trap_sites })
+        .map_err(|message| vec![diagnostic(message, None)])
 }
 
 fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
@@ -855,8 +878,82 @@ fn wasm_type(ty: &Type) -> ValType {
 // other traps.
 const FRAME_START: u32 = RESERVED_BYTES;
 const OVERFLOW_FLAG_GLOBAL: u32 = 1;
+/// Trap record global when frames exist (global 2); otherwise it is global 0.
+const TRAP_GLOBAL: u32 = 2;
 /// Name of the exported stack-exhaustion flag global.
 pub const STACK_OVERFLOW_EXPORT: &str = "__mb_stack_overflow";
+
+/// Name of the exported trap record global.
+pub const TRAP_EXPORT: &str = "__mb_trap";
+/// Name of the Wasm custom section a driver may add with the location table.
+pub const TRAP_SECTION: &str = "memobits.traps";
+
+/// Why a checked operation trapped. The code is the low byte of the
+/// `__mb_trap` global; the remaining 24 bits hold the location id (0: unknown).
+///
+/// `Division` and `Remainder` are recorded before a native Wasm division, which
+/// traps by itself; the host refines them by the native trap kind (divide by
+/// zero, or signed overflow for division). They are meaningless after an
+/// `unreachable` trap and must then be ignored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TrapReason {
+    Add = 1,
+    Subtract = 2,
+    Multiply = 3,
+    Negate = 4,
+    Division = 5,
+    Remainder = 6,
+    DivisionOverflow = 7,
+    IndexOutOfBounds = 8,
+    ArgumentRange = 9,
+}
+
+impl TrapReason {
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Where a check records its trap: the global to store to and a location id.
+#[derive(Clone, Copy)]
+struct Site {
+    global: u32,
+    location: u32,
+}
+
+impl Site {
+    fn record(self, body: &mut WasmFunction, reason: TrapReason) {
+        let packed = (self.location << 8) | u32::from(reason.code());
+        body.instruction(&WasmInstruction::I32Const(packed as i32));
+        body.instruction(&WasmInstruction::GlobalSet(self.global));
+    }
+}
+
+/// Collects trap sites across functions while code is generated.
+struct Traps {
+    global: u32,
+    spans: Vec<Span>,
+}
+
+impl Traps {
+    /// Largest location id that fits beside the reason in an `i32`.
+    const MAX_LOCATION: usize = (1 << 23) - 1;
+
+    fn site(&mut self, span: Option<Span>) -> Site {
+        let location = match span {
+            Some(span) if self.spans.len() < Self::MAX_LOCATION => {
+                self.spans.push(span);
+                self.spans.len() as u32
+            }
+            _ => 0,
+        };
+        Site {
+            global: self.global,
+            location,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct FrameState {
@@ -898,7 +995,7 @@ fn encode(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
     stack_size: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<Span>), String> {
     let structs = struct_layouts(&program.types)?;
     let sizes = program
         .functions
@@ -909,7 +1006,7 @@ fn encode(
                 .map_err(|error| error.message)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    encode_frames(program, exports, &sizes, false, stack_size)
+    encode_frames_traced(program, exports, &sizes, false, stack_size)
 }
 
 // Tests may override frame sizes to exercise allocation and restoration
@@ -924,6 +1021,7 @@ fn encode_with_frame_sizes(
     encode_frames(program, exports, sizes, true, stack_size)
 }
 
+#[cfg(test)]
 fn encode_frames(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
@@ -931,6 +1029,16 @@ fn encode_frames(
     observe: bool,
     stack_size: u32,
 ) -> Result<Vec<u8>, String> {
+    encode_frames_traced(program, exports, sizes, observe, stack_size).map(|(bytes, _)| bytes)
+}
+
+fn encode_frames_traced(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    sizes: &[u32],
+    observe: bool,
+    stack_size: u32,
+) -> Result<(Vec<u8>, Vec<Span>), String> {
     let mut reachable = BTreeSet::new();
     let mut pending = exports.values().copied().collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
@@ -1024,6 +1132,10 @@ fn encode_frames(
     }
     let structs = struct_layouts(&program.types)?;
     let mut code = CodeSection::new();
+    let mut traps = Traps {
+        global: if has_frames { TRAP_GLOBAL } else { 0 },
+        spans: Vec::new(),
+    };
     for id in &reachable {
         code.function(&compile_function(
             &program.functions[*id as usize],
@@ -1032,7 +1144,14 @@ fn encode_frames(
             observe,
             &structs,
             stack_size,
+            &mut traps,
         )?);
+    }
+    // Check sites may exist without any frame (pure arithmetic), so the trap
+    // record needs a global of its own then.
+    let has_traps = !traps.spans.is_empty();
+    if has_traps {
+        export_section.export(TRAP_EXPORT, ExportKind::Global, traps.global);
     }
     let mut memories = MemorySection::new();
     let mut globals = GlobalSection::new();
@@ -1062,13 +1181,26 @@ fn encode_frames(
             &ConstExpr::i32_const(0),
         );
     }
+    if has_traps {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+    }
     let mut module = Module::new();
     module.section(&types).section(&functions);
     if has_frames {
-        module.section(&memories).section(&globals);
+        module.section(&memories);
+    }
+    if has_frames || has_traps {
+        module.section(&globals);
     }
     module.section(&export_section).section(&code);
-    Ok(module.finish())
+    Ok((module.finish(), traps.spans))
 }
 
 fn compile_function(
@@ -1078,6 +1210,7 @@ fn compile_function(
     observe: bool,
     structs: &[StructLayout],
     stack_size: u32,
+    traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
         .map_err(|error| error.message)?;
@@ -1124,7 +1257,13 @@ fn compile_function(
         }
     }
     for (index, local) in function.parameter_locals.iter().enumerate() {
-        guard_parameter(body, index as u32, &function.locals[local.0 as usize].ty)?;
+        let site = traps.site(Some(function.span));
+        guard_parameter(
+            body,
+            site,
+            index as u32,
+            &function.locals[local.0 as usize].ty,
+        )?;
         if let Some(slot) = layout.slots.get(&local.0) {
             emit_address(body, frame.ok_or("owner cell requires frame")?, slot.offset);
             body.instruction(&WasmInstruction::LocalGet(index as u32));
@@ -1165,6 +1304,7 @@ fn compile_function(
                 indices,
                 &layout,
                 frame,
+                traps,
             )?;
         }
         compile_terminator(
@@ -1353,7 +1493,12 @@ fn value_type(function: &Function, operand: &Operand) -> Result<Type, String> {
     }
 }
 
-fn guard_parameter(body: &mut WasmFunction, parameter: u32, ty: &Type) -> Result<(), String> {
+fn guard_parameter(
+    body: &mut WasmFunction,
+    site: Site,
+    parameter: u32,
+    ty: &Type,
+) -> Result<(), String> {
     let Type::Primitive(kind) = ty else {
         if supported_type(ty) {
             return Ok(());
@@ -1373,7 +1518,7 @@ fn guard_parameter(body: &mut WasmFunction, parameter: u32, ty: &Type) -> Result
                 body.instruction(&WasmInstruction::I32Const(1));
                 body.instruction(&WasmInstruction::I32GtU);
             }
-            trap_if(body);
+            trap_if(body, site, TrapReason::ArgumentRange);
         }
         Primitive::I8 | Primitive::I16 => {
             let (min, max) = if *kind == Primitive::I8 {
@@ -1384,11 +1529,11 @@ fn guard_parameter(body: &mut WasmFunction, parameter: u32, ty: &Type) -> Result
             get(body);
             body.instruction(&WasmInstruction::I32Const(min));
             body.instruction(&WasmInstruction::I32LtS);
-            trap_if(body);
+            trap_if(body, site, TrapReason::ArgumentRange);
             get(body);
             body.instruction(&WasmInstruction::I32Const(max));
             body.instruction(&WasmInstruction::I32GtS);
-            trap_if(body);
+            trap_if(body, site, TrapReason::ArgumentRange);
         }
         Primitive::U8 | Primitive::U16 => {
             let max = if *kind == Primitive::U8 {
@@ -1399,15 +1544,25 @@ fn guard_parameter(body: &mut WasmFunction, parameter: u32, ty: &Type) -> Result
             get(body);
             body.instruction(&WasmInstruction::I32Const(max));
             body.instruction(&WasmInstruction::I32GtU);
-            trap_if(body);
+            trap_if(body, site, TrapReason::ArgumentRange);
         }
         _ => {}
     }
     Ok(())
 }
 
-fn trap_if(body: &mut WasmFunction) {
+fn arithmetic_reason(op: BinaryOp) -> TrapReason {
+    match op {
+        BinaryOp::Add => TrapReason::Add,
+        BinaryOp::Subtract => TrapReason::Subtract,
+        _ => TrapReason::Multiply,
+    }
+}
+
+/// Trap when the condition on the stack is true, recording why and where.
+fn trap_if(body: &mut WasmFunction, site: Site, reason: TrapReason) {
     body.instruction(&WasmInstruction::If(BlockType::Empty));
+    site.record(body, reason);
     body.instruction(&WasmInstruction::Unreachable);
     body.instruction(&WasmInstruction::End);
 }
@@ -1418,6 +1573,7 @@ fn emit_unary(
     input: u32,
     ty: &Type,
     output: u32,
+    site: Site,
 ) -> Result<(), String> {
     match (op, ty) {
         (UnaryOp::Plus, Type::Primitive(_)) => {
@@ -1451,7 +1607,7 @@ fn emit_unary(
                 body.instruction(&WasmInstruction::I32Const(min as i32));
                 body.instruction(&WasmInstruction::I32Eq);
             }
-            trap_if(body);
+            trap_if(body, site, TrapReason::Negate);
             if is_i64 {
                 body.instruction(&WasmInstruction::I64Const(0));
                 body.instruction(&WasmInstruction::LocalGet(input));
@@ -1468,6 +1624,7 @@ fn emit_unary(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_binary(
     body: &mut WasmFunction,
     op: BinaryOp,
@@ -1476,6 +1633,7 @@ fn emit_binary(
     ty: &Type,
     output: u32,
     scratch64: u32,
+    site: Site,
 ) -> Result<(), String> {
     if matches!(
         op,
@@ -1528,10 +1686,10 @@ fn emit_binary(
         | Primitive::U8
         | Primitive::U16
         | Primitive::U32 => {
-            return emit_narrow_integer(body, op, left, right, *kind, output, scratch64);
+            return emit_narrow_integer(body, op, left, right, *kind, output, scratch64, site);
         }
         Primitive::I64 | Primitive::U64 => {
-            return emit_wide_integer(body, op, left, right, *kind, output);
+            return emit_wide_integer(body, op, left, right, *kind, output, site);
         }
         Primitive::Unit => return Err("Unit does not support binary operations".into()),
         Primitive::Bool => return Err("Bool supports equality comparisons only".into()),
@@ -1644,6 +1802,7 @@ fn int_compare(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_narrow_integer(
     body: &mut WasmFunction,
     op: BinaryOp,
@@ -1652,6 +1811,7 @@ fn emit_narrow_integer(
     kind: Primitive,
     output: u32,
     scratch: u32,
+    site: Site,
 ) -> Result<(), String> {
     if matches!(op, BinaryOp::Divide | BinaryOp::Remainder) {
         if matches!(kind, Primitive::I8 | Primitive::I16) && op == BinaryOp::Divide {
@@ -1667,8 +1827,16 @@ fn emit_narrow_integer(
             body.instruction(&WasmInstruction::I32Const(-1));
             body.instruction(&WasmInstruction::I32Eq);
             body.instruction(&WasmInstruction::I32And);
-            trap_if(body);
+            trap_if(body, site, TrapReason::DivisionOverflow);
         }
+        site.record(
+            body,
+            if op == BinaryOp::Divide {
+                TrapReason::Division
+            } else {
+                TrapReason::Remainder
+            },
+        );
         body.instruction(&WasmInstruction::LocalGet(left));
         body.instruction(&WasmInstruction::LocalGet(right));
         let unsigned = matches!(kind, Primitive::U8 | Primitive::U16 | Primitive::U32);
@@ -1717,7 +1885,7 @@ fn emit_narrow_integer(
         body.instruction(&WasmInstruction::LocalGet(scratch));
         body.instruction(&WasmInstruction::I64Const(min));
         body.instruction(&WasmInstruction::I64LtS);
-        trap_if(body);
+        trap_if(body, site, arithmetic_reason(op));
     }
     if let Some(max) = max {
         body.instruction(&WasmInstruction::LocalGet(scratch));
@@ -1727,7 +1895,7 @@ fn emit_narrow_integer(
         } else {
             &WasmInstruction::I64GtU
         });
-        trap_if(body);
+        trap_if(body, site, arithmetic_reason(op));
     }
     body.instruction(&WasmInstruction::LocalGet(scratch));
     body.instruction(&WasmInstruction::I32WrapI64);
@@ -1742,8 +1910,20 @@ fn emit_wide_integer(
     right: u32,
     kind: Primitive,
     output: u32,
+    site: Site,
 ) -> Result<(), String> {
     let signed = kind == Primitive::I64;
+    if matches!(op, BinaryOp::Divide | BinaryOp::Remainder) {
+        // The native division traps by itself; note why and where first.
+        site.record(
+            body,
+            if op == BinaryOp::Divide {
+                TrapReason::Division
+            } else {
+                TrapReason::Remainder
+            },
+        );
+    }
     body.instruction(&WasmInstruction::LocalGet(left));
     body.instruction(&WasmInstruction::LocalGet(right));
     match op {
@@ -1765,7 +1945,7 @@ fn emit_wide_integer(
                 body.instruction(&WasmInstruction::LocalGet(left));
                 body.instruction(&WasmInstruction::I64LtU);
             }
-            trap_if(body);
+            trap_if(body, site, TrapReason::Add);
         }
         BinaryOp::Subtract => {
             body.instruction(&WasmInstruction::I64Sub);
@@ -1785,7 +1965,7 @@ fn emit_wide_integer(
                 body.instruction(&WasmInstruction::LocalGet(right));
                 body.instruction(&WasmInstruction::I64LtU);
             }
-            trap_if(body);
+            trap_if(body, site, TrapReason::Subtract);
         }
         BinaryOp::Multiply => {
             body.instruction(&WasmInstruction::I64Mul);
@@ -1808,7 +1988,7 @@ fn emit_wide_integer(
                 body.instruction(&WasmInstruction::I64Eq);
                 body.instruction(&WasmInstruction::I32And);
                 body.instruction(&WasmInstruction::I32Or);
-                trap_if(body);
+                trap_if(body, site, TrapReason::Multiply);
             }
             body.instruction(&WasmInstruction::LocalGet(left));
             body.instruction(&WasmInstruction::I64Eqz);
@@ -1823,7 +2003,7 @@ fn emit_wide_integer(
             });
             body.instruction(&WasmInstruction::LocalGet(right));
             body.instruction(&WasmInstruction::I64Ne);
-            trap_if(body);
+            trap_if(body, site, TrapReason::Multiply);
             body.instruction(&WasmInstruction::End);
         }
         BinaryOp::Divide | BinaryOp::Remainder => {
@@ -1851,6 +2031,7 @@ fn compile_instruction(
     indices: &BTreeMap<u32, u32>,
     layout: &FrameLayout,
     frame: Option<FrameState>,
+    traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
         .output
@@ -2037,6 +2218,7 @@ fn compile_instruction(
                 value_type(function, index)?,
                 Type::Primitive(Primitive::I64 | Primitive::U64)
             );
+            let site = traps.site(instruction.span);
             // The unsigned comparison also rejects negative indices. The index
             // operand is read-only, so it is re-read for the address computation.
             emit_operand(body, function, param_count, index, layout, frame)?;
@@ -2047,7 +2229,7 @@ fn compile_instruction(
                 body.instruction(&WasmInstruction::I32Const(len as i32));
                 body.instruction(&WasmInstruction::I32GeU);
             }
-            trap_if(body);
+            trap_if(body, site, TrapReason::IndexOutOfBounds);
             emit_operand(body, function, param_count, base, layout, frame)?;
             emit_operand(body, function, param_count, index, layout, frame)?;
             if wide {
@@ -2146,12 +2328,18 @@ fn compile_instruction(
             let output = output.ok_or("unary operation lacks an output")?;
             let ty = value_type(function, operand)?;
             refresh_operand(body, function, param_count, operand, layout, frame)?;
+            let site = if *op == UnaryOp::Negate && is_integer(&ty) {
+                traps.site(instruction.span)
+            } else {
+                traps.site(None)
+            };
             emit_unary(
                 body,
                 *op,
                 operand_local(function, param_count, operand)?,
                 &ty,
                 output,
+                site,
             )?;
         }
         InstructionKind::Binary { op, left, right } => {
@@ -2159,6 +2347,15 @@ fn compile_instruction(
             let ty = value_type(function, left)?;
             refresh_operand(body, function, param_count, left, layout, frame)?;
             refresh_operand(body, function, param_count, right, layout, frame)?;
+            let checked = matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Subtract
+                    | BinaryOp::Multiply
+                    | BinaryOp::Divide
+                    | BinaryOp::Remainder
+            ) && is_integer(&ty);
+            let site = traps.site(if checked { instruction.span } else { None });
             emit_binary(
                 body,
                 *op,
@@ -2167,10 +2364,27 @@ fn compile_instruction(
                 &ty,
                 output,
                 scratch64,
+                site,
             )?;
         }
     }
     Ok(())
+}
+
+fn is_integer(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Primitive(
+            Primitive::I8
+                | Primitive::I16
+                | Primitive::I32
+                | Primitive::I64
+                | Primitive::U8
+                | Primitive::U16
+                | Primitive::U32
+                | Primitive::U64
+        )
+    )
 }
 
 fn emit_constant(

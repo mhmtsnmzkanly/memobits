@@ -1,5 +1,6 @@
 use memobits_diagnostics::{
-    render, Category, Diagnostic, DiagnosticCode, Severity, SourceFile, SourceId,
+    render, render_with, write_location, Category, Diagnostic, DiagnosticCode, Severity,
+    SourceFile, SourceId, Span,
 };
 use memobits_ir::{FunctionId, Primitive, Program, Type};
 use memobits_project::{DependencyKind, Error, Project};
@@ -46,26 +47,27 @@ fn project_error(error: Error) -> String {
     diagnostic(code, error.to_string())
 }
 
+fn render_in(diagnostic: &Diagnostic, resolution: &memobits_resolve::Resolution) -> String {
+    render_with(diagnostic, &|id| {
+        resolution
+            .modules
+            .values()
+            .find(|module| module.id == id)
+            .map(|module| SourceFile {
+                id: module.id,
+                name: module.path.to_str().unwrap_or("<source>"),
+                text: &module.text,
+            })
+    })
+}
+
 fn render_source_diagnostics(
     diagnostics: &[Diagnostic],
     resolution: &memobits_resolve::Resolution,
 ) -> String {
     diagnostics
         .iter()
-        .map(|diagnostic| {
-            let source = diagnostic.span.and_then(|span| {
-                resolution
-                    .modules
-                    .values()
-                    .find(|module| module.id == span.source)
-                    .map(|module| SourceFile {
-                        id: module.id,
-                        name: module.path.to_str().unwrap_or("<source>"),
-                        text: &module.text,
-                    })
-            });
-            render(diagnostic, source)
-        })
+        .map(|diagnostic| render_in(diagnostic, resolution))
         .collect()
 }
 
@@ -203,12 +205,33 @@ fn runtime_error(error: memobits_runtime::RunError) -> String {
         RunError::FuelExhausted => 6,
         RunError::Trap(_) => 7,
         RunError::StackOverflow => 8,
+        RunError::Checked { .. } => 7,
     };
     let message = match &error {
         RunError::FuelExhausted => format!(
             "{error}; raise the budget with --fuel N or run without a limit using --no-fuel-limit"
         ),
         _ => error.to_string(),
+    };
+    if let RunError::Checked {
+        reason,
+        location: Some(location),
+    } = &error
+    {
+        let mut output = format!("error[RE{code:03}]: {}\n", reason.message());
+        write_location(
+            &mut output,
+            &location.file,
+            location.line as usize,
+            location.column as usize,
+            location.width as usize,
+            &location.text,
+        );
+        return output;
+    }
+    let message = match &error {
+        RunError::Checked { reason, .. } => reason.message().to_owned(),
+        _ => message,
     };
     render(
         &Diagnostic::new(
@@ -218,6 +241,68 @@ fn runtime_error(error: memobits_runtime::RunError) -> String {
         ),
         None,
     )
+}
+
+/// Resolve a trap-site span to a position with its source line.
+fn locate(
+    span: Span,
+    resolution: &memobits_resolve::Resolution,
+) -> memobits_runtime::SourceLocation {
+    let blank = memobits_runtime::SourceLocation {
+        file: String::new(),
+        line: 0,
+        column: 0,
+        width: 1,
+        text: String::new(),
+    };
+    let Some(module) = resolution.modules.values().find(|m| m.id == span.source) else {
+        return blank;
+    };
+    let text = &module.text;
+    if span.start > span.end
+        || span.end > text.len()
+        || !text.is_char_boundary(span.start)
+        || !text.is_char_boundary(span.end)
+    {
+        return blank;
+    }
+    let line_start = text[..span.start].rfind('\n').map_or(0, |n| n + 1);
+    let line_end = text[span.start..]
+        .find('\n')
+        .map_or(text.len(), |n| span.start + n);
+    memobits_runtime::SourceLocation {
+        file: module.path.to_str().unwrap_or("<source>").to_owned(),
+        line: (text[..span.start].bytes().filter(|&b| b == b'\n').count() + 1) as u32,
+        column: (text[line_start..span.start].chars().count() + 1) as u32,
+        width: text[span.start..span.end.min(line_end)]
+            .chars()
+            .count()
+            .max(1) as u32,
+        text: text[line_start..line_end].trim_end_matches('\r').to_owned(),
+    }
+}
+
+/// Compile and attach the trap location table as the `memobits.traps` custom
+/// section, so source runs and built artifacts report trap locations alike.
+fn compile_with_locations(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    options: &memobits_wasm::CompileOptions,
+    resolution: &memobits_resolve::Resolution,
+) -> Result<Vec<u8>, String> {
+    let compiled = memobits_wasm::compile_traced(program, exports, options)
+        .map_err(|diagnostics| render_source_diagnostics(&diagnostics, resolution))?;
+    if compiled.trap_sites.is_empty() {
+        return Ok(compiled.bytes);
+    }
+    let table = memobits_runtime::TrapTable {
+        locations: compiled
+            .trap_sites
+            .iter()
+            .map(|span| locate(*span, resolution))
+            .collect(),
+    };
+    Ok(memobits_runtime::with_trap_table(&compiled.bytes, &table))
 }
 
 /// The `--fuel N` and `--no-fuel-limit` options shared by both run forms.
@@ -433,8 +518,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         .result
         .as_ref();
     let options = backend_options(&project);
-    let bytes = memobits_wasm::compile_with(&program, &exports, &options)
-        .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &resolution))?;
+    let bytes = compile_with_locations(&program, &exports, &options, &resolution)?;
     let value = memobits_runtime::run_with(&bytes, "main", &run_options).map_err(runtime_error)?;
     Ok(format!(
         "Result: {}\n",
@@ -647,20 +731,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 memobits_analysis::lower_resolved(&project, &result).map_err(|diagnostics| {
                     diagnostics
                         .iter()
-                        .map(|d| {
-                            let source = d.span.and_then(|span| {
-                                result
-                                    .modules
-                                    .values()
-                                    .find(|m| m.id == span.source)
-                                    .map(|m| SourceFile {
-                                        id: m.id,
-                                        name: m.path.to_str().unwrap_or("<source>"),
-                                        text: &m.text,
-                                    })
-                            });
-                            render(d, source)
-                        })
+                        .map(|d| render_in(d, &result))
                         .collect::<String>()
                 })?;
             result
@@ -672,8 +743,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &result))?;
             let exports = build_exports(&project, &result, &program, library)?;
             let options = backend_options(&project);
-            let bytes = memobits_wasm::compile_with(&program, &exports, &options)
-                .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &result))?;
+            let bytes = compile_with_locations(&program, &exports, &options, &result)?;
             let output_path = output
                 .clone()
                 .unwrap_or_else(|| default_build_output(&project, library));
@@ -689,20 +759,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             return Err(result
                 .diagnostics
                 .iter()
-                .map(|d| {
-                    let source = d.span.and_then(|span| {
-                        result
-                            .modules
-                            .values()
-                            .find(|m| m.id == span.source)
-                            .map(|m| SourceFile {
-                                id: m.id,
-                                name: m.path.to_str().unwrap_or("<source>"),
-                                text: &m.text,
-                            })
-                    });
-                    render(d, source)
-                })
+                .map(|d| render_in(d, &result))
                 .collect::<String>());
         }
         let target_name = if library {

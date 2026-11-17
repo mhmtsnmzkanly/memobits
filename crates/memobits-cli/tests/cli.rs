@@ -322,7 +322,11 @@ fn run_reports_runtime_and_compile_failures_with_nonzero_status() {
     assert_eq!(output.status.code(), Some(1));
     let message = String::from_utf8(output.stderr).unwrap();
     assert!(message.contains("RE007"), "{message}");
-    assert!(message.contains("trapped"), "{message}");
+    assert!(
+        message.contains("integer overflow in addition"),
+        "{message}"
+    );
+    assert!(message.contains("app.mb:1:"), "{message}");
 
     f.write("bad.wasm", "not a wasm module");
     assert!(err(f.run(&["run", "bad.wasm"]), "RE001").contains("invalid WebAssembly"));

@@ -121,7 +121,7 @@ pub struct SourceId(pub u32);
 
 /// Half-open UTF-8 byte offsets. Empty spans indicate insertion points.
 /// Validation against the corresponding text happens at rendering time.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Span {
     pub source: SourceId,
     pub start: usize,
@@ -134,7 +134,17 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub span: Option<Span>,
+    /// Secondary locations that explain the primary one, rendered as notes in
+    /// order after the primary snippet.
+    pub labels: Vec<Label>,
     pub help: Option<String>,
+}
+
+/// A secondary source location with an explanation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Label {
+    pub span: Span,
+    pub message: String,
 }
 
 impl Diagnostic {
@@ -144,8 +154,18 @@ impl Diagnostic {
             severity,
             message: message.into(),
             span: None,
+            labels: Vec::new(),
             help: None,
         }
+    }
+
+    /// Attach a secondary location, e.g. where a conflicting loan began.
+    pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
+        self.labels.push(Label {
+            span,
+            message: message.into(),
+        });
+        self
     }
 }
 
@@ -159,51 +179,90 @@ pub struct SourceFile<'a> {
 
 /// Render plain text with the first affected line and a caret range.
 /// Missing sources and invalid spans retain the diagnostic and raw location.
+/// Secondary labels are rendered only when they point into `source`; use
+/// [`render_with`] when labels may live in other files.
 pub fn render(diagnostic: &Diagnostic, source: Option<SourceFile<'_>>) -> String {
+    render_with(diagnostic, &|id| source.filter(|s| s.id == id))
+}
+
+/// Like [`render`], looking each span's source up by id.
+pub fn render_with<'a>(
+    diagnostic: &Diagnostic,
+    lookup: &dyn Fn(SourceId) -> Option<SourceFile<'a>>,
+) -> String {
     use fmt::Write;
     let mut output = format!(
         "{}[{}]: {}\n",
         diagnostic.severity, diagnostic.code, diagnostic.message
     );
     if let Some(span) = diagnostic.span {
-        let valid = source.filter(|s| {
-            s.id == span.source
-                && span.start <= span.end
-                && span.end <= s.text.len()
-                && s.text.is_char_boundary(span.start)
-                && s.text.is_char_boundary(span.end)
-        });
-        if let Some(source) = valid {
-            let before = &source.text[..span.start];
-            let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
-            let line_start = before.rfind('\n').map_or(0, |n| n + 1);
-            let line_end = source.text[span.start..]
-                .find('\n')
-                .map_or(source.text.len(), |n| span.start + n);
-            let text = source.text[line_start..line_end].trim_end_matches('\r');
-            let column = source.text[line_start..span.start].chars().count();
-            let width = source.text[span.start..span.end.min(line_end)]
-                .chars()
-                .count()
-                .max(1);
-            let _ = writeln!(output, " --> {}:{}:{}", source.name, line, column + 1);
-            let _ = writeln!(output, " {line} | {text}");
-            let _ = writeln!(output, "   | {}{}", " ".repeat(column), "^".repeat(width));
-            if span.end > line_end {
-                output.push_str("   = span continues on following lines\n");
-            }
-        } else {
-            let _ = writeln!(
-                output,
-                " --> source {} bytes {}..{} (source unavailable or invalid span)",
-                span.source.0, span.start, span.end
-            );
-        }
+        write_snippet(&mut output, span, lookup(span.source));
+    }
+    for label in &diagnostic.labels {
+        let _ = writeln!(output, " note: {}", label.message);
+        write_snippet(&mut output, label.span, lookup(label.span.source));
     }
     if let Some(help) = &diagnostic.help {
         let _ = writeln!(output, " help: {help}");
     }
     output
+}
+
+/// Append the `-->` location line and the caret snippet for a position that is
+/// already resolved (1-based `line` and `column`, `width` in characters). Used
+/// by reports that carry their own line text, such as runtime traps.
+pub fn write_location(
+    output: &mut String,
+    name: &str,
+    line: usize,
+    column: usize,
+    width: usize,
+    text: &str,
+) {
+    use fmt::Write;
+    let _ = writeln!(output, " --> {name}:{line}:{column}");
+    let _ = writeln!(output, " {line} | {text}");
+    let _ = writeln!(
+        output,
+        "   | {}{}",
+        " ".repeat(column.saturating_sub(1)),
+        "^".repeat(width.max(1))
+    );
+}
+
+fn write_snippet(output: &mut String, span: Span, source: Option<SourceFile<'_>>) {
+    use fmt::Write;
+    let valid = source.filter(|s| {
+        s.id == span.source
+            && span.start <= span.end
+            && span.end <= s.text.len()
+            && s.text.is_char_boundary(span.start)
+            && s.text.is_char_boundary(span.end)
+    });
+    if let Some(source) = valid {
+        let before = &source.text[..span.start];
+        let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
+        let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+        let line_end = source.text[span.start..]
+            .find('\n')
+            .map_or(source.text.len(), |n| span.start + n);
+        let text = source.text[line_start..line_end].trim_end_matches('\r');
+        let column = source.text[line_start..span.start].chars().count();
+        let width = source.text[span.start..span.end.min(line_end)]
+            .chars()
+            .count()
+            .max(1);
+        write_location(output, source.name, line, column + 1, width, text);
+        if span.end > line_end {
+            output.push_str("   = span continues on following lines\n");
+        }
+    } else {
+        let _ = writeln!(
+            output,
+            " --> source {} bytes {}..{} (source unavailable or invalid span)",
+            span.source.0, span.start, span.end
+        );
+    }
 }
 
 #[cfg(test)]

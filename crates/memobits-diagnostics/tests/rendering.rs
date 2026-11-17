@@ -77,3 +77,40 @@ fn project_diagnostics_need_no_source() {
         "error[PE001]: manifest missing\n"
     );
 }
+
+#[test]
+fn renders_secondary_labels_as_notes_with_snippets() {
+    let source = SourceFile {
+        id: SourceId(7),
+        name: "a.mb",
+        text: "var r := x.share();\nx = 1;\n",
+    };
+    let span = |start, end| Span {
+        source: SourceId(7),
+        start,
+        end,
+    };
+    let mut d = Diagnostic::new("BE005".parse().unwrap(), Severity::Error, "cannot write")
+        .with_label(span(9, 18), "`x` was shared here");
+    d.span = Some(span(20, 21));
+    assert_eq!(
+        render(&d, Some(source)),
+        "error[BE005]: cannot write\n --> a.mb:2:1\n 2 | x = 1;\n   | ^\n note: `x` was shared here\n --> a.mb:1:10\n 1 | var r := x.share();\n   |          ^^^^^^^^^\n"
+    );
+}
+
+#[test]
+fn labels_in_other_sources_fall_back_to_raw_locations() {
+    let mut d = Diagnostic::new("BE005".parse().unwrap(), Severity::Error, "m").with_label(
+        Span {
+            source: SourceId(9),
+            start: 1,
+            end: 2,
+        },
+        "elsewhere",
+    );
+    d.span = None;
+    let out = render(&d, None);
+    assert!(out.contains("note: elsewhere"));
+    assert!(out.contains("source 9 bytes 1..2"));
+}

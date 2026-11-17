@@ -19,9 +19,11 @@ The current ABI is experimental: Bool and 8/16/32-bit integers use Wasm i32;
 Internal Unit values use a zero-valued i32 slot. No ABI stability or source
 mapping guarantee is implied.
 
-Runtime checks currently trap with Wasm `unreachable`; mapping those traps to
-source-aware Memobits runtime diagnostics is pending. Source spans are retained
-in backend compile diagnostics, but no runtime source map is emitted.
+Runtime checks trap with Wasm `unreachable` after storing a reason code and
+location id in the exported `__mb_trap` global; `compile_traced` also returns the
+source span of each location id so a driver can emit the `memobits.traps` custom
+section. The protocol is described in `docs/design/wasm-backend.md` ("Trap
+reporting").
 
 Internal primitive references execute using private linear-memory addresses.
 Address-taken owner locals use authoritative frame cells for reads and writes;

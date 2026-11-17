@@ -1,10 +1,10 @@
 //! Experimental loan liveness over validated reference IR.
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
+use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Label, Severity, Span};
 use memobits_ir::{
     Access, ArrayInit, Block, Constant, Edge, Function, Instruction, InstructionKind, LoanId,
-    LocalId, Operand, Program, Source, TerminatorKind, Type, UseMode, ValueId,
+    LocalId, Operand, Program, Source, TerminatorKind, Type, TypeDefKind, UseMode, ValueId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -92,6 +92,9 @@ struct LoanInfo {
     /// Only set on entries of the active set: a live reference holds this loan
     /// itself rather than through a descendant.
     direct: bool,
+    /// Where the loan began: the borrowing instruction, or a parameter's
+    /// declaration. Used only to explain conflicts.
+    origin: Option<Span>,
 }
 
 #[derive(Clone)]
@@ -101,14 +104,254 @@ struct Liveness {
     terminator: Vec<Vec<bool>>,
 }
 
-fn diagnostic(number: u16, span: Option<Span>, message: impl Into<String>) -> Diagnostic {
+/// A conflict between a new access and a live loan, with enough information to
+/// explain both sides in source terms.
+#[derive(Clone, Debug)]
+struct Conflict {
+    key: LoanKey,
+    /// The overlapping location the loan covers.
+    loan_place: Place,
+    /// The overlapping location being accessed.
+    access_place: Place,
+    loan_access: Access,
+    origin: Option<Span>,
+}
+
+/// A diagnostic whose secondary labels are attached once the position in the
+/// function is known.
+struct Pending {
+    diagnostic: Diagnostic,
+    conflict: Option<Conflict>,
+    /// Wins over a plain report with the same code and location.
+    preferred: bool,
+}
+
+fn diagnostic(number: u16, span: Option<Span>, message: impl Into<String>) -> Pending {
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::new(Category::Borrow, number).expect("static BE code"),
         Severity::Error,
         message,
     );
     diagnostic.span = span;
-    diagnostic
+    Pending {
+        diagnostic,
+        conflict: None,
+        preferred: false,
+    }
+}
+
+fn conflict_diagnostic(
+    span: Option<Span>,
+    action: &str,
+    names: (&Function, &Program),
+    conflict: Conflict,
+) -> Pending {
+    let name = place_name(names.0, names.1, &conflict.access_place);
+    let mut pending = diagnostic(
+        5,
+        span,
+        format!(
+            "cannot {action} {name} while it is {}",
+            loan_state(conflict.loan_access)
+        ),
+    );
+    pending.conflict = Some(conflict);
+    pending
+}
+
+/// What the user is doing at an address instruction: a field or element place
+/// that is only written or read reads better as "write"/"read" than as a
+/// "share"/"borrow" of the place.
+fn address_action(function: &Function, output: Option<ValueId>, access: Access) -> &'static str {
+    let Some(output) = output else {
+        return access_verb(access);
+    };
+    let (mut stores, mut loads) = (false, false);
+    for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+        match &instruction.kind {
+            InstructionKind::Store { reference, .. }
+                if reference.source == Source::Value(output) =>
+            {
+                stores = true;
+            }
+            InstructionKind::Load { reference } if reference.source == Source::Value(output) => {
+                loads = true;
+            }
+            _ => {}
+        }
+    }
+    if stores {
+        "write"
+    } else if loads && access == Access::Borrow {
+        "read"
+    } else {
+        access_verb(access)
+    }
+}
+
+fn loan_state(access: Access) -> &'static str {
+    if access == Access::Share {
+        "shared"
+    } else {
+        "borrowed"
+    }
+}
+
+fn access_verb(access: Access) -> &'static str {
+    if access == Access::Share {
+        "share"
+    } else {
+        "borrow"
+    }
+}
+
+/// Render a place as `` `root.field[0]` `` using source names, or "this value"
+/// when the root is a compiler temporary or the path cannot be followed.
+fn place_name(function: &Function, program: &Program, place: &Place) -> String {
+    let local = match place.root {
+        Root::Local(index) | Root::Parameter(index) => function.locals.get(index as usize),
+        Root::Value(_) | Root::External => None,
+    };
+    let Some(local) = local.filter(|local| {
+        !local.name.is_empty() && local.name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    }) else {
+        return "this value".to_owned();
+    };
+    let mut text = local.name.clone();
+    let mut ty = &local.ty;
+    for step in &place.path {
+        while let Type::Reference { inner, .. } = ty {
+            ty = inner;
+        }
+        match (step, ty) {
+            (Step::Field(field), Type::Struct(id)) => {
+                let Some(TypeDefKind::Struct { fields }) =
+                    program.types.get(id.0 as usize).map(|def| &def.kind)
+                else {
+                    return "this value".to_owned();
+                };
+                let Some(field) = fields.get(*field as usize) else {
+                    return "this value".to_owned();
+                };
+                text.push('.');
+                text.push_str(&field.name);
+                ty = &field.ty;
+            }
+            (Step::Const(index), Type::Array { element, .. }) => {
+                text.push_str(&format!("[{index}]"));
+                ty = element;
+            }
+            (Step::Dynamic, Type::Array { element, .. }) => {
+                text.push_str("[_]");
+                ty = element;
+            }
+            _ => return "this value".to_owned(),
+        }
+    }
+    format!("`{text}`")
+}
+
+/// Per-function data needed to explain a conflict after the fact.
+struct Explain<'a> {
+    function: &'a Function,
+    program: &'a Program,
+    inputs: &'a [Vec<Provenance>],
+    consts: &'a [Option<u128>],
+    reachable: &'a [bool],
+}
+
+impl Explain<'_> {
+    /// Add the "loan began here" and "loan is used later" labels.
+    fn attach(&self, pending: &mut [Pending], block: usize, position: usize) {
+        for pending in pending {
+            let Some(conflict) = pending.conflict.take() else {
+                continue;
+            };
+            let loan = place_name(self.function, self.program, &conflict.loan_place);
+            let kind = loan_state(conflict.loan_access);
+            let verb = access_verb(conflict.loan_access);
+            if let Some(origin) = conflict.origin {
+                let message = match conflict.key {
+                    LoanKey::Site(_) => format!("{loan} was {kind} here"),
+                    LoanKey::Parameter(_) => {
+                        format!("{loan} is a {verb} parameter, declared here")
+                    }
+                };
+                pending.diagnostic.labels.push(Label {
+                    span: origin,
+                    message,
+                });
+            }
+            if let Some(span) = self.later_use(block, position, conflict.key) {
+                if Some(span) != pending.diagnostic.span {
+                    pending.diagnostic.labels.push(Label {
+                        span,
+                        message: format!("the {verb} is used later here, which keeps it alive"),
+                    });
+                }
+            }
+        }
+    }
+
+    /// The first use, after instruction `position` of `block`, of a reference
+    /// derived from `key`. Positions past the last instruction mean the
+    /// terminator was being checked.
+    fn later_use(&self, block: usize, position: usize, key: LoanKey) -> Option<Span> {
+        let mut infos = HashMap::new();
+        let mut state = self.inputs[block].clone();
+        let instructions = &self.function.blocks[block].instructions;
+        for instruction in instructions.iter().take(position + 1) {
+            transfer_provenance(
+                self.function,
+                instruction,
+                &mut state,
+                &mut infos,
+                self.consts,
+            );
+        }
+        let mut seen = vec![false; self.function.blocks.len()];
+        let mut queue = VecDeque::new();
+        let mut current = (block, position + 1, state);
+        loop {
+            let (index, start, mut state) = current;
+            let target = &self.function.blocks[index];
+            for instruction in target.instructions.iter().skip(start) {
+                for operand in instruction_operands(&instruction.kind) {
+                    if self.holds(&state, operand, key) {
+                        return operand.span.or(instruction.span);
+                    }
+                }
+                transfer_provenance(
+                    self.function,
+                    instruction,
+                    &mut state,
+                    &mut infos,
+                    self.consts,
+                );
+            }
+            for operand in terminator_operands(&target.terminator.kind) {
+                if self.holds(&state, operand, key) {
+                    return operand.span.or(target.terminator.span);
+                }
+            }
+            for edge in edges(&target.terminator.kind) {
+                let next = edge.target.0 as usize;
+                if !seen[next] && self.reachable.get(next).copied().unwrap_or(false) {
+                    seen[next] = true;
+                    queue.push_back(next);
+                }
+            }
+            let next = queue.pop_front()?;
+            current = (next, 0, self.inputs[next].clone());
+        }
+    }
+
+    fn holds(&self, state: &[Provenance], operand: &Operand, key: LoanKey) -> bool {
+        type_at(self.function, operand.source).is_some_and(is_reference)
+            && operand_provenance(self.function, state, operand)
+                .loans
+                .contains(&key)
+    }
 }
 
 /// Check reference lifetimes and aliasing over valid IR.
@@ -140,19 +383,22 @@ pub fn check_loans(program: &Program) -> Vec<Diagnostic> {
                             })
                     })
             });
-            diagnostics.push(diagnostic(
-                if unsupported_result || unsupported_call_result {
-                    6
-                } else {
-                    3
-                },
-                function.map(|function| function.span),
-                if unsupported_result || unsupported_call_result {
-                    "reference returns are not supported by loan checking".to_owned()
-                } else {
-                    format!("invalid typed IR: {}", error.message)
-                },
-            ));
+            diagnostics.push(
+                diagnostic(
+                    if unsupported_result || unsupported_call_result {
+                        6
+                    } else {
+                        3
+                    },
+                    function.map(|function| function.span),
+                    if unsupported_result || unsupported_call_result {
+                        "reference returns are not supported by loan checking".to_owned()
+                    } else {
+                        format!("invalid typed IR: {}", error.message)
+                    },
+                )
+                .diagnostic,
+            );
         }
         return diagnostics;
     }
@@ -170,7 +416,14 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
     let consts = constants(function);
     let intermediates = intermediate_addresses(function);
     let (inputs, infos) = provenance(function, &reachable);
-    let mut diagnostics = Vec::new();
+    let explain = Explain {
+        function,
+        program,
+        inputs: &inputs,
+        consts: &consts,
+        reachable: &reachable,
+    };
+    let mut diagnostics: Vec<Pending> = Vec::new();
 
     for (block_index, block) in function.blocks.iter().enumerate() {
         if !reachable[block_index] {
@@ -198,6 +451,7 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &liveness.after[block_index][instruction_index],
                 &infos,
             );
+            let first = diagnostics.len();
             check_instruction(
                 program,
                 function,
@@ -210,6 +464,7 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &intermediates,
                 &mut diagnostics,
             );
+            explain.attach(&mut diagnostics[first..], block_index, instruction_index);
             transfer_provenance(
                 function,
                 instruction,
@@ -218,7 +473,9 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &consts,
             );
         }
+        let first = diagnostics.len();
         check_terminator(
+            program,
             function,
             block,
             &state,
@@ -226,8 +483,32 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
             &infos,
             &mut diagnostics,
         );
+        explain.attach(
+            &mut diagnostics[first..],
+            block_index,
+            block.instructions.len(),
+        );
+    }
+    // One conflict can be reached through several operands or loan paths;
+    // report each primary location once.
+    let mut winner: HashMap<(u16, Option<Span>), usize> = HashMap::new();
+    for (index, pending) in diagnostics.iter().enumerate() {
+        let key = (pending.diagnostic.code.number(), pending.diagnostic.span);
+        match winner.get(&key) {
+            Some(&old) if diagnostics[old].preferred || !pending.preferred => {}
+            _ => {
+                winner.insert(key, index);
+            }
+        }
     }
     diagnostics
+        .into_iter()
+        .enumerate()
+        .filter(|(index, pending)| {
+            winner[&(pending.diagnostic.code.number(), pending.diagnostic.span)] == *index
+        })
+        .map(|(_, pending)| pending.diagnostic)
+        .collect()
 }
 
 fn reachable(function: &Function) -> Vec<bool> {
@@ -690,6 +971,7 @@ fn transfer_provenance(
                 parents: owner_provenance.loans.clone(),
                 access,
                 direct: false,
+                origin: instruction.span,
             };
             let info_changed = merge_info(infos, key, info);
             let mut new = owner_provenance;
@@ -746,6 +1028,7 @@ fn provenance(
                 parents: BTreeSet::new(),
                 access: parameter.access,
                 direct: false,
+                origin: Some(function.locals[local.0 as usize].span),
             };
             merge_info(&mut infos, key, info);
             inputs[function.entry.0 as usize][local.0 as usize] = Provenance {
@@ -849,17 +1132,26 @@ fn terminator_operands(terminator: &TerminatorKind) -> Vec<&Operand> {
 }
 
 fn check_terminator(
+    program: &Program,
     function: &Function,
     block: &Block,
     state: &[Provenance],
     live: &[bool],
     infos: &HashMap<LoanKey, LoanInfo>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Pending>,
 ) {
     let active = active_loans(function, state, live, infos);
     for operand in terminator_operands(&block.terminator.kind) {
         if type_at(function, operand.source).is_some_and(is_reference) {
-            check_transport(function, state, operand, &active, infos, diagnostics);
+            check_transport(
+                program,
+                function,
+                state,
+                operand,
+                &active,
+                infos,
+                diagnostics,
+            );
             continue;
         }
         let roots = roots_for_owner(function, state, operand);
@@ -869,10 +1161,11 @@ fn check_terminator(
             Access::Borrow
         };
         if let Some(conflict) = active_conflict(&roots.roots, access, &active, &BTreeSet::new()) {
-            diagnostics.push(diagnostic(
-                5,
+            diagnostics.push(conflict_diagnostic(
                 operand.span.or(block.terminator.span),
-                format!("control-flow operand conflicts with active loan {conflict:?}"),
+                "use",
+                (function, program),
+                conflict,
             ));
         }
     }
@@ -881,12 +1174,13 @@ fn check_terminator(
 // A handle can be relocated, or explicitly reborrowed at a fresh loan site.
 // Copying it would give two handles the same loan identity and bypass freezing.
 fn check_transport(
+    program: &Program,
     function: &Function,
     state: &[Provenance],
     operand: &Operand,
     active: &HashMap<LoanKey, LoanInfo>,
     infos: &HashMap<LoanKey, LoanInfo>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Pending>,
 ) {
     if operand.mode != UseMode::Consume {
         diagnostics.push(diagnostic(2, operand.span, "reference handle transport requires Consume; use an explicit Borrow instruction to reborrow"));
@@ -899,17 +1193,13 @@ fn check_transport(
         _ => Access::Share,
     };
     if let Some(conflict) = active_conflict(&provenance.roots, access, active, &own) {
-        diagnostics.push(diagnostic(
-            5,
+        diagnostics.push(conflict_diagnostic(
             operand.span,
-            format!("reference handle relocation conflicts with active loan {conflict:?}"),
+            "move a reference to",
+            (function, program),
+            conflict,
         ));
     }
-}
-
-fn roots_overlap(left: &BTreeSet<Place>, right: &BTreeSet<Place>) -> bool {
-    left.iter()
-        .any(|a| right.iter().any(|b| places_may_overlap(a, b)))
 }
 
 fn loan_conflicts(new_access: Access, active_access: Access) -> bool {
@@ -945,19 +1235,41 @@ fn immutable_root(function: &Function, roots: &BTreeSet<Place>) -> bool {
     })
 }
 
+/// The first (by loan identity, so output is stable) live loan that conflicts
+/// with `access` to `roots`, together with the overlapping places.
 fn active_conflict(
     roots: &BTreeSet<Place>,
     access: Access,
     active: &HashMap<LoanKey, LoanInfo>,
     exempt: &BTreeSet<LoanKey>,
-) -> Option<LoanKey> {
-    active.iter().find_map(|(key, info)| {
-        (info.direct
-            && !exempt.contains(key)
-            && roots_overlap(roots, &info.roots)
-            && loan_conflicts(access, info.access))
-        .then_some(*key)
-    })
+) -> Option<Conflict> {
+    active
+        .iter()
+        .filter(|(key, info)| {
+            info.direct && !exempt.contains(key) && loan_conflicts(access, info.access)
+        })
+        .filter_map(|(key, info)| {
+            roots.iter().find_map(|a| {
+                info.roots
+                    .iter()
+                    .find(|b| places_may_overlap(a, b))
+                    .map(|b| Conflict {
+                        key: *key,
+                        loan_place: b.clone(),
+                        access_place: a.clone(),
+                        loan_access: info.access,
+                        origin: info.origin,
+                    })
+            })
+        })
+        .min_by_key(|conflict| conflict.key)
+}
+
+/// A pair of overlapping places from two root sets, for call-argument conflicts.
+fn first_overlap(left: &BTreeSet<Place>, right: &BTreeSet<Place>) -> Option<Place> {
+    left.iter()
+        .find(|a| right.iter().any(|b| places_may_overlap(a, b)))
+        .cloned()
 }
 
 fn source_provenance(function: &Function, state: &[Provenance], operand: &Operand) -> Provenance {
@@ -979,13 +1291,21 @@ fn check_instruction(
     infos: &HashMap<LoanKey, LoanInfo>,
     consts: &[Option<u128>],
     intermediates: &HashSet<u32>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Pending>,
 ) {
     match &instruction.kind {
         InstructionKind::Capture(operand) | InstructionKind::Assign { value: operand, .. }
             if type_at(function, operand.source).is_some_and(is_reference) =>
         {
-            check_transport(function, state, operand, active_before, infos, diagnostics);
+            check_transport(
+                program,
+                function,
+                state,
+                operand,
+                active_before,
+                infos,
+                diagnostics,
+            );
         }
         _ => {}
     }
@@ -1044,10 +1364,11 @@ fn check_instruction(
                 active_conflict(&provenance.roots, *access, active_before, &ancestors)
             {
                 if !repeated_site && !transient {
-                    diagnostics.push(diagnostic(
-                        5,
+                    diagnostics.push(conflict_diagnostic(
                         instruction.span,
-                        format!("loan conflicts with active loan {conflict:?}"),
+                        address_action(function, instruction.output, *access),
+                        (function, program),
+                        conflict,
                     ));
                 }
             }
@@ -1058,10 +1379,11 @@ fn check_instruction(
             if let Some(conflict) =
                 active_conflict(&provenance.roots, Access::Borrow, active_before, &own)
             {
-                diagnostics.push(diagnostic(
-                    5,
+                diagnostics.push(conflict_diagnostic(
                     instruction.span,
-                    format!("reference load conflicts with active loan {conflict:?}"),
+                    "read",
+                    (function, program),
+                    conflict,
                 ));
             }
         }
@@ -1089,10 +1411,11 @@ fn check_instruction(
             if let Some(conflict) =
                 active_conflict(&provenance.roots, Access::Share, active_before, &own)
             {
-                diagnostics.push(diagnostic(
-                    5,
+                diagnostics.push(conflict_diagnostic(
                     instruction.span,
-                    format!("Share store conflicts with active loan {conflict:?}"),
+                    "write",
+                    (function, program),
+                    conflict,
                 ));
             }
         }
@@ -1101,10 +1424,11 @@ fn check_instruction(
             if let Some(conflict) =
                 active_conflict(&roots, Access::Share, active_after, &BTreeSet::new())
             {
-                diagnostics.push(diagnostic(
-                    5,
+                diagnostics.push(conflict_diagnostic(
                     instruction.span,
-                    format!("assignment conflicts with active loan {conflict:?}"),
+                    "assign to",
+                    (function, program),
+                    conflict,
                 ));
             }
         }
@@ -1133,10 +1457,16 @@ fn check_instruction(
         if let Some(conflict) =
             active_conflict(&provenance.roots, access, active_before, &BTreeSet::new())
         {
-            diagnostics.push(diagnostic(
-                5,
+            let action = match operand.mode {
+                UseMode::Consume => "move",
+                UseMode::Share => "share",
+                UseMode::Read | UseMode::Borrow => "read",
+            };
+            diagnostics.push(conflict_diagnostic(
                 operand.span.or(instruction.span),
-                format!("owner access conflicts with active loan {conflict:?}"),
+                action,
+                (function, program),
+                conflict,
             ));
         }
     }
@@ -1181,7 +1511,7 @@ fn check_call(
     state: &[Provenance],
     active: &HashMap<LoanKey, LoanInfo>,
     instruction: &Instruction,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Pending>,
 ) {
     let Some(signature) = function_signature(program, function, callee) else {
         return;
@@ -1218,23 +1548,41 @@ fn check_call(
 
     for index in 0..call_loans.len() {
         let (argument, access, provenance) = &call_loans[index];
-        let own = parent_closure(&provenance.loans, active);
+        // Conflicts between the arguments themselves are reported pairwise below.
+        let mut own = BTreeSet::new();
+        for (_, _, other) in &call_loans {
+            own.extend(parent_closure(&other.loans, active));
+        }
         if let Some(conflict) = active_conflict(&provenance.roots, *access, active, &own) {
-            diagnostics.push(diagnostic(
-                5,
+            diagnostics.push(conflict_diagnostic(
                 argument.span.or(instruction.span),
-                format!("call argument conflicts with active loan {conflict:?}"),
+                access_verb(*access),
+                (function, program),
+                conflict,
             ));
         }
         for (other_argument, other_access, other_provenance) in call_loans.iter().skip(index + 1) {
-            if roots_overlap(&provenance.roots, &other_provenance.roots)
-                && loan_conflicts(*access, *other_access)
+            if let Some(place) = first_overlap(&provenance.roots, &other_provenance.roots)
+                .filter(|_| loan_conflicts(*access, *other_access))
             {
-                diagnostics.push(diagnostic(
+                let name = place_name(function, program, &place);
+                let mut pending = diagnostic(
                     5,
                     other_argument.span.or(instruction.span),
-                    "call arguments create conflicting loans to the same owner",
-                ));
+                    format!(
+                        "cannot {} {name} while another argument of this call already {}s it",
+                        access_verb(*other_access),
+                        access_verb(*access),
+                    ),
+                );
+                if let Some(span) = argument.span.or(instruction.span) {
+                    pending.diagnostic.labels.push(Label {
+                        span,
+                        message: format!("{name} is {} here first", loan_state(*access)),
+                    });
+                }
+                pending.preferred = true;
+                diagnostics.push(pending);
             }
         }
     }
