@@ -205,7 +205,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Wasm uses the configured stack region (default 1 MiB). Checked traps carry a
   cause and source location when metadata is available. The runner discards
   trapped instances. Library exports use scalar signatures. Application
-  entries can also use the experimental outcome adapter.
+  entries can also use the private `main` outcome adapter for zero-argument
+  `Result` and `Attempt` functions with primitive success payloads.
 - Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
 - Local and remote package dependencies, A* and ENF validation consumers,
@@ -220,4 +221,6 @@ ancestor-first order and carry a hidden concrete type tag. Zero-argument
 application entries can return `Result` or `Attempt` with primitive success
 payloads. The runtime reports the same outcome in source and artifact runs.
 The [outcome implementation plan](outcome-implementation.md) describes the
-adapter and tracks embedded reference payloads and owned ancestor conversion.
+adapter. Reference type arguments and embedded-loan tracking remain pending.
+Owned conversion to an Error ancestor and reporting its retained concrete
+identity also remain pending.

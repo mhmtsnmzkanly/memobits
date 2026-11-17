@@ -32,7 +32,9 @@ cargo run -p memobits-cli -- run examples/projects/numeric/target/memobits/app.w
 Source and artifact execution use the same Wasm runtime. Standalone scalar
 artifacts display raw Wasm numeric types. Application entries returning
 `Result` or `Attempt` with a primitive success payload display the same
-variant, typed payload, or concrete error in both modes.
+variant, typed payload, or concrete error in both modes. This uses a private
+Wasm adapter for `main`. Reference payloads and embedded-loan tracking are
+pending. See the [outcome implementation notes](docs/design/outcome-implementation.md).
 
 Inspection commands:
 

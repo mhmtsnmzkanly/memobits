@@ -71,8 +71,9 @@ with primitive success payloads. The full B4 contract is in
 
 - The supported success payloads are `Bool`, integers through 64 bits, and
   `f32` and `f64`. The application adapter accepts zero-argument
-  `Result<T, E>` and `Attempt<T, E>` entries, including aliases. Other
-  aggregate application signatures and aggregate library exports get LE900.
+  `Result<T, E>` and `Attempt<T, E>` entries, including aliases. `Option`
+  entries, outcomes with aggregate success payloads, other aggregate
+  application signatures, and aggregate library exports get LE900.
 - The internal version 1 adapter exports `main` with two Wasm `i32` results
   (address and size) and its backing memory as `__mb_entry_memory_v1`. The
   caller-owned return cell follows the configured guest stack. The guest call
@@ -93,11 +94,15 @@ with primitive success payloads. The full B4 contract is in
 
 ## Remaining gates
 
-1. Reference type arguments and embedded-loan tracking need to preserve loans
+1. Reference type arguments such as `Option<borrow i32>` are unsupported.
+   Embedded-loan tracking must preserve loans
    through construction, aggregate moves, branch joins, calls, destructuring,
    and matching, including nested outcomes. B3 borrowing of an enum's storage
    remains available for owned payloads.
-2. Explicit owned conversion to an Error ancestor still has no spelling.
+2. Explicit owned conversion to an Error ancestor remains unimplemented and
+   still has no spelling. The accepted design preserves concrete identity after
+   conversion. The entry metadata and decoder must support reporting that
+   identity when it differs from declared `E`.
    Ancestor reference coercion is currently limited to direct internal call
    arguments. `message: String` depends on string support.
 

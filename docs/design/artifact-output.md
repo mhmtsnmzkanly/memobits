@@ -1,4 +1,4 @@
-# Initial Wasm artifact output
+# Wasm artifact output
 
 The first build path resolves a selected target, checks types and control flow,
 lowers to IR, checks moves, and invokes the Wasm backend. A failed stage must
@@ -9,8 +9,10 @@ successful writing, with temporary files removed after failures.
 Application output exposes the selected package entry as `main`. Library output
 uses the external aliases from the manifest export table and starts resolution
 from those exports. It must not introduce the application entry automatically.
-Only function exports supported by the primitive backend can be emitted at this
-stage; exported aggregate types require a later interface format.
+Library function exports use scalar signatures. A zero-argument application
+entry returning `Result` or `Attempt` with a primitive success payload uses
+the private [outcome entry adapter](outcome-implementation.md). Other aggregate
+application signatures and aggregate library exports are rejected with LE900.
 
 The output is an experimental core Wasm module. It does not yet carry a stable
 Memobits ABI, dependency packaging, host bindings, or a compatibility promise.

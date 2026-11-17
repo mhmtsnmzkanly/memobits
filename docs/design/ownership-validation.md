@@ -1,8 +1,8 @@
 # Ownership validation cases
 
-These are acceptance criteria for source-to-IR integration, not claims that the
-current `analyze` commands enforce ownership. The initial IR checker will support
-owned scalar locals; borrow/share requires later lifetime analysis.
+This historical checkpoint records the initial scalar-move criteria before
+implicit primitive copying and borrow/share checking. The
+[implementation plan](implementation-plan.md) records current ownership rules.
 
 ## Repeated reads
 

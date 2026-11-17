@@ -79,12 +79,13 @@ by an older compiler) keeps the generic `RunError::Trap` message.
 
 ## Memory layout and stack
 
-Linear memory is laid out as: reserved low addresses (16 bytes, address zero
-unused), the stack, static data, then the heap. Static data and the heap do not
-exist yet; `static_data_start(stack_size)` in `crates/memobits-wasm/src/lib.rs`
-is the single boundary where they will begin, so the stack always lies below
-them and exhaustion is a controlled error that cannot corrupt either. Memory is
-currently sized to exactly cover that boundary, rounded up to 64 KiB pages.
+The target memory layout places 16 reserved bytes first, followed by the
+configured stack, static data, and the heap. Address zero is unused.
+`static_data_start(stack_size)` in `crates/memobits-wasm/src/lib.rs` marks the
+first address after the stack. The private [outcome entry adapter](outcome-implementation.md)
+places its caller-owned return cell there. Memory covers the stack and, when
+present, that cell, rounded up to 64 KiB pages. General static data and heap
+allocation remain future work.
 
 The stack size is the build setting `[build].stack_size` (bytes, default 1 MiB,
 a multiple of 16 between 4 KiB and 256 MiB), passed to the backend as

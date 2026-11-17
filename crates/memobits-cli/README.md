@@ -52,7 +52,9 @@ includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.
-Library builds preserve export aliases and support scalar function signatures.
+The private adapter applies to `main` and uses the `memobits.entry` custom
+section. Library builds preserve export aliases and support scalar function
+signatures.
 External imports and type exports remain unsupported. The output is replaced atomically only after resolution, checking,
 lowering, and backend compilation succeed. By default, application builds write
 `target/memobits/app.wasm` and library builds write

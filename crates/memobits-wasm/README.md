@@ -1,10 +1,16 @@
 # memobits-wasm
 
-This crate contains an experimental Wasm backend for the validated primitive
-IR. `compile(&Program, &BTreeMap<String, FunctionId>)` first validates IR and
+This crate contains an experimental Wasm backend for validated typed IR.
+`compile(&Program, &BTreeMap<String, FunctionId>)` first validates IR and
 rejects move-analysis errors, then emits a Wasm module. The caller chooses the
 application entry export or library export aliases; the backend does not infer
 project visibility or roots.
+
+`compile_application_traced` exports the selected entry as `main`. A zero-argument
+entry returning `Result` or `Attempt` with a primitive success payload uses
+the private [outcome entry adapter](../../docs/design/outcome-implementation.md).
+It exports an address/size wrapper and its backing memory, and records decoding
+metadata in `memobits.entry`. Library exports use scalar signatures.
 
 The current backend supports primitive signatures, constants, captures,
 assignments, direct calls, returns, branches, and arbitrary basic-block edges.
@@ -28,9 +34,9 @@ reporting").
 Internal primitive references execute using private linear-memory addresses.
 Address-taken owner locals use authoritative frame cells for reads and writes;
 reference reborrows reuse addresses. Typed loads preserve integer signedness and
-width. Per-invocation frames are restored on normal and early returns. The fixed
-private stack occupies addresses [16, 65536); exhaustion traps. Traps do not
-unwind frames; the current runtime discards its instance after execution.
+width. Per-invocation frames are restored on normal and early returns. The private
+stack starts at byte 16 and uses the configured `[build].stack_size` bytes
+(1 MiB by default). Exhaustion traps, and the runtime discards the instance.
 
 Reference parameters are supported only for internal calls. Fixed arrays of
 primitive elements and nested arrays execute as locals, as owned, `borrow` and
@@ -70,9 +76,9 @@ the variant's offsets and then the tag at offset 0 (`u8` up to 256 variants, `u1
 65536, else `u32`; the tag value is the variant index). The payload area starts at the tag
 size aligned to the largest payload alignment of any variant, the size is the largest
 variant extent rounded to the enum alignment, nested aggregates are inline, and all
-arithmetic is checked. The layout is internal, not a stable ABI. Enums in `main` or
-`[export]` signatures are rejected with LE900, and an enum frame over `[build].stack_size`
-is the usual stack diagnostic. In-crate tests read the tag and payload bytes through the
+arithmetic is checked. The layout is internal. User-defined enums in application entry or library
+export signatures are rejected with LE900. An enum frame over
+`[build].stack_size` triggers the usual stack diagnostic. In-crate tests read the tag and payload bytes through the
 test-only `__test_memory` export.
 
 `match` on owned enums (B2): `EnumTag` loads the tag with its own width (`u8`/`u16`/`u32`,

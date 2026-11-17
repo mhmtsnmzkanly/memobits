@@ -1,7 +1,8 @@
 # Primitive Wasm reference readiness
 
-This plan follows the source-reference audit. It does not enable reference code
-emission or establish a stable external reference ABI.
+This historical plan follows the source-reference audit and records the
+checkpoints through primitive reference emission. See the
+[implementation plan](implementation-plan.md) for current support.
 
 ## Implementation sequence
 

@@ -9,4 +9,11 @@ Project inventory can be inspected with:
 cargo run -p memobits-cli -- project --project examples/projects/numeric/project.toml
 ```
 
-Wasm execution and semantic checking will be added in subsequent milestones.
+The application checks the result of `math::add(20, 22)` and returns
+`Result: i32(0)` in both source and artifact runs.
+
+```sh
+cargo run -p memobits-cli -- run --project examples/projects/numeric/project.toml
+cargo run -p memobits-cli -- build --project examples/projects/numeric/project.toml
+cargo run -p memobits-cli -- run examples/projects/numeric/target/memobits/app.wasm
+```

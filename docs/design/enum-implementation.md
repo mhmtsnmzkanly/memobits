@@ -36,13 +36,14 @@ through a `share` binds read-only too.
 
 **B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy.**
 Implementation sequence and acceptance gates: `outcome-implementation.md`.
-The standard generic enums, written once as prelude declarations and
-monomorphised per instantiation in analysis, so IR and Wasm see plain enums.
-Type arguments such as `Option<i32>` instantiate compiler-known declarations;
+The shared compiler registry supplies the templates. Analysis interns each
+concrete instance, so IR and Wasm use the ordinary enum pipeline.
+Type arguments such as `Option<i32>` instantiate compiler-known types;
 user-defined generic declarations remain deferred, as required by `decisions.md`.
 Prelude variants are `Some`/`None`, `Ok`/`Err`, and `Done`/`Skipped`/`Failed`.
-Reference payloads (`Option<borrow i32>`) must preserve loans through construction,
-moves, calls and matching; B3 alone does not establish this lifetime tracking.
+Reference payloads such as `Option<borrow i32>` are pending. They require
+loans to survive construction, moves, calls and matching. B3 loans cover
+borrowing the storage of an enum with owned payloads.
 
 ## Design notes confirmed in the code
 
@@ -302,7 +303,7 @@ patterns, literal patterns, guards, or-patterns, bare binding patterns (`x =>`),
 `..` in patterns, enum equality, and enums in `main` / `[export]` signatures.
 Everything in B3 and B4 above.
 
-## B3 checkpoint
+## B3 checkpoint (before B4)
 
 ### The rule as built
 

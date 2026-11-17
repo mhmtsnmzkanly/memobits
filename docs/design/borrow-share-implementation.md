@@ -1,7 +1,8 @@
 # Borrow and share implementation sequence
 
 This document applies the accepted access rules to the primitive compiler path.
-It describes work in progress, not currently supported language behavior.
+The checkpoints record the primitive implementation as it landed. See the
+[implementation plan](implementation-plan.md) for current support.
 
 ## Frontend access information
 

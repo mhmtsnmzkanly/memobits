@@ -3,11 +3,10 @@
 ## Boundary
 
 `memobits-ir` holds compiler data independently of syntax, project loading, and
-name resolution. Analysis will produce this representation only after successful
-name, type, and structural control-flow checking. A structural IR validator is
-an additional invariant check, not a replacement for source analysis or ownership
-checking. `lower_module` now lowers standalone primitive modules; Wasm
-compilation and project-wide lowering are also implemented for that subset.
+name resolution. Analysis produces this representation after successful name,
+type, and structural control-flow checking. Structural IR validation, source
+analysis, and ownership checking run as separate checks. See the
+[implementation plan](implementation-plan.md) for the executable subset.
 
 Type inference must remain in one analysis traversal. The checker should retain
 typed expressions and resolved local/function identities, then lower them to
@@ -35,11 +34,11 @@ on the skipped path.
 
 Operand uses distinguish reading from consuming ownership. Arithmetic,
 comparisons, and conditions read their inputs. Binding transfer, owned argument
-passing, assignment transfer, and return consume owned inputs, including scalar
-values. Compound assignments read and then write the destination. Future borrow
-and share operations must preserve their access distinction in the IR.
+passing, assignment transfer, and return consume move-only inputs. Primitive
+values copy implicitly. Compound assignments read and then write the destination.
+Borrow and share operations preserve their access distinction in the IR.
 
-The initial move analysis will propagate availability per local through the
+Move analysis propagates availability for locals and temporaries through the
 control-flow graph. A use after a move on any reachable incoming path is an
 error. Loops require a fixed point; checking only one traversal of a loop body
 would miss reuse on the next iteration. Reinitialization restores availability
@@ -48,23 +47,21 @@ when permitted by the binding's mutation rules.
 ## Verification targets
 
 - Repeated arithmetic reads of one scalar remain valid.
-- Repeated owned transfer of that scalar is rejected.
+- Repeated owned transfer of an aggregate is rejected.
 - A move on one reachable branch is reflected at the join.
 - Loop backedges preserve move state across iterations.
 - Shadowing gives the new binding a fresh identity.
 - Call arguments retain left-to-right evaluation order.
 - Library roots exclude unrelated application entry code.
 
-User-defined aggregate layout, cleanup, borrow lifetimes, optimization, and Wasm
-lowering remain later layers. No stable external ABI is implied by this internal
-representation.
+Aggregate layout and Wasm emission consume validated IR. Heap-backed cleanup
+and embedded-loan tracking remain pending. The IR is an internal compiler format.
 
-## Current implementation and next connection
+## Current lowering and validation
 
 The IR data model and its validator are implemented. Functions carry an explicit
-mapping from parameters to initialized local slots. The initial ownership pass
-tracks both local slots and temporary values through branches and loop backedges.
-It rejects borrowed/shared access pending lifetime analysis.
+mapping from parameters to initialized local slots. The ownership gate
+checks availability and loan conflicts for supported internal borrow/share uses.
 
 Standalone analysis now retains expression types and resolved identities with
 per-function expression IDs. Standalone lowering uses those retained facts and

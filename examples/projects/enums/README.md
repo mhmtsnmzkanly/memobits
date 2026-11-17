@@ -24,8 +24,10 @@ It demonstrates:
   read-only borrows (writing through a match is not allowed).
 
 Still gated: nested patterns, literal patterns, guards, `==` on enums (use `match`), and
-enums in `main` or `[export]` signatures. See
-`docs/design/enum-implementation.md`.
+user-defined enums in Wasm entry or library export signatures. The separate
+[application outcome adapter](../../../docs/design/outcome-implementation.md)
+supports compiler-known Result and Attempt entries with primitive success
+payloads. See the [enum checkpoints](../../../docs/design/enum-implementation.md).
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/enums/project.toml

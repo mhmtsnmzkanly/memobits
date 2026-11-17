@@ -2,9 +2,16 @@
 
 `run(bytes, export)` validates a Wasm binary, rejects modules that require
 imports, instantiates it, and calls a zero-parameter function export. The
-result is `Unit`, `I32`, `I64`, `F32`, or `F64`, matching the Wasm representation.
-Signedness and source-level narrow integer types are unavailable in a Wasm
-artifact, so the runner does not reinterpret integer results.
+scalar result is `Unit`, `I32`, `I64`, `F32`, or `F64`, matching the Wasm
+representation. Standalone scalar results carry no source-level signedness
+or narrow integer type.
+
+For `main` with a `memobits.entry` custom section, the runner validates the
+private adapter and decodes its return cell as `RunValue::Outcome(EntryOutcome)`.
+Success payloads retain their Memobits primitive types. `Err` and `Failed`
+carry the qualified concrete error name (or `Error` for the root) and its
+`u32` code. Malformed adapter metadata, signatures, or return cells report
+`RunError::EntryAbi`. See the [outcome ABI notes](../../docs/design/outcome-implementation.md).
 
 `run_with(bytes, export, &RunOptions { fuel })` takes the same inputs with an
 explicit budget. `RunOptions::fuel` is `Some(n)` for `n` fuel units of metered

@@ -21,7 +21,9 @@ The IR includes reference-typed parameters and explicit `Borrow`, `Load`, and
 `Store` instructions as a data model. Validation checks their structural types
 and prevents loaded reference values from being consumed or escaping as owned
 values (a loaded primitive reaches an owned position through `Copy`). It does not check loan lifetimes or implement borrow/share semantics;
-the ownership gate now checks reference-handle availability and loan conflicts. The Wasm backend still rejects these operations.
+the ownership gate checks reference-handle availability and loan conflicts.
+The Wasm backend emits these operations for supported internal references.
+Reference returns and references stored inside aggregate values remain gated.
 
 `Program::types` holds nominal user-defined types (`TypeDef`, identified by
 `TypeId` and a `CanonicalType` path); `Type::Struct(TypeId)` names one. A struct is
@@ -30,7 +32,7 @@ field is addressed by `FieldAddr { loan, base, field, access }`, the bounds-chec
 twin of `ElementAddr` that yields a `Reference` to the field type and is read with
 `Load`. Validation checks type and field indices, operand count and types, access
 modes and shared loan IDs. `FieldAddr` accepts a struct owner or a `Reference` to a
-struct (with at most the referent's access). Struct fields and array elements are non-Unit primitives, structs or arrays of
+struct (with at most the referent's access). Struct fields and array elements are non-Unit primitives, structs, enums, or arrays of
 those at any depth; a struct that contains itself by value, directly or through arrays
 and other structs, is rejected by validation. Mixed `FieldAddr` / `ElementAddr` chains
 (`a[i].pts[j].x`) address nested aggregates level by level. Structs may be owned,
@@ -62,5 +64,9 @@ reference to one payload field of an enum owner or enum reference, valid on the 
 (dominance is not validated); the validator checks variant and payload ranges, base mode and
 access, the output `Reference` type and loan-id uniqueness. `EnumTag` also accepts a `Borrow`
 mode on any enum reference.
+
+Compiler-known outcomes use the same enum operations. `TypeDef::entry_outcome`
+identifies Result and Attempt instances for application entry validation and
+emission. Nominal Error ancestry is tracked on struct definitions.
 
 Run tests with `cargo test --offline -p memobits-ir`.

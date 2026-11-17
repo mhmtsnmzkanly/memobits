@@ -4,6 +4,11 @@ This crate provides parsing-independent semantic checks and lowering for the
 implemented language subset. Run `cargo test --offline -p memobits-analysis` for
 its unit and integration coverage.
 
+Compiler-known `Option`, `Result`, and `Attempt` instantiate owned enum
+payloads. Analysis checks the nominal Error bound and supports ancestor
+borrow/share coercions on direct internal call arguments. Reference type
+arguments and embedded loans are pending.
+
 `check_control_flow(&Module)` reports `TE020` for `break` and `TE021` for
 `continue` outside a loop. It traverses nested blocks and expressions.
 
