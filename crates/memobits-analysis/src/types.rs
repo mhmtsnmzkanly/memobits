@@ -426,6 +426,7 @@ pub struct TypeFact {
     pub span: Span,
     pub is_enum: bool,
     pub error_ancestry: Option<ErrorAncestry>,
+    pub entry_outcome: Option<memobits_ir::EntryOutcome>,
     pub fields: Vec<FieldFact>,
     pub variants: Vec<VariantFact>,
 }
@@ -448,6 +449,11 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
             span: info.span,
             is_enum: info.is_enum,
             error_ancestry: table.error_ancestry(id as u32),
+            entry_outcome: match table.enum_template(id as u32).map(|template| template.id) {
+                Some(registry::TemplateId::Result) => Some(memobits_ir::EntryOutcome::Result),
+                Some(registry::TemplateId::Attempt) => Some(memobits_ir::EntryOutcome::Attempt),
+                _ => None,
+            },
             fields: info
                 .fields
                 .iter()

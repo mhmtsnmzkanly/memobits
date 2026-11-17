@@ -1,7 +1,9 @@
 # Compiler-known outcomes (B4)
 
 Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` execute inside Memobits
-functions. The full B4 contract is in [decisions.md](decisions.md).
+functions. Zero-argument application entries support `Result` and `Attempt`
+with primitive success payloads. The full B4 contract is in
+[decisions.md](decisions.md).
 
 ## Implemented gates
 
@@ -52,7 +54,12 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
   loan conflict and last-use rules. IR validation checks the nominal parent
   chain and inherited field prefix. Wasm passes the original address and places
   each type's new fields after the padded layout of its parent, so even a
-  whole-value assignment through an ancestor share preserves descendant fields.
+  whole-value assignment through an ancestor share preserves descendant fields
+  and the destination's concrete identity.
+- Every Error value has a hidden 32-bit, module-local type tag at offset zero.
+  The inherited `code` follows the tag. Ordinary value moves and aggregate
+  copies carry the tag. Whole-value stores through an Error share copy the
+  statically visible fields while preserving the destination tag.
 - Project resolution checks imported alias-qualified variants by following
   aliases in their defining modules. An unknown variant on a visible alias
   produces ME006 and use of a private alias from another module produces ME007.
@@ -60,23 +67,39 @@ functions. The full B4 contract is in [decisions.md](decisions.md).
   private types (ME010). Base references use ordinary module visibility
   (ME007), and public derivations cannot expose a private local base (ME010).
 
+## Application entry adapter
+
+- The supported success payloads are `Bool`, integers through 64 bits, and
+  `f32` and `f64`. The application adapter accepts zero-argument
+  `Result<T, E>` and `Attempt<T, E>` entries, including aliases. Other
+  aggregate application signatures and aggregate library exports get LE900.
+- The internal version 1 adapter exports `main` with two Wasm `i32` results
+  (address and size) and its backing memory as `__mb_entry_memory_v1`. The
+  caller-owned return cell follows the configured guest stack. The guest call
+  retains the full configured stack budget.
+- The `memobits.entry` custom section carries a version byte, outcome family,
+  success primitive tag, payload offset, and the little-endian result size
+  and declared Error ID. A bounded UTF-8 name follows the header. Version 1
+  records only the declared `E`. Owning a concrete error through an ancestor
+  type requires a separate conversion feature. The host checks the stored tag
+  against the declared ID before displaying the qualified concrete name and
+  `code`.
+- The runner checks metadata size and values, rejects duplicate sections and
+  control characters in names, and checks the adapter signature, memory,
+  returned size, address alignment, bounds, and active variant before
+  rendering. Source and standalone artifact runs share the decoder. All five
+  variants are normal returns printed on stdout. Guest traps use runtime
+  diagnostics. This adapter is private to the current backend and runner.
+
 ## Remaining gates
 
-1. Add concrete runtime error identity to values and artifact metadata.
+1. Reference type arguments and embedded-loan tracking need to preserve loans
+   through construction, aggregate moves, branch joins, calls, destructuring,
+   and matching, including nested outcomes. B3 borrowing of an enum's storage
+   remains available for owned payloads.
+2. Explicit owned conversion to an Error ancestor still has no spelling.
    Ancestor reference coercion is currently limited to direct internal call
-   arguments. Implicit owned conversion, downcasts, and conversions between
-   unrelated types are rejected. Explicit owned ancestor conversion still has
-   no spelling.
-   `message: String` depends on string support.
-2. Implement reference type arguments and embedded-loan tracking together.
-   Dependency tracking must preserve loans through construction, aggregate moves,
-   branch joins, calls, destructuring, and matching, including nested outcomes.
-   B3 borrowing of an enum's storage remains available for owned payloads.
-3. Implement outcome entry results and artifact metadata so source and artifact
-   execution report the same success, absence, and concrete error identity.
-   Guest traps remain separate from returned errors. Outcomes and derived
-   errors can cross internal calls. Aggregate entry and export signatures
-   still produce LE900.
+   arguments. `message: String` depends on string support.
 
 ## Acceptance evidence
 
@@ -93,6 +116,9 @@ coercion, field privacy, and source and standalone artifact
 execution with a primitive entry result. A counter checks once-only
 evaluation of success and failure payloads.
 
-Completing B4 also requires tests for concrete error identity, embedded-loan
-release, escapes and conflicts through branches and calls, and source/artifact
-parity for outcome entry results.
+CLI tests also cover all five outcome variants, standalone artifact parity,
+and checked and stack traps during outcome execution. A cross-module regression
+returns a leaf error after whole stores through both its immediate ancestor
+and root shares. It checks the concrete identity, the updated code, and the
+preserved leaf fields. Runtime tests exercise malformed metadata, invalid
+addresses and sizes, invalid tags and Bool payloads, and mismatched identities.

@@ -146,6 +146,7 @@ fn function(mutable: bool, extra_values: Vec<Type>, instructions: Vec<Instructio
             },
             span: span(0),
             error_ancestry: None,
+            entry_outcome: None,
             kind: TypeDefKind::Struct {
                 fields: vec![
                     FieldDef {

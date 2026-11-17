@@ -67,11 +67,28 @@ pub enum ErrorAncestry {
     Derived(TypeId),
 }
 
+/// Compiler-known outcome families permitted at an application entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryOutcome {
+    Result,
+    Attempt,
+}
+
+impl EntryOutcome {
+    pub fn variants(self) -> &'static [&'static str] {
+        match self {
+            Self::Result => &["Ok", "Err"],
+            Self::Attempt => &["Done", "Skipped", "Failed"],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDef {
     pub path: CanonicalType,
     pub span: Span,
     pub error_ancestry: Option<ErrorAncestry>,
+    pub entry_outcome: Option<EntryOutcome>,
     pub kind: TypeDefKind,
 }
 
@@ -634,6 +651,29 @@ impl Program {
                     }
                 }
                 None => {}
+            }
+            if let Some(outcome) = definition.entry_outcome {
+                let valid = match &definition.kind {
+                    TypeDefKind::Enum { variants } => {
+                        let names = outcome.variants();
+                        variants.len() == names.len()
+                            && variants
+                                .iter()
+                                .zip(names)
+                                .all(|(variant, name)| variant.name == *name)
+                            && variants[0].payload.len() == 1
+                            && (outcome != EntryOutcome::Attempt || variants[1].payload.is_empty())
+                            && matches!(
+                                variants[names.len() - 1].payload.as_slice(),
+                                [Type::Struct(id)] if self.types.get(id.0 as usize)
+                                    .is_some_and(|ty| ty.error_ancestry.is_some())
+                            )
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    report("invalid compiler-known entry outcome shape".into());
+                }
             }
             match &definition.kind {
                 TypeDefKind::Struct { fields } => {

@@ -17,6 +17,7 @@ subset is small and the output ABI is not stable.
 | `memobits-ir` | Typed control-flow IR and validation |
 | `memobits-ownership` | Move, borrow, and share checking |
 | `memobits-wasm` | Wasm emission |
+| `memobits-entry-abi` | Private metadata format for Wasm outcome entries |
 | `memobits-runtime` | Wasm execution host |
 | `memobits-cli` | The `mb` command |
 
@@ -28,8 +29,10 @@ cargo run -p memobits-cli -- build --project examples/projects/numeric/project.t
 cargo run -p memobits-cli -- run examples/projects/numeric/target/memobits/app.wasm
 ```
 
-Source and artifact execution use the same Wasm runtime. Artifact results use
-raw Wasm numeric representations; source execution can display source type names.
+Source and artifact execution use the same Wasm runtime. Standalone scalar
+artifacts display raw Wasm numeric types. Application entries returning
+`Result` or `Attempt` with a primitive success payload display the same
+variant, typed payload, or concrete error in both modes.
 
 Inspection commands:
 

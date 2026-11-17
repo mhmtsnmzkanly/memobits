@@ -161,6 +161,7 @@ fn program(
             },
             span: span(0),
             error_ancestry: None,
+            entry_outcome: None,
             kind: TypeDefKind::Enum {
                 variants: vec![
                     VariantDef {

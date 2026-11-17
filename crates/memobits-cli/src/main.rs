@@ -16,7 +16,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; external aggregate/reference signatures and imports remain unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. check is not supported yet.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return Result or Attempt with primitive success payloads. Library exports use scalar signatures, and imports remain unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. check is not supported yet.\n";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -206,6 +206,7 @@ fn runtime_error(error: memobits_runtime::RunError) -> String {
         RunError::Trap(_) => 7,
         RunError::StackOverflow => 8,
         RunError::Checked { .. } => 7,
+        RunError::EntryAbi(_) => 9,
     };
     let message = match &error {
         RunError::FuelExhausted => format!(
@@ -289,9 +290,14 @@ fn compile_with_locations(
     exports: &BTreeMap<String, FunctionId>,
     options: &memobits_wasm::CompileOptions,
     resolution: &memobits_resolve::Resolution,
+    library: bool,
 ) -> Result<Vec<u8>, String> {
-    let compiled = memobits_wasm::compile_traced(program, exports, options)
-        .map_err(|diagnostics| render_source_diagnostics(&diagnostics, resolution))?;
+    let compiled = if library {
+        memobits_wasm::compile_traced(program, exports, options)
+    } else {
+        memobits_wasm::compile_application_traced(program, exports["main"], options)
+    }
+    .map_err(|diagnostics| render_source_diagnostics(&diagnostics, resolution))?;
     if compiled.trap_sites.is_empty() {
         return Ok(compiled.bytes);
     }
@@ -372,6 +378,7 @@ impl FuelArgs {
 fn display_run_value(value: memobits_runtime::RunValue, ty: Option<&Type>) -> String {
     use memobits_runtime::RunValue;
     match (value, ty) {
+        (RunValue::Outcome(outcome), _) => outcome.to_string(),
         (RunValue::Unit, _) | (RunValue::I32(_), Some(Type::Primitive(Primitive::Unit))) => {
             "Unit".into()
         }
@@ -518,7 +525,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         .result
         .as_ref();
     let options = backend_options(&project);
-    let bytes = compile_with_locations(&program, &exports, &options, &resolution)?;
+    let bytes = compile_with_locations(&program, &exports, &options, &resolution, false)?;
     let value = memobits_runtime::run_with(&bytes, "main", &run_options).map_err(runtime_error)?;
     Ok(format!(
         "Result: {}\n",
@@ -743,7 +750,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &result))?;
             let exports = build_exports(&project, &result, &program, library)?;
             let options = backend_options(&project);
-            let bytes = compile_with_locations(&program, &exports, &options, &result)?;
+            let bytes = compile_with_locations(&program, &exports, &options, &result, library)?;
             let output_path = output
                 .clone()
                 .unwrap_or_else(|| default_build_output(&project, library));

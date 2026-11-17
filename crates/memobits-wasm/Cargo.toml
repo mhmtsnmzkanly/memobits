@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+memobits-entry-abi = { path = "../memobits-entry-abi" }
 memobits-diagnostics = { path = "../memobits-diagnostics" }
 memobits-ir = { path = "../memobits-ir" }
 memobits-ownership = { path = "../memobits-ownership" }

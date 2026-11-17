@@ -113,8 +113,8 @@ only where explicitly stated; unresolved API spellings remain proposals.
   or a type derived from it. There are no separate standard error types per
   result type; simple programs use `Error` directly. An entry function may
   return `Result` or `Attempt`; the host reports a returned error through its
-  `Error` part. Traps are not errors in this hierarchy and are reported by the
-  host separately.
+  `Error` part. The [current entry adapter](outcome-implementation.md)
+  supports primitive success payloads. The host reports guest traps separately.
 - Empty field-based types (`type Unit {}`) are allowed. Empty enums
   (`type Never []`) are rejected.
 - The prelude exposes the variants of `Option`, `Result`, and `Attempt` by short

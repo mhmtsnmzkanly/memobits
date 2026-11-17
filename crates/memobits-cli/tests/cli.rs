@@ -316,21 +316,183 @@ fn project_error_derivation_checks_base_visibility_and_cross_module_cycles() {
 }
 
 #[test]
-fn outcome_entry_results_remain_gated() {
+fn outcome_entries_report_every_variant_from_source_and_standalone_artifacts() {
+    let f = Fixture::new();
+    let bare = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n[build]\nstack_size=65520\n",
+    );
+    for (source, expected) in [
+        (
+            "fn main() -> Result<u64, Error> { Ok(18446744073709551615) }",
+            "Ok(u64(18446744073709551615))",
+        ),
+        (
+            "fn main() -> Result<i8, Error> { Ok(-20) }",
+            "Ok(i8(-20))",
+        ),
+        (
+            "fn main() -> Result<i32, Error> { Err(Error { code: 4294967295 }) }",
+            "Err(Error, code=4294967295)",
+        ),
+        (
+            "fn main() -> Attempt<Bool, Error> { Done(true) }",
+            "Done(Bool(true))",
+        ),
+        (
+            "fn main() -> Attempt<f64, Error> { Done(2.5) }",
+            "Done(f64(2.5))",
+        ),
+        (
+            "fn main() -> Attempt<i32, Error> { Skipped }",
+            "Skipped",
+        ),
+        (
+            "type ParseError: Error {} fn main() -> Attempt<i32, ParseError> { Failed(ParseError { code: 5 }) }",
+            "Failed(outcomes::main::ParseError, code=5)",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let output = f.run(&["run"]);
+        assert!(output.status.success(), "{source}: {output:?}");
+        assert_eq!(output.stdout, format!("Result: {expected}\n").as_bytes());
+        let build = f.run(&["build", "--output", "entry.wasm"]);
+        assert!(build.status.success(), "{source}: {build:?}");
+        fs::copy(f.0.join("entry.wasm"), bare.0.join("entry.wasm")).unwrap();
+        let artifact = bare.run(&["run", "entry.wasm", "--entry", "main"]);
+        assert!(artifact.status.success(), "{source}: {artifact:?}");
+        assert_eq!(output.stdout, artifact.stdout, "{source}");
+    }
+}
+
+#[test]
+fn whole_ancestor_share_stores_keep_the_leaf_identity_and_fields() {
+    let f = Fixture::new();
+    let bare = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/errors.mb",
+        "pub type Base: Error { pub stage: u8 }
+         pub type Leaf: Base { pub line: u16 }
+         pub type Failure = Result<i32, Leaf>;
+         fn reset(e: share Error) { e = Error { code: 17 }; }
+         pub fn replace(e: share Base) {
+             e = Base { code: 11, stage: 3 };
+             reset(e.share());
+         }
+         pub fn report(e: Leaf) -> Failure { Err(e) }",
+    );
+    f.write(
+        "src/main.mb",
+        "use errors::Leaf;
+         use errors::Failure;
+         type Cell { leaf: Leaf }
+         fn main() -> Failure {
+             var cell := Cell { leaf: Leaf { code: 1, stage: 2, line: 500 } };
+             errors::replace(cell.leaf.share());
+             let Cell { leaf } := cell;
+             if leaf.line == 500 && leaf.stage == 3 {
+                 errors::report(leaf)
+             } else {
+                 Ok(0)
+             }
+         }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(
+        source.stdout,
+        b"Result: Err(outcomes::errors::Leaf, code=17)\n"
+    );
+    let build = f.run(&["build", "--output", "entry.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    fs::copy(f.0.join("entry.wasm"), bare.0.join("entry.wasm")).unwrap();
+    let artifact = bare.run(&["run", "entry.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(source.stdout, artifact.stdout);
+}
+
+#[test]
+fn outcome_entry_traps_keep_runtime_diagnostics() {
     let f = Fixture::new();
     f.write(
         "project.toml",
         "[package]\nname='outcomes'\nentry='main::main'\n",
     );
-    for source in [
-        "fn main() -> Result<i32, Error> { Ok(7) }",
-        "fn main() -> Attempt<i32, Error> { Skipped }",
-        "type ParseError: Error {} fn main() -> Result<i32, ParseError> { Err(ParseError { code: 5 }) }",
-        "type ParseError: Error {} fn main() -> Attempt<i32, ParseError> { Failed(ParseError { code: 5 }) }",
+    f.write(
+        "src/main.mb",
+        "fn divide(n: i32) -> i32 { 1 / n }
+         fn main() -> Result<i32, Error> { Ok(divide(0)) }",
+    );
+    let source = err(f.run(&["run"]), "RE007");
+    assert!(
+        source.contains("division by zero") && source.contains("main.mb"),
+        "{source}"
+    );
+    let build = f.run(&["build", "--output", "entry.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(source, err(f.run(&["run", "entry.wasm"]), "RE007"));
+}
+
+#[test]
+fn outcome_entry_stack_overflow_is_a_trap() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n[build]\nstack_size=4096\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn dive(n: i32) -> Result<i32, Error> {
+             if n == 0 { Ok(1) } else { dive(n - 1) }
+         }
+         fn main() -> Result<i32, Error> { dive(10000) }",
+    );
+    let source = err(f.run(&["run"]), "RE008");
+    let build = f.run(&["build", "--output", "entry.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(source, err(f.run(&["run", "entry.wasm"]), "RE008"));
+}
+
+#[test]
+fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='outcomes'\nentry='main::main'\n[export]\nwork='main::work'\n",
+    );
+    for (source, expected) in [
+        (
+            "fn main() -> Result<Array<i32, 1>, Error> { Ok([7]) }",
+            "primitive success payload",
+        ),
+        (
+            "fn main(n: i32) -> Attempt<i32, Error> { Done(n) }",
+            "must take no parameters",
+        ),
+        (
+            "type Lookalike [ Ok(i32), Err(Error) ] fn main() -> Lookalike { Lookalike::Ok(7) }",
+            "cannot return enums",
+        ),
+        (
+            "fn main() -> Option<i32> { Some(7) }",
+            "cannot return enums",
+        ),
     ] {
         f.write("src/main.mb", source);
-        err(f.run(&["build"]), "LE900");
+        let message = err(f.run(&["build"]), "LE900");
+        assert!(message.contains(expected), "{source}: {message}");
     }
+    f.write(
+        "src/main.mb",
+        "pub fn work() -> Result<i32, Error> { Ok(7) } fn main() {}",
+    );
+    let message = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(message.contains("cannot return enums"), "{message}");
 }
 
 struct Fixture(PathBuf);

@@ -49,10 +49,11 @@ for every possible language feature.
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
 application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
-primitive/aggregate references. External imports and aggregate/reference export
-signatures remain unsupported. Application builds export the manifest entry as
-`main`; library builds preserve export aliases. Type exports are currently
-unsupported. The output is replaced atomically only after resolution, checking,
+primitive/aggregate references. Application builds export the manifest entry as
+`main`. A zero-argument application entry can return `Result<T, E>` or
+`Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.
+Library builds preserve export aliases and support scalar function signatures.
+External imports and type exports remain unsupported. The output is replaced atomically only after resolution, checking,
 lowering, and backend compilation succeed. By default, application builds write
 `target/memobits/app.wasm` and library builds write
 `target/memobits/library.wasm` relative to the manifest; `--output` is relative
@@ -69,19 +70,24 @@ positive integer. The default is 10000000000 (ten billion), which ordinary
 programs never reach while runaway loops still end. `--no-fuel-limit` disables
 metering entirely, so loops run until they finish or trap; it cannot be combined
 with `--fuel`. Invalid values, including `0`, negative or non-integer numbers,
-and repeated or conflicting options, are usage errors (PE004). Successful calls print `Result: ...` and exit 0. A guest
-numeric result is not used as the process exit code. Source runs can label scalar
-results with their Memobits type; artifact runs only know the Wasm scalar type
-because artifacts do not include source type metadata. Unit functions print
-`Result: Unit`. Runtime failures use RE diagnostics and exit nonzero. The runtime
-currently supports zero-argument exports, scalar results, and modules without
-host imports.
+and repeated or conflicting options, are usage errors (PE004). Normal returns
+print `Result: ...` to stdout and exit 0. Source runs label scalar results with
+their Memobits type. Standalone scalar artifacts display the Wasm scalar type.
+Unit functions print `Result: Unit`.
+
+Outcome entries display the same result in both modes, such as
+`Result: Ok(u32(7))`, `Result: Done(Bool(true))`, `Result: Skipped`, or
+`Result: Failed(pkg::parser::ParseError, code=5)`. Both `Err` and `Failed`
+return the concrete error type and its `u32` code. The builtin root is printed
+as `Error`. Guest traps and other runtime failures use RE diagnostics and exit
+nonzero. The runtime accepts zero-argument exports from modules without host
+imports.
 
 Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported
 signature, `RE006` fuel exhaustion (raise the budget with `--fuel N` or use
-`--no-fuel-limit`), `RE007` guest trap, and `RE008` stack overflow. A checked failure (integer
-overflow, division by zero, array index out of bounds) is an RE007 that names the
+`--no-fuel-limit`), `RE007` guest trap, `RE008` stack overflow, and `RE009`
+invalid outcome entry adapter. A checked failure (integer overflow, division by zero, array index out of bounds) is an RE007 that names the
 reason and shows the source line and column, for source runs and built artifacts
 alike; an artifact without the `memobits.traps` section reports the generic trap.
 

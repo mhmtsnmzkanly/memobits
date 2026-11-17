@@ -204,8 +204,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   branch results, and direct borrows of primitive projections are gated.
 - Wasm uses the configured stack region (default 1 MiB). Checked traps carry a
   cause and source location when metadata is available. The runner discards
-  trapped instances. Output signatures are currently scalar, and the artifact
-  ABI is experimental.
+  trapped instances. Library exports use scalar signatures. Application
+  entries can also use the experimental outcome adapter.
 - Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
 - Local and remote package dependencies, A* and ENF validation consumers,
@@ -216,7 +216,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
 Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` use the enum pipeline
 for construction, internal calls, and `match`. The compiler-known `Error`
 root has a public `code: u32` field. Derived error types inherit fields in
-ancestor-first order and also qualify as error arguments. The
-[outcome implementation plan](outcome-implementation.md) tracks concrete error
-identity, ancestor coercions, embedded reference payloads, and host reporting
-of returned errors.
+ancestor-first order and carry a hidden concrete type tag. Zero-argument
+application entries can return `Result` or `Attempt` with primitive success
+payloads. The runtime reports the same outcome in source and artifact runs.
+The [outcome implementation plan](outcome-implementation.md) describes the
+adapter and tracks embedded reference payloads and owned ancestor conversion.

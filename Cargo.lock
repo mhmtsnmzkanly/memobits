@@ -115,6 +115,10 @@ name = "memobits-diagnostics"
 version = "0.1.0"
 
 [[package]]
+name = "memobits-entry-abi"
+version = "0.1.0"
+
+[[package]]
 name = "memobits-ir"
 version = "0.1.0"
 dependencies = [
@@ -150,6 +154,7 @@ dependencies = [
 name = "memobits-runtime"
 version = "0.1.0"
 dependencies = [
+ "memobits-entry-abi",
  "wasm-encoder",
  "wasmi",
 ]
@@ -167,6 +172,7 @@ version = "0.1.0"
 dependencies = [
  "memobits-analysis",
  "memobits-diagnostics",
+ "memobits-entry-abi",
  "memobits-ir",
  "memobits-ownership",
  "memobits-syntax",

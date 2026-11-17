@@ -6,16 +6,18 @@
 //! an internal zero-valued `i32` when an IR value is needed. These choices are
 //! experimental and do not define a stable Memobits ABI.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
+use memobits_entry_abi as entry_abi;
 use memobits_ir::{
-    ArrayInit, BinaryOp, BlockId, Constant, ErrorAncestry, Function, FunctionId, Instruction,
-    InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, TypeDef,
-    TypeDefKind, UnaryOp,
+    ArrayInit, BinaryOp, BlockId, Constant, EntryOutcome, ErrorAncestry, Function, FunctionId,
+    Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
+    Type, TypeDef, TypeDefKind, UnaryOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function as WasmFunction,
-    FunctionSection, GlobalSection, GlobalType, Instruction as WasmInstruction, MemArg,
-    MemorySection, MemoryType, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, CustomSection, ExportKind, ExportSection,
+    Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
+    Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module, TypeSection,
+    ValType,
 };
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
@@ -81,10 +83,8 @@ impl Default for CompileOptions {
     }
 }
 
-/// First address after the stack. Static data and, after it, the heap will be
-/// placed from here; neither exists yet, so memory currently ends here. The
-/// stack lies below them so exhaustion is a controlled error and can never
-/// corrupt either. `None` when the layout does not fit 32-bit memory.
+/// First address after the stack. An outcome entry places its return cell
+/// here. `None` when the layout does not fit 32-bit memory.
 pub fn static_data_start(stack_size: u32) -> Option<u32> {
     align_up(RESERVED_BYTES.checked_add(stack_size)?, 16)
 }
@@ -120,6 +120,26 @@ pub fn compile_traced(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
     options: &CompileOptions,
+) -> Result<Compiled, Vec<Diagnostic>> {
+    compile_target(program, exports, options, false)
+}
+
+/// Compile the project's application entry. A supported outcome result uses
+/// the private versioned runner adapter; library exports are scalar-only.
+pub fn compile_application_traced(
+    program: &Program,
+    entry: FunctionId,
+    options: &CompileOptions,
+) -> Result<Compiled, Vec<Diagnostic>> {
+    let exports = BTreeMap::from([(entry_abi::ENTRY_EXPORT.into(), entry)]);
+    compile_target(program, &exports, options, true)
+}
+
+fn compile_target(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    options: &CompileOptions,
+    application: bool,
 ) -> Result<Compiled, Vec<Diagnostic>> {
     let stack_size = options.stack_size;
     if stack_size == 0 || !stack_size.is_multiple_of(16) || memory_pages(stack_size).is_none() {
@@ -162,8 +182,22 @@ pub fn compile_traced(
             ));
         }
     }
+    let mut entry = None;
     for id in exports.values() {
         if let Some(function) = program.functions.get(id.0 as usize) {
+            if application {
+                match outcome_entry(program, function, &structs, stack_size) {
+                    Ok(Some(adapter)) => {
+                        entry = Some(adapter);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(message) => {
+                        errors.push(diagnostic(message, Some(function.span)));
+                        continue;
+                    }
+                }
+            }
             if function
                 .signature
                 .parameters
@@ -256,7 +290,7 @@ pub fn compile_traced(
         return Err(errors);
     }
 
-    encode(program, exports, stack_size)
+    encode(program, exports, stack_size, entry)
         .map(|(bytes, trap_sites)| Compiled { bytes, trap_sites })
         .map_err(|message| vec![diagnostic(message, None)])
 }
@@ -387,6 +421,7 @@ struct StructLayout {
     offsets: Vec<u32>,
     fields: Vec<FieldStorage>,
     enum_layout: Option<EnumLayout>,
+    error_identity: Option<u32>,
 }
 
 /// Enum layout: the tag at offset 0 with the smallest unsigned width that holds
@@ -472,7 +507,11 @@ fn struct_layout_at(
     active.push(index);
     let layout = match &definition.kind {
         TypeDefKind::Struct { fields } => {
-            let mut offset = 0u32;
+            let mut offset = if definition.error_ancestry == Some(ErrorAncestry::Root) {
+                entry_abi::ERROR_ID_BYTES
+            } else {
+                0
+            };
             let mut align = 1u32;
             let mut offsets = Vec::with_capacity(fields.len());
             let mut storage = Vec::with_capacity(fields.len());
@@ -508,6 +547,7 @@ fn struct_layout_at(
                 offsets,
                 fields: storage,
                 enum_layout: None,
+                error_identity: definition.error_ancestry.map(|_| index as u32 + 1),
             }
         }
         TypeDefKind::Enum { variants } => {
@@ -555,6 +595,7 @@ fn struct_layout_at(
                 align,
                 offsets: Vec::new(),
                 fields: Vec::new(),
+                error_identity: None,
                 enum_layout: Some(EnumLayout {
                     tag_size,
                     variants: laid_out,
@@ -1022,9 +1063,9 @@ fn wasm_type(ty: &Type) -> ValType {
     }
 }
 
-// Experimental private stack. Memory is reserved low addresses, then the stack
-// of `stack_size` bytes, then (future) static data and heap, see
-// `static_data_start`. Frames grow upward, aligned to 16 bytes. Traps do not
+// Experimental private stack. Memory starts with reserved low addresses,
+// then the stack of `stack_size` bytes, then the optional entry return cell
+// (see `static_data_start`). Frames grow upward, aligned to 16 bytes. Traps do not
 // unwind active caller frames. Global 0 is the stack pointer; global 1 is set
 // to 1 before the trap raised by stack exhaustion so a host can tell it from
 // other traps.
@@ -1143,10 +1184,115 @@ impl FrameState {
     }
 }
 
+struct EntryAdapter {
+    address: u32,
+    size: u32,
+    pages: u64,
+    metadata: Vec<u8>,
+}
+
+fn outcome_entry(
+    program: &Program,
+    function: &Function,
+    layouts: &[StructLayout],
+    stack_size: u32,
+) -> Result<Option<EntryAdapter>, String> {
+    let Type::Enum(id) = function.signature.result.as_ref() else {
+        return Ok(None);
+    };
+    let definition = &program.types[id.0 as usize];
+    let Some(outcome) = definition.entry_outcome else {
+        return Ok(None);
+    };
+    if !function.signature.parameters.is_empty() {
+        return Err("Result and Attempt application entries must take no parameters".into());
+    }
+
+    let TypeDefKind::Enum { variants } = &definition.kind else {
+        unreachable!("validated outcome definition");
+    };
+    let success = match variants[0].payload.as_slice() {
+        [Type::Primitive(kind)] => match kind {
+            Primitive::Bool => Some(entry_abi::Scalar::Bool),
+            Primitive::I8 => Some(entry_abi::Scalar::I8),
+            Primitive::I16 => Some(entry_abi::Scalar::I16),
+            Primitive::I32 => Some(entry_abi::Scalar::I32),
+            Primitive::I64 => Some(entry_abi::Scalar::I64),
+            Primitive::U8 => Some(entry_abi::Scalar::U8),
+            Primitive::U16 => Some(entry_abi::Scalar::U16),
+            Primitive::U32 => Some(entry_abi::Scalar::U32),
+            Primitive::U64 => Some(entry_abi::Scalar::U64),
+            Primitive::F32 => Some(entry_abi::Scalar::F32),
+            Primitive::F64 => Some(entry_abi::Scalar::F64),
+            Primitive::Unit => None,
+        },
+        _ => None,
+    }
+    .ok_or(
+        "application entry outcomes require a primitive success payload (Bool, integer, or float)",
+    )?;
+    let failure_variant = outcome.variants().len() - 1;
+    let [Type::Struct(error)] = variants[failure_variant].payload.as_slice() else {
+        unreachable!("validated outcome error payload");
+    };
+    let error_def = &program.types[error.0 as usize];
+    let error_layout = &layouts[error.0 as usize];
+    let path = &error_def.path;
+    let error_name = if error_def.error_ancestry == Some(ErrorAncestry::Root) {
+        path.name.clone()
+    } else {
+        format!(
+            "{}::{}::{}",
+            path.package,
+            path.module.join("::"),
+            path.name
+        )
+    };
+
+    let layout = &layouts[id.0 as usize];
+    let variants = &layout.enum_layout.as_ref().expect("laid out enum").variants;
+    let payload_offset = variants[0].offsets[0];
+    debug_assert_eq!(payload_offset, variants[failure_variant].offsets[0]);
+    debug_assert_eq!(error_layout.offsets[0], entry_abi::ERROR_ID_BYTES);
+    let size = layout.size;
+    let metadata = entry_abi::Metadata {
+        family: match outcome {
+            EntryOutcome::Result => entry_abi::Family::Result,
+            EntryOutcome::Attempt => entry_abi::Family::Attempt,
+        },
+        success,
+        payload_offset: payload_offset
+            .try_into()
+            .map_err(|_| "invalid entry payload offset")?,
+        size,
+        error_id: error_layout.error_identity.expect("laid out Error"),
+        error_name: &error_name,
+    }
+    .encode()
+    .ok_or("application entry outcome does not fit the version 1 metadata format")?;
+    // Keep the return cell outside the guest stack so the configured stack
+    // budget still belongs entirely to guest calls.
+    let address = static_data_start(stack_size).expect("validated stack size");
+    let end = address
+        .checked_add(size)
+        .ok_or("application entry result exceeds the 32-bit memory")?;
+    let pages = u64::from(end).div_ceil(PAGE_SIZE);
+    if pages >= PAGE_SIZE {
+        return Err("application entry result exceeds the supported memory size".into());
+    }
+    Ok(Some(EntryAdapter {
+        address,
+        size,
+        pages,
+        metadata,
+    }))
+}
+
 fn encode(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
     stack_size: u32,
+    entry: Option<EntryAdapter>,
 ) -> Result<(Vec<u8>, Vec<Span>), String> {
     let structs = struct_layouts(&program.types)?;
     let sizes = program
@@ -1158,7 +1304,7 @@ fn encode(
                 .map_err(|error| error.message)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    encode_frames_traced(program, exports, &sizes, false, stack_size)
+    encode_frames_traced(program, exports, &sizes, false, stack_size, entry)
 }
 
 // Tests may override frame sizes to exercise allocation and restoration
@@ -1181,7 +1327,7 @@ fn encode_frames(
     observe: bool,
     stack_size: u32,
 ) -> Result<Vec<u8>, String> {
-    encode_frames_traced(program, exports, sizes, observe, stack_size).map(|(bytes, _)| bytes)
+    encode_frames_traced(program, exports, sizes, observe, stack_size, None).map(|(bytes, _)| bytes)
 }
 
 fn encode_frames_traced(
@@ -1190,6 +1336,7 @@ fn encode_frames_traced(
     sizes: &[u32],
     observe: bool,
     stack_size: u32,
+    entry: Option<EntryAdapter>,
 ) -> Result<(Vec<u8>, Vec<Span>), String> {
     let mut reachable = BTreeSet::new();
     let mut pending = exports.values().copied().collect::<Vec<_>>();
@@ -1268,7 +1415,17 @@ fn encode_frames_traced(
     }
     let mut export_section = ExportSection::new();
     for (name, function) in exports {
-        export_section.export(name, ExportKind::Func, indices[&function.0]);
+        let index = if entry.is_some() && name == entry_abi::ENTRY_EXPORT {
+            selected.len() as u32
+        } else {
+            indices[&function.0]
+        };
+        export_section.export(name, ExportKind::Func, index);
+    }
+    if entry.is_some() {
+        types.ty().function([], [ValType::I32, ValType::I32]);
+        functions.function(signatures.len() as u32);
+        export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
     let has_frames = reachable.iter().any(|id| sizes[*id as usize] != 0);
     if observe && has_frames {
@@ -1299,6 +1456,17 @@ fn encode_frames_traced(
             &mut traps,
         )?);
     }
+    if let Some(adapter) = &entry {
+        let mut wrapper = WasmFunction::new([]);
+        wrapper.instruction(&WasmInstruction::I32Const(adapter.address as i32));
+        wrapper.instruction(&WasmInstruction::Call(
+            indices[&exports[entry_abi::ENTRY_EXPORT].0],
+        ));
+        wrapper.instruction(&WasmInstruction::I32Const(adapter.address as i32));
+        wrapper.instruction(&WasmInstruction::I32Const(adapter.size as i32));
+        wrapper.instruction(&WasmInstruction::End);
+        code.function(&wrapper);
+    }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
     let has_traps = !traps.spans.is_empty();
@@ -1307,8 +1475,11 @@ fn encode_frames_traced(
     }
     let mut memories = MemorySection::new();
     let mut globals = GlobalSection::new();
-    if has_frames {
-        let pages = memory_pages(stack_size).ok_or("stack size does not fit a 32-bit memory")?;
+    if has_frames || entry.is_some() {
+        let pages = match &entry {
+            Some(adapter) => adapter.pages,
+            None => memory_pages(stack_size).ok_or("stack size does not fit a 32-bit memory")?,
+        };
         memories.memory(MemoryType {
             minimum: pages,
             maximum: Some(pages),
@@ -1316,6 +1487,8 @@ fn encode_frames_traced(
             shared: false,
             page_size_log2: None,
         });
+    }
+    if has_frames {
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -1345,13 +1518,19 @@ fn encode_frames_traced(
     }
     let mut module = Module::new();
     module.section(&types).section(&functions);
-    if has_frames {
+    if has_frames || entry.is_some() {
         module.section(&memories);
     }
     if has_frames || has_traps {
         module.section(&globals);
     }
     module.section(&export_section).section(&code);
+    if let Some(adapter) = entry {
+        module.section(&CustomSection {
+            name: entry_abi::SECTION.into(),
+            data: adapter.metadata.into(),
+        });
+    }
     Ok((module.finish(), traps.spans))
 }
 
@@ -2273,6 +2452,11 @@ fn compile_instruction(
             if struct_layout.offsets.len() != fields.len() {
                 return Err("struct creation operand count differs from its type".into());
             }
+            if let Some(identity) = struct_layout.error_identity {
+                emit_address(body, frame, cell.offset);
+                body.instruction(&WasmInstruction::I32Const(identity as i32));
+                emit_store(body, Primitive::U32);
+            }
             for (index, operand) in fields.iter().enumerate() {
                 let destination = cell
                     .offset
@@ -2559,16 +2743,27 @@ fn compile_instruction(
             ));
         }
         InstructionKind::Store { reference, value } => {
-            emit_operand(body, function, param_count, reference, layout, frame)?;
-            emit_operand(body, function, param_count, value, layout, frame)?;
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
-                if is_aggregate(inner.as_ref()) {
-                    // Whole-aggregate store through a share reference: the value
-                    // operand is the address of a cell of the same layout.
-                    body.instruction(&WasmInstruction::I32Const(aggregate_bytes(
-                        &layout.structs,
-                        &inner,
-                    )? as i32));
+                if is_aggregate(&inner) {
+                    // An error share can point at a descendant. Replace only the
+                    // statically visible fields, keeping the object's identity.
+                    let skip = match inner.as_ref() {
+                        Type::Struct(id)
+                            if layout.structs[id.0 as usize].error_identity.is_some() =>
+                        {
+                            entry_abi::ERROR_ID_BYTES
+                        }
+                        _ => 0,
+                    };
+                    for operand in [reference, value] {
+                        emit_operand(body, function, param_count, operand, layout, frame)?;
+                        if skip != 0 {
+                            body.instruction(&WasmInstruction::I32Const(skip as i32));
+                            body.instruction(&WasmInstruction::I32Add);
+                        }
+                    }
+                    let size = aggregate_bytes(&layout.structs, &inner)? - skip;
+                    body.instruction(&WasmInstruction::I32Const(size as i32));
                     body.instruction(&WasmInstruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
@@ -2576,6 +2771,8 @@ fn compile_instruction(
                     return Ok(());
                 }
             }
+            emit_operand(body, function, param_count, reference, layout, frame)?;
+            emit_operand(body, function, param_count, value, layout, frame)?;
             emit_store(body, reference_primitive(function, reference)?);
         }
         InstructionKind::Assign { target, value, .. } => {

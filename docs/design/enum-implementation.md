@@ -34,7 +34,7 @@ the scrutinee's place until its last use, with a variant payload step in the
 loan path (like a field path). Mutable matching stays deferred: matching
 through a `share` binds read-only too.
 
-**B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy (planned).**
+**B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy.**
 Implementation sequence and acceptance gates: `outcome-implementation.md`.
 The standard generic enums, written once as prelude declarations and
 monomorphised per instantiation in analysis, so IR and Wasm see plain enums.

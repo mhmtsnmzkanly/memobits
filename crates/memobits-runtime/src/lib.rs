@@ -1,8 +1,10 @@
 //! Small, fuel-limited WebAssembly runner for zero-argument exports.
-//!
-//! This crate runs modules with no imports and accepts only scalar Wasm
-//! results. It preserves Wasm's numeric representation; it has no source type
-//! metadata to distinguish signed from unsigned integers.
+//! Bare Wasm exports use scalar results. Memobits application artifacts can
+//! also carry a versioned adapter for compiler-known outcomes.
+
+mod entry;
+pub use entry::{EntryOutcome, EntrySuccess, ReturnedError};
+use memobits_entry_abi as entry_abi;
 
 mod traps;
 pub use traps::{
@@ -43,8 +45,8 @@ impl Default for RunOptions {
     }
 }
 
-/// A scalar result in the WebAssembly representation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A scalar Wasm result or a decoded Memobits entry outcome.
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunValue {
     /// The function returned no Wasm values.
     Unit,
@@ -52,6 +54,7 @@ pub enum RunValue {
     I64(i64),
     F32(f32),
     F64(f64),
+    Outcome(EntryOutcome),
 }
 
 /// An error while validating, instantiating, or calling a module.
@@ -67,6 +70,8 @@ pub enum RunError {
     MissingExport(String),
     /// The function has parameters or an unsupported result signature.
     Signature(String),
+    /// Entry adapter metadata, signature, or returned storage is malformed.
+    EntryAbi(String),
     /// The guest exhausted the execution fuel budget.
     FuelExhausted,
     /// The guest trapped while running.
@@ -93,6 +98,7 @@ impl std::fmt::Display for RunError {
             }
             Self::MissingExport(name) => write!(f, "missing function export '{name}'"),
             Self::Signature(message) => write!(f, "unsupported function signature: {message}"),
+            Self::EntryAbi(message) => write!(f, "invalid Memobits entry adapter: {message}"),
             Self::FuelExhausted => f.write_str("WebAssembly execution fuel exhausted"),
             Self::Trap(message) => write!(f, "WebAssembly execution trapped: {message}"),
             Self::Checked { reason, location } => {
@@ -130,6 +136,7 @@ pub fn run(bytes: &[u8], export: &str) -> Result<RunValue, RunError> {
 pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunValue, RunError> {
     let mut config = Config::default();
     config.consume_fuel(options.fuel.is_some());
+    config.ignore_custom_sections(true);
     let engine = Engine::new(&config);
     let module =
         Module::new(&engine, bytes).map_err(|error| RunError::Validate(error.to_string()))?;
@@ -141,6 +148,22 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
         });
     }
 
+    let metadata = if export == entry_abi::ENTRY_EXPORT {
+        let mut sections = traps::custom_sections(bytes, entry_abi::SECTION);
+        let metadata = sections
+            .next()
+            .map(|section| {
+                entry_abi::Metadata::decode(section)
+                    .ok_or_else(|| entry::invalid("invalid or unsupported entry metadata"))
+            })
+            .transpose()?;
+        if sections.next().is_some() {
+            return Err(entry::invalid("duplicate entry metadata"));
+        }
+        metadata
+    } else {
+        None
+    };
     let export_type = module
         .get_export(export)
         .ok_or_else(|| RunError::MissingExport(export.to_owned()))?;
@@ -148,28 +171,38 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
         ExternType::Func(function_type) => function_type,
         _ => return Err(RunError::MissingExport(export.to_owned())),
     };
-    if !function_type.params().is_empty() {
-        return Err(RunError::Signature(format!(
-            "'{export}' takes {} parameter(s); this runner accepts no arguments",
-            function_type.params().len()
-        )));
-    }
-    if function_type.results().len() > 1 {
-        return Err(RunError::Signature(format!(
-            "'{export}' returns multiple values"
-        )));
-    }
-    let result_type = function_type.results().first().copied();
-    if result_type.is_some_and(|ty| {
-        !matches!(
-            ty,
-            ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
-        )
-    }) {
-        return Err(RunError::Signature(format!(
-            "'{export}' returns an unsupported Wasm type {:?}",
-            result_type.expect("checked Some")
-        )));
+    if metadata.is_some() {
+        if !function_type.params().is_empty()
+            || function_type.results() != [ValType::I32, ValType::I32]
+        {
+            return Err(entry::invalid("unexpected entry function signature"));
+        }
+        if !matches!(
+            module.get_export(entry_abi::MEMORY_EXPORT),
+            Some(ExternType::Memory(memory)) if !memory.is_64()
+        ) {
+            return Err(entry::invalid("missing 32-bit entry memory export"));
+        }
+    } else {
+        if !function_type.params().is_empty() {
+            return Err(RunError::Signature(format!(
+                "'{export}' takes {} parameter(s); this runner accepts no arguments",
+                function_type.params().len()
+            )));
+        }
+        match function_type.results() {
+            [] | [ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64] => {}
+            [ty] => {
+                return Err(RunError::Signature(format!(
+                    "'{export}' returns an unsupported Wasm type {ty:?}"
+                )))
+            }
+            _ => {
+                return Err(RunError::Signature(format!(
+                    "'{export}' returns multiple values"
+                )))
+            }
+        }
     }
 
     let mut store = Store::new(&engine, ());
@@ -182,9 +215,11 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
     let function = instance
         .get_func(&store, export)
         .ok_or_else(|| RunError::MissingExport(export.to_owned()))?;
-    let mut results = result_type
+    let mut results = function_type
+        .results()
+        .iter()
+        .copied()
         .map(Val::default_for_ty)
-        .into_iter()
         .collect::<Vec<_>>();
     if let Err(error) = function.call(&mut store, &[], &mut results) {
         // Stack exhaustion sets an exported flag global before trapping, which
@@ -203,6 +238,16 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
                 checked_trap(&error, record, bytes).unwrap_or_else(|| classify_call(error))
             },
         );
+    }
+    if let Some(metadata) = metadata {
+        let [Val::I32(address), Val::I32(size)] = results.as_slice() else {
+            unreachable!("validated entry adapter signature");
+        };
+        let memory = instance
+            .get_memory(&store, entry_abi::MEMORY_EXPORT)
+            .ok_or_else(|| entry::invalid("missing entry memory"))?;
+        return entry::decode(metadata, memory.data(&store), *address as u32, *size as u32)
+            .map(RunValue::Outcome);
     }
     match results.into_iter().next() {
         None => Ok(RunValue::Unit),

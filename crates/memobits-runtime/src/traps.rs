@@ -164,21 +164,33 @@ pub fn with_trap_table(module: &[u8], table: &TrapTable) -> Vec<u8> {
 /// The payload of the first custom section called `name`, if the module's
 /// section framing is readable up to it.
 pub fn custom_section<'a>(module: &'a [u8], name: &str) -> Option<&'a [u8]> {
-    let mut rest = module.get(8..)?;
-    while let Some((&id, tail)) = rest.split_first() {
-        let (size, tail) = read_leb(tail)?;
-        let size = usize::try_from(size).ok()?;
-        let payload = tail.get(..size)?;
-        if id == 0 {
-            let (name_len, after) = read_leb(payload)?;
-            let name_len = usize::try_from(name_len).ok()?;
-            if after.get(..name_len) == Some(name.as_bytes()) {
-                return Some(&after[name_len..]);
+    custom_sections(module, name).next()
+}
+
+/// Scan matching sections without copying arbitrary section contents.
+pub(crate) fn custom_sections<'a, 'n>(
+    module: &'a [u8],
+    name: &'n str,
+) -> impl Iterator<Item = &'a [u8]> + 'n
+where
+    'a: 'n,
+{
+    let mut rest = module.get(8..).unwrap_or_default();
+    std::iter::from_fn(move || {
+        while let Some((&id, tail)) = rest.split_first() {
+            let (size, tail) = read_leb(tail)?;
+            let (payload, remaining) = tail.split_at_checked(size as usize)?;
+            rest = remaining;
+            if id == 0 {
+                let (name_len, after) = read_leb(payload)?;
+                let (section_name, data) = after.split_at_checked(name_len as usize)?;
+                if section_name == name.as_bytes() {
+                    return Some(data);
+                }
             }
         }
-        rest = &tail[size..];
-    }
-    None
+        None
+    })
 }
 
 fn write_leb(out: &mut Vec<u8>, mut value: u32) {
@@ -196,7 +208,10 @@ fn write_leb(out: &mut Vec<u8>, mut value: u32) {
 fn read_leb(bytes: &[u8]) -> Option<(u32, &[u8])> {
     let mut value = 0u32;
     for (index, &byte) in bytes.iter().enumerate().take(5) {
-        value |= u32::from(byte & 0x7f).checked_shl(7 * index as u32)?;
+        if index == 4 && byte > 0x0f {
+            return None;
+        }
+        value |= u32::from(byte & 0x7f) << (7 * index);
         if byte & 0x80 == 0 {
             return Some((value, &bytes[index + 1..]));
         }

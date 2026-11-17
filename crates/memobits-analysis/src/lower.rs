@@ -40,6 +40,7 @@ fn program_types(
             },
             span: definition.span,
             error_ancestry: definition.error_ancestry,
+            entry_outcome: definition.entry_outcome,
             kind: if definition.is_enum {
                 TypeDefKind::Enum {
                     variants: definition
