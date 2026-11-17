@@ -74,7 +74,14 @@ an existing artifact intact.
 memory, then executes its `main` WebAssembly export. `mb run FILE.wasm
 [--entry NAME]` runs an existing artifact's export, defaulting to `main`. Both
 forms use the same fuel-limited Wasm runtime; source execution does not use a
-separate interpreter. Successful calls print `Result: ...` and exit 0. A guest
+separate interpreter.
+
+Both forms accept `--fuel N` to set the execution budget to `N` fuel units, a
+positive integer. The default is 10000000000 (ten billion), which ordinary
+programs never reach while runaway loops still end. `--no-fuel-limit` disables
+metering entirely, so loops run until they finish or trap; it cannot be combined
+with `--fuel`. Invalid values, including `0`, negative or non-integer numbers,
+and repeated or conflicting options, are usage errors (PE004). Successful calls print `Result: ...` and exit 0. A guest
 numeric result is not used as the process exit code. Source runs can label scalar
 results with their Memobits type; artifact runs only know the Wasm scalar type
 because artifacts do not include source type metadata. Unit functions print
@@ -84,7 +91,8 @@ host imports.
 
 Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported
-signature, `RE006` fuel exhaustion, `RE007` guest trap, and `RE008` stack overflow.
+signature, `RE006` fuel exhaustion (raise the budget with `--fuel N` or use
+`--no-fuel-limit`), `RE007` guest trap, and `RE008` stack overflow.
 
 `[build].stack_size` (bytes, default 1048576, multiple of 16, 4096 to 268435456)
 sets the stack used by `mb build` and `mb run`. A function frame larger than the

@@ -14,8 +14,28 @@ use wasmi::{
 /// backend crate).
 const STACK_OVERFLOW_EXPORT: &str = "__mb_stack_overflow";
 
-/// The maximum instruction fuel available to a call.
-pub const DEFAULT_FUEL: u64 = 10_000_000;
+/// The default instruction fuel budget for a call: ten billion units.
+///
+/// Ordinary programs finish far below it, while runaway loops still end.
+pub const DEFAULT_FUEL: u64 = 10_000_000_000;
+
+/// Execution options for [`run_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunOptions {
+    /// The instruction fuel budget for module start-up and the call, or `None`
+    /// for unlimited execution. Unlimited execution disables fuel metering
+    /// entirely, so guest loops are not counted at all.
+    pub fuel: Option<u64>,
+}
+
+impl Default for RunOptions {
+    /// Metered execution with [`DEFAULT_FUEL`].
+    fn default() -> Self {
+        Self {
+            fuel: Some(DEFAULT_FUEL),
+        }
+    }
+}
 
 /// A scalar result in the WebAssembly representation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,16 +94,21 @@ impl std::error::Error for RunError {}
 
 /// Validate, instantiate, and call a zero-parameter Wasm function export.
 ///
-/// The module is compiled with fuel metering enabled and the call receives
-/// [`DEFAULT_FUEL`] for module start-up and the requested call. Modules with
-/// imports are rejected before instantiation.
+/// Validate, instantiate, and call a zero-parameter Wasm function export with
+/// the default options: metered execution under [`DEFAULT_FUEL`].
 pub fn run(bytes: &[u8], export: &str) -> Result<RunValue, RunError> {
-    run_with_fuel(bytes, export, DEFAULT_FUEL)
+    run_with(bytes, export, &RunOptions::default())
 }
 
-fn run_with_fuel(bytes: &[u8], export: &str, fuel: u64) -> Result<RunValue, RunError> {
+/// Validate, instantiate, and call a zero-parameter Wasm function export.
+///
+/// With `options.fuel == Some(n)` the module is compiled with fuel metering
+/// and start-up plus the call share `n` fuel units. With `None` fuel metering
+/// is not enabled at all. Modules with imports are rejected before
+/// instantiation.
+pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunValue, RunError> {
     let mut config = Config::default();
-    config.consume_fuel(true);
+    config.consume_fuel(options.fuel.is_some());
     let engine = Engine::new(&config);
     let module =
         Module::new(&engine, bytes).map_err(|error| RunError::Validate(error.to_string()))?;
@@ -127,9 +152,11 @@ fn run_with_fuel(bytes: &[u8], export: &str, fuel: u64) -> Result<RunValue, RunE
     }
 
     let mut store = Store::new(&engine, ());
-    store
-        .set_fuel(fuel)
-        .map_err(|error| RunError::Instantiate(error.to_string()))?;
+    if let Some(fuel) = options.fuel {
+        store
+            .set_fuel(fuel)
+            .map_err(|error| RunError::Instantiate(error.to_string()))?;
+    }
     let instance = Instance::new(&mut store, &module, &[]).map_err(classify_instantiation)?;
     let function = instance
         .get_func(&store, export)
@@ -185,11 +212,15 @@ fn classify_call(error: WasmiError) -> RunError {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_with_fuel, RunError, RunValue};
+    use super::{run_with, RunError, RunOptions, RunValue};
     use wasm_encoder::{
         BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
         ImportSection, Instruction, Module, StartSection, TypeSection, ValType,
     };
+
+    fn run_with_fuel(bytes: &[u8], export: &str, fuel: u64) -> Result<RunValue, RunError> {
+        run_with(bytes, export, &RunOptions { fuel: Some(fuel) })
+    }
 
     fn module(result: Option<(ValType, Instruction<'static>)>) -> Vec<u8> {
         let mut module = Module::new();
@@ -341,6 +372,56 @@ mod tests {
         assert_eq!(
             run_with_fuel(&infinite_loop, "entry", 100),
             Err(RunError::FuelExhausted)
+        );
+    }
+
+    #[test]
+    fn unlimited_runs_are_unmetered_while_fuel_limits_apply() {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I32]);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut exports = ExportSection::new();
+        exports.export("entry", ExportKind::Func, 0);
+        module.section(&exports);
+        let limit = 100_000;
+        let mut code = CodeSection::new();
+        let mut function = Function::new([(1, ValType::I32)]);
+        function.instruction(&Instruction::Loop(BlockType::Empty));
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Const(1));
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::LocalTee(0));
+        function.instruction(&Instruction::I32Const(limit));
+        function.instruction(&Instruction::I32LtS);
+        function.instruction(&Instruction::BrIf(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module.section(&code);
+        let bytes = module.finish();
+
+        assert_eq!(
+            run_with(&bytes, "entry", &RunOptions { fuel: None }),
+            Ok(RunValue::I32(limit))
+        );
+        assert_eq!(
+            run_with(&bytes, "entry", &RunOptions { fuel: Some(1000) }),
+            Err(RunError::FuelExhausted)
+        );
+        assert_eq!(
+            run_with(
+                &bytes,
+                "entry",
+                &RunOptions {
+                    fuel: Some(10_000_000)
+                }
+            ),
+            Ok(RunValue::I32(limit))
         );
     }
 

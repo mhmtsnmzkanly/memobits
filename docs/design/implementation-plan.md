@@ -95,7 +95,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   a fixed one-page linear memory with checked allocation and restoration on
   every return.
 - **Runtime and execution** (`memobits-runtime`, wasmi): fresh instance per run,
-  bounded default fuel, structured host errors for traps. Source and artifact
+  a default fuel budget of ten billion units (overridable with `mb run --fuel N`
+  or `--no-fuel-limit`), structured host errors for traps. Source and artifact
   execution share the same path and print scalar results. The former AST
   interpreter was removed from the repository and never defined the semantics.
 

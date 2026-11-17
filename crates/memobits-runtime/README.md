@@ -6,9 +6,16 @@ result is `Unit`, `I32`, `I64`, `F32`, or `F64`, matching the Wasm representatio
 Signedness and source-level narrow integer types are unavailable in a Wasm
 artifact, so the runner does not reinterpret integer results.
 
-Execution uses a fixed fuel budget to stop unbounded loops. Errors distinguish
-invalid modules, unsupported imports, instantiation failures, missing exports,
-unsupported signatures, traps, and fuel exhaustion. This is a small execution
+`run_with(bytes, export, &RunOptions { fuel })` takes the same inputs with an
+explicit budget. `RunOptions::fuel` is `Some(n)` for `n` fuel units of metered
+execution, or `None` for unlimited execution, which does not enable fuel
+metering at all. `run` uses `RunOptions::default()`, which is metered with
+`DEFAULT_FUEL` (ten billion units). The `mb` CLI exposes this as `--fuel N` and
+`--no-fuel-limit`.
+
+Errors distinguish invalid modules, unsupported imports, instantiation failures,
+missing exports, unsupported signatures, traps, fuel exhaustion, and stack
+overflow. This is a small execution
 API for the compiler pipeline; it does not claim a complete sandbox or host
 ABI.
 

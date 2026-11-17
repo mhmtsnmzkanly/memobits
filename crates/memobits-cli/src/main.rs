@@ -15,7 +15,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH]\n       mb run FILE.wasm [--entry NAME]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone primitive types and loop control\n  ownership FILE   Check primitive moves and loans in one source file\n  analyze-project  Check primitive types across reachable local modules\n  ownership-project Check primitive moves and loans across reachable local modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. Build supports the primitive Wasm subset and exported functions only. Run uses the same WebAssembly runtime for project source and artifacts, applies a bounded default fuel budget, and prints scalar results without using them as the process exit code. The project ownership command checks the supported primitive subset; success is not a borrow-safety guarantee. The standalone ownership command checks primitive moves and loans; internal primitive references execute in Wasm; external reference signatures remain unsupported, and success is not a complete safety guarantee. check is not supported yet.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone primitive types and loop control\n  ownership FILE   Check primitive moves and loans in one source file\n  analyze-project  Check primitive types across reachable local modules\n  ownership-project Check primitive moves and loans across reachable local modules\n  build            Compile the selected target to WebAssembly\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. Build supports the primitive Wasm subset and exported functions only. Run uses the same WebAssembly runtime for project source and artifacts, applies a bounded default fuel budget (see --fuel), and prints scalar results without using them as the process exit code. The project ownership command checks the supported primitive subset; success is not a borrow-safety guarantee. The standalone ownership command checks primitive moves and loans; internal primitive references execute in Wasm; external reference signatures remain unsupported, and success is not a complete safety guarantee. check is not supported yet.\n";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -204,14 +204,84 @@ fn runtime_error(error: memobits_runtime::RunError) -> String {
         RunError::Trap(_) => 7,
         RunError::StackOverflow => 8,
     };
+    let message = match &error {
+        RunError::FuelExhausted => format!(
+            "{error}; raise the budget with --fuel N or run without a limit using --no-fuel-limit"
+        ),
+        _ => error.to_string(),
+    };
     render(
         &Diagnostic::new(
             DiagnosticCode::new(Category::Runtime, code).expect("static RE code"),
             Severity::Error,
-            error.to_string(),
+            message,
         ),
         None,
     )
+}
+
+/// The `--fuel N` and `--no-fuel-limit` options shared by both run forms.
+#[derive(Default)]
+struct FuelArgs {
+    limit: Option<u64>,
+    unlimited: bool,
+}
+
+impl FuelArgs {
+    /// Consumes `arg` (and its value, if any) when it is a fuel option.
+    fn take(
+        &mut self,
+        arg: &OsString,
+        args: &mut impl Iterator<Item = OsString>,
+    ) -> Result<bool, String> {
+        match arg.to_str() {
+            Some("--no-fuel-limit") => {
+                if self.unlimited {
+                    return Err(diagnostic(4, "--no-fuel-limit may only be specified once"));
+                }
+                self.unlimited = true;
+                Ok(true)
+            }
+            Some("--fuel") => {
+                if self.limit.is_some() {
+                    return Err(diagnostic(4, "--fuel may only be specified once"));
+                }
+                let value = args
+                    .next()
+                    .ok_or_else(|| diagnostic(4, "--fuel requires a positive integer"))?;
+                let text = value.to_string_lossy();
+                let limit = text
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|limit| *limit > 0)
+                    .ok_or_else(|| {
+                        diagnostic(
+                            4,
+                            format!("--fuel requires a positive integer, found '{text}'"),
+                        )
+                    })?;
+                self.limit = Some(limit);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn options(&self) -> Result<memobits_runtime::RunOptions, String> {
+        if self.unlimited && self.limit.is_some() {
+            return Err(diagnostic(
+                4,
+                "--fuel and --no-fuel-limit cannot be used together",
+            ));
+        }
+        Ok(memobits_runtime::RunOptions {
+            fuel: if self.unlimited {
+                None
+            } else {
+                Some(self.limit.unwrap_or(memobits_runtime::DEFAULT_FUEL))
+            },
+        })
+    }
 }
 
 fn display_run_value(value: memobits_runtime::RunValue, ty: Option<&Type>) -> String {
@@ -274,6 +344,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         let wasm_path = PathBuf::from(&arguments[0]);
         let mut entry = "main".to_owned();
         let mut explicit_entry = false;
+        let mut fuel = FuelArgs::default();
         let mut args = arguments.into_iter().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--help" || arg == "-h" {
@@ -282,11 +353,14 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
                 }
                 return Ok(HELP.into());
             }
+            if fuel.take(&arg, &mut args)? {
+                continue;
+            }
             if arg != "--entry" {
                 return Err(diagnostic(
                     4,
                     format!(
-                        "unexpected run argument '{}'; artifact mode accepts only --entry",
+                        "unexpected run argument '{}'; artifact mode accepts only --entry, --fuel, and --no-fuel-limit",
                         arg.to_string_lossy()
                     ),
                 ));
@@ -301,13 +375,16 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
                 .ok_or_else(|| diagnostic(4, "--entry requires an export name"))?;
             explicit_entry = true;
         }
+        let run_options = fuel.options()?;
         let bytes = fs::read(&wasm_path)
             .map_err(|error| diagnostic(1, format!("{}: {error}", wasm_path.display())))?;
-        let value = memobits_runtime::run(&bytes, &entry).map_err(runtime_error)?;
+        let value =
+            memobits_runtime::run_with(&bytes, &entry, &run_options).map_err(runtime_error)?;
         return Ok(format!("Result: {}\n", display_run_value(value, None)));
     }
 
     let mut selected = None;
+    let mut fuel = FuelArgs::default();
     let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -316,11 +393,14 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
             }
             return Ok(HELP.into());
         }
+        if fuel.take(&arg, &mut args)? {
+            continue;
+        }
         if arg != "--project" {
             return Err(diagnostic(
                 4,
                 format!(
-                    "source run accepts only --project, found '{}'",
+                    "source run accepts only --project, --fuel, and --no-fuel-limit, found '{}'",
                     arg.to_string_lossy()
                 ),
             ));
@@ -335,6 +415,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
                 .ok_or_else(|| diagnostic(4, "--project requires a manifest path"))?,
         );
     }
+    let run_options = fuel.options()?;
     let project = Project::load(".", selected.as_deref()).map_err(project_error)?;
     let resolution = resolve(&project, Target::Application);
     if !resolution.diagnostics.is_empty() {
@@ -354,7 +435,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
     let options = backend_options(&project);
     let bytes = memobits_wasm::compile_with(&program, &exports, &options)
         .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &resolution))?;
-    let value = memobits_runtime::run(&bytes, "main").map_err(runtime_error)?;
+    let value = memobits_runtime::run_with(&bytes, "main", &run_options).map_err(runtime_error)?;
     Ok(format!(
         "Result: {}\n",
         display_run_value(value, Some(result_type))

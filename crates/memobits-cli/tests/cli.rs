@@ -1491,3 +1491,83 @@ fn invalid_build_settings_have_stable_codes() {
     stack_project(&f, "[build]\nstack = 4096\n", "pub fn main() {}");
     err(f.run(&["project"]), "PE002");
 }
+
+#[test]
+fn run_fuel_options_control_the_execution_budget() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='demo'\nentry='app::main'\n",
+    );
+    f.write(
+        "src/app.mb",
+        "fn main() -> i32 { var i := 0; var s := 0; loop { if i == 100000 { break; } s = s + 1; i += 1; } s }",
+    );
+    let default = f.run(&["run"]);
+    assert!(default.status.success(), "{default:?}");
+    assert_eq!(
+        String::from_utf8(default.stdout).unwrap(),
+        "Result: i32(100000)\n"
+    );
+    let build = f.run(&["build", "--output", "app.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(
+        String::from_utf8(f.run(&["run", "app.wasm"]).stdout).unwrap(),
+        "Result: i32(100000)\n"
+    );
+
+    for args in [
+        &["run", "--fuel", "1000"][..],
+        &["run", "app.wasm", "--fuel", "1000"],
+    ] {
+        let text = err(f.run(args), "RE006");
+        assert!(text.contains("--fuel"), "{text}");
+    }
+    for args in [
+        &["run", "--fuel", "100000000"][..],
+        &["run", "--no-fuel-limit"],
+        &["run", "app.wasm", "--fuel", "100000000"],
+        &["run", "app.wasm", "--no-fuel-limit"],
+    ] {
+        let out = f.run(args);
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            "Result: i32(100000)\n",
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    for args in [
+        &["run", "--fuel"][..],
+        &["run", "--fuel", "0"],
+        &["run", "--fuel", "-5"],
+        &["run", "--fuel", "1.5"],
+        &["run", "--fuel", "abc"],
+        &["run", "--fuel", "1", "--fuel", "2"],
+        &["run", "--fuel", "1", "--no-fuel-limit"],
+        &["run", "--no-fuel-limit", "--no-fuel-limit"],
+        &["run", "app.wasm", "--fuel", "0"],
+        &["run", "app.wasm", "--fuel"],
+        &["run", "app.wasm", "--no-fuel-limit", "--fuel", "5"],
+    ] {
+        err(f.run(args), "PE004");
+    }
+}
+
+#[test]
+fn deep_recursion_with_frame_arrays_reports_stack_overflow_not_fuel() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='demo'\nentry='app::main'\n",
+    );
+    f.write(
+        "src/app.mb",
+        "fn r(n: i32) -> i32 { let a := [n; 1000]; if n == 0 { 0 } else { r(n - 1) + a[0] } } \
+         fn main() -> i32 { r(100000) }",
+    );
+    let text = err(f.run(&["run"]), "RE008");
+    assert!(!text.contains("RE006"), "{text}");
+    assert!(text.contains("stack overflow"), "{text}");
+}
