@@ -1,0 +1,5 @@
+// A struct whose fields are all `pub`, so other modules may build and read it.
+pub type Point {
+    pub x: i32,
+    pub y: i32,
+}

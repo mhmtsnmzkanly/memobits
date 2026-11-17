@@ -544,6 +544,7 @@ fn zeroed_arrays_clear_dirty_frame_memory() {
             array_function("dirty", 4, false, 2),
             array_function("clean", 4, true, 2),
         ],
+        ..Program::default()
     };
     let exports = BTreeMap::from([
         ("dirty".to_string(), FunctionId(0)),
@@ -562,6 +563,7 @@ fn oversized_or_overflowing_array_layouts_are_diagnostics() {
     for len in [8193, u32::MAX / 2, u32::MAX] {
         let program = Program {
             functions: vec![array_function("big", len, true, 0)],
+            ..Program::default()
         };
         let errors = memobits_wasm::compile(&program, &exports("big", 0)).unwrap_err();
         assert!(

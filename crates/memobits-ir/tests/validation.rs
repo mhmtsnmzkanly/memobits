@@ -87,7 +87,14 @@ fn accepts_well_formed_function_and_join() {
             ))),
         },
     });
-    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    assert_eq!(
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate(),
+        Ok(())
+    );
 }
 
 #[test]
@@ -113,7 +120,12 @@ fn rejects_eager_logical_binary_operations() {
     f.blocks[0].terminator.kind =
         TerminatorKind::Return(Some(operand(Source::Value(ValueId(0)), UseMode::Consume)));
 
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|error| { error.message.contains("short-circuit evaluation") }));
@@ -125,7 +137,12 @@ fn rejects_entry_block_parameters() {
     f.values.push(bool_ty());
     f.blocks[0].parameters.push(ValueId(1));
 
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|error| error.message.contains("entry block cannot have parameters")));
@@ -159,7 +176,14 @@ fn validates_reference_parameters_and_loads() {
     }];
     f.blocks[0].terminator.kind = TerminatorKind::Return(None);
 
-    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    assert_eq!(
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate(),
+        Ok(())
+    );
 }
 
 #[test]
@@ -198,7 +222,14 @@ fn validates_exclusive_reference_stores() {
     ];
     f.blocks[0].terminator.kind = TerminatorKind::Return(None);
 
-    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    assert_eq!(
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate(),
+        Ok(())
+    );
 }
 
 #[test]
@@ -229,7 +260,12 @@ fn loaded_reference_values_cannot_be_consumed_as_owned() {
     f.blocks[0].terminator.kind =
         TerminatorKind::Return(Some(operand(Source::Value(ValueId(0)), UseMode::Consume)));
 
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|error| error.message.contains("read-only and cannot be consumed")));
@@ -294,7 +330,12 @@ fn read_only_load_provenance_survives_capture_and_block_arguments() {
         },
     ];
 
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|error| error.message.contains("read-only and cannot be consumed")));
@@ -317,7 +358,12 @@ fn reference_types_reject_owned_access_and_reference_results() {
         inner: Box::new(i32_ty()),
     });
 
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|error| error.message.contains("reference cannot use Owned access")));
@@ -374,7 +420,8 @@ fn calls_require_reference_arguments_for_borrow_and_share_parameters() {
 
     assert_eq!(
         Program {
-            functions: vec![callee.clone(), caller.clone()]
+            functions: vec![callee.clone(), caller.clone()],
+            ..Program::default()
         }
         .validate(),
         Ok(())
@@ -384,6 +431,7 @@ fn calls_require_reference_arguments_for_borrow_and_share_parameters() {
     callee.locals[0].ty = i32_ty();
     let errors = Program {
         functions: vec![callee, caller],
+        ..Program::default()
     }
     .validate()
     .unwrap_err();
@@ -400,14 +448,24 @@ fn detects_missing_targets_and_bad_return_type() {
         arguments: vec![],
     });
     f.entry = BlockId(8);
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors.iter().any(|e| e.message.contains("entry block")));
     assert!(errors.iter().any(|e| e.message.contains("edge target")));
 
     let mut f = function();
     f.values[0] = bool_ty();
     f.blocks[0].instructions[0].kind = InstructionKind::Constant(Constant::Bool(true));
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|e| e.message.contains("return value type")));
@@ -420,7 +478,12 @@ fn detects_duplicate_values_and_invalid_operand_ids() {
     f.blocks[0].instructions.push(duplicate);
     f.blocks[0].terminator.kind =
         TerminatorKind::Return(Some(operand(Source::Local(LocalId(4)), UseMode::Consume)));
-    let errors = Program { functions: vec![f] }.validate().unwrap_err();
+    let errors = Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap_err();
     assert!(errors
         .iter()
         .any(|e| e.message.contains("defined more than once")));
@@ -454,6 +517,7 @@ fn checks_call_signature_and_use_modes() {
     callee.parameter_locals.push(LocalId(0));
     let errors = Program {
         functions: vec![caller, callee],
+        ..Program::default()
     }
     .validate()
     .unwrap_err();
@@ -557,24 +621,38 @@ fn array_function(index_ty: Type) -> Function {
 }
 
 fn messages(f: Function) -> Vec<String> {
-    Program { functions: vec![f] }
-        .validate()
-        .err()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|error| error.message)
-        .collect()
+    Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .err()
+    .unwrap_or_default()
+    .into_iter()
+    .map(|error| error.message)
+    .collect()
 }
 
 #[test]
 fn accepts_array_new_and_element_address() {
     let f = array_function(i32_ty());
-    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    assert_eq!(
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate(),
+        Ok(())
+    );
     // Any integer width is a valid index; Zeroed needs no operands.
     for index in [Primitive::U8, Primitive::I64, Primitive::U64] {
         let f = array_function(Type::Primitive(index));
         assert_eq!(
-            Program { functions: vec![f] }.validate(),
+            Program {
+                functions: vec![f],
+                ..Program::default()
+            }
+            .validate(),
             Ok(()),
             "{index:?}"
         );
@@ -583,7 +661,14 @@ fn accepts_array_new_and_element_address() {
     f.blocks[0].instructions[2].kind = InstructionKind::ArrayNew {
         init: ArrayInit::Zeroed,
     };
-    assert_eq!(Program { functions: vec![f] }.validate(), Ok(()));
+    assert_eq!(
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate(),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1005,18 +1090,26 @@ fn copy_function(source_ty: Type, output_ty: Type, mode: UseMode) -> Function {
 #[test]
 fn copy_turns_a_loaded_read_only_value_into_an_owned_value() {
     let f = copy_function(i32_ty(), i32_ty(), UseMode::Read);
-    Program { functions: vec![f] }.validate().unwrap();
+    Program {
+        functions: vec![f],
+        ..Program::default()
+    }
+    .validate()
+    .unwrap();
 }
 
 #[test]
 fn copy_requires_a_primitive_read_source_with_matching_output() {
     let messages = |f: Function| -> Vec<String> {
-        Program { functions: vec![f] }
-            .validate()
-            .unwrap_err()
-            .into_iter()
-            .map(|error| error.message)
-            .collect()
+        Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate()
+        .unwrap_err()
+        .into_iter()
+        .map(|error| error.message)
+        .collect()
     };
     assert!(
         messages(copy_function(i32_ty(), i32_ty(), UseMode::Consume))
@@ -1037,4 +1130,326 @@ fn copy_requires_a_primitive_read_source_with_matching_output() {
     assert!(messages(f)
         .iter()
         .any(|m| m.contains("copy is available only for primitive values")));
+}
+
+// ---- user-defined struct types ----
+
+fn struct_def(name: &str, fields: Vec<(&str, Type)>) -> TypeDef {
+    TypeDef {
+        path: CanonicalType {
+            package: "test".into(),
+            module: vec!["main".into()],
+            name: name.into(),
+        },
+        span: span(),
+        kind: TypeDefKind::Struct {
+            fields: fields
+                .into_iter()
+                .map(|(name, ty)| FieldDef {
+                    name: name.into(),
+                    ty,
+                })
+                .collect(),
+        },
+    }
+}
+fn ins(output: Option<u32>, kind: InstructionKind) -> Instruction {
+    Instruction {
+        span: Some(span()),
+        output: output.map(ValueId),
+        kind,
+    }
+}
+fn val(id: u32, mode: UseMode) -> Operand {
+    operand(Source::Value(ValueId(id)), mode)
+}
+fn loc(id: u32, mode: UseMode) -> Operand {
+    operand(Source::Local(LocalId(id)), mode)
+}
+
+/// `type P { x: i32, y: i32 }` and a function building one, binding it to the
+/// local `p`, then reading field `y` through a field address and a load.
+fn struct_program() -> Program {
+    let mut f = function();
+    f.signature.result = Box::new(Type::Primitive(Primitive::Unit));
+    f.locals = vec![Local {
+        name: "p".into(),
+        ty: Type::Struct(TypeId(0)),
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![
+        i32_ty(),
+        i32_ty(),
+        Type::Struct(TypeId(0)),
+        Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(i32_ty()),
+        },
+        i32_ty(),
+    ];
+    f.blocks[0].instructions = vec![
+        ins(
+            Some(0),
+            InstructionKind::Constant(Constant::Integer("1".into())),
+        ),
+        ins(
+            Some(1),
+            InstructionKind::Constant(Constant::Integer("2".into())),
+        ),
+        ins(
+            Some(2),
+            InstructionKind::StructNew {
+                ty: TypeId(0),
+                fields: vec![val(0, UseMode::Consume), val(1, UseMode::Consume)],
+            },
+        ),
+        ins(
+            None,
+            InstructionKind::Assign {
+                target: LocalId(0),
+                value: val(2, UseMode::Consume),
+                initialize: true,
+            },
+        ),
+        ins(
+            Some(3),
+            InstructionKind::FieldAddr {
+                loan: LoanId(0),
+                base: loc(0, UseMode::Borrow),
+                field: 1,
+                access: Access::Borrow,
+            },
+        ),
+        ins(
+            Some(4),
+            InstructionKind::Load {
+                reference: val(3, UseMode::Borrow),
+            },
+        ),
+    ];
+    f.blocks[0].terminator.kind = TerminatorKind::Return(None);
+    Program {
+        functions: vec![f],
+        types: vec![struct_def("P", vec![("x", i32_ty()), ("y", i32_ty())])],
+    }
+}
+fn struct_errors(edit: impl FnOnce(&mut Program)) -> Vec<String> {
+    let mut program = struct_program();
+    edit(&mut program);
+    program
+        .validate()
+        .unwrap_err()
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
+}
+fn has(errors: &[String], needle: &str) -> bool {
+    errors.iter().any(|e| e.contains(needle))
+}
+
+#[test]
+fn accepts_struct_creation_field_address_and_load() {
+    assert_eq!(struct_program().validate(), Ok(()));
+}
+
+#[test]
+fn rejects_out_of_range_struct_type_ids() {
+    let errors = struct_errors(|p| {
+        p.functions[0].locals[0].ty = Type::Struct(TypeId(7));
+    });
+    assert!(has(&errors, "out of range"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.functions[0].blocks[0].instructions[2].kind = InstructionKind::StructNew {
+            ty: TypeId(7),
+            fields: vec![val(0, UseMode::Consume), val(1, UseMode::Consume)],
+        };
+    });
+    assert!(has(&errors, "out of range"), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_struct_creation() {
+    let errors = struct_errors(|p| {
+        p.functions[0].blocks[0].instructions[2].kind = InstructionKind::StructNew {
+            ty: TypeId(0),
+            fields: vec![val(0, UseMode::Consume)],
+        };
+    });
+    assert!(has(&errors, "operand count"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.functions[0].values[1] = Type::Primitive(Primitive::Bool);
+        p.functions[0].blocks[0].instructions[1].kind =
+            InstructionKind::Constant(Constant::Bool(true));
+    });
+    assert!(
+        has(&errors, "differs from the declared field type"),
+        "{errors:?}"
+    );
+    let errors = struct_errors(|p| {
+        if let InstructionKind::StructNew { fields, .. } =
+            &mut p.functions[0].blocks[0].instructions[2].kind
+        {
+            fields[0].mode = UseMode::Read;
+        }
+    });
+    assert!(has(&errors, "must be consumed"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.functions[0].values[2] = i32_ty();
+    });
+    assert!(has(&errors, "created struct type"), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_field_addresses() {
+    let errors = struct_errors(|p| {
+        if let InstructionKind::FieldAddr { field, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            *field = 2;
+        }
+    });
+    assert!(has(&errors, "field index 2 is out of range"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.functions[0].values[3] = Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(Type::Primitive(Primitive::Bool)),
+        };
+    });
+    assert!(has(&errors, "output type is incompatible"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        if let InstructionKind::FieldAddr { base, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            base.mode = UseMode::Share;
+        }
+    });
+    assert!(has(&errors, "base mode"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        if let InstructionKind::FieldAddr { base, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            *base = val(0, UseMode::Borrow);
+        }
+    });
+    assert!(has(&errors, "must be a struct owner"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        if let InstructionKind::FieldAddr { loan, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            *loan = LoanId(0);
+        }
+        // A second field address reusing loan 0.
+        let duplicate = p.functions[0].blocks[0].instructions[4].clone();
+        p.functions[0].values.push(Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(i32_ty()),
+        });
+        let mut duplicate = duplicate;
+        duplicate.output = Some(ValueId(5));
+        p.functions[0].blocks[0].instructions.push(duplicate);
+    });
+    assert!(
+        has(&errors, "loan ID is defined more than once"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_unsupported_struct_shapes() {
+    // Whole-struct load, struct block parameters and struct signature types.
+    let errors = struct_errors(|p| {
+        let f = &mut p.functions[0];
+        f.values[3] = Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(Type::Struct(TypeId(0))),
+        };
+    });
+    assert!(has(&errors, "must refer to a primitive"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        let f = &mut p.functions[0];
+        f.signature.parameters.push(ParameterType {
+            access: Access::Owned,
+            ty: Type::Struct(TypeId(0)),
+        });
+        f.parameter_locals.push(LocalId(0));
+    });
+    assert!(has(&errors, "cannot be a struct yet"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        *p.functions[0].signature.result = Type::Struct(TypeId(0));
+    });
+    assert!(has(&errors, "cannot be a struct yet"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        let f = &mut p.functions[0];
+        f.values.push(Type::Struct(TypeId(0)));
+        f.blocks.push(Block {
+            parameters: vec![ValueId(5)],
+            instructions: vec![],
+            terminator: Terminator {
+                span: None,
+                kind: TerminatorKind::Return(None),
+            },
+        });
+    });
+    assert!(has(&errors, "struct block parameters"), "{errors:?}");
+}
+
+#[test]
+fn rejects_invalid_struct_definitions() {
+    // Recursive and nested aggregate fields cannot be represented.
+    let errors = struct_errors(|p| {
+        p.types
+            .push(struct_def("Node", vec![("next", Type::Struct(TypeId(1)))]));
+    });
+    assert!(has(&errors, "must be a non-Unit primitive"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types[0] = struct_def(
+            "P",
+            vec![
+                ("x", i32_ty()),
+                (
+                    "y",
+                    Type::Array {
+                        element: Box::new(i32_ty()),
+                        len: 2,
+                    },
+                ),
+            ],
+        );
+    });
+    assert!(has(&errors, "must be a non-Unit primitive"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types[0] = struct_def("P", vec![("x", i32_ty()), ("x", i32_ty())]);
+    });
+    assert!(has(&errors, "more than once"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types.push(p.types[0].clone());
+    });
+    assert!(has(&errors, "duplicate canonical type path"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types[0].path.name = String::new();
+    });
+    assert!(has(&errors, "invalid canonical type path"), "{errors:?}");
+    let errors = struct_errors(|p| {
+        p.types[0] = struct_def("P", vec![("x", Type::Primitive(Primitive::Unit))]);
+    });
+    assert!(has(&errors, "must be a non-Unit primitive"), "{errors:?}");
+}
+
+#[test]
+fn nominal_struct_types_with_equal_fields_are_distinct() {
+    // Assigning a `Q` value to a local of type `P` is a type mismatch.
+    let errors = struct_errors(|p| {
+        p.types
+            .push(struct_def("Q", vec![("x", i32_ty()), ("y", i32_ty())]));
+        p.functions[0].values[2] = Type::Struct(TypeId(1));
+        p.functions[0].blocks[0].instructions[2].kind = InstructionKind::StructNew {
+            ty: TypeId(1),
+            fields: vec![val(0, UseMode::Consume), val(1, UseMode::Consume)],
+        };
+    });
+    assert!(
+        has(&errors, "assignment value type differs from local type"),
+        "{errors:?}"
+    );
 }

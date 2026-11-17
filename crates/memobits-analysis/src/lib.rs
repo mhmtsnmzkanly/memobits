@@ -82,6 +82,11 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         ExprKind::Field { base, .. } => check_expr(base, in_loop, diagnostics),
+        ExprKind::Struct { fields, .. } => {
+            for field in fields {
+                check_expr(&field.value, in_loop, diagnostics);
+            }
+        }
         ExprKind::Block(block) => check_block(block, in_loop, diagnostics),
         ExprKind::If {
             condition,
@@ -118,8 +123,8 @@ mod tests {
 mod constants;
 mod types;
 pub use types::{
-    check_resolved_types, check_typed_module, check_types, ExprId, ExpressionFact, FunctionFacts,
-    LocalFact, PathTarget, PathUse, TypedModule,
+    check_resolved_types, check_typed_module, check_types, ExprId, ExpressionFact, FieldFact,
+    FunctionFacts, LocalFact, PathTarget, PathUse, StructFact, TypedModule,
 };
 
 mod lower;

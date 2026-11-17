@@ -94,6 +94,7 @@ fn base() -> Function {
 fn codes(function: Function) -> Vec<String> {
     let program = Program {
         functions: vec![function],
+        ..Program::default()
     };
     check_moves(&program)
         .iter()
@@ -110,7 +111,10 @@ fn reads_do_not_consume_but_second_consume_fails() {
         consume(local(0, UseMode::Consume, 12)),
         consume(local(0, UseMode::Consume, 13)),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].code.to_string(), "BE001");
     assert_eq!(diagnostics[0].span.unwrap().start, 13);
@@ -150,7 +154,10 @@ fn branch_move_reaches_join_and_unreachable_block_is_ignored() {
             TerminatorKind::Return(None),
         ),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].span.unwrap().start, 6);
 }
@@ -182,7 +189,10 @@ fn loop_backedge_reaches_fixed_point() {
             TerminatorKind::Return(None),
         ),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics
             .iter()
@@ -200,7 +210,10 @@ fn assignment_restores_after_rhs_and_shadow_ids_are_separate() {
         assign(0, local(1, UseMode::Read, 3)),
         assign(1, local(0, UseMode::Read, 4)),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(
         diagnostics
             .iter()
@@ -216,7 +229,10 @@ fn assignment_restores_after_rhs_and_shadow_ids_are_separate() {
         assign(1, local(0, UseMode::Read, 6)),
         consume(local(1, UseMode::Read, 7)),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(
         diagnostics
             .iter()
@@ -239,7 +255,10 @@ fn temporary_values_cannot_be_consumed_twice() {
         consume(value(0, UseMode::Consume, 2)),
         consume(value(0, UseMode::Consume, 3)),
     ];
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].span.unwrap().start, 3);
 }
@@ -269,7 +288,10 @@ fn reassignment_to_immutable_local_is_rejected() {
         },
     }];
 
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].code.to_string(), "BE004");
     assert_eq!(diagnostics[0].span.unwrap().start, 18);
@@ -295,13 +317,17 @@ fn copy_reads_its_source_and_is_rejected_after_a_move() {
     ];
     let first = check_moves(&Program {
         functions: vec![f.clone()],
+        ..Program::default()
     });
     assert!(first.is_empty(), "{first:?}");
     f.values.push(ty());
     f.blocks[0]
         .instructions
         .push(copy_into(2, local(0, UseMode::Read, 14)));
-    let diagnostics = check_moves(&Program { functions: vec![f] });
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].code.to_string(), "BE001");
     assert_eq!(diagnostics[0].span.unwrap().start, 14);

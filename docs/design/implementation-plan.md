@@ -99,11 +99,27 @@ the implemented subset; a milestone is not complete merely because its crate exi
   execution share the same path and print scalar results. The former AST
   interpreter was removed from the repository and never defined the semantics.
 
+### Structs (A1)
+
+- **Structs, first slice** (`memobits-analysis`, `-ir`, `-ownership`, `-wasm`):
+  `type P { x: i32, pub y: i32 }` declarations with non-Unit primitive fields;
+  struct literals with every field exactly once, in any order, as a `let`
+  initialiser; primitive field reads `p.x` in expressions and conditions; and
+  `p.x.copy()`. `pub` types and fields work across modules. IR uses
+  `TypeDef`/`Type::Struct`, `StructNew` and `FieldAddr` + `Load`; the backend
+  lays fields out in declaration order at natural alignment inside the 32 KiB frame.
+  Reading a primitive field into an owned binding is still TE022 (use `.copy()`),
+  pending the implicit primitive copy in `decisions.md`. Everything else on
+  structs is gated with TE017 (`var` structs, field assignment, whole-struct
+  values, struct parameters and results, nested or array fields), and private
+  access is TE025. The gate table and the A2-A4 sequence are in
+  `struct-implementation.md`.
+
 ### Known limits of the implemented subset
 
 - Analysis success is not an ownership or borrow-safety proof. Coverage is the
   tested subset.
-- Standalone `analyze` does not support imported functions or user-defined types;
+- Standalone `analyze` does not support imported functions or user-defined types beyond the A1 structs;
   `analyze-project` supports primitive signatures across resolved modules only.
 - Resolution reachability works at module granularity. Source analysis checks all
   declarations in loaded modules; there is no per-definition incremental compilation.
@@ -188,14 +204,16 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Milestones 10-12 (A* and ENF consumers, optimization): not started.
 - Milestone 13 (later design): task/host coordination, parallel execution,
   static storage, property/extension systems, ABI compatibility, and cross-language calls.
-- Milestone 4 gaps: user-defined type analysis, enum exhaustiveness, and
-  three-state outcome distinctions.
+- Milestone 4 gaps: enum type analysis, enum exhaustiveness, and three-state
+  outcome distinctions. Structs beyond A1 (A2-A4) are gated, not analysed.
 
 ### Next step
 
-Fixed arrays of primitive and nested-array elements are complete (WP1-WP4).
-The next work is the first aggregate beyond arrays: copy of aggregates (primitive
-`.copy()` already lifts TE022 for primitive elements), then user-defined struct types and
-enums on the same frame-cell model, and an external array ABI if exports ever
-need one. Keep TE017/TE022/LE900 gating every form not listed under the
-fixed-array status above.
+Fixed arrays of primitive and nested-array elements are complete (WP1-WP4), and
+the struct A1 slice is complete (`struct-implementation.md`). The next work is
+struct package A2 (`var` structs, field assignment, whole-struct moves, struct
+parameters and results, borrow/share of structs). The implicit primitive copy
+decided in `decisions.md` is not implemented yet; when it lands, the TE022 rule for
+primitive fields goes away. After that: copy of aggregates, enums on the same
+frame-cell model, and an external array ABI if exports ever need one. Keep TE017/TE022/LE900 gating every form not
+listed under the fixed-array and struct status above.

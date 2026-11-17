@@ -36,7 +36,7 @@ require no network access: `cargo test --offline -p memobits-cli`.
 
 `mb analyze FILE` runs standalone primitive type and loop-control checks after
 successful parsing. It reports source diagnostics and rejects unsupported imports,
-user-defined types, and borrow/share parameters. Ownership is not checked. This
+enum types, and borrow/share parameters (struct and alias declarations are supported). Ownership is not checked. This
 command is an incremental compiler tool, not a project build or safety guarantee.
 
 `mb ownership FILE` parses and type-checks a standalone source file, lowers it to

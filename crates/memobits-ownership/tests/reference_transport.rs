@@ -86,10 +86,13 @@ fn local_slot(name: &str, ty: Type, mutable: bool) -> Local {
     }
 }
 fn codes(functions: Vec<Function>) -> Vec<String> {
-    check_loans(&Program { functions })
-        .iter()
-        .map(|d| d.code.to_string())
-        .collect()
+    check_loans(&Program {
+        functions,
+        ..Program::default()
+    })
+    .iter()
+    .map(|d| d.code.to_string())
+    .collect()
 }
 fn owned_i32(name: &str, mutable: bool) -> (ParameterType, Local) {
     (
@@ -141,7 +144,10 @@ fn handle_capture_requires_relocation() {
                     TerminatorKind::Return(None),
                 )],
             );
-            let program = Program { functions: vec![f] };
+            let program = Program {
+                functions: vec![f],
+                ..Program::default()
+            };
             program.validate().unwrap();
             let diagnostics = memobits_ownership::check_ownership(&program);
             assert_eq!(

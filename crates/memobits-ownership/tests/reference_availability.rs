@@ -99,7 +99,10 @@ fn owned_i32(name: &str, mutable: bool) -> (ParameterType, Local) {
 }
 
 fn run(f: Function) -> Vec<memobits_diagnostics::Diagnostic> {
-    let program = Program { functions: vec![f] };
+    let program = Program {
+        functions: vec![f],
+        ..Program::default()
+    };
     assert!(program.validate().is_ok(), "{:?}", program.validate());
     check_ownership(&program)
 }

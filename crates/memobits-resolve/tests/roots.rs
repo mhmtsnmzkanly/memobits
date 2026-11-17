@@ -123,6 +123,15 @@ fn local_type_annotations_and_enum_variants_are_resolved() {
     for (source, expected) in [
         ("fn main(x: Missing) {}", Some("NE003")),
         ("type X { field: Missing } fn main() {}", Some("NE003")),
+        ("fn main() { let p := Missing { x: 1 }; }", Some("NE003")),
+        (
+            "type P { x: i32 } fn main() { let p := P { x: unknown }; }",
+            Some("NE001"),
+        ),
+        (
+            "type P { x: i32 } fn main() { let p := P { x: 1 }; let q := p.x; }",
+            None,
+        ),
         (
             "type State [ Idle ] fn main() { State::Missing; }",
             Some("NE004"),

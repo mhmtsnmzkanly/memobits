@@ -3,16 +3,48 @@ use std::collections::HashMap;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, Constant, Edge,
-    Function, Instruction, InstructionKind, LoanId, Local, LocalId, Operand, Primitive, Program,
-    Source, Terminator, TerminatorKind, Type, UnaryOp, UseMode, ValueId,
+    Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
+    Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
+    Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
+    UnaryOp, UseMode, ValueId,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{Block, Expr, ExprKind, ItemKind, Module, Statement, StatementKind};
 
-use crate::types::{check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget};
+use crate::types::{
+    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget, StructFact,
+};
 
+/// IR type definitions for the checked structs. `module_path` names the module
+/// of a standalone definition (whose fact module is empty).
+fn program_types(
+    structs: &[StructFact],
+    package: &str,
+    module_of: impl Fn(&str) -> Vec<String>,
+) -> Vec<TypeDef> {
+    structs
+        .iter()
+        .map(|definition| TypeDef {
+            path: CanonicalType {
+                package: package.into(),
+                module: module_of(&definition.module),
+                name: definition.name.clone(),
+            },
+            span: definition.span,
+            kind: TypeDefKind::Struct {
+                fields: definition
+                    .fields
+                    .iter()
+                    .map(|field| FieldDef {
+                        name: field.name.clone(),
+                        ty: field.ty.clone(),
+                    })
+                    .collect(),
+            },
+        })
+        .collect()
+}
 fn error(span: Span, message: impl Into<String>) -> Diagnostic {
     let mut d = Diagnostic::new(
         DiagnosticCode::new(Category::Type, 18).expect("static TE code"),
@@ -99,7 +131,7 @@ pub fn lower_module(
             }],
             entry: BlockId(0),
         };
-        let mut builder = Builder::new(function, fact);
+        let mut builder = Builder::new(function, fact, &facts.types);
         builder.lower_block(body);
         if let Some(current) = builder.current {
             let value = builder.last_value.take();
@@ -113,7 +145,10 @@ pub fn lower_module(
         }
         functions.push(builder.function);
     }
-    let program = Program { functions };
+    let program = Program {
+        functions,
+        types: program_types(&facts.types, package, |_| module_path.to_vec()),
+    };
     if let Err(errors) = program.validate() {
         for failure in errors {
             let span = failure
@@ -242,7 +277,7 @@ pub fn lower_resolved(
                     }],
                     entry: BlockId(0),
                 };
-                let mut builder = Builder::new(function, fact);
+                let mut builder = Builder::new(function, fact, &typed.types);
                 builder.lower_block(body);
                 if let Some(current) = builder.current {
                     let value = builder.last_value.take();
@@ -259,7 +294,12 @@ pub fn lower_resolved(
             }
         }
     }
-    let program = Program { functions };
+    let program = Program {
+        functions,
+        types: program_types(&typed.types, &project.manifest.package.name, |module| {
+            module.split("::").map(str::to_owned).collect()
+        }),
+    };
     if let Err(errors) = program.validate() {
         let fallback = program
             .functions
@@ -337,6 +377,7 @@ struct LoopTargets {
 struct Builder<'a> {
     function: Function,
     facts: &'a FunctionFacts,
+    types: &'a [StructFact],
     expression_ids: HashMap<usize, ExprId>,
     expressions: HashMap<ExprId, Option<Type>>,
     paths: HashMap<ExprId, PathTarget>,
@@ -346,7 +387,7 @@ struct Builder<'a> {
     next_loan: u32,
 }
 impl<'a> Builder<'a> {
-    fn new(function: Function, facts: &'a FunctionFacts) -> Self {
+    fn new(function: Function, facts: &'a FunctionFacts, types: &'a [StructFact]) -> Self {
         let expression_ids = facts
             .expressions
             .iter()
@@ -365,6 +406,7 @@ impl<'a> Builder<'a> {
         Self {
             function,
             facts,
+            types,
             expression_ids,
             expressions,
             paths,
@@ -1065,7 +1107,71 @@ impl<'a> Builder<'a> {
                     self.ty(expr),
                 )
             }
-            ExprKind::Field { .. } => unreachable!("unsupported field rejected before lowering"),
+            ExprKind::Field { base, name } => {
+                // Field read: checked address of the field, then a load.
+                let owner = self.lower_expr(base)?;
+                let Some(Type::Struct(id)) = self.operand_type(owner) else {
+                    unreachable!("checked struct field base")
+                };
+                let definition = &self.types[id.0 as usize];
+                let index = definition
+                    .fields
+                    .iter()
+                    .position(|field| &field.name == name)
+                    .expect("checked struct field");
+                let field_type = definition.fields[index].ty.clone();
+                let loan = LoanId(self.next_loan);
+                self.next_loan += 1;
+                let mut base = owner;
+                base.mode = access_mode(Access::Borrow);
+                let mut reference = self.emit(
+                    expr.span,
+                    InstructionKind::FieldAddr {
+                        loan,
+                        base,
+                        field: index as u32,
+                        access: Access::Borrow,
+                    },
+                    Some(Type::Reference {
+                        access: Access::Borrow,
+                        inner: Box::new(field_type),
+                    }),
+                )?;
+                reference.mode = access_mode(Access::Borrow);
+                self.load_element(reference, expr.span)
+            }
+            ExprKind::Struct { fields, .. } => {
+                let Some(Type::Struct(id)) = self.ty(expr) else {
+                    unreachable!("checked struct literal type")
+                };
+                let types = self.types;
+                let definition = &types[id.0 as usize];
+                // Evaluate and capture every initialiser in source order, then
+                // hand them to StructNew in declaration order.
+                let mut slots: Vec<Option<Operand>> = vec![None; definition.fields.len()];
+                for init in fields {
+                    let value = self.lower_expr(&init.value)?;
+                    let value = self.scalar(value)?;
+                    let operand = consume(self.capture(consume(value))?);
+                    let index = definition
+                        .fields
+                        .iter()
+                        .position(|field| field.name == init.name)
+                        .expect("checked struct field");
+                    slots[index] = Some(operand);
+                }
+                self.emit(
+                    expr.span,
+                    InstructionKind::StructNew {
+                        ty: id,
+                        fields: slots
+                            .into_iter()
+                            .map(|slot| slot.expect("checked complete struct literal"))
+                            .collect(),
+                    },
+                    Some(Type::Struct(id)),
+                )
+            }
             ExprKind::Block(block) => self.lower_block(block),
             ExprKind::If {
                 condition,
@@ -1176,7 +1282,7 @@ impl<'a> Builder<'a> {
             // reads a reference. Do not forward the read-only Load result
             // into the join as an owned value.
             let rhs = if matches!(self.ty(right), Some(Type::Reference { .. }))
-                || matches!(right.kind, ExprKind::Index { .. })
+                || matches!(right.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
             {
                 let neutral = self.constant(
                     right.span,

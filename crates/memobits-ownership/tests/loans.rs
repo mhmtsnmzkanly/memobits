@@ -89,10 +89,13 @@ fn local_slot(name: &str, ty: Type, mutable: bool) -> Local {
     }
 }
 fn codes(functions: Vec<Function>) -> Vec<String> {
-    check_loans(&Program { functions })
-        .iter()
-        .map(|d| d.code.to_string())
-        .collect()
+    check_loans(&Program {
+        functions,
+        ..Program::default()
+    })
+    .iter()
+    .map(|d| d.code.to_string())
+    .collect()
 }
 fn owned_i32(name: &str, mutable: bool) -> (ParameterType, Local) {
     (
@@ -149,7 +152,10 @@ fn live_borrow_blocks_owner_write_until_last_use() {
             TerminatorKind::Return(None),
         )],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics
             .iter()
@@ -268,7 +274,10 @@ fn forwarded_reborrow_keeps_ancestor_live() {
             TerminatorKind::Return(None),
         )],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics
             .iter()
@@ -361,7 +370,10 @@ fn branch_join_unions_possible_owner_origins() {
             ),
         ],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics
             .iter()
@@ -628,7 +640,10 @@ fn loop_reentry_with_live_share_site_is_rejected() {
             block(&[], vec![], TerminatorKind::Return(None)),
         ],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics
             .iter()
@@ -659,7 +674,10 @@ fn move_pass_accepts_supported_borrow_modes() {
             TerminatorKind::Return(None),
         )],
     );
-    let program = Program { functions: vec![f] };
+    let program = Program {
+        functions: vec![f],
+        ..Program::default()
+    };
     assert!(memobits_ownership::check_moves(&program).is_empty());
     assert!(check_loans(&program).is_empty());
 }
@@ -673,7 +691,10 @@ fn malformed_control_flow_is_rejected_before_loan_analysis() {
         vec![],
         vec![block(&[], vec![], TerminatorKind::Goto(edge(1, vec![])))],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics.iter().any(|d| d.code.to_string() == "BE003"),
         "{diagnostics:?}"
@@ -728,7 +749,10 @@ fn branch_operand_cannot_read_owner_during_live_share_loan() {
             block(&[], vec![], TerminatorKind::Return(None)),
         ],
     );
-    let diagnostics = check_loans(&Program { functions: vec![f] });
+    let diagnostics = check_loans(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
     assert!(
         diagnostics.iter().any(|d| d.code.to_string() == "BE005"),
         "{diagnostics:?}"
@@ -790,6 +814,7 @@ fn direct_owner_reads_obey_live_loan_access() {
                     vec![reference(access), i32_ty(), i32_ty()],
                     vec![block(&[], instructions, TerminatorKind::Return(None))],
                 )],
+                ..Program::default()
             };
             program.validate().unwrap();
             let diagnostics = check_loans(&program);
@@ -877,6 +902,7 @@ fn reference_load_and_reborrow_respect_descendant_access() {
                     ],
                     vec![block(&[], instructions, TerminatorKind::Return(None))],
                 )],
+                ..Program::default()
             };
             program.validate().unwrap();
             let diagnostics = check_loans(&program);
@@ -953,7 +979,10 @@ fn distinct_reference_parameters_keep_independent_roots() {
                 TerminatorKind::Return(None),
             )],
         );
-        let program = Program { functions: vec![f] };
+        let program = Program {
+            functions: vec![f],
+            ..Program::default()
+        };
         program.validate().unwrap();
         assert!(
             check_loans(&program).is_empty(),
@@ -973,7 +1002,10 @@ fn combined_gate_reports_structural_failures_once() {
         vec![],
         vec![block(&[], vec![], TerminatorKind::Goto(edge(1, vec![])))],
     );
-    let program = Program { functions: vec![f] };
+    let program = Program {
+        functions: vec![f],
+        ..Program::default()
+    };
     assert_eq!(
         memobits_ownership::check_ownership(&program),
         memobits_ownership::check_moves(&program)
@@ -1033,6 +1065,7 @@ fn independent_parameter_contract_is_enforced_at_calls() {
     );
     let program = Program {
         functions: vec![caller, callee],
+        ..Program::default()
     };
     program.validate().unwrap();
     assert!(check_loans(&program)
@@ -1094,7 +1127,10 @@ fn reborrow_cannot_bypass_a_live_exclusive_descendant() {
             TerminatorKind::Return(None),
         )],
     );
-    let program = Program { functions: vec![f] };
+    let program = Program {
+        functions: vec![f],
+        ..Program::default()
+    };
     program.validate().unwrap();
     assert!(check_loans(&program)
         .iter()
@@ -1158,6 +1194,7 @@ fn share_call_cannot_write_through_immutable_reference_handle_local() {
         );
         let program = Program {
             functions: vec![caller, callee.clone()],
+            ..Program::default()
         };
         program.validate().unwrap();
         let diagnostics = memobits_ownership::check_ownership(&program);

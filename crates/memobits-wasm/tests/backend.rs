@@ -139,6 +139,7 @@ fn unit_parameter_carrier_is_restricted_to_zero() {
                 },
             }],
         }],
+        ..Program::default()
     };
     let wasm = memobits_wasm::compile(&program, &exports("main", 0)).unwrap();
     let (_engine, mut store, instance) = instantiate(&wasm);
@@ -509,6 +510,7 @@ fn rejects_unimplemented_indirect_calls_with_backend_code() {
                 },
             }],
         }],
+        ..Program::default()
     };
     let errors = memobits_wasm::compile(&program, &BTreeMap::new()).unwrap_err();
     assert!(errors.iter().any(|error| error.code.to_string() == "LE900"));
@@ -810,6 +812,7 @@ fn block_parameter_edges_stage_parallel_copies() {
     };
     let program = Program {
         functions: vec![function],
+        ..Program::default()
     };
     let wasm = memobits_wasm::compile(&program, &exports("main", 0)).unwrap();
     wasmparser::validate(&wasm).unwrap();

@@ -28,6 +28,10 @@ control-flow joins and does not yet model returned-reference provenance or
 implement complete language-level borrow semantics. The backend also does not
 support reference returns.
 
+Struct owners follow the array rules: `StructNew` consumes its field operands,
+`FieldAddr` reads (not consumes) its owner and creates a loan, and any field loan
+overlaps the whole struct (no field-disjoint reasoning yet).
+
 Run tests with `cargo test --offline -p memobits-ownership`.
 
 `check_ownership(&Program)` combines availability and loan analysis and is used

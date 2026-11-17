@@ -4,10 +4,12 @@
 //! gated with TE017.
 //! Name resolution across modules and ownership checking are separate passes.
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
     Access as IrAccess, FunctionId, LocalId, ParameterType, Primitive, Signature, Type as IrType,
+    TypeId,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -15,10 +17,15 @@ use memobits_syntax::{
     Access, Block, Expr, ExprKind, ItemKind, Module, Parameter, StatementKind, Type,
 };
 
+mod typetable;
+use typetable::TypeTable;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Primitive(&'static str),
     Array(Box<Ty>, u32),
+    /// A struct, by index in the type table, with its name for messages.
+    Struct(u32, Rc<str>),
     Reference {
         access: IrAccess,
         inner: Box<Ty>,
@@ -147,6 +154,7 @@ fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
         Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
+        Ty::Struct(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
         Ty::Reference { access, inner, .. } => {
             format!("{} {}", access_name(*access), name(inner))
@@ -271,6 +279,9 @@ fn flow_expr(expr: &Expr) -> Flow {
             .iter()
             .fold(flow_expr(callee), |flow, arg| flow.then(flow_expr(arg))),
         ExprKind::Field { base, .. } => flow_expr(base),
+        ExprKind::Struct { fields, .. } => fields
+            .iter()
+            .fold(Flow::NEXT, |flow, field| flow.then(flow_expr(&field.value))),
         ExprKind::Block(block) => flow_block(block),
         ExprKind::If {
             condition,
@@ -343,9 +354,48 @@ pub struct FunctionFacts {
     next_expr: u32,
 }
 
+/// One declared struct field with its IR type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldFact {
+    pub name: String,
+    pub ty: IrType,
+}
+
+/// A checked struct definition. `module` is the resolver's module name (`""`
+/// for a standalone module); the struct's `TypeId` is its index in
+/// `TypedModule::types`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructFact {
+    pub module: String,
+    pub name: String,
+    pub span: Span,
+    pub fields: Vec<FieldFact>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedModule {
     pub functions: Vec<FunctionFacts>,
+    pub types: Vec<StructFact>,
+}
+
+fn struct_facts(table: &TypeTable) -> Vec<StructFact> {
+    table
+        .structs
+        .iter()
+        .map(|info| StructFact {
+            module: info.module.clone(),
+            name: info.name.clone(),
+            span: info.span,
+            fields: info
+                .fields
+                .iter()
+                .map(|field| FieldFact {
+                    name: field.name.clone(),
+                    ty: ir_type(&field.ty).unwrap_or(IrType::Primitive(Primitive::Unit)),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn ir_type(ty: &Ty) -> Option<IrType> {
@@ -385,6 +435,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             element: Box::new(ir_type(element)?),
             len: *len,
         },
+        Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
         Ty::Never | Ty::Error => return None,
     })
 }
@@ -407,8 +458,16 @@ struct Checker {
     /// that may be a whole array: literals, repetitions, named arrays, and the
     /// tails of `if`/block expressions in such a position.
     allowed_arrays: HashSet<usize>,
-    /// Address of the path expression currently checked as an index base.
+    /// Addresses of struct literals that initialise a `let` binding: the only
+    /// position in which a whole struct value is accepted.
+    allowed_structs: HashSet<usize>,
+    /// Field reads that already failed; they are not also reported as extractions.
+    failed_fields: HashSet<usize>,
+    /// Address of the path expression currently checked as an index or field base.
     index_base: usize,
+    /// Module whose names and field visibility are being checked.
+    module: String,
+    table: Rc<TypeTable>,
     functions: HashMap<String, Ty>,
     function_ids: HashMap<String, FunctionId>,
     facts: Option<FunctionFacts>,
@@ -434,9 +493,21 @@ impl Checker {
         value
     }
     /// Types in function signatures. Array parameters (owned, `borrow` or
-    /// `share`) and owned array results are supported.
+    /// `share`) and owned array results are supported; structs are not yet.
     fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
-        self.type_path(ty)
+        let resolved = self.type_path(ty);
+        if matches!(resolved, Ty::Struct(..)) {
+            self.error(
+                17,
+                ty.span,
+                format!(
+                    "struct type '{}' cannot appear in a function signature yet: struct parameters, results and references (and exported struct signatures) are not supported",
+                    name(&resolved)
+                ),
+            );
+            return Ty::Error;
+        }
+        resolved
     }
     /// Executable arrays hold non-Unit primitive elements or nested arrays.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
@@ -487,63 +558,33 @@ impl Checker {
     /// comparisons and conditions, but not a binding, assignment, return, call
     /// argument, array element or block result.
     fn reject_extraction(&mut self, expr: &Expr) {
-        if self.executable && matches!(expr.kind, ExprKind::Index { .. }) {
+        if self.executable
+            && !self.failed_fields.contains(&(expr as *const Expr as usize))
+            && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
+        {
+            let what = if matches!(expr.kind, ExprKind::Field { .. }) {
+                "a struct field cannot be moved out by field access"
+            } else {
+                "an array element cannot be moved out by indexing"
+            };
             self.error(
                 22,
                 expr.span,
-                "an array element cannot be moved out by indexing; use `.copy()` to copy the element, or use it inside an arithmetic or comparison expression",
+                format!("{what}; use `.copy()` to copy the value, or use it inside an arithmetic or comparison expression"),
             );
         }
     }
     fn type_path(&mut self, ty: &Type) -> Ty {
-        if ty.path == ["Array"] {
-            if let [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Integer(count)] =
-                ty.arguments.as_slice()
-            {
-                let element = self.type_path(element);
-                self.check_element_support(&element, ty.span);
-                return match self.array_count(count) {
-                    Some(count) => Ty::Array(Box::new(element), count),
-                    None => Ty::Error,
-                };
-            }
-            self.error(
-                2,
-                ty.span,
-                "Array requires an element type and integer literal length",
-            );
-            return Ty::Error;
-        }
-        if !ty.arguments.is_empty() {
-            self.error(1, ty.span, "unsupported type arguments");
-            return Ty::Error;
-        }
-        if ty.path.len() != 1 {
-            self.error(
-                1,
-                ty.span,
-                "qualified types are not supported by this primitive type pass",
-            );
-            return Ty::Error;
-        }
-        match ty.path[0].as_str() {
-            "i8" => Ty::Primitive("i8"),
-            "i16" => Ty::Primitive("i16"),
-            "i32" => I32,
-            "i64" => Ty::Primitive("i64"),
-            "u8" => Ty::Primitive("u8"),
-            "u16" => Ty::Primitive("u16"),
-            "u32" => Ty::Primitive("u32"),
-            "u64" => Ty::Primitive("u64"),
-            "f32" => Ty::Primitive("f32"),
-            "f64" => F64,
-            "Bool" => BOOL,
-            _ => {
-                self.error(
-                    1,
-                    ty.span,
-                    format!("unsupported or unresolved type '{}'", ty.path[0]),
-                );
+        match self.table.resolve(&self.module, ty) {
+            Ok(resolved) => resolved,
+            Err(failure) => {
+                // A failure inside an alias target is reported at the alias.
+                if failure.span.source == ty.span.source
+                    && failure.span.start >= ty.span.start
+                    && failure.span.end <= ty.span.end
+                {
+                    self.error(failure.code, failure.span, failure.message);
+                }
                 Ty::Error
             }
         }
@@ -604,12 +645,24 @@ impl Checker {
                 } => {
                     let annotation = annotation.as_ref().map(|ty| self.type_path(ty));
                     self.allow_array_value(value);
+                    if matches!(value.kind, ExprKind::Struct { .. }) {
+                        self.allowed_structs.insert(value as *const Expr as usize);
+                    }
                     let inferred = self.expr(value, annotation.as_ref());
                     self.reject_extraction(value);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
                     }
                     let ty = annotation.unwrap_or(inferred);
+                    if self.executable && *mutable && matches!(ty, Ty::Struct(..)) {
+                        self.error(
+                            17,
+                            statement.span,
+                            format!(
+                                "`var` struct bindings are not supported yet: '{name}' would allow field assignment; bind the struct with `let`"
+                            ),
+                        );
+                    }
                     let id = self.register_local(
                         name,
                         &ty,
@@ -766,6 +819,15 @@ impl Checker {
                                 ),
                             }
                             element
+                        }
+                        ExprKind::Field { .. } => {
+                            self.expr(target, None);
+                            self.error(
+                                17,
+                                target.span,
+                                "assigning to a struct field is not supported yet: structs are immutable `let` values in this version",
+                            );
+                            Ty::Error
                         }
                         _ => {
                             self.expr(target, None);
@@ -970,6 +1032,14 @@ impl Checker {
                 (Box::new(primitive), origin, current_access)
             }
             ty @ (Ty::Never | Ty::Error) => return ty,
+            Ty::Struct(..) => {
+                self.error(
+                    17,
+                    base.span,
+                    "borrow/share conversion of a struct is not supported yet",
+                );
+                return Ty::Error;
+            }
             _ => {
                 self.error(
                     17,
@@ -1034,6 +1104,68 @@ impl Checker {
             access,
             inner,
             origin,
+        }
+    }
+    /// `base.field`: a read of one field of a named local struct.
+    fn field_read(&mut self, base: &Expr, field_name: &str, expr: &Expr) -> Ty {
+        if self.executable {
+            match &base.kind {
+                        ExprKind::Path(path) if path.len() == 1 => {
+                            self.index_base = base as *const Expr as usize;
+                        }
+                        _ => self.error(
+                            17,
+                            base.span,
+                            "field access is supported on named local structs only; bind the struct to a local first",
+                        ),
+                    }
+        }
+        let base_ty = self.expr(base, None);
+        match base_ty {
+            Ty::Struct(id, struct_name) => {
+                let table = Rc::clone(&self.table);
+                let info = &table.structs[id as usize];
+                match info.fields.iter().find(|field| field.name == field_name) {
+                    None => {
+                        self.error(
+                            24,
+                            expr.span,
+                            format!("struct '{struct_name}' has no field '{field_name}'"),
+                        );
+                        Ty::Error
+                    }
+                    Some(field) => {
+                        if !field.public && info.module != self.module {
+                            self.error(
+                                        25,
+                                        expr.span,
+                                        format!(
+                                            "field '{field_name}' of struct '{struct_name}' is private to module '{}'",
+                                            info.module
+                                        ),
+                                    );
+                        }
+                        field.ty.clone()
+                    }
+                }
+            }
+            Ty::Never | Ty::Error => Ty::Error,
+            Ty::Reference { .. } => {
+                // References to structs only arise from gated forms, which
+                // have their own diagnostic.
+                Ty::Error
+            }
+            other => {
+                self.error(
+                    24,
+                    expr.span,
+                    format!(
+                        "field access requires a struct value, found {}",
+                        name(&other)
+                    ),
+                );
+                Ty::Error
+            }
         }
     }
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
@@ -1273,6 +1405,16 @@ impl Checker {
                             17,
                             expr.span,
                             "whole arrays can only be moved into a binding, assignment, argument, element, result or branch value, or indexed",
+                        );
+                    }
+                    if self.executable
+                        && matches!(binding.ty, Ty::Struct(..))
+                        && self.index_base != expr as *const Expr as usize
+                    {
+                        self.error(
+                            17,
+                            expr.span,
+                            "whole structs cannot be used as values yet: only `let` initialisation from a literal and field reads (`p.x`) are supported; moving, assigning, passing or returning a struct is not",
                         );
                     }
                     return binding.ty;
@@ -1520,14 +1662,116 @@ impl Checker {
                     Ty::Error
                 }
             }
-            ExprKind::Field { base, .. } => {
-                self.expr(base, None);
-                self.error(
-                    12,
-                    expr.span,
-                    "field access requires unsupported user-defined type checking",
-                );
-                Ty::Error
+            ExprKind::Field {
+                base,
+                name: field_name,
+            } => {
+                let ty = self.field_read(base, field_name, expr);
+                if matches!(ty, Ty::Error) {
+                    self.failed_fields.insert(expr as *const Expr as usize);
+                }
+                ty
+            }
+            ExprKind::Struct { path, fields } => {
+                if self.executable
+                    && !self
+                        .allowed_structs
+                        .contains(&(expr as *const Expr as usize))
+                {
+                    self.error(
+                        17,
+                        expr.span,
+                        "struct literals can only initialise a `let` binding yet (`let p := P { .. };`); they cannot be a temporary, argument, result, field base or branch value",
+                    );
+                }
+                let literal_type = Type {
+                    span: expr.span,
+                    path: path.clone(),
+                    arguments: Vec::new(),
+                };
+                let target = self.type_path(&literal_type);
+                let table = Rc::clone(&self.table);
+                let info = match &target {
+                    Ty::Struct(id, _) => Some(&table.structs[*id as usize]),
+                    Ty::Error => None,
+                    other => {
+                        self.error(
+                            23,
+                            expr.span,
+                            format!("'{}' is not a struct type", name(other)),
+                        );
+                        None
+                    }
+                };
+                let mut seen: Vec<&str> = Vec::new();
+                // Field initialisers are checked (and later evaluated) in source order.
+                for init in fields {
+                    let declared = info
+                        .and_then(|info| info.fields.iter().find(|field| field.name == init.name));
+                    if let Some(info) = info {
+                        if declared.is_none() {
+                            self.error(
+                                23,
+                                init.span,
+                                format!("struct '{}' has no field '{}'", info.name, init.name),
+                            );
+                        }
+                    }
+                    if seen.contains(&init.name.as_str()) {
+                        self.error(
+                            23,
+                            init.span,
+                            format!("field '{}' is initialised more than once", init.name),
+                        );
+                    }
+                    seen.push(&init.name);
+                    let expected_field = declared.map(|field| field.ty.clone());
+                    let actual = self.expr(&init.value, expected_field.as_ref());
+                    self.reject_extraction(&init.value);
+                    if let Some(want) = &expected_field {
+                        self.ensure(&actual, want, init.value.span);
+                    }
+                }
+                if let Some(info) = info {
+                    let missing: Vec<&str> = info
+                        .fields
+                        .iter()
+                        .filter(|field| !seen.contains(&field.name.as_str()))
+                        .map(|field| field.name.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        self.error(
+                            23,
+                            expr.span,
+                            format!(
+                                "missing field(s) in '{}' literal: {}",
+                                info.name,
+                                missing.join(", ")
+                            ),
+                        );
+                    }
+                    if info.module != self.module {
+                        let private: Vec<&str> = info
+                            .fields
+                            .iter()
+                            .filter(|field| !field.public)
+                            .map(|field| field.name.as_str())
+                            .collect();
+                        if !private.is_empty() {
+                            self.error(
+                                25,
+                                expr.span,
+                                format!(
+                                    "cannot construct struct '{}' outside module '{}': field(s) {} are private",
+                                    info.name,
+                                    info.module,
+                                    private.join(", ")
+                                ),
+                            );
+                        }
+                    }
+                }
+                target
             }
             ExprKind::Block(block) => {
                 let ty = self.block(block, expected).0;
@@ -1603,25 +1847,49 @@ pub fn check_types(module: &Module) -> Vec<Diagnostic> {
     check_standalone(module, false).0
 }
 
+fn enum_declaration(c: &mut Checker, item: &memobits_syntax::Item) {
+    if matches!(
+        &item.kind,
+        ItemKind::Type {
+            definition: memobits_syntax::TypeDefinition::Enum(_),
+            ..
+        }
+    ) {
+        c.error(
+            16,
+            item.span,
+            "user-defined enum types are not supported by this type pass",
+        );
+    }
+}
+
 /// Check a standalone module and retain canonical local and expression facts.
 /// This returns no facts if type or control-flow diagnostics exist.
 /// Array forms outside the executable subset (results, nesting, element references) report TE017.
 pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic>> {
-    let (mut diagnostics, functions) = check_standalone(module, true);
+    let (mut diagnostics, functions, types) = check_standalone(module, true);
     diagnostics.extend(crate::check_control_flow(module));
     if diagnostics.is_empty() {
-        Ok(TypedModule { functions })
+        Ok(TypedModule { functions, types })
     } else {
         Err(diagnostics)
     }
 }
 
-fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<FunctionFacts>) {
+fn check_standalone(
+    module: &Module,
+    capture: bool,
+) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<StructFact>) {
+    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
     let mut c = Checker {
-        diagnostics: Vec::new(),
+        diagnostics: table_diagnostics,
         executable: capture,
         allowed_arrays: HashSet::new(),
+        allowed_structs: HashSet::new(),
+        failed_fields: HashSet::new(),
         index_base: 0,
+        module: String::new(),
+        table: Rc::new(table),
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,
@@ -1662,11 +1930,7 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
                 }
             }
             ItemKind::Use { .. } => c.error(15, item.span, "imports require module resolution"),
-            ItemKind::Type { .. } => c.error(
-                16,
-                item.span,
-                "user-defined types are not supported by this type pass",
-            ),
+            ItemKind::Type { .. } => enum_declaration(&mut c, item),
         }
     }
     let mut functions = Vec::new();
@@ -1704,7 +1968,8 @@ fn check_standalone(module: &Module, capture: bool) -> (Vec<Diagnostic>, Vec<Fun
             }
         }
     }
-    (c.diagnostics, functions)
+    let types = struct_facts(&c.table);
+    (c.diagnostics, functions, types)
 }
 fn check_function_body(
     c: &mut Checker,
@@ -1767,6 +2032,28 @@ fn check_resolved_mode(
         return Err(resolution.diagnostics.clone());
     }
     let mut diagnostics = Vec::new();
+    let mut module_imports: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (module_name, source) in &resolution.modules {
+        let imports = module_imports.entry(module_name.clone()).or_default();
+        for item in &source.syntax.items {
+            if let ItemKind::Use { path, alias, .. } = &item.kind {
+                if let Some(local) = alias.as_ref().or(path.last()) {
+                    imports.insert(local.clone(), path.join("::"));
+                }
+            }
+        }
+        for (alias, path) in &project.manifest.prelude {
+            imports.entry(alias.clone()).or_insert_with(|| path.clone());
+        }
+    }
+    let modules: Vec<(&str, &Module)> = resolution
+        .modules
+        .iter()
+        .map(|(name, source)| (name.as_str(), &source.syntax))
+        .collect();
+    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports);
+    let table = Rc::new(table);
+    diagnostics.extend(table_diagnostics);
     let mut ids = HashMap::new();
     let mut next_id = 0;
     for (module_name, source) in &resolution.modules {
@@ -1781,6 +2068,8 @@ fn check_resolved_mode(
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
             executable,
+            module: module_name.clone(),
+            table: Rc::clone(&table),
             ..checker()
         };
         for item in &source.syntax.items {
@@ -1807,11 +2096,7 @@ fn check_resolved_mode(
                         Ty::Function(params, Box::new(result)),
                     );
                 }
-                ItemKind::Type { .. } => c.error(
-                    16,
-                    item.span,
-                    "user-defined types are not supported by this type pass",
-                ),
+                ItemKind::Type { .. } => enum_declaration(&mut c, item),
                 ItemKind::Use { .. } => {}
             }
         }
@@ -1822,6 +2107,8 @@ fn check_resolved_mode(
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
             executable,
+            module: module_name.clone(),
+            table: Rc::clone(&table),
             qualified_functions: signatures.clone(),
             qualified_function_ids: ids.clone(),
             ..checker()
@@ -1903,6 +2190,7 @@ fn check_resolved_mode(
     if diagnostics.is_empty() {
         Ok(TypedModule {
             functions: all_facts,
+            types: struct_facts(&table),
         })
     } else {
         Err(diagnostics)
@@ -1914,7 +2202,11 @@ fn checker() -> Checker {
         diagnostics: Vec::new(),
         executable: true,
         allowed_arrays: HashSet::new(),
+        allowed_structs: HashSet::new(),
+        failed_fields: HashSet::new(),
         index_base: 0,
+        module: String::new(),
+        table: Rc::new(TypeTable::empty()),
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,

@@ -334,3 +334,116 @@ fn block_like_expressions_outside_statement_position_are_unchanged() {
     };
     assert!(matches!(value.kind, ExprKind::If { .. }));
 }
+
+// ---- struct literals ----
+
+fn first_binding_value(source: &str) -> memobits_syntax::Expr {
+    let body = function_body(source);
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!("expected a binding")
+    };
+    value.clone()
+}
+
+#[test]
+fn struct_literals_keep_field_order_and_allow_trailing_commas() {
+    let value = first_binding_value("fn f() { let p := Version { minor: 1, major: 0, }; }");
+    let ExprKind::Struct { path, fields } = &value.kind else {
+        panic!("{value:?}")
+    };
+    assert_eq!(path, &["Version"]);
+    let names: Vec<_> = fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["minor", "major"]);
+    assert!(matches!(fields[0].value.kind, ExprKind::Number(_)));
+
+    let value = first_binding_value("fn f() { let p := a::P { x: 1 + 2, y: g(3) }; }");
+    let ExprKind::Struct { path, fields } = &value.kind else {
+        panic!()
+    };
+    assert_eq!(path, &["a", "P"]);
+    assert!(matches!(fields[0].value.kind, ExprKind::Binary { .. }));
+    assert!(matches!(fields[1].value.kind, ExprKind::Call { .. }));
+
+    let value = first_binding_value("fn f() { let p := Empty {}; }");
+    assert!(matches!(&value.kind, ExprKind::Struct { fields, .. } if fields.is_empty()));
+}
+
+#[test]
+fn struct_literals_postfix_and_nest() {
+    let value = first_binding_value("fn f() { let n := P { x: 1, y: 2 }.x; }");
+    let ExprKind::Field { base, name } = &value.kind else {
+        panic!("{value:?}")
+    };
+    assert_eq!(name, "x");
+    assert!(matches!(base.kind, ExprKind::Struct { .. }));
+}
+
+#[test]
+fn struct_literal_is_not_allowed_directly_in_an_if_condition() {
+    // The `{` after the condition starts the branch block, as in Rust.
+    let result = parse(SourceId(2), "fn f() { if x == P { a: 1 } { 1; } }");
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("wrap it in parentheses")),
+        "{:?}",
+        result.diagnostics
+    );
+    // An ordinary condition followed by its block is unaffected.
+    let result = parse(
+        SourceId(2),
+        "fn f(x: i32) { if x == 1 { 1; } else if x == 2 { 2; } }",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn parenthesised_and_delimited_struct_literals_are_fine_in_conditions() {
+    for source in [
+        "fn f() { if (P { a: 1 }).a == 1 { 1; } }",
+        "fn f() { if g(P { a: 1 }) { 1; } }",
+        "fn f() { if xs[Q { i: 0 }.i] == 1 { 1; } }",
+        "fn f() { if true { let p := P { a: 1 }; } }",
+        "fn f() { if true { P { a: 1 }.a; } else { Q { b: 2 }.b; } }",
+    ] {
+        let result = parse(SourceId(3), source);
+        assert!(
+            result.diagnostics.is_empty(),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+    let body = function_body("fn f() { if (P { a: 1 }).a == 1 { 1; } }");
+    let e = body.tail.as_ref().expect("if is the block tail");
+    let ExprKind::If { condition, .. } = &e.kind else {
+        panic!()
+    };
+    let ExprKind::Binary { left, .. } = &condition.kind else {
+        panic!()
+    };
+    let ExprKind::Field { base, .. } = &left.kind else {
+        panic!()
+    };
+    assert!(matches!(base.kind, ExprKind::Struct { .. }));
+}
+
+#[test]
+fn malformed_struct_literals_and_destructuring_have_clear_diagnostics() {
+    for (source, expected) in [
+        ("fn f() { let p := P { x }; }", "shorthand is not supported"),
+        ("fn f() { let p := P { x: 1 y: 2 }; }", "expected '}'"),
+        ("fn f() { let P { x } := p; }", "destructuring bindings"),
+        ("fn f() { var P { x } := p; }", "destructuring bindings"),
+    ] {
+        let result = parse(SourceId(4), source);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains(expected)),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}

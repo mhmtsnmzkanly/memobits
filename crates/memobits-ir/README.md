@@ -23,4 +23,14 @@ and prevents loaded reference values from being consumed or escaping as owned
 values. It does not check loan lifetimes or implement borrow/share semantics;
 the ownership gate now checks reference-handle availability and loan conflicts. The Wasm backend still rejects these operations.
 
+`Program::types` holds nominal user-defined types (`TypeDef`, identified by
+`TypeId` and a `CanonicalType` path); `Type::Struct(TypeId)` names one. A struct is
+created by `StructNew` (one consumed operand per field, declaration order) and a
+field is addressed by `FieldAddr { loan, base, field, access }`, the bounds-check-free
+twin of `ElementAddr` that yields a `Reference` to the field type and is read with
+`Load`. Validation checks type and field indices, operand count and types, access
+modes and shared loan IDs. Struct fields are non-Unit primitives for now (so
+recursive or nested struct types are rejected), and struct parameters, results,
+block parameters, references and whole-struct loads are not valid yet.
+
 Run tests with `cargo test --offline -p memobits-ir`.

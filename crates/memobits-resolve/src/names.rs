@@ -247,6 +247,17 @@ impl Checker {
                 }
             }
             ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Struct { path, fields } => {
+                // The literal names a type: resolve it like a type annotation.
+                self.ty(&Type {
+                    span: expr.span,
+                    path: path.clone(),
+                    arguments: Vec::new(),
+                });
+                for field in fields {
+                    self.expr(&field.value);
+                }
+            }
             ExprKind::Block(b) => self.block(b),
             ExprKind::If {
                 condition,

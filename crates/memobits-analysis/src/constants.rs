@@ -137,6 +137,11 @@ fn check_expr(
             }
         }
         ExprKind::Field { base, .. } => check_expr(base, types, diagnostics),
+        ExprKind::Struct { fields, .. } => {
+            for field in fields {
+                check_expr(&field.value, types, diagnostics);
+            }
+        }
         ExprKind::Block(block) => check_block(block, types, diagnostics),
         ExprKind::If {
             condition,

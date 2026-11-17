@@ -1149,3 +1149,249 @@ fn array_parameters_cross_modules_and_stay_out_of_exported_signatures() {
     f.write("src/main.mb", "fn main(a: Array<i32, 2>) -> i32 { 0 }\n");
     err(f.run(&["run"]), "LE900");
 }
+
+#[test]
+fn structs_run_from_source_and_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='structs'\nentry='app::main'\n",
+    );
+    let out = run_both(
+        &f,
+        "type P { x: i32, y: i32 } fn main() -> i32 { let p := P { x: 3, y: 4 }; p.x * p.y }",
+    );
+    assert!(out.contains("Result: i32(12)"), "{out}");
+    // Mixed widths: every field reads back, `.copy()` yields an owned value.
+    let out = run_both(
+        &f,
+        "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+         fn main() -> i64 { let m := M { e: -7, a: 200, d: 1.5, c: true, b: 5000000000 }; \
+             let b := m.b.copy(); if m.c { b + 1 } else { 0 } }",
+    );
+    assert!(out.contains("5000000001"), "{out}");
+    // Initialisers run in source order, not declaration order.
+    let out = run_both(
+        &f,
+        "type P { a: i32, b: i32, c: i32 } \
+         fn next(c: share i32) -> i32 { c += 1; c.copy() } \
+         fn main() -> i32 { var n := 0; \
+             let p := P { c: next(n.share()), a: next(n.share()), b: next(n.share()) }; \
+             p.a * 100 + p.b * 10 + p.c }",
+    );
+    assert!(out.contains("Result: i32(231)"), "{out}");
+    // Bool field as a condition; alias to a struct; a parenthesised literal.
+    let out = run_both(
+        &f,
+        "type Flags { on: Bool, n: i32 } type F = Flags; \
+         fn main() -> i32 { let f: F = F { n: 9, on: true }; if f.on { f.n + 1 } else { 0 } }",
+    );
+    assert!(out.contains("Result: i32(10)"), "{out}");
+}
+
+#[test]
+fn struct_diagnostics_are_rendered_with_stable_codes() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='structs'\nentry='app::main'\n",
+    );
+    let head = "type P { x: i32, y: i32 } ";
+    for (body, code, text) in [
+        (
+            "let p := P { x: 1 }; 0",
+            "TE023",
+            "missing field(s) in 'P' literal: y",
+        ),
+        (
+            "let p := P { x: 1, y: 2, z: 3 }; 0",
+            "TE023",
+            "has no field 'z'",
+        ),
+        (
+            "let p := P { x: 1, x: 2, y: 3 }; 0",
+            "TE023",
+            "more than once",
+        ),
+        (
+            "let p := P { x: 1, y: true }; 0",
+            "TE002",
+            "expected i32, found Bool",
+        ),
+        ("let p := Q { x: 1 }; 0", "NE003", "unknown type 'Q'"),
+        ("let n := 1; n.x + 1", "TE024", "requires a struct value"),
+        (
+            "let p := P { x: 1, y: 2 }; p.z + 1",
+            "TE024",
+            "has no field 'z'",
+        ),
+        (
+            "let p := P { x: 1, y: 2 }; let q := p.x; q",
+            "TE022",
+            "use `.copy()`",
+        ),
+        (
+            "var p := P { x: 1, y: 2 }; 0",
+            "TE017",
+            "`var` struct bindings",
+        ),
+        (
+            "let p := P { x: 1, y: 2 }; p.x = 3; 0",
+            "TE017",
+            "assigning to a struct field",
+        ),
+        (
+            "let p := P { x: 1, y: 2 }; let q := p; 0",
+            "TE017",
+            "whole structs",
+        ),
+        (
+            "if 1 == P { x: 1, y: 2 } { 1 } else { 2 }",
+            "SE002",
+            "wrap it in parentheses",
+        ),
+        (
+            "let P { x, y } := P { x: 1, y: 2 }; 0",
+            "SE002",
+            "destructuring",
+        ),
+    ] {
+        f.write(
+            "src/app.mb",
+            &format!("{head} fn main() -> i32 {{ {body} }}"),
+        );
+        let message = err(f.run(&["run"]), code);
+        assert!(message.contains(text), "{body}: {message}");
+        assert!(message.contains("app.mb:1:"), "{message}");
+    }
+    for (source, code, text) in [
+        (
+            "type A { a: A } fn main() -> i32 { 0 }",
+            "TE026",
+            "recursive struct",
+        ),
+        (
+            "type A = B; type B = A; fn main() -> i32 { 0 }",
+            "TE026",
+            "alias cycle",
+        ),
+        (
+            "type P { x: i32 } fn f(p: P) {} fn main() -> i32 { 0 }",
+            "TE017",
+            "function signature",
+        ),
+        (
+            "type P { x: i32 } fn main(p: P) -> i32 { 0 }",
+            "TE017",
+            "function signature",
+        ),
+        (
+            "type P { x: i32 } fn f() -> P { P { x: 1 } } fn main() -> i32 { 0 }",
+            "TE017",
+            "function signature",
+        ),
+        (
+            "type P { x: i32 } type Q { p: P } fn main() -> i32 { 0 }",
+            "TE017",
+            "struct-typed fields",
+        ),
+        (
+            "type Q { a: Array<i32, 2> } fn main() -> i32 { 0 }",
+            "TE017",
+            "array-typed fields",
+        ),
+        (
+            "type P { x: i32 } fn main() -> i32 { let a := [P { x: 1 }]; 0 }",
+            "TE017",
+            "struct literals can only",
+        ),
+        (
+            "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",
+            "TE016",
+            "enum types",
+        ),
+        (
+            "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",
+            "TE001",
+            "enum type 'E'",
+        ),
+    ] {
+        f.write("src/app.mb", source);
+        let message = err(f.run(&["run"]), code);
+        assert!(message.contains(text), "{source}: {message}");
+    }
+    // Library exports with struct signatures are rejected too.
+    f.write(
+        "project.toml",
+        "[package]\nname='structs'\nentry='app::main'\n[export]\nf='app::f'\n",
+    );
+    f.write(
+        "src/app.mb",
+        "pub type P { pub x: i32 } pub fn f(p: P) -> i32 { 0 } fn main() -> i32 { 0 }",
+    );
+    err(f.run(&["build", "--lib"]), "TE017");
+}
+
+#[test]
+fn structs_cross_module_boundaries_by_visibility() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='structs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/geom.mb",
+        "pub type Point { pub x: i32, pub y: i32 }\n\
+         pub type Account { pub id: i32, balance: i32 }\n\
+         pub type Meters = Point;\n\
+         pub fn opening() -> i32 { let a := Account { id: 1, balance: 40 }; a.balance + a.id }\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use geom::Point; use geom::Meters; use geom::opening;\n\
+         fn main() -> i32 { let p := Point { y: 4, x: 3 }; let m := geom::Point { x: 5, y: 6 }; \
+             let q := Meters { x: 7, y: 8 }; p.x * p.y + m.x + q.y + opening() }\n",
+    );
+    assert!(f.run(&["analyze-project"]).status.success());
+    assert!(f.run(&["ownership-project"]).status.success());
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert!(String::from_utf8_lossy(&source.stdout).contains("Result: i32(66)"));
+    assert!(f.run(&["build"]).status.success());
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert_eq!(source.stdout, artifact.stdout);
+
+    // A struct with a private field cannot be built from another module, and
+    // its private field is not readable there either.
+    f.write(
+        "src/main.mb",
+        "use geom::Account;\n\
+         fn main() -> i32 { let a := Account { id: 1, balance: 2 }; a.balance + 0 }\n",
+    );
+    let message = err(f.run(&["run"]), "TE025");
+    assert!(
+        message.contains("cannot construct struct 'Account' outside module 'geom'"),
+        "{message}"
+    );
+    assert!(
+        message.contains("field 'balance' of struct 'Account' is private to module 'geom'"),
+        "{message}"
+    );
+
+    // A private type cannot be named from another module, an unknown one is a name error.
+    f.write("src/geom.mb", "type Hidden { x: i32 } pub fn f() {}\n");
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { let h := geom::Hidden { x: 1 }; 0 }\n",
+    );
+    err(f.run(&["run"]), "ME007");
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { let h := Nope { x: 1 }; 0 }\n",
+    );
+    err(f.run(&["run"]), "NE003");
+}

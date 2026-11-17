@@ -145,6 +145,7 @@ fn function(mutable: bool, extra_values: Vec<Type>, instructions: Vec<Instructio
             }],
             entry: BlockId(0),
         }],
+        ..Program::default()
     }
 }
 fn move_codes(program: &Program) -> Vec<String> {

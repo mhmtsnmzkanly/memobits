@@ -42,5 +42,14 @@ index and traps out of range. Exported signatures that use arrays or references
 (parameters or results), reference returns, and indirect calls remain
 unsupported. The private pointer representation is not a stable ABI.
 
+A struct local or value also owns an inline frame cell. Fields are laid out in
+declaration order at natural alignment (size and alignment of the struct are those of
+its largest field, size rounded up) using checked arithmetic; the cell shares the
+32 KiB frame cap with arrays, and an oversized struct is a backend diagnostic.
+`StructNew` stores each field at its offset, in place in the destination local's cell
+when it is bound immediately (the array construction mechanism), and `FieldAddr` adds
+the constant field offset to the cell address, so `Load` is unchanged. Struct
+parameters, results and references do not exist in the IR yet.
+
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

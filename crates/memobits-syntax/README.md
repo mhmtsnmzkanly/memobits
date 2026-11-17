@@ -15,6 +15,17 @@ The parser accepts member-call spellings such as `value.borrow()`,
 `value.share()`, and `value.copy()` as ordinary call and field syntax; it does
 not assign access or copying semantics to them.
 
+Struct literals `Name { field: expression, ... }` (path names such as
+`geom::Point { .. }` are allowed) keep their initialisers in source order; every
+field needs an explicit `name: value` (shorthand `Name { x }` is rejected) and a
+trailing comma is accepted. A literal is **not** parsed where a `{` would start a
+block right after an expression: directly in an `if` condition
+(`if p == P { x: 1 } { .. }`) the parser reports SE002 and asks for parentheses,
+as in Rust. Parenthesised (`if (P { x: 1 }).x == 1 { .. }`) or otherwise
+delimited literals (call arguments, indices, array elements) are fine, and the
+restriction ends inside any nested block. `let Type { f } := v;` (destructuring)
+is rejected with SE002 until a later package.
+
 SE001 reports lexical errors; SE002 reports unexpected or missing syntax.
 Locations are UTF-8 byte offsets. Name resolution, type checking, ownership,
 visibility, exhaustive matching, and control-flow legality are not performed.

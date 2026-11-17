@@ -16,8 +16,9 @@ the function. A reachable break permits normal completion and therefore requires
 a suitable result afterward. Nested loop breaks remain local. Conditions are
 not constant-folded by this flow pass.
 
-This pass reports unsupported user-defined types, imports, qualified paths,
-ordinary field access. Primitive borrow/share parameters and named-owner conversions are supported for analysis and IR lowering. It does not resolve modules,
+This pass reports unsupported enum declarations (TE016), imports, qualified
+function paths and non-struct field access. Struct and alias declarations are
+supported (see below). Primitive borrow/share parameters and named-owner conversions are supported for analysis and IR lowering. It does not resolve modules,
 check ownership, or decide a public spelling for Unit annotations. `TE001`–
 `TE017` and `TE022` are type-pass diagnostics; `TE020` and `TE021` are reserved for control
 flow. Parse first and handle syntax diagnostics separately. Both analysis
@@ -109,3 +110,29 @@ IR). Every other array form (references to primitive elements, indexing a
 temporary such as `make()[0]`, borrowing a temporary, whole arrays outside an
 owned-value position, reference elements) is still gated with TE017. Repetition expressions are
 type-checked once even at zero count; analysis facts never expand them.
+
+## Structs and type aliases
+
+`type Name { fields }` declares a nominal struct and `type Name = Other;` an alias.
+A type table (`types/typetable.rs`) is built once for all modules checked together:
+struct identity is `module::Name` (so `use`, qualified paths and aliases all reach the
+same definition), struct `TypeId`s follow module then declaration order, and aliases are
+followed to their targets wherever a type is named (annotations, signatures, array
+element types, field types, literals); an alias cycle is TE026. Standalone checking
+(`check_types`, `lower_module`) uses the same table with a single unnamed module.
+
+Executable support is the first slice (A1): a struct literal `P { y: 2, x: 1 }` (all
+fields exactly once, any order, evaluated in source order) as the initialiser of a
+`let` binding, and primitive field reads `p.x` inside expressions (TE022 rejects
+moving a field out; `p.x.copy()` gives an owned value). Fields are primitives only.
+Literal shape errors (missing, unknown or duplicate field, non-struct name) are TE023,
+field access on a non-struct or an unknown field is TE024, field privacy (reading a
+private field of another module's struct, or building such a struct from another
+module unless every field is `pub`) is TE025, and a struct that contains itself by value
+(or an alias cycle) is TE026. Everything else is TE017: `var` struct bindings, field
+assignment, whole-struct moves/assignments/uses, literals outside a `let` initialiser,
+struct parameters, results and references (including exported signatures),
+struct-typed and array-typed fields, arrays of structs, `.borrow()`/`.share()` of a
+struct. Enum types used as value types report TE001 (and the declaration TE016).
+Lowering emits `StructNew` and `FieldAddr` + `Load`; `TypedModule::types` carries the
+checked struct definitions.

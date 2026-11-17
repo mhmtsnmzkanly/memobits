@@ -226,6 +226,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Load { reference: operand } => vec![operand],
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
+        InstructionKind::FieldAddr { base, .. } => vec![base],
+        InstructionKind::StructNew { fields, .. } => fields.iter().collect(),
         InstructionKind::ArrayNew { init } => match init {
             ArrayInit::Elements(elements) => elements.iter().collect(),
             ArrayInit::Zeroed => Vec::new(),
@@ -472,6 +474,12 @@ fn transfer_provenance(
             access,
         }
         | InstructionKind::ElementAddr {
+            loan,
+            base: owner,
+            access,
+            ..
+        }
+        | InstructionKind::FieldAddr {
             loan,
             base: owner,
             access,
@@ -780,6 +788,12 @@ fn check_instruction(
             base: owner,
             access,
             ..
+        }
+        | InstructionKind::FieldAddr {
+            loan,
+            base: owner,
+            access,
+            ..
         } => {
             if *access == Access::Share {
                 if let Source::Local(local) = owner.source {
@@ -885,7 +899,9 @@ fn check_instruction(
     for operand in instruction_operands(&instruction.kind) {
         let is_borrow_owner = match &instruction.kind {
             InstructionKind::Borrow { owner, .. } => std::ptr::eq(owner, operand),
-            InstructionKind::ElementAddr { base, .. } => std::ptr::eq(base, operand),
+            InstructionKind::ElementAddr { base, .. } | InstructionKind::FieldAddr { base, .. } => {
+                std::ptr::eq(base, operand)
+            }
             _ => false,
         };
         if is_borrow_owner || type_at(function, operand.source).is_some_and(is_reference) {

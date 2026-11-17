@@ -53,7 +53,7 @@ fn checks_calls_assignments_and_returns() {
 #[test]
 fn unsupported_features_are_reported_with_spans() {
     for source in [
-        "type User = i32;",
+        "type User [ A, B ]",
         "use other::name;",
         "fn main(x: User) {}",
         "fn main() { other::value; }",

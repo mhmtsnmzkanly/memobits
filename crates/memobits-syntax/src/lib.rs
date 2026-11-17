@@ -139,12 +139,24 @@ pub enum ExprKind {
         base: Box<Expr>,
         name: String,
     },
+    /// `Name { field: value, ... }`. Field initialisers keep source order; the
+    /// parser does not check that they match the type's declaration.
+    Struct {
+        path: Vec<String>,
+        fields: Vec<FieldInit>,
+    },
     Block(Block),
     If {
         condition: Box<Expr>,
         then_branch: Block,
         else_branch: Option<Box<Expr>>,
     },
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldInit {
+    pub span: Span,
+    pub name: String,
+    pub value: Expr,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
@@ -321,6 +333,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
     let mut p = Parser {
         tokens: lexed.tokens,
         pos: 0,
+        no_struct: false,
         diagnostics: lexed.diagnostics,
     };
     let mut items = Vec::new();
@@ -346,6 +359,9 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// True while parsing an `if` condition: there a `{` after an expression
+    /// starts the branch block, so a struct literal needs parentheses.
+    no_struct: bool,
     diagnostics: Vec<Diagnostic>,
 }
 type PResult<T> = Result<T, ()>;
@@ -589,6 +605,12 @@ impl Parser {
         })
     }
     fn block(&mut self) -> PResult<Block> {
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let block = self.block_inner();
+        self.no_struct = saved;
+        block
+    }
+    fn block_inner(&mut self) -> PResult<Block> {
         let start = self.current().span.start;
         self.expect("{")?;
         let mut statements = Vec::new();
@@ -638,6 +660,12 @@ impl Parser {
             let mutable = self.eat("var");
             if !mutable {
                 self.expect("let")?;
+            }
+            if matches!(self.tokens.get(self.pos + 1), Some(Token { kind: TokenKind::Symbol(s), .. }) if s == "{")
+            {
+                return self.fail(
+                    "destructuring bindings (`let Type { field } := value;`) are not supported yet",
+                );
             }
             let name = self.name()?;
             let annotation = if self.eat(":=") {
@@ -728,7 +756,10 @@ impl Parser {
             });
         }
         self.expect("if")?;
-        let condition = Box::new(self.expr(0)?);
+        let saved = std::mem::replace(&mut self.no_struct, true);
+        let condition = self.expr(0);
+        self.no_struct = saved;
+        let condition = Box::new(condition?);
         let then_branch = self.block()?;
         let else_branch = if self.eat("else") {
             if !self.at("if") && !self.at("{") {
@@ -751,6 +782,71 @@ impl Parser {
             },
         })
     }
+    /// Parse inside delimiters, where a `{` can no longer be mistaken for the
+    /// block that follows an `if` condition.
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        let result = parse(self);
+        self.no_struct = saved;
+        result
+    }
+    /// At `{`: whether `word :` follows, which no block statement can start with.
+    fn looks_like_struct_fields(&self) -> bool {
+        matches!(
+            (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
+            (
+                Some(Token { kind: TokenKind::Word(_), .. }),
+                Some(Token { kind: TokenKind::Symbol(colon), .. })
+            ) if colon == ":"
+        )
+    }
+    fn array_literal_rest(&mut self) -> PResult<ExprKind> {
+        if self.eat("]") {
+            return Ok(ExprKind::Array(Vec::new()));
+        }
+        let first = self.expr(0)?;
+        if self.eat(";") {
+            let count = self.integer_literal()?;
+            self.expect("]")?;
+            Ok(ExprKind::RepeatArray {
+                value: Box::new(first),
+                count,
+            })
+        } else {
+            let mut elements = vec![first];
+            while self.eat(",") && !self.at("]") {
+                elements.push(self.expr(0)?);
+            }
+            self.expect("]")?;
+            Ok(ExprKind::Array(elements))
+        }
+    }
+    /// `{ name: expression, ... }` after a struct literal's path.
+    fn struct_fields(&mut self) -> PResult<Vec<FieldInit>> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.at("}") && !self.eof() {
+            let start = self.current().span.start;
+            let name = self.name()?;
+            if self.at(",") || self.at("}") {
+                return self.fail(format!(
+                    "struct literal field '{name}' needs a value: write '{name}: expression' (shorthand is not supported)"
+                ));
+            }
+            self.expect(":")?;
+            let value = self.expr(0)?;
+            fields.push(FieldInit {
+                span: self.span(start),
+                name,
+                value,
+            });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(fields)
+    }
     fn expr(&mut self, minimum: u8) -> PResult<Expr> {
         let start = self.current().span.start;
         let mut left = if self.at("-") || self.at("!") || self.at("+") {
@@ -764,26 +860,7 @@ impl Parser {
                 kind: ExprKind::Unary { operator, operand },
             }
         } else if self.eat("[") {
-            let kind = if self.eat("]") {
-                ExprKind::Array(Vec::new())
-            } else {
-                let first = self.expr(0)?;
-                if self.eat(";") {
-                    let count = self.integer_literal()?;
-                    self.expect("]")?;
-                    ExprKind::RepeatArray {
-                        value: Box::new(first),
-                        count,
-                    }
-                } else {
-                    let mut elements = vec![first];
-                    while self.eat(",") && !self.at("]") {
-                        elements.push(self.expr(0)?);
-                    }
-                    self.expect("]")?;
-                    ExprKind::Array(elements)
-                }
-            };
+            let kind = self.nested(Self::array_literal_rest)?;
             Node {
                 span: self.span(start),
                 kind,
@@ -791,7 +868,7 @@ impl Parser {
         } else if self.at("{") || self.at("if") {
             self.block_like(false)?
         } else if self.eat("(") {
-            let e = self.expr(0)?;
+            let e = self.nested(|p| p.expr(0))?;
             self.expect(")")?;
             Node {
                 span: self.span(start),
@@ -807,7 +884,20 @@ impl Parser {
                     self.bump();
                     ExprKind::Bool(s == "true")
                 }
-                TokenKind::Word(_) => ExprKind::Path(self.path()?),
+                TokenKind::Word(_) => {
+                    let path = self.path()?;
+                    if self.at("{") && self.no_struct && self.looks_like_struct_fields() {
+                        return self.fail(
+                            "a struct literal is not allowed directly in an `if` condition; wrap it in parentheses",
+                        );
+                    }
+                    if self.at("{") && !self.no_struct {
+                        let fields = self.nested(Self::struct_fields)?;
+                        ExprKind::Struct { path, fields }
+                    } else {
+                        ExprKind::Path(path)
+                    }
+                }
                 _ => return self.fail("expected expression"),
             };
             Node {
@@ -817,7 +907,7 @@ impl Parser {
         };
         loop {
             if minimum <= 15 && self.eat("[") {
-                let index = Box::new(self.expr(0)?);
+                let index = Box::new(self.nested(|p| p.expr(0))?);
                 self.expect("]")?;
                 left = Node {
                     span: self.span(start),
@@ -829,13 +919,16 @@ impl Parser {
                 continue;
             }
             if minimum <= 15 && self.eat("(") {
-                let mut arguments = Vec::new();
-                while !self.at(")") && !self.eof() {
-                    arguments.push(self.expr(0)?);
-                    if !self.eat(",") {
-                        break;
+                let arguments = self.nested(|p| {
+                    let mut arguments = Vec::new();
+                    while !p.at(")") && !p.eof() {
+                        arguments.push(p.expr(0)?);
+                        if !p.eat(",") {
+                            break;
+                        }
                     }
-                }
+                    Ok(arguments)
+                })?;
                 self.expect(")")?;
                 left = Node {
                     span: self.span(start),

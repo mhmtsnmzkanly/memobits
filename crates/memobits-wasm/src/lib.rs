@@ -8,7 +8,8 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
     ArrayInit, BinaryOp, BlockId, Constant, Function, FunctionId, Instruction, InstructionKind,
-    LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, UnaryOp,
+    LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, TypeDef, TypeDefKind,
+    UnaryOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_encoder::{
@@ -65,6 +66,10 @@ pub fn compile(
     if !ownership.is_empty() {
         return Err(ownership);
     }
+    let structs = match struct_layouts(&program.types) {
+        Ok(structs) => structs,
+        Err(message) => return Err(vec![diagnostic(message, None)]),
+    };
     let mut errors = Vec::new();
     for (name, function) in exports {
         if program.functions.get(function.0 as usize).is_none() {
@@ -106,7 +111,7 @@ pub fn compile(
         }
     }
     for function in &program.functions {
-        if let Err(error) = FrameLayout::for_function(function) {
+        if let Err(error) = FrameLayout::for_function_in(&structs, function) {
             errors.push(diagnostic(error.message, error.span));
         }
         for block in &function.blocks {
@@ -154,6 +159,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Load { .. }
         | InstructionKind::Store { .. } => None,
         InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
+        InstructionKind::StructNew { .. } | InstructionKind::FieldAddr { .. } => None,
         InstructionKind::Call { callee, .. } => match callee.source {
             Source::Function(_) => None,
             _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
@@ -185,6 +191,8 @@ fn primitive_signature<'a>(
 fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
+        // A struct is an inline frame-cell value; it never crosses a signature.
+        Type::Struct(_) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
@@ -227,9 +235,68 @@ struct ArrayCell {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameLayout {
     slots: BTreeMap<u32, FrameSlot>,
-    /// Every array-typed local and value owns one inline cell.
+    /// Every array- or struct-typed local and value owns one inline cell.
     arrays: BTreeMap<Slot, ArrayCell>,
+    /// Layout of each struct type, indexed by `TypeId`.
+    structs: Vec<StructLayout>,
     size: u32,
+}
+
+/// Natural-alignment layout of a struct: fields in declaration order, each at
+/// the next offset aligned to its own size, total size rounded up to the largest
+/// field alignment. Fields are non-Unit primitives (validated).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StructLayout {
+    size: u32,
+    align: u32,
+    offsets: Vec<u32>,
+    fields: Vec<Primitive>,
+}
+
+const STRUCT_LAYOUT_OVERFLOW: &str = "struct layout overflows the 32-bit address space";
+
+fn struct_layouts(types: &[TypeDef]) -> Result<Vec<StructLayout>, String> {
+    types
+        .iter()
+        .map(|definition| {
+            let TypeDefKind::Struct { fields } = &definition.kind;
+            let mut offset = 0u32;
+            let mut align = 1u32;
+            let mut offsets = Vec::with_capacity(fields.len());
+            let mut primitives = Vec::with_capacity(fields.len());
+            for field in fields {
+                let Type::Primitive(kind) = field.ty else {
+                    return Err(format!(
+                        "field '{}' of struct '{}' is not a primitive",
+                        field.name, definition.path.name
+                    ));
+                };
+                let (size, field_align) = storage_layout(kind)?;
+                offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                offsets.push(offset);
+                primitives.push(kind);
+                offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                align = align.max(field_align);
+            }
+            Ok(StructLayout {
+                size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                align,
+                offsets,
+                fields: primitives,
+            })
+        })
+        .collect()
+}
+
+/// Size and alignment of an array or struct type.
+fn aggregate_layout(structs: &[StructLayout], ty: &Type) -> Result<(u32, u32), String> {
+    match ty {
+        Type::Struct(id) => structs
+            .get(id.0 as usize)
+            .map(|layout| (layout.size, layout.align))
+            .ok_or_else(|| "struct type is out of range".to_string()),
+        other => array_layout(other),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,7 +315,16 @@ struct FrameLayoutError {
 }
 
 impl FrameLayout {
+    /// Layout for a function that uses no struct types.
+    #[cfg(test)]
     fn for_function(function: &Function) -> Result<Self, FrameLayoutError> {
+        Self::for_function_in(&[], function)
+    }
+
+    fn for_function_in(
+        structs: &[StructLayout],
+        function: &Function,
+    ) -> Result<Self, FrameLayoutError> {
         let mut owners = BTreeSet::new();
         for block in &function.blocks {
             for instruction in &block.instructions {
@@ -350,7 +426,7 @@ impl FrameLayout {
         let aliases = construction_aliases(function);
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
-            if !matches!(ty, Type::Array { .. }) {
+            if !matches!(ty, Type::Array { .. } | Type::Struct(_)) {
                 continue;
             }
             if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
@@ -360,8 +436,12 @@ impl FrameLayout {
                 message: message.into(),
                 span: span.or(Some(function.span)),
             };
-            let too_large = "array frame layout exceeds the 32 KiB activation frame limit";
-            let (bytes, align) = array_layout(ty).map_err(|m| {
+            let too_large = if matches!(ty, Type::Struct(_)) {
+                "struct frame layout exceeds the 32 KiB activation frame limit"
+            } else {
+                "array frame layout exceeds the 32 KiB activation frame limit"
+            };
+            let (bytes, align) = aggregate_layout(structs, ty).map_err(|m| {
                 if m == LAYOUT_OVERFLOW {
                     error(too_large)
                 } else {
@@ -406,6 +486,7 @@ impl FrameLayout {
         Ok(Self {
             slots,
             arrays,
+            structs: structs.to_vec(),
             size,
         })
     }
@@ -448,6 +529,8 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     count(base);
                     count(index);
                 }
+                InstructionKind::FieldAddr { base, .. } => count(base),
+                InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
                 InstructionKind::Store { reference, value } => {
                     count(reference);
                     count(value);
@@ -500,12 +583,15 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 &producer.kind,
                 InstructionKind::Capture(Operand { source: Source::Local(local), .. }) if local == target
             );
-            let array = |ty: Option<&Type>| matches!(ty, Some(Type::Array { .. }));
+            let array =
+                |ty: Option<&Type>| matches!(ty, Some(Type::Array { .. } | Type::Struct(_)));
             if *assigned == output
                 && uses[output.0 as usize] == 1
                 && matches!(
                     producer.kind,
-                    InstructionKind::ArrayNew { .. } | InstructionKind::Capture(_)
+                    InstructionKind::ArrayNew { .. }
+                        | InstructionKind::StructNew { .. }
+                        | InstructionKind::Capture(_)
                 )
                 && array(function.values.get(output.0 as usize))
                 && function.values.get(output.0 as usize)
@@ -582,7 +668,7 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Reference { .. } => ValType::I32,
         // Array slots keep an unused Wasm local; their authoritative storage is
         // a frame cell and operands push the cell address.
-        Type::Array { .. } => ValType::I32,
+        Type::Array { .. } | Type::Struct(_) => ValType::I32,
     }
 }
 
@@ -622,11 +708,12 @@ impl FrameState {
 }
 
 fn encode(program: &Program, exports: &BTreeMap<String, FunctionId>) -> Result<Vec<u8>, String> {
+    let structs = struct_layouts(&program.types)?;
     let sizes = program
         .functions
         .iter()
         .map(|function| {
-            FrameLayout::for_function(function)
+            FrameLayout::for_function_in(&structs, function)
                 .map(|layout| layout.size)
                 .map_err(|error| error.message)
         })
@@ -737,6 +824,7 @@ fn encode_frames(
         export_section.export("__test_memory", ExportKind::Memory, 0);
         export_section.export("__test_sp", ExportKind::Global, 0);
     }
+    let structs = struct_layouts(&program.types)?;
     let mut code = CodeSection::new();
     for id in &reachable {
         code.function(&compile_function(
@@ -744,6 +832,7 @@ fn encode_frames(
             &indices,
             sizes[*id as usize],
             observe,
+            &structs,
         )?);
     }
     let mut memories = MemorySection::new();
@@ -779,8 +868,9 @@ fn compile_function(
     indices: &BTreeMap<u32, u32>,
     frame_size: u32,
     observe: bool,
+    structs: &[StructLayout],
 ) -> Result<WasmFunction, String> {
-    let layout = FrameLayout::for_function(function).map_err(|error| error.message)?;
+    let layout = FrameLayout::for_function_in(structs, function).map_err(|error| error.message)?;
     let result_is_array = matches!(function.signature.result.as_ref(), Type::Array { .. });
     // Wasm parameters: the source parameters plus, for an array result, one
     // hidden pointer to the caller-allocated result storage (last parameter).
@@ -1623,6 +1713,49 @@ fn compile_instruction(
                 }
             }
         }
+        InstructionKind::StructNew { fields, .. } => {
+            let value = instruction
+                .output
+                .ok_or("struct creation lacks an output")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let frame = frame.ok_or("struct cell requires frame")?;
+            let Type::Struct(type_id) = function.values[value.0 as usize] else {
+                return Err("struct creation output must have a struct type".into());
+            };
+            let struct_layout = layout
+                .structs
+                .get(type_id.0 as usize)
+                .ok_or("struct type is out of range")?;
+            if struct_layout.offsets.len() != fields.len() {
+                return Err("struct creation operand count differs from its type".into());
+            }
+            for (index, operand) in fields.iter().enumerate() {
+                let destination = cell
+                    .offset
+                    .checked_add(struct_layout.offsets[index])
+                    .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                emit_address(body, frame, destination);
+                emit_operand(body, function, param_count, operand, layout, Some(frame))?;
+                emit_store(body, struct_layout.fields[index]);
+            }
+        }
+        InstructionKind::FieldAddr { base, field, .. } => {
+            let output = output.ok_or("field address lacks an output")?;
+            // The base is a struct owner: its operand is the cell address.
+            let Type::Struct(type_id) = value_type(function, base)? else {
+                return Err("field address base is not a struct".into());
+            };
+            let offset = layout
+                .structs
+                .get(type_id.0 as usize)
+                .and_then(|struct_layout| struct_layout.offsets.get(*field as usize))
+                .copied()
+                .ok_or("field address refers to a missing field")?;
+            emit_operand(body, function, param_count, base, layout, frame)?;
+            body.instruction(&WasmInstruction::I32Const(offset as i32));
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
         InstructionKind::ElementAddr { base, index, .. } => {
             let output = output.ok_or("element address lacks an output")?;
             // The base is an array owner (its operand is the cell address) or a
@@ -2397,5 +2530,78 @@ mod activation_tests {
         let (store, instance) = instance(&private);
         assert!(instance.get_memory(&store, "__test_memory").is_none());
         assert!(instance.get_global(&store, "__test_sp").is_none());
+    }
+}
+
+#[cfg(test)]
+mod struct_layout_tests {
+    use super::*;
+    use wasmi::{Engine, Linker, Module, Store};
+
+    const MIXED: &str = "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+        fn main() -> i32 { let m := M { e: -7, a: 200, d: 1.5, c: true, b: 5000000000 }; 1 }";
+
+    fn lower(source: &str) -> Program {
+        let parsed = memobits_syntax::parse(memobits_diagnostics::SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap()
+    }
+
+    #[test]
+    fn fields_use_natural_alignment_in_declaration_order() {
+        let program = lower(MIXED);
+        let layouts = struct_layouts(&program.types).unwrap();
+        assert_eq!(layouts.len(), 1);
+        // a: u8 @0, b: i64 @8, c: Bool @16, d: f32 @20, e: i16 @24; size 32, align 8.
+        assert_eq!(layouts[0].offsets, [0, 8, 16, 20, 24]);
+        assert_eq!(layouts[0].size, 32);
+        assert_eq!(layouts[0].align, 8);
+        let small = lower("type S { a: u8, b: u16, c: u8 } fn main() {}");
+        let layouts = struct_layouts(&small.types).unwrap();
+        assert_eq!(layouts[0].offsets, [0, 2, 4]);
+        assert_eq!(layouts[0].size, 6);
+        assert_eq!(layouts[0].align, 2);
+        let empty = lower("type U {} fn main() {}");
+        let layouts = struct_layouts(&empty.types).unwrap();
+        assert_eq!((layouts[0].size, layouts[0].align), (0, 1));
+    }
+
+    #[test]
+    fn construction_writes_each_field_at_its_offset() {
+        let program = lower(MIXED);
+        let exports = BTreeMap::from([("main".to_string(), FunctionId(0))]);
+        let structs = struct_layouts(&program.types).unwrap();
+        let sizes = vec![
+            FrameLayout::for_function_in(&structs, &program.functions[0])
+                .unwrap()
+                .size,
+        ];
+        let wasm = encode_with_frame_sizes(&program, &exports, &sizes).unwrap();
+        wasmparser::validate(&wasm).unwrap();
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).unwrap();
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine)
+            .instantiate_and_start(&mut store, &module)
+            .unwrap();
+        instance
+            .get_typed_func::<(), i32>(&store, "main")
+            .unwrap()
+            .call(&mut store, ())
+            .unwrap();
+        let memory = instance.get_memory(&store, "__test_memory").unwrap();
+        let bytes = &memory.data(&store)[FRAME_START as usize..FRAME_START as usize + 32];
+        assert_eq!(bytes[0], 200);
+        assert_eq!(
+            i64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            5_000_000_000
+        );
+        assert_eq!(bytes[16], 1);
+        assert_eq!(f32::from_le_bytes(bytes[20..24].try_into().unwrap()), 1.5);
+        assert_eq!(i16::from_le_bytes(bytes[24..26].try_into().unwrap()), -7);
+        // Padding is untouched (still zero-initialised memory).
+        assert!(bytes[1..8].iter().all(|&b| b == 0));
+        assert!(bytes[17..20].iter().all(|&b| b == 0));
+        assert!(bytes[26..32].iter().all(|&b| b == 0));
     }
 }

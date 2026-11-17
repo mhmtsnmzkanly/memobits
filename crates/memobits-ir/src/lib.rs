@@ -13,6 +13,10 @@ pub struct ValueId(pub u32);
 pub struct BlockId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LoanId(pub u32);
+/// Index into `Program::types`. Types are nominal: two definitions with equal
+/// fields but different canonical paths are different types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TypeId(pub u32);
 
 /// A definition's identity is independent of aliases and lexical spellings.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -20,6 +24,35 @@ pub struct CanonicalFunction {
     pub package: String,
     pub module: Vec<String>,
     pub name: String,
+}
+
+/// A user-defined type's identity is independent of aliases and lexical spellings.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CanonicalType {
+    pub package: String,
+    pub module: Vec<String>,
+    pub name: String,
+}
+
+/// One declared struct field. Fields are laid out in declaration order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldDef {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeDefKind {
+    /// Fields are non-Unit primitives for now; nested aggregates are not
+    /// representable, so by-value recursion cannot occur in a valid program.
+    Struct { fields: Vec<FieldDef> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeDef {
+    pub path: CanonicalType,
+    pub span: Span,
+    pub kind: TypeDefKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -51,6 +84,9 @@ pub enum Type {
         element: Box<Type>,
         len: u32,
     },
+    /// A user-defined struct stored inline in its owner; the definition lives
+    /// in `Program::types`.
+    Struct(TypeId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +204,21 @@ pub enum InstructionKind {
         index: Operand,
         access: Access,
     },
+    /// Create a struct value. One consumed operand per field, in declaration
+    /// order; the output type is `Type::Struct(ty)`. Source evaluation order is
+    /// decided by the operands' earlier instructions, not by this order.
+    StructNew {
+        ty: TypeId,
+        fields: Vec<Operand>,
+    },
+    /// Struct twin of `ElementAddr` without a bounds check: a reference to one
+    /// field of a struct owner. The output is `Reference { access, field type }`.
+    FieldAddr {
+        loan: LoanId,
+        base: Operand,
+        field: u32,
+        access: Access,
+    },
     /// Read the referent. The output is read-only provenance and cannot escape
     /// as an owned value without a future explicit copy operation.
     Load {
@@ -261,6 +312,8 @@ pub struct Function {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Program {
     pub functions: Vec<Function>,
+    /// User-defined types, indexed by `TypeId`.
+    pub types: Vec<TypeDef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,6 +329,8 @@ impl Program {
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
         let mut errors = Vec::new();
         let mut paths = HashSet::new();
+        self.validate_types(&mut errors);
+        let type_count = self.types.len();
         for (index, function) in self.functions.iter().enumerate() {
             let id = FunctionId(index as u32);
             if !paths.insert(&function.path) {
@@ -302,19 +357,26 @@ impl Program {
                 );
             }
             for parameter in &function.signature.parameters {
-                validate_parameter_type(&parameter.ty, &mut errors, id, "function parameter");
+                validate_parameter_type(
+                    type_count,
+                    &parameter.ty,
+                    &mut errors,
+                    id,
+                    "function parameter",
+                );
             }
             validate_signature_value_type(
+                type_count,
                 &function.signature.result,
                 &mut errors,
                 id,
                 "function result",
             );
             for local in &function.locals {
-                validate_type_shape(&local.ty, &mut errors, id, "local");
+                validate_type_shape(type_count, &local.ty, &mut errors, id, "local");
             }
             for value in &function.values {
-                validate_type_shape(value, &mut errors, id, "value");
+                validate_type_shape(type_count, value, &mut errors, id, "value");
             }
             if function.parameter_locals.len() != function.signature.parameters.len() {
                 push(
@@ -355,11 +417,20 @@ impl Program {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
+                    if matches!(function.values.get(value.0 as usize), Some(Type::Struct(_))) {
+                        push(
+                            &mut errors,
+                            id,
+                            Some(block_id),
+                            "struct block parameters are not supported yet",
+                        );
+                    }
                 }
                 for instruction in &block.instructions {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
                     if let InstructionKind::Borrow { loan, .. }
-                    | InstructionKind::ElementAddr { loan, .. } = &instruction.kind
+                    | InstructionKind::ElementAddr { loan, .. }
+                    | InstructionKind::FieldAddr { loan, .. } = &instruction.kind
                     {
                         if !loans.insert(*loan) {
                             push(
@@ -385,6 +456,48 @@ impl Program {
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+}
+
+impl Program {
+    fn validate_types(&self, errors: &mut Vec<ValidationError>) {
+        let mut paths = HashSet::new();
+        for definition in &self.types {
+            let mut report = |message: String| {
+                errors.push(ValidationError {
+                    function: None,
+                    block: None,
+                    message,
+                });
+            };
+            let path = &definition.path;
+            if path.package.is_empty()
+                || path.name.is_empty()
+                || path.module.is_empty()
+                || path.module.iter().any(String::is_empty)
+            {
+                report("invalid canonical type path".into());
+            }
+            if !paths.insert(path) {
+                report(format!("duplicate canonical type path '{}'", path.name));
+            }
+            let TypeDefKind::Struct { fields } = &definition.kind;
+            let mut names = HashSet::new();
+            for field in fields {
+                if !names.insert(&field.name) {
+                    report(format!(
+                        "struct '{}' declares field '{}' more than once",
+                        path.name, field.name
+                    ));
+                }
+                if !matches!(&field.ty, Type::Primitive(kind) if *kind != Primitive::Unit) {
+                    report(format!(
+                        "field '{}' of struct '{}' must be a non-Unit primitive; array, struct (nested or recursive) and reference fields are not supported",
+                        field.name, path.name
+                    ));
+                }
+            }
         }
     }
 }
@@ -415,6 +528,7 @@ fn parameter_local_type(parameter: &ParameterType) -> Type {
 /// A parameter names its pointee type: a primitive or a fixed array of
 /// primitives, passed by ownership, `borrow` or `share`.
 fn validate_parameter_type(
+    type_count: usize,
     ty: &Type,
     errors: &mut Vec<ValidationError>,
     id: FunctionId,
@@ -428,10 +542,19 @@ fn validate_parameter_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    validate_type_shape(ty, errors, id, context);
+    if matches!(ty, Type::Struct(_)) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} type cannot be a struct yet"),
+        );
+    }
+    validate_type_shape(type_count, ty, errors, id, context);
 }
 
 fn validate_signature_value_type(
+    type_count: usize,
     ty: &Type,
     errors: &mut Vec<ValidationError>,
     id: FunctionId,
@@ -445,10 +568,19 @@ fn validate_signature_value_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    validate_type_shape(ty, errors, id, context);
+    if matches!(ty, Type::Struct(_)) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} type cannot be a struct yet"),
+        );
+    }
+    validate_type_shape(type_count, ty, errors, id, context);
 }
 
 fn validate_type_shape(
+    type_count: usize,
     ty: &Type,
     errors: &mut Vec<ValidationError>,
     id: FunctionId,
@@ -456,11 +588,33 @@ fn validate_type_shape(
 ) {
     match ty {
         Type::Primitive(_) => {}
+        Type::Struct(type_id) => {
+            if type_id.0 as usize >= type_count {
+                push(
+                    errors,
+                    id,
+                    None,
+                    format!("{context} struct type {:?} is out of range", type_id),
+                );
+            }
+        }
         Type::Function(signature) => {
             for parameter in &signature.parameters {
-                validate_parameter_type(&parameter.ty, errors, id, "function type parameter");
+                validate_parameter_type(
+                    type_count,
+                    &parameter.ty,
+                    errors,
+                    id,
+                    "function type parameter",
+                );
             }
-            validate_signature_value_type(&signature.result, errors, id, "function type result");
+            validate_signature_value_type(
+                type_count,
+                &signature.result,
+                errors,
+                id,
+                "function type result",
+            );
         }
         Type::Reference { access, inner } => {
             if *access == Access::Owned {
@@ -480,12 +634,12 @@ fn validate_type_shape(
                 );
             }
             if matches!(inner.as_ref(), Type::Array { .. }) {
-                validate_type_shape(inner, errors, id, context);
+                validate_type_shape(type_count, inner, errors, id, context);
             }
         }
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
-            Type::Array { .. } => validate_type_shape(element, errors, id, context),
+            Type::Array { .. } => validate_type_shape(type_count, element, errors, id, context),
             _ => push(
                 errors,
                 id,
@@ -892,6 +1046,151 @@ fn validate_instruction(
                 }
             }
         }
+        InstructionKind::StructNew { ty, fields } => {
+            let operand_types = fields
+                .iter()
+                .map(|operand| {
+                    let actual = operand_type(program, function, operand, errors, id, block);
+                    if operand.mode != UseMode::Consume {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "struct field operand must be consumed",
+                        );
+                    }
+                    actual
+                })
+                .collect::<Vec<_>>();
+            if out.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "struct creation requires an output value",
+                );
+            }
+            if out.is_some_and(|output| output != &Type::Struct(*ty)) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "struct creation output must have the created struct type",
+                );
+            }
+            match program.types.get(ty.0 as usize) {
+                None => push(
+                    errors,
+                    id,
+                    Some(block),
+                    format!("struct type {:?} is out of range", ty),
+                ),
+                Some(TypeDef {
+                    kind: TypeDefKind::Struct { fields: declared },
+                    ..
+                }) => {
+                    if declared.len() != fields.len() {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "struct creation operand count differs from the field count",
+                        );
+                    }
+                    if operand_types
+                        .iter()
+                        .zip(declared)
+                        .any(|(actual, field)| actual.as_ref().is_some_and(|a| a != &field.ty))
+                    {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "struct field operand type differs from the declared field type",
+                        );
+                    }
+                }
+            }
+        }
+        InstructionKind::FieldAddr {
+            base,
+            field,
+            access,
+            ..
+        } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            if instruction.output.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "field address requires an output reference",
+                );
+            }
+            let expected_mode = use_mode_for_access(*access);
+            if expected_mode.is_none() || base.mode != expected_mode.unwrap() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "field address base mode does not match requested access",
+                );
+            }
+            let field_type = match actual {
+                Some(Type::Struct(type_id)) if *access != Access::Owned => {
+                    match program.types.get(type_id.0 as usize) {
+                        Some(TypeDef {
+                            kind: TypeDefKind::Struct { fields },
+                            ..
+                        }) => match fields.get(*field as usize) {
+                            Some(declared) => Some(declared.ty.clone()),
+                            None => {
+                                push(
+                                    errors,
+                                    id,
+                                    Some(block),
+                                    format!("field index {field} is out of range"),
+                                );
+                                None
+                            }
+                        },
+                        None => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                format!("struct type {:?} is out of range", type_id),
+                            );
+                            None
+                        }
+                    }
+                }
+                Some(_) => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "field address base must be a struct owner",
+                    );
+                    None
+                }
+                None => None,
+            };
+            if let (Some(field_type), Some(output)) = (field_type, out) {
+                let expected = Type::Reference {
+                    access: *access,
+                    inner: Box::new(field_type),
+                };
+                if output != &expected {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "field address output type is incompatible",
+                    );
+                }
+            }
+        }
         InstructionKind::Load { reference } => {
             let actual = operand_type(program, function, reference, errors, id, block);
             if instruction.output.is_none() {
@@ -914,6 +1213,14 @@ fn validate_instruction(
                             id,
                             Some(block),
                             "load of a whole array is not supported; read elements instead",
+                        );
+                    }
+                    if matches!(inner.as_ref(), Type::Struct(_)) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "load of a whole struct is not supported; read fields instead",
                         );
                     }
                     if out.is_some_and(|output| output != inner.as_ref()) {
@@ -1226,6 +1533,12 @@ fn validate_read_only_loaded_values(
                 InstructionKind::ElementAddr { base, index, .. } => {
                     report(block_id, base, false);
                     report(block_id, index, false);
+                }
+                InstructionKind::FieldAddr { base, .. } => report(block_id, base, false),
+                InstructionKind::StructNew { fields, .. } => {
+                    for field in fields {
+                        report(block_id, field, true);
+                    }
                 }
                 InstructionKind::ArrayNew { init } => {
                     if let ArrayInit::Elements(elements) = init {

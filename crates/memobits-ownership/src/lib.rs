@@ -194,6 +194,15 @@ fn transfer_instruction(
             transfer_operand(base, state, diagnostics.as_deref_mut(), function);
             transfer_operand(index, state, diagnostics, function);
         }
+        InstructionKind::FieldAddr { base, .. } => {
+            transfer_operand(base, state, diagnostics, function)
+        }
+        InstructionKind::StructNew { fields, .. } => {
+            let mut diagnostics = diagnostics;
+            for field in fields {
+                transfer_operand(field, state, diagnostics.as_deref_mut(), function);
+            }
+        }
         InstructionKind::ArrayNew { init } => {
             if let ArrayInit::Elements(elements) = init {
                 let mut diagnostics = diagnostics;
