@@ -38,7 +38,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
    borrowing. Reject conflicts before lowering cleanup and ownership into IR.
 8. **Runtime and core collections** — implement controlled errors for dynamic
    integer overflow, invalid indexing and other checked operations; UTF-8 string
-   primitives; fixed arrays and dynamic lists; Option/Result/outcome payloads;
+   primitives starting with [owned literals and byte length](utf8-text-slice.md);
+   fixed arrays and dynamic lists; Option/Result/outcome payloads;
    and normal-exit cleanup. Keep trap cleanup policy at the host/runtime boundary.
 9. **Core libraries and package artifacts** — implement reusable APIs on top of
    the runtime, local binary dependency loading, `import` selection,
@@ -214,7 +215,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   UTF-8 token handling and parser conformance require a protocol reference.
 - The [guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
   validates fixed byte buffers with explicit lengths and byte-offset errors.
-  Guest string and scalar iteration APIs remain pending.
+  The [first text slice](utf8-text-slice.md) is design only. Guest string and
+  scalar iteration APIs remain pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 
