@@ -338,3 +338,33 @@ fn public_outcome_signatures_cannot_expose_private_nested_types() {
         result.diagnostics
     );
 }
+
+#[test]
+fn reference_arguments_participate_in_name_and_visibility_checks() {
+    let f = Fixture::new("type Hidden { pub value: i32 }");
+    for (source, expected) in [
+        (
+            "fn main() { let a: Option<borrow Missing> = None; }",
+            "NE003",
+        ),
+        (
+            "fn main() { let a: Option<borrow math::Hidden> = None; }",
+            "ME007",
+        ),
+        (
+            "type Hidden { value: i32 } pub type Maybe = Option<borrow Hidden>; fn main() {}",
+            "ME010",
+        ),
+    ] {
+        fs::write(f.0.join("src/main.mb"), source).unwrap();
+        let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.to_string() == expected),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}

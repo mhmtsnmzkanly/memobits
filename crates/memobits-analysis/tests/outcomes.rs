@@ -73,6 +73,75 @@ fn option_infers_nested_payloads_without_annotations() {
 }
 
 #[test]
+fn reference_type_arguments_fail_before_lowering() {
+    for (source, rejected) in [
+        (
+            "type Maybe = Option<borrow i32>; fn main() {}",
+            "borrow i32",
+        ),
+        (
+            "fn main() { let empty: Option<share i32> = None; }",
+            "share i32",
+        ),
+        (
+            "fn leak() -> Option<borrow i32> { let n := 1; Some(n.borrow()) } fn main() {}",
+            "borrow i32",
+        ),
+        (
+            "type Record { value: Array<Option<borrow i32>, 2> } fn main() {}",
+            "borrow i32",
+        ),
+        (
+            "fn take(a: Array<borrow i32, 2>) {} fn main() {}",
+            "borrow i32",
+        ),
+        (
+            "fn main() { let n := 1; let wrapped := Some(Some(n.borrow())); }",
+            "n.borrow()",
+        ),
+        (
+            "fn main() { let n := 1; let wrapped := Done(n.borrow()); }",
+            "n.borrow()",
+        ),
+        (
+            "type Bad = Result<i32, borrow Error>; fn main() {}",
+            "borrow Error",
+        ),
+    ] {
+        let parsed = parse(SourceId(91), source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+        let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
+        assert!(
+            errors.iter().any(|error| {
+                error.code.to_string() == "TE017"
+                    && error.message.contains("embedded-loan tracking")
+                    && error
+                        .span
+                        .is_some_and(|span| &source[span.start..span.end] == rejected)
+            }),
+            "{source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn owned_option_still_copies_primitive_from_reference() {
+    let program = lower(
+        "fn main() -> i32 {
+             var n := 1;
+             let wrapped: Option<i32> = Some(n.borrow());
+             n = 2;
+             match wrapped { Some(value) => value, None => n }
+         }",
+    );
+    assert!(memobits_ownership::check_ownership(&program).is_empty());
+}
+
+#[test]
 fn bare_none_requires_a_payload_type() {
     let parsed = parse(SourceId(91), "fn main() { let value := None; }");
     assert!(parsed.diagnostics.is_empty());

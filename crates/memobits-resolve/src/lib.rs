@@ -300,7 +300,9 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             }
             while let Some(ty) = exposed.pop() {
                 exposed.extend(ty.arguments.iter().filter_map(|argument| match argument {
-                    TypeArgument::Type(ty) => Some(ty),
+                    TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
+                        Some(ty)
+                    }
                     TypeArgument::Integer(_) => None,
                 }));
                 let qualified = if ty.path.len() == 1 {

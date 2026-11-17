@@ -46,6 +46,11 @@ pub struct Type {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeArgument {
     Type(Type),
+    Reference {
+        span: Span,
+        access: Access,
+        referent: Type,
+    },
     Integer(IntegerLiteral),
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -517,7 +522,17 @@ impl Parser {
                 }
                 arguments.push(match parameter {
                     templates::ParameterKind::Type | templates::ParameterKind::ErrorType => {
-                        TypeArgument::Type(self.ty()?)
+                        let start = self.current().span.start;
+                        let access = self.access();
+                        let referent = self.ty()?;
+                        match access {
+                            Access::Owned => TypeArgument::Type(referent),
+                            Access::Borrow | Access::Share => TypeArgument::Reference {
+                                span: self.span(start),
+                                access,
+                                referent,
+                            },
+                        }
                     }
                     templates::ParameterKind::Integer => {
                         TypeArgument::Integer(self.integer_literal()?)
@@ -533,6 +548,15 @@ impl Parser {
             path,
             arguments,
         })
+    }
+    fn access(&mut self) -> Access {
+        if self.eat("borrow") {
+            Access::Borrow
+        } else if self.eat("share") {
+            Access::Share
+        } else {
+            Access::Owned
+        }
     }
     fn integer_literal(&mut self) -> PResult<IntegerLiteral> {
         match self.current().kind.clone() {
@@ -555,13 +579,7 @@ impl Parser {
                 let mutable = self.eat("var");
                 let name = self.name()?;
                 self.expect(":")?;
-                let access = if self.eat("borrow") {
-                    Access::Borrow
-                } else if self.eat("share") {
-                    Access::Share
-                } else {
-                    Access::Owned
-                };
+                let access = self.access();
                 let ty = self.ty()?;
                 parameters.push(Parameter {
                     span: self.span(start),

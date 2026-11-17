@@ -123,6 +123,50 @@ fn utf8_errors_and_nested_comments_have_valid_spans() {
 }
 
 #[test]
+fn parses_reference_type_arguments_with_access_and_spans() {
+    use memobits_syntax::{Access, TypeArgument};
+
+    let source =
+        "fn f(a: borrow Option<borrow math::Value>, b: Result<share Array<i32, 2>, Error>) {}";
+    let parsed = parse(SourceId(0), source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { parameters, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    assert_eq!(parameters[0].access, Access::Borrow);
+    assert_eq!(parameters[1].access, Access::Owned);
+    for (parameter, expected_access, expected_text, expected_path) in [
+        (
+            &parameters[0],
+            Access::Borrow,
+            "borrow math::Value",
+            &["math", "Value"][..],
+        ),
+        (
+            &parameters[1],
+            Access::Share,
+            "share Array<i32, 2>",
+            &["Array"][..],
+        ),
+    ] {
+        let TypeArgument::Reference {
+            span,
+            access,
+            referent,
+        } = &parameter.ty.arguments[0]
+        else {
+            panic!()
+        };
+        assert_eq!(*access, expected_access);
+        assert_eq!(&source[span.start..span.end], expected_text);
+        assert_eq!(referent.path, expected_path);
+    }
+    assert!(!parse(SourceId(0), "type Bad = Array<i32, borrow i32>;")
+        .diagnostics
+        .is_empty());
+}
+
+#[test]
 fn arrays_preserve_nested_types_literals_and_spans() {
     use memobits_syntax::TypeArgument;
     let source = "fn f(a: Array<Array<i32, 0>, 1_000>) { [1, 2,]; []; [f(); 03]; }";

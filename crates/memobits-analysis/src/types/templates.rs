@@ -2,6 +2,7 @@
 //! in the type table so arguments resolve through the same aliases and modules
 //! as ordinary types. Register a template only when its implementation is ready.
 
+use memobits_diagnostics::Span;
 use memobits_syntax::{
     templates::{ParameterKind, Template},
     Type, TypeArgument,
@@ -13,6 +14,17 @@ use super::{typetable::TypeFailure, Ty};
 pub(super) enum ResolvedArgument {
     Type(Ty),
     Integer(u32),
+}
+
+pub(super) fn unsupported_reference_argument(template: &Template, span: Span) -> TypeFailure {
+    TypeFailure {
+        span,
+        code: 17,
+        message: format!(
+            "{} reference type arguments require embedded-loan tracking",
+            template.name
+        ),
+    }
 }
 
 /// Resolve aliases before an argument participates in instance identity.
@@ -35,6 +47,9 @@ pub(super) fn resolve_arguments(
         .map(|(argument, kind)| match (kind, argument) {
             (ParameterKind::Type | ParameterKind::ErrorType, TypeArgument::Type(ty)) => {
                 resolve_type(*kind, ty).map(ResolvedArgument::Type)
+            }
+            (_, TypeArgument::Reference { span, .. }) => {
+                Err(unsupported_reference_argument(template, *span))
             }
             (ParameterKind::Integer, TypeArgument::Integer(integer)) => integer
                 .raw

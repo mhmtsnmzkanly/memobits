@@ -159,8 +159,11 @@ struct Checker {
 impl Checker {
     fn ty(&mut self, ty: &Type) {
         for argument in &ty.arguments {
-            if let TypeArgument::Type(element) = argument {
-                self.ty(element);
+            match argument {
+                TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
+                    self.ty(ty)
+                }
+                TypeArgument::Integer(_) => {}
             }
         }
         if templates::lookup(&ty.path).is_some() {

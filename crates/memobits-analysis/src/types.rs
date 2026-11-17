@@ -1518,7 +1518,13 @@ impl Checker {
                 if actual == Ty::Error {
                     return Ty::Error;
                 }
-                if matches!(actual, Ty::Reference { .. } | Ty::Function(..)) || actual == UNIT {
+                if matches!(actual, Ty::Reference { .. }) {
+                    let failure =
+                        templates::unsupported_reference_argument(template, argument.span);
+                    self.error(failure.code, failure.span, failure.message);
+                    return Ty::Error;
+                }
+                if matches!(actual, Ty::Function(..)) || actual == UNIT {
                     self.error(
                         17,
                         argument.span,

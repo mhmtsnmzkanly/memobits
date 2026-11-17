@@ -221,6 +221,8 @@ ancestor-first order and carry a hidden concrete type tag. Zero-argument
 application entries can return `Result` or `Attempt` with primitive success
 payloads. The runtime reports the same outcome in source and artifact runs.
 The [outcome implementation plan](outcome-implementation.md) describes the
-adapter. Reference type arguments and embedded-loan tracking remain pending.
+adapter and the acceptance criteria for reference payloads. Syntax and name
+resolution handle reference type arguments. Type checking rejects them with
+TE017 pending embedded-loan tracking.
 Owned conversion to an Error ancestor and reporting its retained concrete
 identity also remain pending.

@@ -13,6 +13,16 @@ with primitive success payloads. The full B4 contract is in
   arguments through local and module aliases, then interns each outcome by
   template identity and resolved arguments. Nested instances participate in
   recursive value layout checks. User-defined generics remain unavailable.
+- Within a compiler-known type or error-type argument slot, syntax records
+  `borrow T` and `share T` with their access mode and full argument span.
+  Referent names and public visibility are checked at any nesting depth.
+  Analysis rejects each reference argument with TE017 at its span, including
+  in unused aliases, fields, and signatures, and rejects inferred reference
+  payloads at the payload expression. This applies even to `None` with a
+  reference argument. Integer slots still require literals. The gate runs
+  before instance creation for the rejected type, and IR validation still
+  rejects reference fields and enum payloads. Contextual primitive payloads
+  can still load a value through a standalone reference.
 - `Some`, `None`, `Ok`, `Err`, `Done`, `Skipped`, and `Failed` use the
   concrete expected instance when one is available. An alias-qualified
   constructor such as `Work::Done(value)` supplies its own instance. Local
@@ -94,11 +104,18 @@ with primitive success payloads. The full B4 contract is in
 
 ## Remaining gates
 
-1. Reference type arguments such as `Option<borrow i32>` are unsupported.
-   Embedded-loan tracking must preserve loans
-   through construction, aggregate moves, branch joins, calls, destructuring,
-   and matching, including nested outcomes. B3 borrowing of an enum's storage
-   remains available for owned payloads.
+1. The first executable reference payload should be a function-local
+   `Option<borrow T>`. Enable it only when construction carries the referent's
+   provenance and matching yields a read-only reference to that referent.
+   Acceptance requires that a live wrapper or extracted binding rejects
+   conflicting mutation and owner moves, a final use releases the loan, and
+   a reference to a local owner cannot leave the owner's scope or be returned.
+   Preserve owned enum moves and B3 borrows of enum storage. Keep every
+   transfer outside the proven subset gated.
+   Expand coverage to aggregate moves and branch joins by carrying all
+   possible origins, then to calls, destructuring and nested outcomes as
+   each transfer gains validation, provenance and escape checks. Keep share
+   payloads gated until exclusive access is tracked across the same transfers.
 2. Explicit owned conversion to an Error ancestor remains unimplemented and
    still has no spelling. The accepted design preserves concrete identity after
    conversion. The entry metadata and decoder must support reporting that
