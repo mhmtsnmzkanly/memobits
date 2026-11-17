@@ -68,13 +68,13 @@ the implemented subset; a milestone is not complete merely because its crate exi
   stable codes with file/line/column. `check` is reported as unsupported.
 - **Syntax** (`memobits-syntax`): basic declarations, parameter access, type forms,
   expression precedence, loop and control flow, and error recovery. Fixed-array
-  syntax (`Array<T, N>`, literals, `[expr; N]`, indexing) produces structured AST nodes.
+  types, literals, repetition, and indexing produce structured AST nodes.
 - **Resolution** (`memobits-resolve`): loads reachable local modules from the
   application entry or library exports; checks lexical scopes, duplicate bindings,
   imports and aliases, visibility, enum variant paths, and prelude names. Public
   signatures reject private local types.
 - **Type and flow analysis** (`memobits-analysis`): standalone and project-wide
-  primitive checking (numeric defaults, literal ranges, signatures, calls, bindings,
+  checking (numeric defaults, literal ranges, signatures, calls, bindings,
   assignments, branches, return analysis, loop divergence). Loop control reports
   TE020/TE021. Type-only fixed-array analysis covers homogeneous element inference,
   contextual literal typing, annotation length checks, zero-count and divergent
@@ -84,16 +84,15 @@ the implemented subset; a milestone is not complete merely because its crate exi
   local modules, imports, and qualified paths; scalar reference handles and
   Borrow/Load/Store.
 - **Ownership** (`memobits-ownership`, `check_ownership`): move checking for owned
-  locals and temporaries, including numeric values, branch joins, and loop
-  fixed points. Primitive `borrow` (read-only) and `share` (exclusive mutable)
-  are lowered and checked, with loan conflicts, reference availability across
-  joins and backedges, and rejection of invalid reference transport (BE002).
-- **Wasm backend** (`memobits-wasm`): emits and validates the primitive subset:
-  constant returns, direct calls restricted to the export-reachable closure,
+  aggregates and reference handles through branch joins and loop fixed points.
+  Primitive values copy implicitly. Primitive and aggregate `borrow` and `share`
+  are lowered and checked for conflicts, availability, and invalid transport.
+- **Wasm backend** (`memobits-wasm`): emits primitives and supported fixed
+  arrays, structs, and enums. It supports direct calls from export roots,
   branches, checked integer arithmetic, IEEE float operations, and internal
-  primitive references. Address-taken owners live in authoritative frame cells in
-  a configurable stack region of linear memory with checked allocation and restoration on
-  every return.
+  references. Address-taken owners live in authoritative frame cells in
+  a configurable stack region of linear memory. Allocation is checked and the
+  stack pointer is restored on each normal return.
 - **Runtime and execution** (`memobits-runtime`, wasmi): fresh instance per run,
   a default fuel budget of ten billion units (overridable with `mb run --fuel N`
   or `--no-fuel-limit`), structured host errors for traps. Source and artifact
@@ -187,122 +186,36 @@ the implemented subset; a milestone is not complete merely because its crate exi
   deferred. Details in the B3 checkpoint of `enum-implementation.md`; example
   in `examples/projects/enums/`.
 
-### Known limits of the implemented subset
+### Current limits
 
-- Analysis success is not an ownership or borrow-safety proof. Coverage is the
-  tested subset.
-- Standalone `analyze` does not support imported functions or user-defined types beyond the A1-A3 structs;
-  `analyze-project` supports primitive signatures across resolved modules only.
-- Resolution reachability works at module granularity. Source analysis checks all
-  declarations in loaded modules; there is no per-definition incremental compilation.
-- Reexports, alias expansion through type aliases, public-signature visibility
-  closure, and full value/type namespace validation are missing.
-- Borrow/share is primitive only. Reference-valued block and `if` results and
-  returned references are rejected. Reference exports and reference returns are
-  rejected, and no stable external reference ABI exists.
-- Fixed arrays execute for primitive (non-Unit) elements: literals, repetition
-  `[e; N]` (loop lowering; `[e; 0]` evaluates nothing, owned bindings cannot be
-  repeated), `let` and `var` bindings, indexed reads inside arithmetic,
-  comparison and condition expressions, element assignment `a[i] = v` and
-  compound `a[i] op= v` on `var` arrays (TE004 on `let`), and whole-array moves
-  `let b := a;` / `b = a;` (memory copy; the source is unavailable afterwards).
-  Indices may be any integer type; constant out-of-range indices are TE008,
-  dynamic ones (reads and writes) trap (`RE007`). Extracting an element into an
-  owned position (binding, `=`, return, tail, owned argument, array element) is
-  TE022. Nested arrays (WP4) work to any depth: `Array<Array<i32, 2>, 3>`,
-  literals, repetition with an array element expression (each evaluation
-  separate), `m[i][j]` reads, writes and compound writes, bounds traps and
-  TE008 on either index, whole-row replacement `m[i] = [1, 2];`, and rows lent
-  to `borrow`/`share` parameters with `m[i].borrow()` / `m[i].share()`.
-  Arrays are also function results (`-> Array<T, N>`; struct-return storage
-  owned by the caller) and `if`/block values; a result may be a literal,
-  repetition, call, named local or parameter (a move) and feeds a binding,
-  `=`, an owned argument, an element or another result. Arrays cross internal calls (WP3): owned (`a: Array<T, N>`, moved into
-  the call; a literal, repetition or named array is accepted), `borrow` and
-  `share` parameters with the same `.borrow()` / `.share()` call-site spelling
-  as primitives, element reads through either reference, element and compound
-  writes and whole-array stores through `share`, local `let r := a.borrow();`
-  / `var r := a.share();` bindings and reborrowing a reference parameter. Loans carry
-  projection paths (A4): two `share` rows of one matrix with constant indices
-  are independent, with a dynamic index (`m[i]`, `m[j]`) they are BE005, and a
-  write while an overlapping row or array borrow is live is BE005. Fixed arrays are complete for primitive and nested-array
-  elements. Still gated: references to primitive elements (`a[0].share()`,
-  TE017), indexing or borrowing a temporary (`make()[0]`, `[1, 2].borrow()`,
-  TE017), extracting a row (aggregate element) into an owned position (TE022;
-  primitive elements are copied implicitly, rows cannot be copied yet),
-  whole arrays as operands or statements (TE017), reference-typed elements and
-  returned references (TE017), non-primitive element types such as `Unit`,
-  and arrays or array references in exported signatures (`main`, `[export]`,
-  parameters or results), which the backend rejects with LE900. Layout: each
-  array local, value, call result and join parameter owns an inline cell in the
-  activation frame, which must fit the configured `[build].stack_size` (default
-  1 MiB; repetition also uses a hidden accumulator cell, so it takes twice the
-  array size, a known inefficiency; sizes use checked multiplication and nested sizes are products);
-  larger layouts are a backend diagnostic. Literal lengths are capped at
-  `u32::MAX` as an analysis bound, not a memory guarantee. See the WP1-WP4
-  checkpoints in `fixed-array-implementation.md`.
-- **Primitive copy** (`memobits-analysis`, `-ir`, `-ownership`, `-wasm`):
-  `expr.copy()` is a compiler-known zero-argument method (like `.borrow()` /
-  `.share()`) for integers, floats and `Bool`. The receiver may be a local or
-  parameter, an array element at any depth (bounds-checked), or a primitive
-  read through a `borrow`/`share` reference (`r.copy()`, `p[i].copy()`). It
-  lowers to a distinct IR instruction `Copy { source }` whose source is a
-  `Read` use and whose output is an ordinary owned value (a `Load` result stays
-  read-only, so `validate_read_only_loaded_values` is unchanged). Ownership
-  treats it as a non-consuming read: allowed while borrows are live, BE005
-  while a `share` of the owner is live, BE001 on a moved local. It works in
-  every owned position, including repetition elements (evaluated per
-  iteration). `.copy()` on an array, a row or a reference to one is TE017
-  ("copy is currently available only for primitive values"); arguments are
-  TE010. Aggregate copy and copy-on-write are not implemented and the spelling
-  remains provisional. `.copy()` on a primitive is now optional.
-- **Implicit primitive copy** (`memobits-analysis`, `-ir` unchanged,
-  `-ownership` unchanged): integers, floats and `Bool` are never moved. Binding,
-  assigning, passing as an owned argument, returning, and using as an array,
-  struct or repetition element all leave the source usable, and a primitive
-  array element or struct field (or a primitive read through a `borrow`/`share`
-  reference, `fn get(r: borrow i32) -> i32 { r }`) may be read into any owned
-  position. Lowering (`Builder::owned`) emits the existing `Copy` instruction for
-  every primitive local and every `Load` result that reaches an owned position, so
-  the IR validator keeps rejecting consumed loaded values and the move checker
-  needs no type knowledge: only aggregates and reference handles are ever
-  consumed. A copy is a read, so BE005 still applies while a `share` of the
-  owner is live. TE022 covers aggregate elements (rows, structs) and aggregate fields; reference handles keep their transport rules
-  (TE017). Aggregates keep move semantics (BE001).
-- Frame memory is an experimental fixed 64 KiB page with addresses below 16
-  reserved. Checked traps report their reason and source line/column (see
-  `wasm-backend.md`, "Trap reporting"); traps do not unwind caller frames and
-  discard the instance; no persistent-instance reset policy exists.
-- The Wasm output ABI is experimental: no imports or aggregate exports; artifact
-  results use raw numeric representations.
+- Standalone analysis resolves types defined in the same file. Use project
+  analysis for imported definitions. Reachable modules are checked in full.
+  Wasm emission follows the function closure of the entry or library exports.
+  Per-definition incremental compilation and external package linking are pending.
+- Fixed arrays can hold primitives and nested aggregates. Constant out-of-range
+  indices are diagnosed at compile time. Dynamic bounds checks report RE007.
+  Implicit copies cover primitive fields and elements. Moving an aggregate out
+  of a field or element is gated, while whole-struct destructuring consumes its
+  owner. See [fixed arrays](fixed-array-implementation.md) and
+  [structs](struct-implementation.md) for supported projections and operations.
+- Borrow and share support internal primitive and aggregate parameters.
+  Distinct struct fields and constant indices can be treated as disjoint.
+  Dynamic indices are conservative. Reference returns, reference-valued
+  branch results, and direct borrows of primitive projections are gated.
+- Wasm uses the configured stack region (default 1 MiB). Checked traps carry a
+  cause and source location when metadata is available. The runner discards
+  trapped instances. Output signatures are currently scalar, and the artifact
+  ABI is experimental.
+- Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
+  mutable pattern bindings, `defaults`, and `try` are pending.
+- Local and remote package dependencies, A* and ENF validation consumers,
+  optimization, and a stable external ABI remain later milestones.
 
-### Not yet implemented
+### Compiler-known outcome types
 
-- Milestone 6 (Wasm generation): aggregate and collection emission; imports;
-  stable ABI; per-definition reachability.
-- Milestone 7 (ownership and borrow): aggregate and array ownership, disjoint
-  field borrowing, explicit copy/removal for aggregates, and borrow/share of
-  non-primitive types.
-- Milestone 8 (runtime and collections): dynamic lists (fixed arrays are done), UTF-8 strings, Option/Result/outcome
-  payloads, and normal-exit cleanup for aggregates.
-- Milestone 9 (libraries and packages): source and binary dependency loading,
-  package cycle detection, dependency import selection, external artifact
-  packaging, separate app/library outputs beyond the current CLI, and remote fetching.
-- Milestones 10-12 (A* and ENF consumers, optimization): not started.
-- Milestone 13 (later design): task/host coordination, parallel execution,
-  static storage, property/extension systems, ABI compatibility, and cross-language calls.
-- Milestone 4 gaps: mutable matching and three-state
-  outcome distinctions. Struct forms beyond A4 (whole-struct `.copy()`, references to primitive fields) are gated, not analysed.
-
-### Next step
-
-Fixed arrays of primitive and nested-array elements are complete (WP1-WP4),
-structs are complete through A4 (`struct-implementation.md`), and enums are
-implemented through B3 (values, owned `match` and borrowing `match` over
-references and places, `enum-implementation.md`). The next work is B4:
-compiler-known `Option`, `Result` and `Attempt` and the `Error` hierarchy as
-monomorphised prelude enums, with minimal generic enum syntax and reference
-payloads (`Option<borrow T>`) on top of B3's loans. The implicit primitive copy decided in `decisions.md`
-is implemented. After that: copy of aggregates, references to primitive fields,
-and an external array ABI if exports ever need one. Keep TE017/TE022/LE900
-gating every form not listed under the fixed-array, struct and enum status above.
+Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` use the enum pipeline
+for construction, internal calls, and `match`. The compiler-known `Error`
+root has a public `code: u32` field and is currently the only valid error
+argument. The [outcome implementation plan](outcome-implementation.md)
+tracks embedded reference payloads, error derivation, and host reporting of
+returned errors.

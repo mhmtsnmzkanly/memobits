@@ -59,9 +59,11 @@ Code, diagnostics, and documentation are written in English.
 - [Fixed arrays](docs/design/fixed-array-implementation.md) — array
   implementation sequence and checkpoints.
 - [Structs](docs/design/struct-implementation.md) — struct implementation
-  sequence (A1 and A2 implemented) and checkpoints.
+  sequence through destructuring and disjoint field loans.
 - [Enums](docs/design/enum-implementation.md) — enum implementation sequence
-  (B1 and B2 implemented: enum values and owned `match`) and checkpoints.
+  through enum values, owned `match`, and borrowing `match`.
+- [Outcome types](docs/design/outcome-implementation.md) — compiler-known
+  templates and remaining implementation gates.
 - [Illustrative syntax guide](examples/design/language-guide.mb) (not executable).
 
 ## Examples

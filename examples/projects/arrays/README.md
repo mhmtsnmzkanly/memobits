@@ -24,11 +24,9 @@ cargo run -p memobits-cli -- build --project examples/projects/arrays/project.to
 cargo run -p memobits-cli -- run examples/projects/arrays/target/memobits/app.wasm
 ```
 
-Observed output of each command (the build path is shown relative to the repository root):
+Both run commands print the same result.
 
 ```text
-Result: i32(493)
-Built examples/projects/arrays/target/memobits/app.wasm: 1 export(s), 3621 bytes
 Result: i32(493)
 ```
 

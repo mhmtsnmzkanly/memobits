@@ -33,12 +33,9 @@ cargo run -p memobits-cli -- build --project examples/projects/enums/project.tom
 cargo run -p memobits-cli -- run examples/projects/enums/target/memobits/app.wasm
 ```
 
-Observed output of each command, from the repository root (the absolute prefix
-of the built path is shortened to the repository root):
+Both run commands print the same result.
 
 ```text
-Result: i32(1094300)
-Built examples/projects/enums/target/memobits/app.wasm: 1 export(s), 6197 bytes
 Result: i32(1094300)
 ```
 

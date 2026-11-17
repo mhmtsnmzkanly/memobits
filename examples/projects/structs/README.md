@@ -44,12 +44,9 @@ cargo run -p memobits-cli -- build --project examples/projects/structs/project.t
 cargo run -p memobits-cli -- run examples/projects/structs/target/memobits/app.wasm
 ```
 
-Observed output of each command, from the repository root (the absolute prefix
-of the built path is shortened to the repository root):
+Both run commands print the same result.
 
 ```text
-Result: i32(63)
-Built examples/projects/structs/target/memobits/app.wasm: 1 export(s), 2570 bytes
 Result: i32(63)
 ```
 
