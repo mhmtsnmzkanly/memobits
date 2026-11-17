@@ -42,6 +42,11 @@ is BE005, and two `Share` arguments of one struct in a call are BE005. A2 and A3
 (nested structs, array fields, arrays of structs; mixed `FieldAddr`/`ElementAddr` chains)
 needed no new rules beyond the paths below.
 
+Enums (B1) need no new rules: `EnumNew` consumes its payload operands, an enum owner moves
+as a whole value (BE001 afterwards), and a `Borrow` of an enum owner is a loan rooted at its
+place. With no projection into an enum yet, every access overlaps the whole enum
+(BE005 for an assignment, move or conflicting reference while one is live).
+
 Field-disjoint loans (A4). Provenance and loans track *places*: a root (local, temporary,
 reference parameter, or external) plus a projection path of steps `Field(i)`,
 `Const(n)` (an index that is an integer `Constant` instruction) and `Dynamic` (any other

@@ -585,6 +585,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             vec![base]
         }
         InstructionKind::StructNew { fields, .. } => fields.iter().collect(),
+        InstructionKind::EnumNew { payload, .. } => payload.iter().collect(),
         InstructionKind::ArrayNew { init } => match init {
             ArrayInit::Elements(elements) => elements.iter().collect(),
             ArrayInit::Zeroed => Vec::new(),

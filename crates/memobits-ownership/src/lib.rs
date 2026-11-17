@@ -204,6 +204,12 @@ fn transfer_instruction(
                 transfer_operand(field, state, diagnostics.as_deref_mut(), function);
             }
         }
+        InstructionKind::EnumNew { payload, .. } => {
+            let mut diagnostics = diagnostics;
+            for operand in payload {
+                transfer_operand(operand, state, diagnostics.as_deref_mut(), function);
+            }
+        }
         InstructionKind::ArrayNew { init } => {
             if let ArrayInit::Elements(elements) = init {
                 let mut diagnostics = diagnostics;

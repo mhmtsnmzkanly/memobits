@@ -65,5 +65,15 @@ element offsets and constant field offsets to the root cell address. `Extract` (
 destructuring) loads a primitive field at its constant offset, or `memory.copy`s an
 aggregate field into the output value's own frame cell.
 
+Enums (B1) are frame-cell aggregates like structs: `EnumNew` stores the payload fields at
+the variant's offsets and then the tag at offset 0 (`u8` up to 256 variants, `u16` up to
+65536, else `u32`; the tag value is the variant index). The payload area starts at the tag
+size aligned to the largest payload alignment of any variant, the size is the largest
+variant extent rounded to the enum alignment, nested aggregates are inline, and all
+arithmetic is checked. The layout is internal, not a stable ABI. Enums in `main` or
+`[export]` signatures are rejected with LE900, and an enum frame over `[build].stack_size`
+is the usual stack diagnostic. In-crate tests read the tag and payload bytes through the
+test-only `__test_memory` export; no language feature reads a tag before `match` (B2).
+
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

@@ -16,8 +16,8 @@ the function. A reachable break permits normal completion and therefore requires
 a suitable result afterward. Nested loop breaks remain local. Conditions are
 not constant-folded by this flow pass.
 
-This pass reports unsupported enum declarations (TE016), imports, qualified
-function paths and non-struct field access. Struct and alias declarations are
+This pass reports imports (standalone), unresolved qualified
+function paths and non-struct field access. Struct, enum and alias declarations are
 supported (see below). Primitive borrow/share parameters and named-owner conversions are supported for analysis and IR lowering. It does not resolve modules,
 check ownership, or decide a public spelling for Unit annotations. `TE001`–
 `TE017` and `TE022` are type-pass diagnostics; `TE020` and `TE021` are reserved for control
@@ -158,7 +158,7 @@ or immutable roots); whole sub-aggregate replacement (`l.a = P { .. }`, `a[i] = 
 sub-aggregate out (`let q := l.a;`, `let r := a[i];`, as an owned argument, returned) is
 TE022 (partial moves are deferred). A struct containing itself by value, also through
 arrays, is TE026.
-Structs in exported signatures are rejected later by the backend (LE900). Enum types used as value types report TE001 (and the declaration TE016).
+Structs in exported signatures are rejected later by the backend (LE900). TE016 (unsupported enum declaration) is retired: enums are supported since B1.
 Lowering emits `StructNew` and `FieldAddr` + `Load`; `TypedModule::types` carries the
 checked struct definitions.
 
@@ -172,3 +172,19 @@ primitive or aggregate. Lowering evaluates the initialiser once, emits one
 makes the last extraction `Consume` the whole value, so a source local is moved (BE001
 on later use) and a call result or literal is simply consumed. A struct with no fields
 is consumed by a `Capture`.
+
+Enums (B1, `docs/design/enum-implementation.md`). `type Shape [ Empty, Circle(f64),
+Rect(i32, i32) ]` is a nominal type in the same table and id space as structs
+(`TypedModule::types` holds `TypeFact`s with `fields` or `variants`). Payloads are
+non-Unit primitives, arrays, structs and enums in any nesting; an empty enum is TE027 and
+by-value recursion (through arrays, structs and enums) is TE026 ("recursive enum").
+Construction is a unit-variant path `Shape::Empty` or a call `Shape::Circle(1.5)`, with
+local, `use`d, qualified and alias-qualified prefixes; arity is TE010, a payload type
+mismatch TE002, and the wrong form (payload on a unit variant, a payload variant without
+arguments, an unknown variant in the standalone check) TE028. Payload arguments are
+owned-value positions evaluated left to right (aggregates move in, primitives copy). A unit
+variant must itself be in an owned-value position (TE017 as a temporary). Enums are
+whole-value aggregates everywhere structs are (bindings, moves, parameters, results,
+joins, fields, array elements, repetition); there is no equality, field access or `match`
+yet (TE007/TE024). Lowering emits `EnumNew { ty, variant, payload }`; `FunctionFacts::
+variant_uses` records which expressions are variant constructions.

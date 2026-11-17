@@ -11,7 +11,7 @@ project crate but their contents are not parsed. All declarations inside a
 reachable module are checked, including unused functions.
 
 This is not a type or ownership checker. Dependency loading, reexports, enum
-variant lookup through type aliases, and complete public-signature visibility
+variant lookup through type aliases (analysis resolves alias-qualified variants itself), and complete public-signature visibility
 closure are not implemented. Direct exposure of private local types in public
 functions, aliases, fields, and enum payloads is rejected (ME010). Imported annotation targets must be types, but
 complete value/type namespace validation remains for semantic analysis.

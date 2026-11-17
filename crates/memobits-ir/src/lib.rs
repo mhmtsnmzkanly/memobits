@@ -41,11 +41,23 @@ pub struct FieldDef {
     pub ty: Type,
 }
 
+/// One enum variant: a name and its payload types, in declaration order. A
+/// unit variant has an empty payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantDef {
+    pub name: String,
+    pub payload: Vec<Type>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeDefKind {
-    /// Fields are non-Unit primitives for now; nested aggregates are not
-    /// representable, so by-value recursion cannot occur in a valid program.
+    /// Fields are non-Unit primitives, structs, enums or arrays of those.
+    /// By-value recursion is rejected by validation.
     Struct { fields: Vec<FieldDef> },
+    /// A tagged union with at least one variant. A variant's index is its
+    /// declaration position and doubles as its tag value. Payload types follow
+    /// the field rules of structs (no references, no Unit).
+    Enum { variants: Vec<VariantDef> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +99,9 @@ pub enum Type {
     /// A user-defined struct stored inline in its owner; the definition lives
     /// in `Program::types`.
     Struct(TypeId),
+    /// A user-defined enum stored inline in its owner as a tag and a payload
+    /// area; the definition (`TypeDefKind::Enum`) lives in `Program::types`.
+    Enum(TypeId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +225,21 @@ pub enum InstructionKind {
     StructNew {
         ty: TypeId,
         fields: Vec<Operand>,
+    },
+    /// Create an enum value of variant `variant` (an index into the enum's
+    /// variants). One consumed operand per payload type of that variant, in
+    /// declaration order, so a unit variant has none; the output type is
+    /// `Type::Enum(ty)`. As for `StructNew`, source evaluation order is decided
+    /// by the operands' earlier instructions.
+    ///
+    /// Planned for B2 (not yet part of this enum): `EnumTag { base }` reading the
+    /// tag of an enum owner or reference as a `u32`, `VariantAddr { loan, base,
+    /// variant, field, access }` projecting one payload field, and a `Switch`
+    /// terminator. See `docs/design/enum-implementation.md`.
+    EnumNew {
+        ty: TypeId,
+        variant: u32,
+        payload: Vec<Operand>,
     },
     /// Struct twin of `ElementAddr` without a bounds check: a reference to one
     /// field of a struct owner. The output is `Reference { access, field type }`.
@@ -492,32 +522,63 @@ impl Program {
             if !paths.insert(path) {
                 report(format!("duplicate canonical type path '{}'", path.name));
             }
-            let TypeDefKind::Struct { fields } = &definition.kind;
-            let mut names = HashSet::new();
-            for field in fields {
-                if !names.insert(&field.name) {
-                    report(format!(
-                        "struct '{}' declares field '{}' more than once",
-                        path.name, field.name
-                    ));
+            match &definition.kind {
+                TypeDefKind::Struct { fields } => {
+                    let mut names = HashSet::new();
+                    for field in fields {
+                        if !names.insert(&field.name) {
+                            report(format!(
+                                "struct '{}' declares field '{}' more than once",
+                                path.name, field.name
+                            ));
+                        }
+                        if !field_type_is_valid(&field.ty, self.types.len()) {
+                            report(format!(
+                                "field '{}' of struct '{}' must be a non-Unit primitive, a struct, an enum or an array of such types; reference fields are not supported",
+                                field.name, path.name
+                            ));
+                        }
+                    }
                 }
-                if !field_type_is_valid(&field.ty, self.types.len()) {
-                    report(format!(
-                        "field '{}' of struct '{}' must be a non-Unit primitive, a struct or an array of such types; reference fields are not supported",
-                        field.name, path.name
-                    ));
+                TypeDefKind::Enum { variants } => {
+                    if variants.is_empty() {
+                        report(format!("enum '{}' has no variants", path.name));
+                    }
+                    let mut names = HashSet::new();
+                    for variant in variants {
+                        if !names.insert(&variant.name) {
+                            report(format!(
+                                "enum '{}' declares variant '{}' more than once",
+                                path.name, variant.name
+                            ));
+                        }
+                        if variant
+                            .payload
+                            .iter()
+                            .any(|ty| !field_type_is_valid(ty, self.types.len()))
+                        {
+                            report(format!(
+                                "payload of variant '{}' of enum '{}' must be non-Unit primitives, structs, enums or arrays of such types; reference payloads are not supported",
+                                variant.name, path.name
+                            ));
+                        }
+                    }
                 }
             }
         }
-        // A struct that contains itself by value, directly or through arrays
-        // and other structs, has no finite size.
+        // A struct or enum that contains itself by value, directly or through
+        // arrays, structs and enum payloads, has no finite size.
         for start in 0..self.types.len() {
             if self.type_reaches(start, start) {
+                let what = match self.types[start].kind {
+                    TypeDefKind::Struct { .. } => "struct",
+                    TypeDefKind::Enum { .. } => "enum",
+                };
                 errors.push(ValidationError {
                     function: None,
                     block: None,
                     message: format!(
-                        "struct '{}' contains itself by value",
+                        "{what} '{}' contains itself by value",
                         self.types[start].path.name
                     ),
                 });
@@ -525,7 +586,7 @@ impl Program {
         }
     }
 
-    /// Whether struct `from` contains struct `to` by value (one or more steps).
+    /// Whether type `from` contains type `to` by value (one or more steps).
     fn type_reaches(&self, from: usize, to: usize) -> bool {
         let mut seen = HashSet::new();
         let mut pending = vec![from];
@@ -538,9 +599,17 @@ impl Program {
             if !seen.insert(current) {
                 continue;
             }
-            let TypeDefKind::Struct { fields } = &self.types[current].kind;
-            for field in fields {
-                collect_struct_ids(&field.ty, &mut pending, self.types.len());
+            match &self.types[current].kind {
+                TypeDefKind::Struct { fields } => {
+                    for field in fields {
+                        collect_struct_ids(&field.ty, &mut pending, self.types.len());
+                    }
+                }
+                TypeDefKind::Enum { variants } => {
+                    for ty in variants.iter().flat_map(|variant| &variant.payload) {
+                        collect_struct_ids(ty, &mut pending, self.types.len());
+                    }
+                }
             }
         }
         false
@@ -549,18 +618,18 @@ impl Program {
 
 fn collect_struct_ids(ty: &Type, out: &mut Vec<usize>, count: usize) {
     match ty {
-        Type::Struct(id) if (id.0 as usize) < count => out.push(id.0 as usize),
+        Type::Struct(id) | Type::Enum(id) if (id.0 as usize) < count => out.push(id.0 as usize),
         Type::Array { element, .. } => collect_struct_ids(element, out, count),
         _ => {}
     }
 }
 
-/// Field and array-element types: non-Unit primitives, structs in range, and
+/// Field, payload and array-element types: non-Unit primitives, structs and enums in range, and
 /// arrays of those, at any depth.
 fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
     match ty {
         Type::Primitive(kind) => *kind != Primitive::Unit,
-        Type::Struct(id) => (id.0 as usize) < type_count,
+        Type::Struct(id) | Type::Enum(id) => (id.0 as usize) < type_count,
         Type::Array { element, .. } => field_type_is_valid(element, type_count),
         _ => false,
     }
@@ -636,13 +705,13 @@ fn validate_type_shape(
 ) {
     match ty {
         Type::Primitive(_) => {}
-        Type::Struct(type_id) => {
+        Type::Struct(type_id) | Type::Enum(type_id) => {
             if type_id.0 as usize >= type_count {
                 push(
                     errors,
                     id,
                     None,
-                    format!("{context} struct type {:?} is out of range", type_id),
+                    format!("{context} type {:?} is out of range", type_id),
                 );
             }
         }
@@ -675,7 +744,7 @@ fn validate_type_shape(
             }
             if !matches!(
                 inner.as_ref(),
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
             ) {
                 push(
                     errors,
@@ -686,13 +755,16 @@ fn validate_type_shape(
                     ),
                 );
             }
-            if matches!(inner.as_ref(), Type::Array { .. } | Type::Struct(_)) {
+            if matches!(
+                inner.as_ref(),
+                Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+            ) {
                 validate_type_shape(type_count, inner, errors, id, context);
             }
         }
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
-            Type::Array { .. } | Type::Struct(_) => {
+            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
             _ => push(
@@ -736,7 +808,7 @@ fn validate_extract_consumption(
     let aggregate = function
         .values
         .get(output.0 as usize)
-        .is_some_and(|ty| matches!(ty, Type::Array { .. } | Type::Struct(_)));
+        .is_some_and(|ty| matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_)));
     if !aggregate || base.mode == UseMode::Consume {
         return;
     }
@@ -962,7 +1034,7 @@ fn validate_instruction(
                     }
                     Some(*inner)
                 }
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
                     if *access != Access::Owned =>
                 {
                     Some(actual)
@@ -1191,6 +1263,15 @@ fn validate_instruction(
                     format!("struct type {:?} is out of range", ty),
                 ),
                 Some(TypeDef {
+                    kind: TypeDefKind::Enum { .. },
+                    ..
+                }) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    format!("struct creation names enum type {:?}", ty),
+                ),
+                Some(TypeDef {
                     kind: TypeDefKind::Struct { fields: declared },
                     ..
                 }) => {
@@ -1215,6 +1296,93 @@ fn validate_instruction(
                         );
                     }
                 }
+            }
+        }
+        InstructionKind::EnumNew {
+            ty,
+            variant,
+            payload,
+        } => {
+            let operand_types = payload
+                .iter()
+                .map(|operand| {
+                    let actual = operand_type(program, function, operand, errors, id, block);
+                    if operand.mode != UseMode::Consume {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "enum payload operand must be consumed",
+                        );
+                    }
+                    actual
+                })
+                .collect::<Vec<_>>();
+            if out.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "enum creation requires an output value",
+                );
+            }
+            if out.is_some_and(|output| output != &Type::Enum(*ty)) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "enum creation output must have the created enum type",
+                );
+            }
+            match program.types.get(ty.0 as usize) {
+                None => push(
+                    errors,
+                    id,
+                    Some(block),
+                    format!("enum type {:?} is out of range", ty),
+                ),
+                Some(TypeDef {
+                    kind: TypeDefKind::Struct { .. },
+                    ..
+                }) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    format!("enum creation names struct type {:?}", ty),
+                ),
+                Some(TypeDef {
+                    kind: TypeDefKind::Enum { variants },
+                    ..
+                }) => match variants.get(*variant as usize) {
+                    None => push(
+                        errors,
+                        id,
+                        Some(block),
+                        format!("variant index {variant} is out of range"),
+                    ),
+                    Some(declared) => {
+                        if declared.payload.len() != payload.len() {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "enum creation operand count differs from the variant's payload",
+                            );
+                        }
+                        if operand_types
+                            .iter()
+                            .zip(&declared.payload)
+                            .any(|(actual, ty)| actual.as_ref().is_some_and(|a| a != ty))
+                        {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "enum payload operand type differs from the declared payload type",
+                            );
+                        }
+                    }
+                },
             }
         }
         InstructionKind::FieldAddr {
@@ -1295,6 +1463,18 @@ fn validate_instruction(
                             None
                         }
                     },
+                    Some(TypeDef {
+                        kind: TypeDefKind::Enum { .. },
+                        ..
+                    }) => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("struct type {:?} names an enum", type_id),
+                        );
+                        None
+                    }
                     None => {
                         push(
                             errors,
@@ -1347,6 +1527,18 @@ fn validate_instruction(
                             None
                         }
                     },
+                    Some(TypeDef {
+                        kind: TypeDefKind::Enum { .. },
+                        ..
+                    }) => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("struct type {:?} names an enum", type_id),
+                        );
+                        None
+                    }
                     None => {
                         push(
                             errors,
@@ -1414,6 +1606,14 @@ fn validate_instruction(
                             id,
                             Some(block),
                             "load of a whole struct is not supported; read fields instead",
+                        );
+                    }
+                    if matches!(inner.as_ref(), Type::Enum(_)) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "load of a whole enum is not supported",
                         );
                     }
                     if out.is_some_and(|output| output != inner.as_ref()) {
@@ -1733,6 +1933,11 @@ fn validate_read_only_loaded_values(
                 InstructionKind::StructNew { fields, .. } => {
                     for field in fields {
                         report(block_id, field, true);
+                    }
+                }
+                InstructionKind::EnumNew { payload, .. } => {
+                    for operand in payload {
+                        report(block_id, operand, true);
                     }
                 }
                 InstructionKind::ArrayNew { init } => {

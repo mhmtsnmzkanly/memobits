@@ -95,7 +95,7 @@ independently, and likewise distinct constant array indices.
 | `.borrow()` / `.share()` of a struct, `.copy()` of a struct | TE017 |
 | Field access on a non-local base (`f().x`), and `1.field` | TE017 |
 | Struct-typed fields, array-typed fields, arrays of structs (`Array<P, N>`, `type G = Array<P, 2>`) (lifted by A3) | TE017 |
-| Enum types used as value types | TE001 (declaration TE016) |
+| Enum types used as value types (lifted by B1, see `enum-implementation.md`) | was TE001 / TE016 |
 | Destructuring `let P { x } := p;` | SE002 |
 | Struct literal directly in an unparenthesised `if` condition | SE002 |
 | Frame layout over the configured stack size for a struct | LE900 |

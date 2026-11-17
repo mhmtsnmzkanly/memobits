@@ -357,19 +357,27 @@ fn recursive_structs_and_alias_cycles_are_diagnostics() {
 }
 
 #[test]
-fn enum_types_are_not_value_types_and_never_panic() {
+fn enum_types_are_value_types_and_misuse_is_diagnosed_without_panics() {
+    for (source, code) in [
+        ("type E [ A, B ] fn main() { let e: E = 1; }", "TE002"),
+        (
+            "type E [ A, B ] type S = E; fn main() { let s := S { x: 1 }; }",
+            "TE023",
+        ),
+        (
+            "type E [ A, B ] fn main() { let e := E { x: 1 }; }",
+            "TE023",
+        ),
+    ] {
+        let found = codes(source);
+        assert!(found.iter().any(|c| c == code), "{source}: {found:?}");
+    }
     for source in [
-        "type E [ A, B ] fn main() { let e: E = 1; }",
         "type E [ A, B ] fn f(e: E) {} fn main() {}",
         "type E [ A, B ] fn f() -> E { E::A } fn main() {}",
         "type E [ A, B ] type S { e: E } fn main() {}",
-        "type E [ A, B ] type S = E; fn main() { let s := S { x: 1 }; }",
     ] {
-        let found = codes(source);
-        assert!(
-            found.iter().any(|c| c == "TE001" || c == "TE016"),
-            "{source}: {found:?}"
-        );
+        lower(source);
     }
 }
 

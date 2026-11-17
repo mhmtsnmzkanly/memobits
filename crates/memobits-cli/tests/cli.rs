@@ -1299,13 +1299,8 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
         ),
         (
             "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",
-            "TE016",
-            "enum types",
-        ),
-        (
-            "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",
-            "TE001",
-            "enum type 'E'",
+            "TE002",
+            "E",
         ),
     ] {
         f.write("src/app.mb", source);

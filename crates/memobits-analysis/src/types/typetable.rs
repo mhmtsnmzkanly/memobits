@@ -1,6 +1,6 @@
-//! Nominal type table shared by every module checked together: struct
-//! definitions with canonical identity (`module::Name`), type aliases resolved
-//! to their targets, and enum declarations (recorded only to report them).
+//! Nominal type table shared by every module checked together: struct and enum
+//! definitions with canonical identity (`module::Name`), and type aliases
+//! resolved to their targets. Structs and enums share one id space.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -16,12 +16,23 @@ pub(super) struct FieldInfo {
     pub ty: Ty,
 }
 
+/// One enum variant: its payload types in declaration order.
+#[derive(Clone, Debug)]
+pub(super) struct VariantInfo {
+    pub name: String,
+    pub payload: Vec<Ty>,
+}
+
+/// A nominal type: a struct (`fields`) or an enum (`variants`, `is_enum`). The
+/// index in `TypeTable::types` is the type's id in the IR type table.
 #[derive(Clone, Debug)]
 pub(super) struct StructInfo {
     pub name: String,
     pub module: String,
     pub span: Span,
+    pub is_enum: bool,
     pub fields: Vec<FieldInfo>,
+    pub variants: Vec<VariantInfo>,
 }
 
 /// A failed type resolution. The span is the offending type reference, so a
@@ -34,9 +45,12 @@ pub(super) struct TypeFailure {
 }
 
 enum Def {
-    Struct(u32),
-    Alias { module: String, target: Type },
-    Enum,
+    /// A struct or enum, by index in `TypeTable::types`.
+    Named(u32),
+    Alias {
+        module: String,
+        target: Type,
+    },
 }
 
 #[derive(Clone)]
@@ -46,7 +60,7 @@ enum AliasState {
 }
 
 pub(super) struct TypeTable {
-    pub structs: Vec<StructInfo>,
+    pub types: Vec<StructInfo>,
     defs: HashMap<String, Def>,
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
@@ -84,7 +98,7 @@ fn primitive(name: &str) -> Option<Ty> {
 impl TypeTable {
     pub fn empty() -> Self {
         Self {
-            structs: Vec::new(),
+            types: Vec::new(),
             defs: HashMap::new(),
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
@@ -104,6 +118,7 @@ impl TypeTable {
         table.imports = imports;
         let mut diagnostics = Vec::new();
         let mut field_types: Vec<(usize, Vec<(&memobits_syntax::Field, String)>)> = Vec::new();
+        let mut variant_types: Vec<(usize, &[memobits_syntax::Variant], String)> = Vec::new();
         let mut alias_items = Vec::new();
         for (module, syntax) in modules {
             for item in &syntax.items {
@@ -115,18 +130,20 @@ impl TypeTable {
                 };
                 let def = match definition {
                     TypeDefinition::Struct(fields) => {
-                        let id = table.structs.len();
-                        table.structs.push(StructInfo {
+                        let id = table.types.len();
+                        table.types.push(StructInfo {
                             name: name.clone(),
                             module: (*module).to_owned(),
                             span: item.span,
+                            is_enum: false,
                             fields: Vec::new(),
+                            variants: Vec::new(),
                         });
                         field_types.push((
                             id,
                             fields.iter().map(|f| (f, (*module).to_owned())).collect(),
                         ));
-                        Def::Struct(id as u32)
+                        Def::Named(id as u32)
                     }
                     TypeDefinition::Alias(target) => {
                         alias_items.push((key(module, name), target));
@@ -135,7 +152,28 @@ impl TypeTable {
                             target: target.clone(),
                         }
                     }
-                    TypeDefinition::Enum(_) => Def::Enum,
+                    TypeDefinition::Enum(variants) => {
+                        let id = table.types.len();
+                        table.types.push(StructInfo {
+                            name: name.clone(),
+                            module: (*module).to_owned(),
+                            span: item.span,
+                            is_enum: true,
+                            fields: Vec::new(),
+                            variants: Vec::new(),
+                        });
+                        variant_types.push((id, variants, (*module).to_owned()));
+                        if variants.is_empty() {
+                            diagnostics.push(diagnostic(
+                                27,
+                                item.span,
+                                format!(
+                                    "enum '{name}' declares no variants; an enum needs at least one"
+                                ),
+                            ));
+                        }
+                        Def::Named(id as u32)
+                    }
                 };
                 if table.defs.insert(key(module, name), def).is_some() {
                     diagnostics.push(diagnostic(
@@ -165,7 +203,7 @@ impl TypeTable {
                         field.span,
                         format!(
                             "struct '{}' declares field '{}' more than once",
-                            table.structs[*id].name, field.name
+                            table.types[*id].name, field.name
                         ),
                     ));
                 }
@@ -194,36 +232,89 @@ impl TypeTable {
             resolved.push(infos);
         }
         for ((id, _), infos) in field_types.iter().zip(&resolved) {
-            table.structs[*id].fields = infos.iter().map(|(info, _)| info.clone()).collect();
+            table.types[*id].fields = infos.iter().map(|(info, _)| info.clone()).collect();
         }
-        // A struct that contains itself by value, directly or through struct-typed
-        // fields and arrays, would have infinite size.
+        // Enum variants: payload types are resolved like field types.
+        let mut payload_spans: Vec<(usize, Vec<Span>)> = Vec::new();
+        for (id, variants, module) in &variant_types {
+            let mut infos: Vec<VariantInfo> = Vec::new();
+            let mut spans = Vec::new();
+            for variant in *variants {
+                let mut payload = Vec::new();
+                for ty in &variant.payload {
+                    let resolved = match table.resolve(module, ty) {
+                        Ok(ty) => ty,
+                        Err(failure) => {
+                            if within(failure.span, ty.span) {
+                                diagnostics.push(diagnostic(
+                                    failure.code,
+                                    failure.span,
+                                    failure.message,
+                                ));
+                            }
+                            Ty::Error
+                        }
+                    };
+                    payload.push(resolved);
+                    spans.push(ty.span);
+                }
+                infos.push(VariantInfo {
+                    name: variant.name.clone(),
+                    payload,
+                });
+            }
+            table.types[*id].variants = infos;
+            payload_spans.push((*id, spans));
+        }
+        // A type that contains itself by value, directly or through struct
+        // fields, enum payloads and arrays, would have infinite size.
+        let mut recursion = |id: usize, ty: &Ty, span: Span, table: &Self| {
+            let mut contained = Vec::new();
+            contained_types(ty, &mut contained);
+            for target in contained {
+                if table.reaches(target, id) {
+                    let what = |index: usize| {
+                        if table.types[index].is_enum {
+                            "enum"
+                        } else {
+                            "struct"
+                        }
+                    };
+                    diagnostics.push(diagnostic(
+                        26,
+                        span,
+                        format!(
+                            "recursive {}: '{}' contains '{}' by value, so '{}' would have infinite size",
+                            what(id),
+                            table.types[id].name,
+                            table.types[target].name,
+                            table.types[id].name
+                        ),
+                    ));
+                    break;
+                }
+            }
+        };
         for ((id, _), infos) in field_types.iter().zip(&resolved) {
             for (info, span) in infos {
-                let mut contained = Vec::new();
-                contained_structs(&info.ty, &mut contained);
-                for target in contained {
-                    if table.reaches(target, *id) {
-                        diagnostics.push(diagnostic(
-                            26,
-                            *span,
-                            format!(
-                                "recursive struct: '{}' contains '{}' by value, so '{}' would have infinite size",
-                                table.structs[*id].name,
-                                table.structs[target].name,
-                                table.structs[*id].name
-                            ),
-                        ));
-                        break;
-                    }
-                }
+                recursion(*id, &info.ty, *span, &table);
+            }
+        }
+        for (id, spans) in &payload_spans {
+            let payloads = table.types[*id]
+                .variants
+                .iter()
+                .flat_map(|variant| variant.payload.iter().cloned())
+                .collect::<Vec<_>>();
+            for (ty, span) in payloads.iter().zip(spans) {
+                recursion(*id, ty, *span, &table);
             }
         }
         (table, diagnostics)
     }
 
-    /// Whether struct `from` reaches struct `to` by value, through struct-typed
-    /// fields and array-typed fields of any depth.
+    /// Whether type `from` reaches type `to` by value, through struct fields,
+    /// enum payloads and arrays of any depth.
     fn reaches(&self, from: usize, to: usize) -> bool {
         let mut seen = HashSet::new();
         let mut pending = vec![from];
@@ -234,8 +325,13 @@ impl TypeTable {
             if !seen.insert(current) {
                 continue;
             }
-            for field in &self.structs[current].fields {
-                contained_structs(&field.ty, &mut pending);
+            for field in &self.types[current].fields {
+                contained_types(&field.ty, &mut pending);
+            }
+            for variant in &self.types[current].variants {
+                for ty in &variant.payload {
+                    contained_types(ty, &mut pending);
+                }
             }
         }
         false
@@ -260,8 +356,8 @@ impl TypeTable {
         result
     }
 
-    /// Resolve a written type in `module`: primitives, `Array<T, N>`, structs and
-    /// aliases (followed to their targets). Enums are reported as unsupported.
+    /// Resolve a written type in `module`: primitives, `Array<T, N>`, structs, enums
+    /// and aliases (followed to their targets).
     pub fn resolve(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
         let failure = |code: u16, message: String| TypeFailure {
             span: ty.span,
@@ -320,10 +416,15 @@ impl TypeTable {
         };
         let definition_key = normalize(&expanded);
         match self.defs.get(definition_key) {
-            Some(Def::Struct(id)) => Ok(Ty::Struct(
-                *id,
-                self.structs[*id as usize].name.as_str().into(),
-            )),
+            Some(Def::Named(id)) => {
+                let info = &self.types[*id as usize];
+                let name = info.name.as_str().into();
+                Ok(if info.is_enum {
+                    Ty::Enum(*id, name)
+                } else {
+                    Ty::Struct(*id, name)
+                })
+            }
             Some(Def::Alias { .. }) => {
                 if matches!(
                     self.aliases.borrow().get(definition_key),
@@ -336,24 +437,17 @@ impl TypeTable {
                 }
                 self.resolve_alias(definition_key)
             }
-            Some(Def::Enum) => Err(failure(
-                1,
-                format!(
-                    "enum type '{}' is not supported as a value type yet",
-                    ty.path.join("::")
-                ),
-            )),
             None => Err(unresolved()),
         }
     }
 }
 
-/// Struct ids contained by value in a field type: the struct itself, or the
-/// structs inside an array of any depth.
-fn contained_structs(ty: &Ty, out: &mut Vec<usize>) {
+/// Struct and enum ids contained by value in a field or payload type: the type
+/// itself, or the types inside an array of any depth.
+fn contained_types(ty: &Ty, out: &mut Vec<usize>) {
     match ty {
-        Ty::Struct(id, _) => out.push(*id as usize),
-        Ty::Array(element, _) => contained_structs(element, out),
+        Ty::Struct(id, _) | Ty::Enum(id, _) => out.push(*id as usize),
+        Ty::Array(element, _) => contained_types(element, out),
         _ => {}
     }
 }

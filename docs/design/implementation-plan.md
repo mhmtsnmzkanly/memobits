@@ -143,6 +143,23 @@ the implemented subset; a milestone is not complete merely because its crate exi
   children, and uncertain cases overlap. Structs are complete for this phase. See the A4
   checkpoint in `struct-implementation.md`.
 
+### Enums (B1)
+
+- **Enum types as values, no `match` yet** (`memobits-analysis`, `-ir`, `-ownership`,
+  `-wasm`): `type Shape [ Empty, Circle(f64), Rect(i32, i32) ]` declarations whose
+  payloads are primitives, arrays, structs and enums in any nesting (by-value
+  recursion is TE026, an empty enum TE027); construction `Shape::Empty` and
+  `Shape::Circle(1.5)` through local, `use`d, qualified and aliased paths
+  (arity TE010, payload type TE002, form TE028); and enums as ordinary
+  aggregates: bindings, whole assignment, moves (BE001), owned / `borrow` /
+  `share` parameters, results, joins, struct fields, array elements and
+  repetition. IR: `Type::Enum`, `TypeDefKind::Enum`, `EnumNew`. Layout: a `u8`
+  (up to 256 variants) or `u16` tag at offset 0, then the payload area aligned
+  to the largest payload alignment, size the largest variant. Enums in exported
+  signatures are LE900. Enums cannot be inspected before `match` (B2); loans are
+  whole-enum conservative. Sequence, representation, the B2 plan and the gate
+  table are in `enum-implementation.md`.
+
 ### Known limits of the implemented subset
 
 - Analysis success is not an ownership or borrow-safety proof. Coverage is the
@@ -252,12 +269,14 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 ### Next step
 
-Fixed arrays of primitive and nested-array elements are complete (WP1-WP4), and
-structs are complete through A4 (nesting, destructuring and field-disjoint loans;
-`struct-implementation.md`). The next work is enums and `match` on the same
-frame-cell model, using the whole-value destructuring and path-aware loans as the
-base for variant payload patterns. The implicit primitive copy decided in
-`decisions.md` is implemented. After that: copy of aggregates, references to
-primitive fields, and an external array ABI if exports ever need one. Keep
-TE017/TE022/LE900 gating every form not listed under the fixed-array and struct
-status above.
+Fixed arrays of primitive and nested-array elements are complete (WP1-WP4),
+structs are complete through A4 (`struct-implementation.md`), and enum types as
+values are implemented (B1, `enum-implementation.md`). The next work is B2: owned
+`match` with exhaustiveness, on the `EnumTag` / `Switch` / `VariantAddr` plan
+written down in `enum-implementation.md`, reusing the whole-value destructuring
+and path-aware loans for variant payload patterns. Then B3 (borrow matching and
+enum parameters everywhere) and B4 (compiler-known `Option`, `Result`, `Attempt`
+and the `Error` hierarchy). The implicit primitive copy decided in `decisions.md`
+is implemented. After that: copy of aggregates, references to primitive fields,
+and an external array ABI if exports ever need one. Keep TE017/TE022/LE900
+gating every form not listed under the fixed-array, struct and enum status above.

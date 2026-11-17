@@ -1657,3 +1657,281 @@ fn an_aggregate_extraction_must_be_followed_by_a_consuming_use() {
         "{errors:?}"
     );
 }
+
+// ---- user-defined enum types ----
+
+fn enum_def(name: &str, variants: Vec<(&str, Vec<Type>)>) -> TypeDef {
+    TypeDef {
+        path: CanonicalType {
+            package: "test".into(),
+            module: vec!["main".into()],
+            name: name.into(),
+        },
+        span: span(),
+        kind: TypeDefKind::Enum {
+            variants: variants
+                .into_iter()
+                .map(|(name, payload)| VariantDef {
+                    name: name.into(),
+                    payload,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// `type E [ A, B(i32), C(i32, Bool) ]` (type 0) and a function binding
+/// `E::B(1)` to the local `e`.
+fn enum_program() -> Program {
+    let mut f = function();
+    f.signature.result = Box::new(Type::Primitive(Primitive::Unit));
+    f.locals = vec![Local {
+        name: "e".into(),
+        ty: Type::Enum(TypeId(0)),
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![i32_ty(), Type::Enum(TypeId(0))];
+    f.blocks[0].instructions = vec![
+        ins(
+            Some(0),
+            InstructionKind::Constant(Constant::Integer("1".into())),
+        ),
+        ins(
+            Some(1),
+            InstructionKind::EnumNew {
+                ty: TypeId(0),
+                variant: 1,
+                payload: vec![val(0, UseMode::Consume)],
+            },
+        ),
+        ins(
+            None,
+            InstructionKind::Assign {
+                target: LocalId(0),
+                value: val(1, UseMode::Consume),
+                initialize: true,
+            },
+        ),
+    ];
+    f.blocks[0].terminator.kind = TerminatorKind::Return(None);
+    Program {
+        functions: vec![f],
+        types: vec![enum_def(
+            "E",
+            vec![
+                ("A", vec![]),
+                ("B", vec![i32_ty()]),
+                ("C", vec![i32_ty(), bool_ty()]),
+            ],
+        )],
+    }
+}
+fn enum_errors(edit: impl FnOnce(&mut Program)) -> Vec<String> {
+    let mut program = enum_program();
+    edit(&mut program);
+    program
+        .validate()
+        .unwrap_err()
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
+}
+fn set_new(p: &mut Program, variant: u32, payload: Vec<Operand>) {
+    p.functions[0].blocks[0].instructions[1].kind = InstructionKind::EnumNew {
+        ty: TypeId(0),
+        variant,
+        payload,
+    };
+}
+
+#[test]
+fn accepts_enum_creation_for_unit_and_payload_variants() {
+    assert_eq!(enum_program().validate(), Ok(()));
+    let mut p = enum_program();
+    set_new(&mut p, 0, vec![]);
+    assert_eq!(p.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_invalid_enum_creation() {
+    let errors = enum_errors(|p| set_new(p, 3, vec![val(0, UseMode::Consume)]));
+    assert!(
+        has(&errors, "variant index 3 is out of range"),
+        "{errors:?}"
+    );
+    let errors = enum_errors(|p| set_new(p, 1, vec![]));
+    assert!(has(&errors, "operand count"), "{errors:?}");
+    let errors = enum_errors(|p| set_new(p, 0, vec![val(0, UseMode::Consume)]));
+    assert!(has(&errors, "operand count"), "{errors:?}");
+    let errors = enum_errors(|p| {
+        set_new(
+            p,
+            2,
+            vec![val(0, UseMode::Consume), val(0, UseMode::Consume)],
+        );
+    });
+    assert!(
+        has(&errors, "differs from the declared payload type"),
+        "{errors:?}"
+    );
+    let errors = enum_errors(|p| set_new(p, 1, vec![val(0, UseMode::Read)]));
+    assert!(has(&errors, "must be consumed"), "{errors:?}");
+    let errors = enum_errors(|p| p.functions[0].values[1] = i32_ty());
+    assert!(has(&errors, "created enum type"), "{errors:?}");
+    let errors = enum_errors(|p| p.functions[0].blocks[0].instructions[1].output = None);
+    assert!(has(&errors, "requires an output"), "{errors:?}");
+    let errors = enum_errors(|p| {
+        p.functions[0].blocks[0].instructions[1].kind = InstructionKind::EnumNew {
+            ty: TypeId(9),
+            variant: 0,
+            payload: vec![],
+        };
+    });
+    assert!(has(&errors, "out of range"), "{errors:?}");
+}
+
+#[test]
+fn rejects_out_of_range_and_mismatched_enum_type_ids() {
+    let errors = enum_errors(|p| p.functions[0].locals[0].ty = Type::Enum(TypeId(5)));
+    assert!(has(&errors, "out of range"), "{errors:?}");
+    // StructNew on an enum type and EnumNew on a struct type are rejected.
+    let errors = enum_errors(|p| {
+        p.functions[0].blocks[0].instructions[1].kind = InstructionKind::StructNew {
+            ty: TypeId(0),
+            fields: vec![val(0, UseMode::Consume)],
+        };
+        p.functions[0].values[1] = Type::Struct(TypeId(0));
+    });
+    assert!(has(&errors, "names enum type"), "{errors:?}");
+    let errors = enum_errors(|p| {
+        p.types.push(struct_def("S", vec![("x", i32_ty())]));
+        p.functions[0].blocks[0].instructions[1].kind = InstructionKind::EnumNew {
+            ty: TypeId(1),
+            variant: 0,
+            payload: vec![],
+        };
+        p.functions[0].values[1] = Type::Enum(TypeId(1));
+    });
+    assert!(has(&errors, "names struct type"), "{errors:?}");
+}
+
+#[test]
+fn validates_enum_definitions() {
+    let mut p = enum_program();
+    p.types[0] = enum_def("E", vec![]);
+    let errors = p.validate().unwrap_err();
+    assert!(errors.iter().any(|e| e.message.contains("has no variants")));
+    let errors = enum_errors(|p| p.types[0] = enum_def("E", vec![("A", vec![]), ("A", vec![])]));
+    assert!(has(&errors, "more than once"), "{errors:?}");
+    for payload in [
+        Type::Primitive(Primitive::Unit),
+        Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(i32_ty()),
+        },
+        Type::Enum(TypeId(9)),
+    ] {
+        let errors = enum_errors(|p| p.types[0] = enum_def("E", vec![("A", vec![payload])]));
+        assert!(has(&errors, "payload of variant"), "{errors:?}");
+    }
+}
+
+#[test]
+fn rejects_enums_that_contain_themselves_by_value() {
+    let errors = enum_errors(|p| {
+        p.types[0] = enum_def("E", vec![("A", vec![Type::Enum(TypeId(0))])]);
+    });
+    assert!(
+        has(&errors, "enum 'E' contains itself by value"),
+        "{errors:?}"
+    );
+    let errors = enum_errors(|p| {
+        p.types[0] = enum_def(
+            "E",
+            vec![(
+                "A",
+                vec![Type::Array {
+                    element: Box::new(Type::Enum(TypeId(0))),
+                    len: 2,
+                }],
+            )],
+        );
+    });
+    assert!(has(&errors, "contains itself by value"), "{errors:?}");
+    let errors = enum_errors(|p| {
+        p.types[0] = enum_def("E", vec![("A", vec![Type::Struct(TypeId(1))])]);
+        p.types
+            .push(struct_def("S", vec![("e", Type::Enum(TypeId(0)))]));
+    });
+    assert!(has(&errors, "contains itself by value"), "{errors:?}");
+    // Nesting without a cycle is fine: an enum inside a struct inside an enum.
+    let mut p = enum_program();
+    p.types
+        .push(struct_def("S", vec![("e", Type::Enum(TypeId(0)))]));
+    p.types.push(enum_def(
+        "F",
+        vec![("X", vec![Type::Struct(TypeId(1)), Type::Enum(TypeId(0))])],
+    ));
+    assert_eq!(p.validate(), Ok(()));
+}
+
+#[test]
+fn enums_are_aggregates_for_references_and_loads() {
+    let mut p = enum_program();
+    let f = &mut p.functions[0];
+    f.values.push(Type::Reference {
+        access: Access::Borrow,
+        inner: Box::new(Type::Enum(TypeId(0))),
+    });
+    f.blocks[0].instructions.push(ins(
+        Some(2),
+        InstructionKind::Borrow {
+            loan: LoanId(0),
+            owner: loc(0, UseMode::Borrow),
+            access: Access::Borrow,
+        },
+    ));
+    assert_eq!(p.validate(), Ok(()));
+    // A whole enum cannot be loaded; only a future tag/payload read can.
+    let errors = enum_errors(|p| {
+        let f = &mut p.functions[0];
+        f.values.push(Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(Type::Enum(TypeId(0))),
+        });
+        f.values.push(Type::Enum(TypeId(0)));
+        f.blocks[0].instructions.push(ins(
+            Some(2),
+            InstructionKind::Borrow {
+                loan: LoanId(0),
+                owner: loc(0, UseMode::Borrow),
+                access: Access::Borrow,
+            },
+        ));
+        f.blocks[0].instructions.push(ins(
+            Some(3),
+            InstructionKind::Load {
+                reference: val(2, UseMode::Borrow),
+            },
+        ));
+    });
+    assert!(has(&errors, "load of a whole enum"), "{errors:?}");
+}
+
+#[test]
+fn enum_typed_struct_fields_and_array_elements_are_valid() {
+    let mut p = enum_program();
+    p.types
+        .push(struct_def("S", vec![("e", Type::Enum(TypeId(0)))]));
+    p.functions[0].locals.push(Local {
+        name: "xs".into(),
+        ty: Type::Array {
+            element: Box::new(Type::Enum(TypeId(0))),
+            len: 3,
+        },
+        mutable: false,
+        span: span(),
+    });
+    assert_eq!(p.validate(), Ok(()));
+}

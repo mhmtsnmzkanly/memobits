@@ -27,6 +27,8 @@ enum Ty {
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
+    /// An enum, by index in the same table as structs, with its name.
+    Enum(u32, Rc<str>),
     Reference {
         access: IrAccess,
         inner: Box<Ty>,
@@ -155,7 +157,7 @@ fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
         Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
-        Ty::Struct(_, name) => name.to_string(),
+        Ty::Struct(_, name) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
         Ty::Reference { access, inner, .. } => {
             format!("{} {}", access_name(*access), name(inner))
@@ -343,6 +345,16 @@ pub struct PathUse {
     pub access: Option<IrAccess>,
 }
 
+/// A construction of an enum variant. `expression` is the path expression of a
+/// unit variant, or the call expression of a payload variant; the expression's
+/// type is the enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VariantUse {
+    pub expression: ExprId,
+    /// Index into the enum's variants.
+    pub variant: u32,
+}
+
 /// Facts are indexed by function, then by fresh expression/local identities.
 /// The syntax module is deliberately not relabeled as checked syntax.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,6 +365,8 @@ pub struct FunctionFacts {
     pub locals: Vec<LocalFact>,
     pub expressions: Vec<ExpressionFact>,
     pub path_uses: Vec<PathUse>,
+    /// Enum variant constructions: a unit variant path or a payload call.
+    pub variant_uses: Vec<VariantUse>,
     next_expr: u32,
 }
 
@@ -363,37 +377,61 @@ pub struct FieldFact {
     pub ty: IrType,
 }
 
-/// A checked struct definition. `module` is the resolver's module name (`""`
-/// for a standalone module); the struct's `TypeId` is its index in
-/// `TypedModule::types`.
+/// One declared enum variant with its payload types.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructFact {
+pub struct VariantFact {
+    pub name: String,
+    pub payload: Vec<IrType>,
+}
+
+/// A checked struct or enum definition. `module` is the resolver's module name
+/// (`""` for a standalone module); the type's `TypeId` is its index in
+/// `TypedModule::types`. A struct has `fields`; an enum (`is_enum`) has
+/// `variants`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeFact {
     pub module: String,
     pub name: String,
     pub span: Span,
+    pub is_enum: bool,
     pub fields: Vec<FieldFact>,
+    pub variants: Vec<VariantFact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedModule {
     pub functions: Vec<FunctionFacts>,
-    pub types: Vec<StructFact>,
+    pub types: Vec<TypeFact>,
 }
 
-fn struct_facts(table: &TypeTable) -> Vec<StructFact> {
+fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
+    let unit = || IrType::Primitive(Primitive::Unit);
     table
-        .structs
+        .types
         .iter()
-        .map(|info| StructFact {
+        .map(|info| TypeFact {
             module: info.module.clone(),
             name: info.name.clone(),
             span: info.span,
+            is_enum: info.is_enum,
             fields: info
                 .fields
                 .iter()
                 .map(|field| FieldFact {
                     name: field.name.clone(),
-                    ty: ir_type(&field.ty).unwrap_or(IrType::Primitive(Primitive::Unit)),
+                    ty: ir_type(&field.ty).unwrap_or_else(unit),
+                })
+                .collect(),
+            variants: info
+                .variants
+                .iter()
+                .map(|variant| VariantFact {
+                    name: variant.name.clone(),
+                    payload: variant
+                        .payload
+                        .iter()
+                        .map(|ty| ir_type(ty).unwrap_or_else(unit))
+                        .collect(),
                 })
                 .collect(),
         })
@@ -438,6 +476,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             len: *len,
         },
         Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
+        Ty::Enum(id, _) => IrType::Enum(TypeId(*id)),
         Ty::Never | Ty::Error => return None,
     })
 }
@@ -503,7 +542,7 @@ impl Checker {
         if self.executable
             && !matches!(
                 element,
-                Ty::Error | Ty::Never | Ty::Array(..) | Ty::Struct(..)
+                Ty::Error | Ty::Never | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
             )
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
         {
@@ -580,7 +619,7 @@ impl Checker {
             _ => None,
         };
         match &binding.ty {
-            ty @ (Ty::Array(..) | Ty::Struct(..)) if !writable => {
+            ty @ (Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) if !writable => {
                 let what = aggregate(ty).expect("aggregate root");
                 self.error(
                     4,
@@ -592,21 +631,32 @@ impl Checker {
                 access: IrAccess::Borrow,
                 inner,
                 ..
-            } if matches!(inner.as_ref(), Ty::Array(..) | Ty::Struct(..)) => self.error(
-                4,
-                target.span,
-                format!("cannot assign through borrow binding '{root}'"),
-            ),
+            } if matches!(
+                inner.as_ref(),
+                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+            ) =>
+            {
+                self.error(
+                    4,
+                    target.span,
+                    format!("cannot assign through borrow binding '{root}'"),
+                )
+            }
             Ty::Reference {
                 access: IrAccess::Share,
                 inner,
                 ..
-            } if matches!(inner.as_ref(), Ty::Array(..) | Ty::Struct(..)) && !writable => self
-                .error(
+            } if matches!(
+                inner.as_ref(),
+                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+            ) && !writable =>
+            {
+                self.error(
                     4,
                     target.span,
                     format!("cannot assign through immutable share binding '{root}'"),
-                ),
+                )
+            }
             _ => {}
         }
     }
@@ -693,7 +743,7 @@ impl Checker {
         let target = self.type_path(&pattern_type);
         let table = Rc::clone(&self.table);
         let info = match &target {
-            Ty::Struct(id, _) => Some(&table.structs[*id as usize]),
+            Ty::Struct(id, _) => Some(&table.types[*id as usize]),
             Ty::Error => None,
             other => {
                 self.error(
@@ -993,7 +1043,7 @@ impl Checker {
                 }
                 StatementKind::Expression(expr) => {
                     let ty = self.expr(expr, None);
-                    if matches!(ty, Ty::Array(..) | Ty::Struct(..)) {
+                    if matches!(ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) {
                         self.reject_extraction(expr, &ty);
                     }
                 }
@@ -1126,7 +1176,7 @@ impl Checker {
         if is_row
             && !matches!(
                 base_ty,
-                Ty::Array(..) | Ty::Struct(..) | Ty::Error | Ty::Never
+                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) | Ty::Error | Ty::Never
             )
         {
             self.error(
@@ -1137,7 +1187,7 @@ impl Checker {
             return Ty::Error;
         }
         let (inner, origin, current_access) = match base_ty {
-            Ty::Array(..) | Ty::Struct(..) if is_row => {
+            Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) if is_row => {
                 let binding = owner_binding.as_ref().expect("row root checked above");
                 let access = match &binding.ty {
                     Ty::Reference { access, .. } => *access,
@@ -1154,7 +1204,7 @@ impl Checker {
                 inner,
                 origin,
             } => (inner, origin, Some(access)),
-            primitive @ (Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..)) => {
+            primitive @ (Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) => {
                 let origin = owner_binding
                     .as_ref()
                     .map_or(ReferenceOrigin::Temporary, |binding| {
@@ -1176,7 +1226,7 @@ impl Checker {
 
         if !matches!(
             inner.as_ref(),
-            Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..)
+            Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
         ) {
             self.error(
                 17,
@@ -1260,7 +1310,7 @@ impl Checker {
         match base_ty {
             Ty::Struct(id, struct_name) => {
                 let table = Rc::clone(&self.table);
-                let info = &table.structs[id as usize];
+                let info = &table.types[id as usize];
                 match info.fields.iter().find(|field| field.name == field_name) {
                     None => {
                         self.error(
@@ -1307,8 +1357,194 @@ impl Checker {
             }
         }
     }
+    /// A path `Enum::Variant` (the enum possibly qualified or imported): the
+    /// enum's type and the variant's index, `None` inside when the enum has no
+    /// such variant. `None` overall when the path does not name an enum.
+    fn variant_path(&self, path: &[String], span: Span) -> Option<(Ty, Option<u32>)> {
+        let (variant, type_path) = path.split_last()?;
+        if type_path.is_empty() {
+            return None;
+        }
+        let written = Type {
+            span,
+            path: type_path.to_vec(),
+            arguments: Vec::new(),
+        };
+        let resolved = self.table.resolve(&self.module, &written).ok()?;
+        let Ty::Enum(id, _) = &resolved else {
+            return None;
+        };
+        let index = self.table.types[*id as usize]
+            .variants
+            .iter()
+            .position(|candidate| &candidate.name == variant)
+            .map(|index| index as u32);
+        Some((resolved, index))
+    }
+    fn record_variant(&mut self, id: Option<ExprId>, variant: u32) {
+        if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+            facts.variant_uses.push(VariantUse {
+                expression,
+                variant,
+            });
+        }
+    }
+    /// A variant written without arguments. Variants with a payload need the
+    /// call form (TE028).
+    fn unit_variant(
+        &mut self,
+        expr: &Expr,
+        id: Option<ExprId>,
+        path: &[String],
+        enum_ty: Ty,
+        variant: Option<u32>,
+    ) -> Ty {
+        let Ty::Enum(enum_id, _) = &enum_ty else {
+            unreachable!("variant paths name enums")
+        };
+        let table = Rc::clone(&self.table);
+        let info = &table.types[*enum_id as usize];
+        let Some(variant) = variant else {
+            self.error(
+                28,
+                expr.span,
+                format!(
+                    "enum '{}' has no variant '{}'",
+                    info.name,
+                    path[path.len() - 1]
+                ),
+            );
+            return Ty::Error;
+        };
+        let declared = &info.variants[variant as usize];
+        if !declared.payload.is_empty() {
+            self.error(
+                28,
+                expr.span,
+                format!(
+                    "variant '{}::{}' carries {} payload value(s); construct it as {}::{}(...)",
+                    info.name,
+                    declared.name,
+                    declared.payload.len(),
+                    info.name,
+                    declared.name
+                ),
+            );
+            return Ty::Error;
+        }
+        if self.executable && !self.array_allowed(expr) {
+            self.error(
+                17,
+                expr.span,
+                "enum values must be used as an owned value (binding initializer, assignment, argument, result, field, element or branch value); they cannot be a temporary",
+            );
+        }
+        self.record_variant(id, variant);
+        enum_ty
+    }
+    /// `Enum::Variant(payload...)`: arity and payload types are checked like a
+    /// call; arguments are owned-value positions evaluated left to right.
+    fn variant_call(
+        &mut self,
+        expr: &Expr,
+        id: Option<ExprId>,
+        arguments: &[Expr],
+        enum_ty: Ty,
+        variant: Option<u32>,
+    ) -> Ty {
+        let Ty::Enum(enum_id, _) = &enum_ty else {
+            unreachable!("variant paths name enums")
+        };
+        let table = Rc::clone(&self.table);
+        let info = &table.types[*enum_id as usize];
+        let ExprKind::Call { callee, .. } = &expr.kind else {
+            unreachable!("variant calls are calls")
+        };
+        let ExprKind::Path(path) = &callee.kind else {
+            unreachable!("variant calls have path callees")
+        };
+        let Some(variant) = variant else {
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            self.error(
+                28,
+                callee.span,
+                format!(
+                    "enum '{}' has no variant '{}'",
+                    info.name,
+                    path[path.len() - 1]
+                ),
+            );
+            return Ty::Error;
+        };
+        let declared = &info.variants[variant as usize];
+        if declared.payload.is_empty() {
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            self.error(
+                28,
+                expr.span,
+                format!(
+                    "variant '{}::{}' has no payload; write it without parentheses",
+                    info.name, declared.name
+                ),
+            );
+            return enum_ty;
+        }
+        if declared.payload.len() != arguments.len() {
+            self.error(
+                10,
+                expr.span,
+                format!(
+                    "variant '{}::{}' expects {} argument(s), found {}",
+                    info.name,
+                    declared.name,
+                    declared.payload.len(),
+                    arguments.len()
+                ),
+            );
+        }
+        let mut diverges = false;
+        for (index, argument) in arguments.iter().enumerate() {
+            let want = declared.payload.get(index);
+            if want.is_some_and(|ty| matches!(ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))) {
+                self.allow_array_value(argument);
+            }
+            let actual = self.expr(argument, want);
+            self.reject_extraction(argument, &actual);
+            if let Some(want) = want {
+                self.ensure(&actual, want, argument.span);
+            }
+            diverges |= actual == Ty::Never;
+        }
+        if diverges {
+            return Ty::Never;
+        }
+        self.record_variant(id, variant);
+        enum_ty
+    }
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
+            ExprKind::Path(path) if self.variant_path(path, expr.span).is_some() => {
+                let (enum_ty, variant) = self
+                    .variant_path(path, expr.span)
+                    .expect("checked variant path");
+                self.unit_variant(expr, id, path, enum_ty, variant)
+            }
+            ExprKind::Call { callee, arguments }
+                if matches!(&callee.kind, ExprKind::Path(path)
+                    if self.variant_path(path, callee.span).is_some()) =>
+            {
+                let ExprKind::Path(path) = &callee.kind else {
+                    unreachable!("checked variant callee")
+                };
+                let (enum_ty, variant) = self
+                    .variant_path(path, callee.span)
+                    .expect("checked variant path");
+                self.variant_call(expr, id, arguments, enum_ty, variant)
+            }
             ExprKind::Array(elements) => {
                 if self.executable && !self.array_allowed(expr) {
                     self.error(
@@ -1537,7 +1773,7 @@ impl Checker {
                         });
                     }
                     if self.executable
-                        && matches!(binding.ty, Ty::Array(..) | Ty::Struct(..))
+                        && matches!(binding.ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))
                         && self.index_base != expr as *const Expr as usize
                         && !self.array_allowed(expr)
                     {
@@ -1736,7 +1972,10 @@ impl Checker {
                     for (i, arg) in arguments.iter().enumerate() {
                         if params.get(i).is_some_and(|parameter| {
                             parameter.access == IrAccess::Owned
-                                && matches!(parameter.ty, Ty::Array(..) | Ty::Struct(..))
+                                && matches!(
+                                    parameter.ty,
+                                    Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                                )
                         }) {
                             // An owned aggregate parameter takes a literal, repetition,
                             // call result, `if` or named value moved into the call.
@@ -1818,7 +2057,7 @@ impl Checker {
                 let target = self.type_path(&literal_type);
                 let table = Rc::clone(&self.table);
                 let info = match &target {
-                    Ty::Struct(id, _) => Some(&table.structs[*id as usize]),
+                    Ty::Struct(id, _) => Some(&table.types[*id as usize]),
                     Ty::Error => None,
                     other => {
                         self.error(
@@ -1976,22 +2215,6 @@ pub fn check_types(module: &Module) -> Vec<Diagnostic> {
     check_standalone(module, false).0
 }
 
-fn enum_declaration(c: &mut Checker, item: &memobits_syntax::Item) {
-    if matches!(
-        &item.kind,
-        ItemKind::Type {
-            definition: memobits_syntax::TypeDefinition::Enum(_),
-            ..
-        }
-    ) {
-        c.error(
-            16,
-            item.span,
-            "user-defined enum types are not supported by this type pass",
-        );
-    }
-}
-
 /// Check a standalone module and retain canonical local and expression facts.
 /// This returns no facts if type or control-flow diagnostics exist.
 /// Array forms outside the executable subset (results, nesting, element references) report TE017.
@@ -2008,7 +2231,7 @@ pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic
 fn check_standalone(
     module: &Module,
     capture: bool,
-) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<StructFact>) {
+) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
     let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
     let mut c = Checker {
         diagnostics: table_diagnostics,
@@ -2058,7 +2281,7 @@ fn check_standalone(
                 }
             }
             ItemKind::Use { .. } => c.error(15, item.span, "imports require module resolution"),
-            ItemKind::Type { .. } => enum_declaration(&mut c, item),
+            ItemKind::Type { .. } => {}
         }
     }
     let mut functions = Vec::new();
@@ -2087,6 +2310,7 @@ fn check_standalone(
                     locals: Vec::new(),
                     expressions: Vec::new(),
                     path_uses: Vec::new(),
+                    variant_uses: Vec::new(),
                     next_expr: 0,
                 });
             }
@@ -2096,7 +2320,7 @@ fn check_standalone(
             }
         }
     }
-    let types = struct_facts(&c.table);
+    let types = type_facts(&c.table);
     (c.diagnostics, functions, types)
 }
 fn check_function_body(
@@ -2224,7 +2448,7 @@ fn check_resolved_mode(
                         Ty::Function(params, Box::new(result)),
                     );
                 }
-                ItemKind::Type { .. } => enum_declaration(&mut c, item),
+                ItemKind::Type { .. } => {}
                 ItemKind::Use { .. } => {}
             }
         }
@@ -2304,6 +2528,7 @@ fn check_resolved_mode(
                         locals: Vec::new(),
                         expressions: Vec::new(),
                         path_uses: Vec::new(),
+                        variant_uses: Vec::new(),
                         next_expr: 0,
                     });
                     check_function_body(&mut c, parameters, body, params.clone(), *result.clone());
@@ -2318,7 +2543,7 @@ fn check_resolved_mode(
     if diagnostics.is_empty() {
         Ok(TypedModule {
             functions: all_facts,
-            types: struct_facts(&table),
+            types: type_facts(&table),
         })
     } else {
         Err(diagnostics)

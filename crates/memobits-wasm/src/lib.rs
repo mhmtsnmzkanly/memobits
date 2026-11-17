@@ -172,6 +172,21 @@ pub fn compile_traced(
                     "Wasm exported signatures cannot take structs or struct references; the external struct ABI is not defined",
                     Some(function.span),
                 ));
+            } else if function
+                .signature
+                .parameters
+                .iter()
+                .any(|p| matches!(p.ty, Type::Enum(_)))
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot take enums or enum references; the external enum ABI is not defined",
+                    Some(function.span),
+                ));
+            } else if matches!(function.signature.result.as_ref(), Type::Enum(_)) {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot return enums; the external enum ABI is not defined",
+                    Some(function.span),
+                ));
             } else if matches!(function.signature.result.as_ref(), Type::Struct(_)) {
                 errors.push(diagnostic(
                     "Wasm exported signatures cannot return structs; the external struct ABI is not defined",
@@ -255,6 +270,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Store { .. } => None,
         InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
         InstructionKind::StructNew { .. }
+        | InstructionKind::EnumNew { .. }
         | InstructionKind::FieldAddr { .. }
         | InstructionKind::Extract { .. } => None,
         InstructionKind::Call { callee, .. } => match callee.source {
@@ -280,37 +296,37 @@ fn primitive_signature<'a>(
         memobits_ir::Access::Owned => {
             matches!(
                 p.ty,
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
             )
         }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
             matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
-                || matches!(p.ty, Type::Array { .. } | Type::Struct(_))
+                || matches!(p.ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
         }
     }) && matches!(
         result,
-        Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+        Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
     )
 }
 
 fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
-        // A struct is an inline frame-cell value, passed internally by address.
-        Type::Struct(_) => true,
+        // A struct or enum is an inline frame-cell value, passed internally by address.
+        Type::Struct(_) | Type::Enum(_) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
         } => match inner.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             array @ Type::Array { .. } => supported_type(array),
-            Type::Struct(_) => true,
+            Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },
         Type::Array { element, .. } => match element.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             nested @ Type::Array { .. } => supported_type(nested),
-            Type::Struct(_) => true,
+            Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },
         _ => false,
@@ -352,14 +368,37 @@ enum FieldStorage {
     Aggregate(u32),
 }
 
-/// Natural-alignment layout of a struct: fields in declaration order, each at
-/// the next offset aligned to its own alignment, total size rounded up to the
-/// largest field alignment. A nested struct or array field is laid out inline
-/// with its own size and alignment (the validator rejects by-value cycles).
+/// Natural-alignment layout of a struct or enum. A struct lays its fields out
+/// in declaration order, each at the next offset aligned to its own alignment,
+/// total size rounded up to the largest field alignment. An enum (`variants` is
+/// `Some`) stores its tag at offset 0 and every variant's payload in one shared
+/// area; `offsets` and `fields` are empty for it. A nested aggregate is laid
+/// out inline with its own size and alignment (the validator rejects by-value
+/// cycles).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StructLayout {
     size: u32,
     align: u32,
+    offsets: Vec<u32>,
+    fields: Vec<FieldStorage>,
+    enum_layout: Option<EnumLayout>,
+}
+
+/// Enum layout: the tag at offset 0 with the smallest unsigned width that holds
+/// the variant count (1 byte up to 256 variants, 2 up to 65536, else 4), then
+/// the payload area, aligned to the largest payload alignment of any variant.
+/// Each variant places its payload fields from the start of that area, so the
+/// size is the largest variant extent, rounded up to the enum's alignment. The
+/// layout is internal, not a stable ABI, and bytes beyond the active variant's
+/// payload are unspecified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnumLayout {
+    tag_size: u32,
+    variants: Vec<VariantLayout>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VariantLayout {
     offsets: Vec<u32>,
     fields: Vec<FieldStorage>,
 }
@@ -377,6 +416,34 @@ fn struct_layouts(types: &[TypeDef]) -> Result<Vec<StructLayout>, String> {
         .collect())
 }
 
+/// Size, alignment and storage kind of one field or payload value.
+fn member_layout(
+    types: &[TypeDef],
+    ty: &Type,
+    done: &mut Vec<Option<StructLayout>>,
+    active: &mut Vec<usize>,
+) -> Result<Option<(u32, u32, FieldStorage)>, String> {
+    Ok(match ty {
+        Type::Primitive(kind) => {
+            let (size, align) = storage_layout(*kind)?;
+            Some((size, align, FieldStorage::Primitive(*kind)))
+        }
+        nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
+            nested_struct_layouts(types, nested, done, active)?;
+            let (size, align) = type_layout(
+                &|id| {
+                    done.get(id as usize)
+                        .and_then(Option::as_ref)
+                        .map(|layout| (layout.size, layout.align))
+                },
+                nested,
+            )?;
+            Some((size, align, FieldStorage::Aggregate(size)))
+        }
+        _ => None,
+    })
+}
+
 fn struct_layout_at(
     types: &[TypeDef],
     index: usize,
@@ -386,61 +453,105 @@ fn struct_layout_at(
     if done[index].is_some() {
         return Ok(());
     }
+    let definition = &types[index];
     if active.contains(&index) {
+        let what = match definition.kind {
+            TypeDefKind::Struct { .. } => "struct",
+            TypeDefKind::Enum { .. } => "enum",
+        };
         return Err(format!(
-            "struct '{}' contains itself by value",
-            types[index].path.name
+            "{what} '{}' contains itself by value",
+            definition.path.name
         ));
     }
     active.push(index);
-    let definition = &types[index];
-    let TypeDefKind::Struct { fields } = &definition.kind;
-    let mut offset = 0u32;
-    let mut align = 1u32;
-    let mut offsets = Vec::with_capacity(fields.len());
-    let mut storage = Vec::with_capacity(fields.len());
-    for field in fields {
-        let (size, field_align, kind) = match &field.ty {
-            Type::Primitive(kind) => {
-                let (size, field_align) = storage_layout(*kind)?;
-                (size, field_align, FieldStorage::Primitive(*kind))
+    let layout = match &definition.kind {
+        TypeDefKind::Struct { fields } => {
+            let mut offset = 0u32;
+            let mut align = 1u32;
+            let mut offsets = Vec::with_capacity(fields.len());
+            let mut storage = Vec::with_capacity(fields.len());
+            for field in fields {
+                let Some((size, field_align, kind)) =
+                    member_layout(types, &field.ty, done, active)?
+                else {
+                    return Err(format!(
+                        "field '{}' of struct '{}' has an unsupported type",
+                        field.name, definition.path.name
+                    ));
+                };
+                offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                offsets.push(offset);
+                storage.push(kind);
+                offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                align = align.max(field_align);
             }
-            nested @ (Type::Array { .. } | Type::Struct(_)) => {
-                nested_struct_layouts(types, nested, done, active)?;
-                let (size, field_align) = type_layout(
-                    &|id| {
-                        done.get(id as usize)
-                            .and_then(Option::as_ref)
-                            .map(|layout| (layout.size, layout.align))
-                    },
-                    nested,
-                )?;
-                (size, field_align, FieldStorage::Aggregate(size))
+            StructLayout {
+                size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                align,
+                offsets,
+                fields: storage,
+                enum_layout: None,
             }
-            _ => {
-                return Err(format!(
-                    "field '{}' of struct '{}' has an unsupported type",
-                    field.name, definition.path.name
-                ))
+        }
+        TypeDefKind::Enum { variants } => {
+            let tag_size = match variants.len() {
+                0..=256 => 1u32,
+                257..=65536 => 2,
+                _ => 4,
+            };
+            // First pass: member sizes, so the payload area's alignment is known.
+            let mut sized: Vec<Vec<(u32, u32, FieldStorage)>> = Vec::with_capacity(variants.len());
+            let mut payload_align = 1u32;
+            for variant in variants {
+                let mut members = Vec::with_capacity(variant.payload.len());
+                for ty in &variant.payload {
+                    let Some(member) = member_layout(types, ty, done, active)? else {
+                        return Err(format!(
+                            "payload of variant '{}' of enum '{}' has an unsupported type",
+                            variant.name, definition.path.name
+                        ));
+                    };
+                    payload_align = payload_align.max(member.1);
+                    members.push(member);
+                }
+                sized.push(members);
             }
-        };
-        offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-        offsets.push(offset);
-        storage.push(kind);
-        offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-        align = align.max(field_align);
-    }
-    done[index] = Some(StructLayout {
-        size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
-        align,
-        offsets,
-        fields: storage,
-    });
+            let payload_start = align_up(tag_size, payload_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+            let align = payload_align.max(tag_size);
+            let mut extent = tag_size;
+            let mut laid_out = Vec::with_capacity(sized.len());
+            for members in sized {
+                let mut cursor = payload_start;
+                let mut offsets = Vec::with_capacity(members.len());
+                let mut fields = Vec::with_capacity(members.len());
+                for (size, member_align, kind) in members {
+                    cursor = align_up(cursor, member_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                    offsets.push(cursor);
+                    fields.push(kind);
+                    cursor = cursor.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                }
+                extent = extent.max(cursor);
+                laid_out.push(VariantLayout { offsets, fields });
+            }
+            StructLayout {
+                size: align_up(extent, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                align,
+                offsets: Vec::new(),
+                fields: Vec::new(),
+                enum_layout: Some(EnumLayout {
+                    tag_size,
+                    variants: laid_out,
+                }),
+            }
+        }
+    };
+    done[index] = Some(layout);
     active.pop();
     Ok(())
 }
 
-/// Lay out every struct reachable from a field type before the field itself.
+/// Lay out every struct or enum reachable from a field type before the field itself.
 fn nested_struct_layouts(
     types: &[TypeDef],
     ty: &Type,
@@ -448,7 +559,7 @@ fn nested_struct_layouts(
     active: &mut Vec<usize>,
 ) -> Result<(), String> {
     match ty {
-        Type::Struct(id) => struct_layout_at(types, id.0 as usize, done, active),
+        Type::Struct(id) | Type::Enum(id) => struct_layout_at(types, id.0 as usize, done, active),
         Type::Array { element, .. } => nested_struct_layouts(types, element, done, active),
         _ => Ok(()),
     }
@@ -474,15 +585,17 @@ fn type_layout(
 ) -> Result<(u32, u32), String> {
     match ty {
         Type::Primitive(kind) => storage_layout(*kind),
-        Type::Struct(id) => {
-            struct_layout(id.0).ok_or_else(|| "struct type is out of range".to_string())
+        Type::Struct(id) | Type::Enum(id) => {
+            struct_layout(id.0).ok_or_else(|| "type is out of range".to_string())
         }
         Type::Array { element, len } => {
             let (size, align) = type_layout(struct_layout, element)?;
             let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
             Ok((bytes, align))
         }
-        _ => Err("array elements must be primitives, structs or arrays in frame layout".into()),
+        _ => Err(
+            "array elements must be primitives, structs, enums or arrays in frame layout".into(),
+        ),
     }
 }
 
@@ -560,14 +673,14 @@ impl FrameLayout {
                             Type::Primitive(primitive) => {
                                 storage_layout(*primitive).map_err(error)?;
                             }
-                            Type::Array { .. } | Type::Struct(_) => {}
+                            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                             _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
                         }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
                     // An array owner already has its cell (one per array local or value).
-                    Type::Array { .. } | Type::Struct(_) => {}
+                    Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -617,7 +730,7 @@ impl FrameLayout {
         let aliases = construction_aliases(function);
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
-            if !matches!(ty, Type::Array { .. } | Type::Struct(_)) {
+            if !matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) {
                 continue;
             }
             if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
@@ -629,6 +742,8 @@ impl FrameLayout {
             };
             let what = if matches!(ty, Type::Struct(_)) {
                 "struct"
+            } else if matches!(ty, Type::Enum(_)) {
+                "enum"
             } else {
                 "array"
             };
@@ -737,6 +852,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     count(base)
                 }
                 InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
+                InstructionKind::EnumNew { payload, .. } => payload.iter().for_each(&mut count),
                 InstructionKind::Store { reference, value } => {
                     count(reference);
                     count(value);
@@ -789,14 +905,19 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 &producer.kind,
                 InstructionKind::Capture(Operand { source: Source::Local(local), .. }) if local == target
             );
-            let array =
-                |ty: Option<&Type>| matches!(ty, Some(Type::Array { .. } | Type::Struct(_)));
+            let array = |ty: Option<&Type>| {
+                matches!(
+                    ty,
+                    Some(Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+                )
+            };
             if *assigned == output
                 && uses[output.0 as usize] == 1
                 && matches!(
                     producer.kind,
                     InstructionKind::ArrayNew { .. }
                         | InstructionKind::StructNew { .. }
+                        | InstructionKind::EnumNew { .. }
                         | InstructionKind::Capture(_)
                 )
                 && array(function.values.get(output.0 as usize))
@@ -828,7 +949,9 @@ const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
 /// owner or reference).
 fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
     match ty {
-        Type::Array { .. } | Type::Struct(_) => aggregate_layout(structs, ty).map(|(size, _)| size),
+        Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+            aggregate_layout(structs, ty).map(|(size, _)| size)
+        }
         Type::Reference { inner, .. } => aggregate_bytes(structs, inner),
         _ => Err("expected an array or struct type".into()),
     }
@@ -837,7 +960,7 @@ fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
 /// Aggregate values (arrays and structs) live in frame cells and are passed
 /// and returned by address.
 fn is_aggregate(ty: &Type) -> bool {
-    matches!(ty, Type::Array { .. } | Type::Struct(_))
+    matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
 }
 
 fn align_up(value: u32, align: u32) -> Option<u32> {
@@ -866,7 +989,7 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Reference { .. } => ValType::I32,
         // Array slots keep an unused Wasm local; their authoritative storage is
         // a frame cell and operands push the cell address.
-        Type::Array { .. } | Type::Struct(_) => ValType::I32,
+        Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => ValType::I32,
     }
 }
 
@@ -2141,6 +2264,58 @@ fn compile_instruction(
                 }
             }
         }
+        InstructionKind::EnumNew {
+            variant, payload, ..
+        } => {
+            let value = instruction.output.ok_or("enum creation lacks an output")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let frame = frame.ok_or("enum cell requires frame")?;
+            let Type::Enum(type_id) = function.values[value.0 as usize] else {
+                return Err("enum creation output must have an enum type".into());
+            };
+            let enum_type = layout
+                .structs
+                .get(type_id.0 as usize)
+                .ok_or("enum type is out of range")?;
+            let enum_layout = enum_type
+                .enum_layout
+                .as_ref()
+                .ok_or("enum creation names a struct type")?;
+            let variant_layout = enum_layout
+                .variants
+                .get(*variant as usize)
+                .ok_or("enum creation refers to a missing variant")?;
+            if variant_layout.offsets.len() != payload.len() {
+                return Err("enum creation operand count differs from its variant".into());
+            }
+            // Payload operands are read before the tag is written, so building
+            // into the destination cell never reads a half-written enum.
+            for (index, operand) in payload.iter().enumerate() {
+                let destination = cell
+                    .offset
+                    .checked_add(variant_layout.offsets[index])
+                    .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+                emit_address(body, frame, destination);
+                emit_operand(body, function, param_count, operand, layout, Some(frame))?;
+                match variant_layout.fields[index] {
+                    FieldStorage::Primitive(kind) => emit_store(body, kind),
+                    FieldStorage::Aggregate(size) => {
+                        body.instruction(&WasmInstruction::I32Const(size as i32));
+                        body.instruction(&WasmInstruction::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+            }
+            emit_address(body, frame, cell.offset);
+            body.instruction(&WasmInstruction::I32Const(*variant as i32));
+            match enum_layout.tag_size {
+                1 => emit_store(body, Primitive::U8),
+                2 => emit_store(body, Primitive::U16),
+                _ => emit_store(body, Primitive::U32),
+            }
+        }
         InstructionKind::Extract { base, field } => {
             let output = output.ok_or("field extraction lacks an output")?;
             let Type::Struct(type_id) = value_type(function, base)? else {
@@ -3126,5 +3301,221 @@ mod struct_layout_tests {
         assert!(bytes[1..8].iter().all(|&b| b == 0));
         assert!(bytes[17..20].iter().all(|&b| b == 0));
         assert!(bytes[26..32].iter().all(|&b| b == 0));
+    }
+}
+
+#[cfg(test)]
+mod enum_layout_tests {
+    use super::*;
+    use wasmi::{Engine, Linker, Module, Store};
+
+    fn lower(source: &str) -> Program {
+        let parsed = memobits_syntax::parse(memobits_diagnostics::SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap()
+    }
+
+    fn layout_of(source: &str, name: &str) -> StructLayout {
+        let program = lower(source);
+        let layouts = struct_layouts(&program.types).unwrap();
+        let index = program
+            .types
+            .iter()
+            .position(|t| t.path.name == name)
+            .unwrap();
+        layouts[index].clone()
+    }
+
+    fn variants_of(layout: &StructLayout) -> &[VariantLayout] {
+        &layout.enum_layout.as_ref().unwrap().variants
+    }
+
+    /// Test hook for the missing `match`: run `main` and return the first `len`
+    /// bytes of the frame, where the first aggregate local's cell starts.
+    fn frame_bytes(source: &str, len: usize) -> Vec<u8> {
+        let program = lower(source);
+        let exports = BTreeMap::from([("main".to_string(), FunctionId(0))]);
+        let structs = struct_layouts(&program.types).unwrap();
+        let sizes: Vec<u32> = program
+            .functions
+            .iter()
+            .map(|f| {
+                FrameLayout::for_function_in(&structs, f, DEFAULT_STACK_SIZE)
+                    .unwrap()
+                    .size
+            })
+            .collect();
+        let wasm = encode_with_frame_sizes(&program, &exports, &sizes, DEFAULT_STACK_SIZE).unwrap();
+        wasmparser::validate(&wasm).unwrap();
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm[..]).unwrap();
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine)
+            .instantiate_and_start(&mut store, &module)
+            .unwrap();
+        instance
+            .get_typed_func::<(), i32>(&store, "main")
+            .unwrap()
+            .call(&mut store, ())
+            .unwrap();
+        let memory = instance.get_memory(&store, "__test_memory").unwrap();
+        memory.data(&store)[FRAME_START as usize..FRAME_START as usize + len].to_vec()
+    }
+
+    #[test]
+    fn unit_only_enums_are_just_a_tag() {
+        let layout = layout_of("type E [ A, B, C ] fn main() {}", "E");
+        assert_eq!((layout.size, layout.align), (1, 1));
+        assert_eq!(layout.enum_layout.as_ref().unwrap().tag_size, 1);
+        assert!(variants_of(&layout).iter().all(|v| v.offsets.is_empty()));
+    }
+
+    #[test]
+    fn tag_width_is_the_smallest_that_fits_the_variant_count() {
+        let make = |count: usize| {
+            let variants = (0..count)
+                .map(|i| format!("V{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            layout_of(&format!("type E [ {variants} ] fn main() {{}}"), "E")
+        };
+        for (count, tag, size) in [
+            (1, 1, 1),
+            (256, 1, 1),
+            (257, 2, 2),
+            (300, 2, 2),
+            (65536, 2, 2),
+        ] {
+            let layout = make(count);
+            assert_eq!(
+                layout.enum_layout.as_ref().unwrap().tag_size,
+                tag,
+                "{count}"
+            );
+            assert_eq!((layout.size, layout.align), (size, size), "{count}");
+        }
+        assert_eq!(make(65537).enum_layout.unwrap().tag_size, 4);
+    }
+
+    #[test]
+    fn payload_area_follows_the_tag_at_the_maximum_payload_alignment() {
+        // tag @0; the widest payload alignment (i64) puts every payload at 8.
+        let layout = layout_of("type M [ A(u8), B(u16), C(u8, i64), D ] fn main() {}", "M");
+        let variants = variants_of(&layout);
+        assert_eq!(variants[0].offsets, [8]);
+        assert_eq!(variants[1].offsets, [8]);
+        assert_eq!(variants[2].offsets, [8, 16]);
+        assert!(variants[3].offsets.is_empty());
+        assert_eq!((layout.size, layout.align), (24, 8));
+        // A u16 payload starts at 2, not 1.
+        let layout = layout_of("type U [ A(u16), B ] fn main() {}", "U");
+        assert_eq!(variants_of(&layout)[0].offsets, [2]);
+        assert_eq!((layout.size, layout.align), (4, 2));
+        // Byte payloads pack right after the tag.
+        let layout = layout_of("type T [ A(u8), B(u8, u8) ] fn main() {}", "T");
+        assert_eq!(variants_of(&layout)[1].offsets, [1, 2]);
+        assert_eq!((layout.size, layout.align), (3, 1));
+        // A wide tag shares the area with a narrow payload: tag 2 bytes, u8 at 2.
+        let variants = (0..300)
+            .map(|i| {
+                if i == 0 {
+                    "V0(u8)".into()
+                } else {
+                    format!("V{i}")
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+        let layout = layout_of(&format!("type W [ {variants} ] fn main() {{}}"), "W");
+        assert_eq!(variants_of(&layout)[0].offsets, [2]);
+        assert_eq!((layout.size, layout.align), (4, 2));
+    }
+
+    #[test]
+    fn nested_aggregates_use_their_own_size_and_alignment() {
+        let layout = layout_of(
+            "type P { x: i32, y: i32 } type Shape [ Empty, Circle(f64), Rect(i32, i32), \
+             Poly(P, Array<u8, 3>) ] fn main() {}",
+            "Shape",
+        );
+        let variants = variants_of(&layout);
+        assert_eq!(variants[1].offsets, [8]);
+        assert_eq!(variants[2].offsets, [8, 12]);
+        assert_eq!(variants[3].offsets, [8, 16]);
+        assert_eq!(
+            variants[3].fields,
+            [FieldStorage::Aggregate(8), FieldStorage::Aggregate(3)]
+        );
+        // Largest variant is Poly: 16 + 3 = 19, rounded to the alignment 8.
+        assert_eq!((layout.size, layout.align), (24, 8));
+        // An enum inside an enum, and an array of enums, stride by the enum size.
+        let program =
+            lower("type In [ X(i16), Y ] type Out [ A(In), B(Array<In, 3>) ] fn main() {}");
+        let layouts = struct_layouts(&program.types).unwrap();
+        assert_eq!((layouts[0].size, layouts[0].align), (4, 2));
+        assert_eq!(
+            layouts[1].enum_layout.as_ref().unwrap().variants[1].offsets,
+            [2]
+        );
+        assert_eq!((layouts[1].size, layouts[1].align), (14, 2));
+    }
+
+    #[test]
+    fn layout_arithmetic_is_checked() {
+        let program =
+            lower("type Huge [ A(Array<Array<Array<i64, 65536>, 65536>, 65536>) ] fn main() {}");
+        assert!(struct_layouts(&program.types).is_err());
+    }
+
+    #[test]
+    fn construction_writes_the_tag_and_the_payload_at_their_offsets() {
+        let bytes = frame_bytes(
+            "type Shape [ Empty, Circle(f64), Rect(i32, i32) ] \
+             fn main() -> i32 { let s := Shape::Rect(7, -9); 1 }",
+            16,
+        );
+        assert_eq!(bytes[0], 2);
+        assert_eq!(i32::from_le_bytes(bytes[8..12].try_into().unwrap()), 7);
+        assert_eq!(i32::from_le_bytes(bytes[12..16].try_into().unwrap()), -9);
+        let bytes = frame_bytes(
+            "type Shape [ Empty, Circle(f64), Rect(i32, i32) ] \
+             fn main() -> i32 { let s := Shape::Circle(1.5); 1 }",
+            16,
+        );
+        assert_eq!(bytes[0], 1);
+        assert_eq!(f64::from_le_bytes(bytes[8..16].try_into().unwrap()), 1.5);
+        let bytes = frame_bytes(
+            "type Shape [ Empty, Circle(f64) ] fn main() -> i32 { let s := Shape::Empty; 1 }",
+            1,
+        );
+        assert_eq!(bytes[0], 0);
+    }
+
+    #[test]
+    fn a_300_variant_enum_stores_a_u16_tag() {
+        let variants = (0..300)
+            .map(|i| format!("V{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bytes = frame_bytes(
+            &format!("type Big [ {variants} ] fn main() -> i32 {{ let b := Big::V299; 1 }}"),
+            2,
+        );
+        assert_eq!(u16::from_le_bytes(bytes[0..2].try_into().unwrap()), 299);
+    }
+
+    #[test]
+    fn nested_payloads_land_inside_the_outer_payload_area() {
+        // `In` is 4 bytes (tag @0, i16 @2, align 2); `Out` stores that cell at
+        // its own payload offset 2.
+        let bytes = frame_bytes(
+            "type In [ X(i16), Y ] type Out [ A(In), B(u8) ] \
+             fn main() -> i32 { let o := Out::A(In::X(1234)); 1 }",
+            8,
+        );
+        // Out: tag A = 0 @0, In @2 (size 4, align 2): In tag X = 0 @2, i16 @4.
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[2], 0);
+        assert_eq!(i16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1234);
     }
 }

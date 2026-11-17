@@ -43,4 +43,15 @@ field's type. Validation requires that an aggregate extraction with a `Read` bas
 followed in the same block by a consuming use (`Extract` or `Capture`) of the same base,
 so the whole value is consumed exactly once and no partial move can be expressed.
 
+`Type::Enum(TypeId)` names an enum, defined by `TypeDefKind::Enum { variants:
+Vec<VariantDef { name, payload }> }` in the same type table (and id space) as structs. A
+variant's index is its tag. `EnumNew { ty, variant, payload }` creates a value with one
+consumed operand per payload type of that variant; validation checks the type id and kind,
+the variant index, operand count, types, modes and the output type. Payload types follow
+the struct field rules (non-Unit primitives, structs, enums, arrays; no references); an
+empty enum, duplicate variant names and by-value recursion are rejected. Enums are
+aggregates for borrow/share references, owners, parameters, results and block parameters;
+a whole-enum `Load` is invalid. Tag reads, payload projection and `Switch` (B2) are
+specified in `docs/design/enum-implementation.md` but not yet part of the IR.
+
 Run tests with `cargo test --offline -p memobits-ir`.

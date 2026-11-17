@@ -60,6 +60,8 @@ Code, diagnostics, and documentation are written in English.
   implementation sequence and checkpoints.
 - [Structs](docs/design/struct-implementation.md) — struct implementation
   sequence (A1 and A2 implemented) and checkpoints.
+- [Enums](docs/design/enum-implementation.md) — enum implementation sequence
+  (B1 implemented: enum types as values, no `match` yet) and checkpoints.
 - [Illustrative syntax guide](examples/design/language-guide.mb) (not executable).
 
 ## Examples

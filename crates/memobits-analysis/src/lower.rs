@@ -6,7 +6,7 @@ use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
     Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
     Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UnaryOp, UseMode, ValueId,
+    UnaryOp, UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -15,13 +15,13 @@ use memobits_syntax::{
 };
 
 use crate::types::{
-    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget, StructFact,
+    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget, TypeFact,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
 /// of a standalone definition (whose fact module is empty).
 fn program_types(
-    structs: &[StructFact],
+    structs: &[TypeFact],
     package: &str,
     module_of: impl Fn(&str) -> Vec<String>,
 ) -> Vec<TypeDef> {
@@ -34,15 +34,28 @@ fn program_types(
                 name: definition.name.clone(),
             },
             span: definition.span,
-            kind: TypeDefKind::Struct {
-                fields: definition
-                    .fields
-                    .iter()
-                    .map(|field| FieldDef {
-                        name: field.name.clone(),
-                        ty: field.ty.clone(),
-                    })
-                    .collect(),
+            kind: if definition.is_enum {
+                TypeDefKind::Enum {
+                    variants: definition
+                        .variants
+                        .iter()
+                        .map(|variant| VariantDef {
+                            name: variant.name.clone(),
+                            payload: variant.payload.clone(),
+                        })
+                        .collect(),
+                }
+            } else {
+                TypeDefKind::Struct {
+                    fields: definition
+                        .fields
+                        .iter()
+                        .map(|field| FieldDef {
+                            name: field.name.clone(),
+                            ty: field.ty.clone(),
+                        })
+                        .collect(),
+                }
             },
         })
         .collect()
@@ -386,10 +399,11 @@ struct LoopTargets {
 struct Builder<'a> {
     function: Function,
     facts: &'a FunctionFacts,
-    types: &'a [StructFact],
+    types: &'a [TypeFact],
     expression_ids: HashMap<usize, ExprId>,
     expressions: HashMap<ExprId, Option<Type>>,
     paths: HashMap<ExprId, PathTarget>,
+    variants: HashMap<ExprId, u32>,
     current: Option<BlockId>,
     last_value: Option<Operand>,
     loops: Vec<LoopTargets>,
@@ -399,7 +413,7 @@ struct Builder<'a> {
     loaded: HashSet<u32>,
 }
 impl<'a> Builder<'a> {
-    fn new(function: Function, facts: &'a FunctionFacts, types: &'a [StructFact]) -> Self {
+    fn new(function: Function, facts: &'a FunctionFacts, types: &'a [TypeFact]) -> Self {
         let expression_ids = facts
             .expressions
             .iter()
@@ -415,6 +429,11 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|u| (u.expression, u.target))
             .collect();
+        let variants = facts
+            .variant_uses
+            .iter()
+            .map(|u| (u.expression, u.variant))
+            .collect();
         Self {
             function,
             facts,
@@ -422,6 +441,7 @@ impl<'a> Builder<'a> {
             expression_ids,
             expressions,
             paths,
+            variants,
             current: Some(BlockId(0)),
             last_value: None,
             loops: Vec::new(),
@@ -1209,6 +1229,9 @@ impl<'a> Builder<'a> {
                 Constant::Bool(*value),
                 Type::Primitive(Primitive::Bool),
             ),
+            ExprKind::Path(_) if self.variants.contains_key(&self.id(expr)) => {
+                self.lower_variant(expr, &[])
+            }
             ExprKind::Path(_) => {
                 let source = match self.path(expr) {
                     PathTarget::Local(id) => Source::Local(id),
@@ -1271,6 +1294,9 @@ impl<'a> Builder<'a> {
                     },
                     self.ty(expr),
                 )
+            }
+            ExprKind::Call { arguments, .. } if self.variants.contains_key(&self.id(expr)) => {
+                self.lower_variant(expr, arguments)
             }
             ExprKind::Call { callee, arguments } => {
                 if let ExprKind::Field { base, name } = &callee.kind {
@@ -1366,6 +1392,30 @@ impl<'a> Builder<'a> {
                 else_branch,
             } => self.lower_if(expr, condition, then_branch, else_branch.as_deref()),
         }
+    }
+    /// An enum variant construction. Payload arguments are evaluated and
+    /// captured left to right, then handed to `EnumNew` in declaration order.
+    fn lower_variant(&mut self, expr: &Expr, arguments: &[Expr]) -> Option<Operand> {
+        let Some(Type::Enum(id)) = self.ty(expr) else {
+            unreachable!("checked variant type")
+        };
+        let variant = self.variants[&self.id(expr)];
+        let types = self.types;
+        let declared = &types[id.0 as usize].variants[variant as usize];
+        let mut payload = Vec::with_capacity(arguments.len());
+        for (argument, ty) in arguments.iter().zip(&declared.payload) {
+            let value = self.lower_expr(argument)?;
+            payload.push(self.owned_captured(value, ty)?);
+        }
+        self.emit(
+            expr.span,
+            InstructionKind::EnumNew {
+                ty: id,
+                variant,
+                payload,
+            },
+            Some(Type::Enum(id)),
+        )
     }
     fn join(&mut self, target: BlockId, value: Operand, span: Span) {
         let Some(value) = self.owned(value) else {
