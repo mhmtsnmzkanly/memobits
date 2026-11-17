@@ -45,7 +45,9 @@ The Memobits compiler lexer receives Rust `&str`. Guest-side UTF-8 strings
 and scalar iteration are still pending. This fixture uses byte arrays and
 rejects every non-ASCII byte at its first occurrence. The valid UTF-8 encoding
 of U+00E9 and its truncated prefix therefore produce the same fixture error.
-Keep offsets in bytes. Once the protocol reference establishes where text
+The [separate guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
+demonstrates scalar validation over byte buffers. Keep ENF offsets in bytes.
+Once the protocol reference establishes where text
 is permitted, define the UTF-8 validation and scalar-handling contract for
 those tokens.
 

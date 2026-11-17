@@ -17,6 +17,11 @@ fn enf_lexer_example_checks_byte_fixtures_in_source_and_wasm() {
     assert_example_runs_in_both_modes("enf-lexer", b"Result: Ok(i32(0))\n");
 }
 
+#[test]
+fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
+    assert_example_runs_in_both_modes("utf8-validator", b"Result: Ok(i32(0))\n");
+}
+
 fn assert_example_runs_in_both_modes(project: &str, expected: &[u8]) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/projects")

@@ -212,6 +212,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.
+- The [guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
+  validates fixed byte buffers with explicit lengths and byte-offset errors.
+  Guest string and scalar iteration APIs remain pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

@@ -88,6 +88,8 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
   around a wall and verifies that closing the gap makes the goal unreachable.
 - [Bounded ENF lexer fixture](docs/design/enf-lexer-slice.md) checks decimal
   tokens, byte spans and error outcomes.
+- [Guest UTF-8 validator](examples/projects/utf8-validator/README.md) checks
+  Unicode scalar encodings and reports byte offsets for malformed input.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of
