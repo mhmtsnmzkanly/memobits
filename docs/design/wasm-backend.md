@@ -30,6 +30,28 @@ A first artifact may use a Wasm trap for dynamic failure while the host error
 protocol is being developed. The limitation must be documented; it is not a
 stable error ABI. Statically proven failures should be diagnosed before encoding.
 
+## Memory layout and stack
+
+Linear memory is laid out as: reserved low addresses (16 bytes, address zero
+unused), the stack, static data, then the heap. Static data and the heap do not
+exist yet; `static_data_start(stack_size)` in `crates/memobits-wasm/src/lib.rs`
+is the single boundary where they will begin, so the stack always lies below
+them and exhaustion is a controlled error that cannot corrupt either. Memory is
+currently sized to exactly cover that boundary, rounded up to 64 KiB pages.
+
+The stack size is the build setting `[build].stack_size` (bytes, default 1 MiB,
+a multiple of 16 between 4 KiB and 256 MiB), passed to the backend as
+`CompileOptions::stack_size` (`compile` uses the default; `compile_with` takes
+options). Frames grow upward, 16-byte aligned, with the stack pointer in
+global 0. There is no per-function frame limit: a frame larger than the
+configured stack is an LE900 diagnostic naming the frame size and the stack
+size, with a hint to raise `[build].stack_size`; layout arithmetic is checked.
+At run time, entering a frame that does not fit sets the exported flag global
+`__mb_stack_overflow` and traps with `unreachable` before the stack pointer is
+touched; `memobits-runtime` reports that as `RunError::StackOverflow`
+(`RE008`). Storage placement is a backend decision; language rules, IR and
+ownership do not depend on it. Memory, flag and layout remain experimental ABI.
+
 ## Verification
 
 Independent Wasm validation checks binary structure. Execution tests must also

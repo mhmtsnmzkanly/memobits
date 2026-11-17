@@ -818,9 +818,9 @@ fn array_mutation_repetition_and_moves_run_from_source_and_artifact() {
     err(f.run(&["run"]), "TE008");
     f.write(
         "src/app.mb",
-        "fn main() -> i32 { let a: Array<i64, 2049> = [0; 2049]; 0 }",
+        "fn main() -> i32 { let a: Array<i64, 65537> = [0; 65537]; 0 }",
     );
-    assert!(err(f.run(&["run"]), "LE900").contains("32 KiB"));
+    assert!(err(f.run(&["run"]), "LE900").contains("configured stack size"));
 }
 
 #[test]
@@ -1421,4 +1421,73 @@ fn structs_cross_module_boundaries_by_visibility() {
         "fn main() -> i32 { let h := Nope { x: 1 }; 0 }\n",
     );
     err(f.run(&["run"]), "NE003");
+}
+
+fn stack_project(f: &Fixture, build: &str, source: &str) {
+    f.write(
+        "project.toml",
+        &format!("[package]\nname='demo'\nentry='app::main'\n{build}"),
+    );
+    f.write("src/app.mb", source);
+}
+
+#[test]
+fn build_stack_size_controls_frame_limits() {
+    let f = Fixture::new();
+    let big = "pub fn main() -> i32 { let a: Array<i32, 524288> = [1; 524288]; a[524287] }";
+    stack_project(&f, "", big);
+    let text = err(f.run(&["run"]), "LE900");
+    assert!(
+        text.contains("1048576") && text.contains("[build].stack_size"),
+        "{text}"
+    );
+    stack_project(&f, "[build]\nstack_size = 4194304\n", big);
+    let out = f.run(&["build"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let grid = "pub fn main() -> i32 { var g: Array<Array<i32, 100>, 100> = [[0; 100]; 100]; g[99][99] = 4; g[99][99] }";
+    stack_project(&f, "", grid);
+    assert!(f.run(&["build"]).status.success());
+}
+
+#[test]
+fn stack_exhaustion_is_a_distinct_runtime_error() {
+    let f = Fixture::new();
+    let source = "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
+        if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \
+        pub fn main() -> i32 { rec(100000) }";
+    stack_project(&f, "[build]\nstack_size = 65536\n", source);
+    let text = err(f.run(&["run"]), "RE008");
+    assert!(text.contains("stack overflow"), "{text}");
+    // A subsequent run of shallower work is unaffected.
+    stack_project(
+        &f,
+        "[build]\nstack_size = 65536\n",
+        &source.replace("rec(100000)", "rec(3)"),
+    );
+    let out = f.run(&["run"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Result: i32(6)"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn invalid_build_settings_have_stable_codes() {
+    let f = Fixture::new();
+    for value in ["0", "-16", "100", "4100", "999999999999"] {
+        stack_project(
+            &f,
+            &format!("[build]\nstack_size = {value}\n"),
+            "pub fn main() {}",
+        );
+        err(f.run(&["project"]), "PE007");
+    }
+    stack_project(&f, "[build]\nstack_size = 'big'\n", "pub fn main() {}");
+    err(f.run(&["project"]), "PE002");
+    stack_project(&f, "[build]\nstack = 4096\n", "pub fn main() {}");
+    err(f.run(&["project"]), "PE002");
 }

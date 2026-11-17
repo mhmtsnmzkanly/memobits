@@ -196,9 +196,12 @@ fn bounds_trap_happens_before_later_effects_and_inside_control_flow() {
 #[test]
 fn array_frames_are_capped_with_a_diagnostic() {
     // Repetition keeps these sources tiny. The hidden accumulator and the
-    // binding each own a cell, so 2048 * 8 bytes twice is exactly the 32 KiB cap.
+    // binding each own a cell, so 65536 * 8 bytes twice is exactly the default
+    // 1 MiB stack.
     assert_eq!(
-        run_typed::<i64>("fn main() -> i64 { let a: Array<i64, 2048> = [0; 2048]; a[2047] + 1 }"),
+        run_typed::<i64>(
+            "fn main() -> i64 { let a: Array<i64, 65536> = [0; 65536]; a[65535] + 1 }"
+        ),
         1
     );
     // A literal is built directly in the binding's cell, so it occupies one cell.
@@ -210,15 +213,17 @@ fn array_frames_are_capped_with_a_diagnostic() {
         1
     );
     for source in [
-        "fn main() { let a: Array<i64, 2049> = [0; 2049]; }",
-        "fn main() { let a: Array<i32, 5000> = [0; 5000]; }",
+        "fn main() { let a: Array<i64, 65537> = [0; 65537]; }",
+        "fn main() { let a: Array<i32, 300000> = [0; 300000]; }",
         "fn main() { let a: Array<u8, 4000000000> = [0; 4000000000]; }",
         "fn main() { let a: Array<f64, 4294967295> = [0.0; 4294967295]; }",
     ] {
         let program = lower(source);
         let errors = memobits_wasm::compile(&program, &exports("main", 0)).unwrap_err();
         assert!(
-            errors.iter().any(|d| d.message.contains("32 KiB")),
+            errors
+                .iter()
+                .any(|d| d.message.contains("configured stack size")),
             "{source}: {errors:?}"
         );
     }
@@ -560,14 +565,16 @@ fn zeroed_arrays_clear_dirty_frame_memory() {
 
 #[test]
 fn oversized_or_overflowing_array_layouts_are_diagnostics() {
-    for len in [8193, u32::MAX / 2, u32::MAX] {
+    for len in [262145, u32::MAX / 2, u32::MAX] {
         let program = Program {
             functions: vec![array_function("big", len, true, 0)],
             ..Program::default()
         };
         let errors = memobits_wasm::compile(&program, &exports("big", 0)).unwrap_err();
         assert!(
-            errors.iter().any(|d| d.message.contains("32 KiB")),
+            errors
+                .iter()
+                .any(|d| d.message.contains("configured stack size")),
             "{len}: {errors:?}"
         );
     }

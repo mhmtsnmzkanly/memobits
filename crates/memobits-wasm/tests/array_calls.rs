@@ -267,7 +267,7 @@ fn array_arguments_report_backend_gates_with_clear_messages() {
     }
     // A callee frame holding a too-large array parameter is a frame diagnostic.
     rejected(
-        "fn f(a: Array<i64, 5000>) {} fn main() -> i32 { 0 }",
-        "32 KiB",
+        "fn f(a: Array<i64, 200000>) {} fn main() -> i32 { 0 }",
+        "configured stack size",
     );
 }

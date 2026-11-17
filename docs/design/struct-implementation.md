@@ -54,8 +54,8 @@ independently. Until then every field loan overlaps the whole struct.
 - **Layout.** Fields sit in declaration order at natural alignment: each field
   starts at the next offset aligned to its own size, and the struct's size is
   rounded up to its largest alignment (`crates/memobits-wasm/src/lib.rs`,
-  `struct_layouts`). A struct value owns an inline cell in the 32 KiB activation
-  frame, shared with arrays. Overflow is a backend diagnostic (LE900), never a host
+  `struct_layouts`). A struct value owns an inline cell in the activation
+  frame (bounded by the configured `[build].stack_size`), shared with arrays. Overflow is a backend diagnostic (LE900), never a host
   allocation.
 - **Loans.** A `FieldAddr` loan is rooted at the whole struct local. A live
   reference to any field therefore conflicts with a write to any other field of
@@ -97,7 +97,7 @@ independently. Until then every field loan overlaps the whole struct.
 | Enum types used as value types | TE001 (declaration TE016) |
 | Destructuring `let P { x } := p;` | SE002 |
 | Struct literal directly in an unparenthesised `if` condition | SE002 |
-| Frame layout over 32 KiB for a struct | LE900 |
+| Frame layout over the configured stack size for a struct | LE900 |
 
 ### Rejected by analysis
 

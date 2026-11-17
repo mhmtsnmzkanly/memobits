@@ -1,5 +1,5 @@
 //! Wasm execution of user-defined structs: frame-cell layout, in-place
-//! construction, field reads and the 32 KiB frame cap.
+//! construction, field reads and the configured stack limit.
 use memobits_analysis::lower_module;
 use memobits_diagnostics::SourceId;
 use memobits_ir::Program;
@@ -220,14 +220,18 @@ fn a_struct_larger_than_the_frame_cap_is_a_backend_diagnostic() {
     };
     // 1000 * 8 bytes = 8 KB fits.
     assert_eq!(run(&source(1000)), 1);
-    // 4200 * 8 bytes = 33.6 KB exceeds the 32 KiB frame cap.
+    // 4200 * 8 bytes = 33.6 KB exceeds a 32 KiB configured stack.
     let program = lower(&source(4200));
     let exports = BTreeMap::from([("main".to_string(), memobits_ir::FunctionId(0))]);
-    let errors = memobits_wasm::compile(&program, &exports).unwrap_err();
+    let options = memobits_wasm::CompileOptions {
+        stack_size: 32 * 1024,
+    };
+    let errors = memobits_wasm::compile_with(&program, &exports, &options).unwrap_err();
     assert!(
         errors
             .iter()
-            .any(|d| d.message.contains("struct frame layout exceeds the 32 KiB")),
+            .any(|d| d.message.contains("struct frame layout of")
+                && d.message.contains("configured stack size")),
         "{errors:?}"
     );
 }

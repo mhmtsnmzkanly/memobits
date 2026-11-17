@@ -317,19 +317,19 @@ fn arrays_stay_out_of_exported_signatures_and_frames_are_capped() {
         ),
         // A caller-allocated result cell counts against the frame.
         (
-            "fn big() -> Array<i64, 3000> { [0; 3000] } fn main() -> i32 { let a := big(); 0 }",
+            "fn big() -> Array<i64, 140000> { [0; 140000] } fn main() -> i32 { let a := big(); 0 }",
             "main",
-            "32 KiB",
+            "configured stack size",
         ),
         (
             "fn main() -> i32 { let m: Array<Array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }",
             "main",
-            "32 KiB",
+            "configured stack size",
         ),
         (
             "fn main() -> i32 { let m: Array<Array<i64, 4000000000>, 4000000000> = [[0; 4000000000]; 4000000000]; 0 }",
             "main",
-            "32 KiB",
+            "configured stack size",
         ),
     ] {
         let errors = compile_errors(source, entry);

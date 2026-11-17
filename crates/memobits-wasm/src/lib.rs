@@ -50,6 +50,62 @@ pub fn compile(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    compile_with(program, exports, &CompileOptions::default())
+}
+
+/// Default stack size in bytes (1 MiB), matching `[build].stack_size`.
+pub const DEFAULT_STACK_SIZE: u32 = 1024 * 1024;
+
+/// Reserved low addresses: address zero stays unused and the stack begins at
+/// this offset.
+pub const RESERVED_BYTES: u32 = 16;
+
+const PAGE_SIZE: u64 = 65536;
+
+/// Backend settings. The experimental ABI is not stable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Stack size in bytes; a non-zero multiple of 16 that fits a 32-bit memory.
+    pub stack_size: u32,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            stack_size: DEFAULT_STACK_SIZE,
+        }
+    }
+}
+
+/// First address after the stack. Static data and, after it, the heap will be
+/// placed from here; neither exists yet, so memory currently ends here. The
+/// stack lies below them so exhaustion is a controlled error and can never
+/// corrupt either. `None` when the layout does not fit 32-bit memory.
+pub fn static_data_start(stack_size: u32) -> Option<u32> {
+    align_up(RESERVED_BYTES.checked_add(stack_size)?, 16)
+}
+
+/// Memory size in 64 KiB pages covering everything below the heap boundary.
+fn memory_pages(stack_size: u32) -> Option<u64> {
+    let pages = u64::from(static_data_start(stack_size)?).div_ceil(PAGE_SIZE);
+    (pages < PAGE_SIZE).then_some(pages)
+}
+
+/// Like [`compile`], with explicit backend settings.
+pub fn compile_with(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    options: &CompileOptions,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    let stack_size = options.stack_size;
+    if stack_size == 0 || !stack_size.is_multiple_of(16) || memory_pages(stack_size).is_none() {
+        return Err(vec![diagnostic(
+            format!(
+                "invalid stack size {stack_size}: it must be a non-zero multiple of 16 bytes that fits a 32-bit memory"
+            ),
+            None,
+        )]);
+    }
     if let Err(errors) = program.validate() {
         return Err(errors
             .into_iter()
@@ -111,7 +167,7 @@ pub fn compile(
         }
     }
     for function in &program.functions {
-        if let Err(error) = FrameLayout::for_function_in(&structs, function) {
+        if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
             errors.push(diagnostic(error.message, error.span));
         }
         for block in &function.blocks {
@@ -146,7 +202,7 @@ pub fn compile(
         return Err(errors);
     }
 
-    encode(program, exports).map_err(|message| vec![diagnostic(message, None)])
+    encode(program, exports, stack_size).map_err(|message| vec![diagnostic(message, None)])
 }
 
 fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
@@ -209,11 +265,6 @@ fn supported_type(ty: &Type) -> bool {
         _ => false,
     }
 }
-
-/// Upper bound for one activation frame. The shared stack page is 64 KiB, so a
-/// source-supplied array length can never request host or guest memory beyond
-/// this cap; larger layouts are compile-time diagnostics.
-const MAX_FRAME_SIZE: u32 = 32 * 1024;
 
 /// Identity of an array cell owner within one function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -318,12 +369,16 @@ impl FrameLayout {
     /// Layout for a function that uses no struct types.
     #[cfg(test)]
     fn for_function(function: &Function) -> Result<Self, FrameLayoutError> {
-        Self::for_function_in(&[], function)
+        Self::for_function_in(&[], function, DEFAULT_STACK_SIZE)
     }
 
+    /// Lay out one activation frame. A frame larger than `stack_size` can never
+    /// run, so it is a compile-time diagnostic; source-supplied array lengths
+    /// therefore cannot request memory beyond the configured stack.
     fn for_function_in(
         structs: &[StructLayout],
         function: &Function,
+        stack_size: u32,
     ) -> Result<Self, FrameLayoutError> {
         let mut owners = BTreeSet::new();
         for block in &function.blocks {
@@ -436,22 +491,29 @@ impl FrameLayout {
                 message: message.into(),
                 span: span.or(Some(function.span)),
             };
-            let too_large = if matches!(ty, Type::Struct(_)) {
-                "struct frame layout exceeds the 32 KiB activation frame limit"
+            let what = if matches!(ty, Type::Struct(_)) {
+                "struct"
             } else {
-                "array frame layout exceeds the 32 KiB activation frame limit"
+                "array"
+            };
+            let too_large = |size: Option<u64>| {
+                error(&stack_exceeded(
+                    what,
+                    size.map_or("more than 4 GiB".into(), |s| format!("{s} bytes")),
+                    stack_size,
+                ))
             };
             let (bytes, align) = aggregate_layout(structs, ty).map_err(|m| {
                 if m == LAYOUT_OVERFLOW {
-                    error(too_large)
+                    too_large(None)
                 } else {
                     error(&m)
                 }
             })?;
-            offset = align_up(offset, align).ok_or_else(|| error(too_large))?;
-            let end = offset.checked_add(bytes).ok_or_else(|| error(too_large))?;
-            if end > MAX_FRAME_SIZE {
-                return Err(error(too_large));
+            offset = align_up(offset, align).ok_or_else(|| too_large(None))?;
+            let end = offset.checked_add(bytes).ok_or_else(|| too_large(None))?;
+            if end > stack_size {
+                return Err(too_large(Some(u64::from(end))));
             }
             arrays.insert(
                 slot,
@@ -472,14 +534,14 @@ impl FrameLayout {
         } else {
             align_up(offset, 16)
                 .ok_or_else(|| FrameLayoutError {
-                    message: "aligned owner frame layout exceeds the 32-bit address space".into(),
+                    message: stack_exceeded("owner", "more than 4 GiB".into(), stack_size),
                     span: Some(function.span),
                 })?
                 .max(16)
         };
-        if size > MAX_FRAME_SIZE {
+        if size > stack_size {
             return Err(FrameLayoutError {
-                message: "activation frame exceeds the 32 KiB frame limit".into(),
+                message: stack_exceeded("activation", format!("{size} bytes"), stack_size),
                 span: Some(function.span),
             });
         }
@@ -490,6 +552,12 @@ impl FrameLayout {
             size,
         })
     }
+}
+
+fn stack_exceeded(what: &str, size: String, stack_size: u32) -> String {
+    format!(
+        "{what} frame layout of {size} exceeds the configured stack size of {stack_size} bytes; raise [build].stack_size"
+    )
 }
 
 /// Array values built and immediately assigned to a local share that local's
@@ -672,15 +740,23 @@ fn wasm_type(ty: &Type) -> ValType {
     }
 }
 
-// Experimental fixed one-page private stack. Address zero stays reserved; frames
-// grow upward, aligned to 16 bytes. Traps do not unwind active caller frames.
-const FRAME_START: u32 = 16;
-const FRAME_LIMIT: u32 = 65536;
+// Experimental private stack. Memory is reserved low addresses, then the stack
+// of `stack_size` bytes, then (future) static data and heap, see
+// `static_data_start`. Frames grow upward, aligned to 16 bytes. Traps do not
+// unwind active caller frames. Global 0 is the stack pointer; global 1 is set
+// to 1 before the trap raised by stack exhaustion so a host can tell it from
+// other traps.
+const FRAME_START: u32 = RESERVED_BYTES;
+const OVERFLOW_FLAG_GLOBAL: u32 = 1;
+/// Name of the exported stack-exhaustion flag global.
+pub const STACK_OVERFLOW_EXPORT: &str = "__mb_stack_overflow";
 
 #[derive(Clone, Copy)]
 struct FrameState {
     base: u32,
     size: u32,
+    /// First address past the stack.
+    limit: u32,
 }
 
 impl FrameState {
@@ -690,11 +766,15 @@ impl FrameState {
         // Check available space before addition, so neither wrapping nor a
         // failed allocation can mutate the shared stack pointer.
         body.instruction(&WasmInstruction::I32Const(self.size as i32));
-        body.instruction(&WasmInstruction::I32Const(FRAME_LIMIT as i32));
+        body.instruction(&WasmInstruction::I32Const(self.limit as i32));
         body.instruction(&WasmInstruction::LocalGet(self.base));
         body.instruction(&WasmInstruction::I32Sub);
         body.instruction(&WasmInstruction::I32GtU);
-        trap_if(body);
+        body.instruction(&WasmInstruction::If(BlockType::Empty));
+        body.instruction(&WasmInstruction::I32Const(1));
+        body.instruction(&WasmInstruction::GlobalSet(OVERFLOW_FLAG_GLOBAL));
+        body.instruction(&WasmInstruction::Unreachable);
+        body.instruction(&WasmInstruction::End);
         body.instruction(&WasmInstruction::LocalGet(self.base));
         body.instruction(&WasmInstruction::I32Const(self.size as i32));
         body.instruction(&WasmInstruction::I32Add);
@@ -707,18 +787,22 @@ impl FrameState {
     }
 }
 
-fn encode(program: &Program, exports: &BTreeMap<String, FunctionId>) -> Result<Vec<u8>, String> {
+fn encode(
+    program: &Program,
+    exports: &BTreeMap<String, FunctionId>,
+    stack_size: u32,
+) -> Result<Vec<u8>, String> {
     let structs = struct_layouts(&program.types)?;
     let sizes = program
         .functions
         .iter()
         .map(|function| {
-            FrameLayout::for_function_in(&structs, function)
+            FrameLayout::for_function_in(&structs, function, stack_size)
                 .map(|layout| layout.size)
                 .map_err(|error| error.message)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    encode_frames(program, exports, &sizes, false)
+    encode_frames(program, exports, &sizes, false, stack_size)
 }
 
 // Tests may override frame sizes to exercise allocation and restoration
@@ -728,8 +812,9 @@ fn encode_with_frame_sizes(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
     sizes: &[u32],
+    stack_size: u32,
 ) -> Result<Vec<u8>, String> {
-    encode_frames(program, exports, sizes, true)
+    encode_frames(program, exports, sizes, true, stack_size)
 }
 
 fn encode_frames(
@@ -737,6 +822,7 @@ fn encode_frames(
     exports: &BTreeMap<String, FunctionId>,
     sizes: &[u32],
     observe: bool,
+    stack_size: u32,
 ) -> Result<Vec<u8>, String> {
     let mut reachable = BTreeSet::new();
     let mut pending = exports.values().copied().collect::<Vec<_>>();
@@ -824,6 +910,13 @@ fn encode_frames(
         export_section.export("__test_memory", ExportKind::Memory, 0);
         export_section.export("__test_sp", ExportKind::Global, 0);
     }
+    if has_frames {
+        export_section.export(
+            STACK_OVERFLOW_EXPORT,
+            ExportKind::Global,
+            OVERFLOW_FLAG_GLOBAL,
+        );
+    }
     let structs = struct_layouts(&program.types)?;
     let mut code = CodeSection::new();
     for id in &reachable {
@@ -833,14 +926,16 @@ fn encode_frames(
             sizes[*id as usize],
             observe,
             &structs,
+            stack_size,
         )?);
     }
     let mut memories = MemorySection::new();
     let mut globals = GlobalSection::new();
     if has_frames {
+        let pages = memory_pages(stack_size).ok_or("stack size does not fit a 32-bit memory")?;
         memories.memory(MemoryType {
-            minimum: 1,
-            maximum: Some(1),
+            minimum: pages,
+            maximum: Some(pages),
             memory64: false,
             shared: false,
             page_size_log2: None,
@@ -852,6 +947,14 @@ fn encode_frames(
                 shared: false,
             },
             &ConstExpr::i32_const(FRAME_START as i32),
+        );
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
         );
     }
     let mut module = Module::new();
@@ -869,8 +972,10 @@ fn compile_function(
     frame_size: u32,
     observe: bool,
     structs: &[StructLayout],
+    stack_size: u32,
 ) -> Result<WasmFunction, String> {
-    let layout = FrameLayout::for_function_in(structs, function).map_err(|error| error.message)?;
+    let layout = FrameLayout::for_function_in(structs, function, stack_size)
+        .map_err(|error| error.message)?;
     let result_is_array = matches!(function.signature.result.as_ref(), Type::Array { .. });
     // Wasm parameters: the source parameters plus, for an array result, one
     // hidden pointer to the caller-allocated result storage (last parameter).
@@ -897,6 +1002,7 @@ fn compile_function(
     let frame = (frame_size != 0).then_some(FrameState {
         base: scratch64 + 1,
         size: frame_size,
+        limit: FRAME_START + stack_size,
     });
     if let Some(frame) = frame {
         frame.enter(body);
@@ -2447,7 +2553,8 @@ mod activation_tests {
     fn nested_recursive_and_early_returns_restore_each_activation() {
         let program = lower("fn recurse(n: i32) -> i32 { if n == 0 { return 42; } recurse(n - 1) } fn main() -> i32 { recurse(3) }");
         let exports = BTreeMap::from([("main".into(), FunctionId(1))]);
-        let wasm = encode_with_frame_sizes(&program, &exports, &[16, 32]).unwrap();
+        let wasm =
+            encode_with_frame_sizes(&program, &exports, &[16, 32], DEFAULT_STACK_SIZE).unwrap();
         let (mut store, instance) = instance(&wasm);
         let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
         for _ in 0..20 {
@@ -2470,7 +2577,7 @@ mod activation_tests {
         let program =
             lower("fn recurse(n: i32) -> i32 { if n == 0 { 7 } else { recurse(n - 1) } }");
         let exports = BTreeMap::from([("recurse".into(), FunctionId(0))]);
-        let wasm = encode_with_frame_sizes(&program, &exports, &[32752]).unwrap();
+        let wasm = encode_with_frame_sizes(&program, &exports, &[32752], 65520).unwrap();
         let (mut store, instance) = instance(&wasm);
         let recurse = instance
             .get_typed_func::<i32, i32>(&store, "recurse")
@@ -2481,7 +2588,7 @@ mod activation_tests {
         // Two active frames remain after a trap; failed third entry changed nothing.
         assert_eq!(sp(&store, instance), 65520);
         for size in [65536, u32::MAX] {
-            let bytes = encode_with_frame_sizes(&program, &exports, &[size]).unwrap();
+            let bytes = encode_with_frame_sizes(&program, &exports, &[size], 65520).unwrap();
             let (mut store, instance) = self::instance(&bytes);
             let recurse = instance
                 .get_typed_func::<i32, i32>(&store, "recurse")
@@ -2495,14 +2602,17 @@ mod activation_tests {
     fn unit_returns_restore_and_unselected_frames_emit_no_stack() {
         let program = lower("fn helper() { return; } fn main() { helper() }");
         let exports = BTreeMap::from([("main".into(), FunctionId(1))]);
-        let bytes = encode_with_frame_sizes(&program, &exports, &[16, 16]).unwrap();
+        let bytes =
+            encode_with_frame_sizes(&program, &exports, &[16, 16], DEFAULT_STACK_SIZE).unwrap();
         let (mut store, instance) = instance(&bytes);
         let main = instance.get_typed_func::<(), ()>(&store, "main").unwrap();
         for _ in 0..3 {
             main.call(&mut store, ()).unwrap();
             assert_eq!(sp(&store, instance), 16);
         }
-        let no_roots = encode_with_frame_sizes(&program, &BTreeMap::new(), &[16, 16]).unwrap();
+        let no_roots =
+            encode_with_frame_sizes(&program, &BTreeMap::new(), &[16, 16], DEFAULT_STACK_SIZE)
+                .unwrap();
         assert!(!wasmparser::Parser::new(0)
             .parse_all(&no_roots)
             .any(|part| matches!(
@@ -2518,7 +2628,7 @@ mod activation_tests {
         let normal = compile(&program, &exports).unwrap();
         assert_eq!(
             normal,
-            encode_with_frame_sizes(&program, &exports, &[0]).unwrap()
+            encode_with_frame_sizes(&program, &exports, &[0], DEFAULT_STACK_SIZE).unwrap()
         );
         assert!(!wasmparser::Parser::new(0)
             .parse_all(&normal)
@@ -2526,7 +2636,7 @@ mod activation_tests {
                 part.unwrap(),
                 wasmparser::Payload::MemorySection(_) | wasmparser::Payload::GlobalSection(_)
             )));
-        let private = encode_frames(&program, &exports, &[16], false).unwrap();
+        let private = encode_frames(&program, &exports, &[16], false, DEFAULT_STACK_SIZE).unwrap();
         let (store, instance) = instance(&private);
         assert!(instance.get_memory(&store, "__test_memory").is_none());
         assert!(instance.get_global(&store, "__test_sp").is_none());
@@ -2572,11 +2682,11 @@ mod struct_layout_tests {
         let exports = BTreeMap::from([("main".to_string(), FunctionId(0))]);
         let structs = struct_layouts(&program.types).unwrap();
         let sizes = vec![
-            FrameLayout::for_function_in(&structs, &program.functions[0])
+            FrameLayout::for_function_in(&structs, &program.functions[0], DEFAULT_STACK_SIZE)
                 .unwrap()
                 .size,
         ];
-        let wasm = encode_with_frame_sizes(&program, &exports, &sizes).unwrap();
+        let wasm = encode_with_frame_sizes(&program, &exports, &sizes, DEFAULT_STACK_SIZE).unwrap();
         wasmparser::validate(&wasm).unwrap();
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm[..]).unwrap();

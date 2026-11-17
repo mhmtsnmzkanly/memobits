@@ -9,6 +9,11 @@ use wasmi::{
     ValType,
 };
 
+/// Export name of the backend's stack-exhaustion flag global (the value of
+/// `memobits_wasm::STACK_OVERFLOW_EXPORT`; the runtime does not depend on the
+/// backend crate).
+const STACK_OVERFLOW_EXPORT: &str = "__mb_stack_overflow";
+
 /// The maximum instruction fuel available to a call.
 pub const DEFAULT_FUEL: u64 = 10_000_000;
 
@@ -40,6 +45,8 @@ pub enum RunError {
     FuelExhausted,
     /// The guest trapped while running.
     Trap(String),
+    /// The guest ran out of its configured stack (`[build].stack_size`).
+    StackOverflow,
 }
 
 impl std::fmt::Display for RunError {
@@ -56,6 +63,9 @@ impl std::fmt::Display for RunError {
             Self::Signature(message) => write!(f, "unsupported function signature: {message}"),
             Self::FuelExhausted => f.write_str("WebAssembly execution fuel exhausted"),
             Self::Trap(message) => write!(f, "WebAssembly execution trapped: {message}"),
+            Self::StackOverflow => f.write_str(
+                "stack overflow: the program exhausted its stack; raise [build].stack_size or reduce recursion depth",
+            ),
         }
     }
 }
@@ -128,9 +138,20 @@ fn run_with_fuel(bytes: &[u8], export: &str, fuel: u64) -> Result<RunValue, RunE
         .map(Val::default_for_ty)
         .into_iter()
         .collect::<Vec<_>>();
-    function
-        .call(&mut store, &[], &mut results)
-        .map_err(classify_call)?;
+    if let Err(error) = function.call(&mut store, &[], &mut results) {
+        // Stack exhaustion sets an exported flag global before trapping, which
+        // is how it is told apart from other `unreachable` traps.
+        let overflowed = instance
+            .get_global(&store, STACK_OVERFLOW_EXPORT)
+            .is_some_and(|flag| flag.get(&store).i32() == Some(1));
+        return Err(
+            if overflowed && error.as_trap_code() != Some(TrapCode::OutOfFuel) {
+                RunError::StackOverflow
+            } else {
+                classify_call(error)
+            },
+        );
+    }
     match results.into_iter().next() {
         None => Ok(RunValue::Unit),
         Some(Val::I32(value)) => Ok(RunValue::I32(value)),
@@ -347,5 +368,45 @@ mod tests {
             run_with_fuel(&module.finish(), "entry", 100),
             Err(RunError::Trap(_))
         ));
+    }
+
+    #[test]
+    fn flagged_unreachable_traps_report_stack_overflow() {
+        use wasm_encoder::{ConstExpr, GlobalSection, GlobalType};
+        for (flag, overflow) in [(1, true), (0, false)] {
+            let mut module = Module::new();
+            let mut types = TypeSection::new();
+            types.ty().function([], []);
+            module.section(&types);
+            let mut functions = FunctionSection::new();
+            functions.function(0);
+            module.section(&functions);
+            let mut globals = GlobalSection::new();
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(flag),
+            );
+            module.section(&globals);
+            let mut exports = ExportSection::new();
+            exports.export("entry", ExportKind::Func, 0);
+            exports.export("__mb_stack_overflow", ExportKind::Global, 0);
+            module.section(&exports);
+            let mut code = CodeSection::new();
+            let mut function = Function::new([]);
+            function.instruction(&Instruction::Unreachable);
+            function.instruction(&Instruction::End);
+            code.function(&function);
+            module.section(&code);
+            let result = run_with_fuel(&module.finish(), "entry", 1000);
+            if overflow {
+                assert_eq!(result, Err(RunError::StackOverflow));
+            } else {
+                assert!(matches!(result, Err(RunError::Trap(_))));
+            }
+        }
     }
 }

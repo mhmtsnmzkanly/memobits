@@ -29,6 +29,7 @@ Errors use the shared diagnostics renderer with these stable project codes:
 | PE004 | Invalid command-line usage |
 | PE005 | Explicitly unsupported check command |
 | PE006 | Unsupported build target or export |
+| PE007 | Invalid `[build]` setting, such as a `stack_size` out of range or not a multiple of 16 |
 
 Successful commands exit 0 and write stdout; failures exit 1 and write stderr.
 Tests launch the real `mb` executable with isolated temporary directories and
@@ -83,4 +84,8 @@ host imports.
 
 Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported
-signature, `RE006` fuel exhaustion, and `RE007` guest trap.
+signature, `RE006` fuel exhaustion, `RE007` guest trap, and `RE008` stack overflow.
+
+`[build].stack_size` (bytes, default 1048576, multiple of 16, 4096 to 268435456)
+sets the stack used by `mb build` and `mb run`. A function frame larger than the
+stack is an LE900 compile error; exhausting the stack at run time reports RE008.

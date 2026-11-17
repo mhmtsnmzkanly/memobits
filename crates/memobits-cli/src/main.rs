@@ -30,11 +30,18 @@ fn diagnostic(number: u16, message: impl Into<String>) -> String {
     )
 }
 
+fn backend_options(project: &Project) -> memobits_wasm::CompileOptions {
+    memobits_wasm::CompileOptions {
+        stack_size: project.manifest.stack_size(),
+    }
+}
+
 fn project_error(error: Error) -> String {
     let code = match &error {
         Error::Io { .. } => 1,
         Error::Toml(_) => 2,
         Error::Invalid(_) => 3,
+        Error::Build(_) => 7,
     };
     diagnostic(code, error.to_string())
 }
@@ -195,6 +202,7 @@ fn runtime_error(error: memobits_runtime::RunError) -> String {
         RunError::Signature(_) => 5,
         RunError::FuelExhausted => 6,
         RunError::Trap(_) => 7,
+        RunError::StackOverflow => 8,
     };
     render(
         &Diagnostic::new(
@@ -343,7 +351,8 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         .signature
         .result
         .as_ref();
-    let bytes = memobits_wasm::compile(&program, &exports)
+    let options = backend_options(&project);
+    let bytes = memobits_wasm::compile_with(&program, &exports, &options)
         .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &resolution))?;
     let value = memobits_runtime::run(&bytes, "main").map_err(runtime_error)?;
     Ok(format!(
@@ -581,7 +590,8 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             let program = memobits_analysis::lower_resolved(&project, &result)
                 .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &result))?;
             let exports = build_exports(&project, &result, &program, library)?;
-            let bytes = memobits_wasm::compile(&program, &exports)
+            let options = backend_options(&project);
+            let bytes = memobits_wasm::compile_with(&program, &exports, &options)
                 .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &result))?;
             let output_path = output
                 .clone()

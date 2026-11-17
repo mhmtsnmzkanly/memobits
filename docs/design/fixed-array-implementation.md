@@ -126,8 +126,8 @@ expressions.
   elements. A loan on an array local overlaps every element (no index
   reasoning).
 - Wasm: every array-typed local and value owns an inline, element-aligned cell in
-  the activation frame; array operands push the cell address. Frames are capped
-  at 32 KiB (`MAX_FRAME_SIZE`); `checked_mul`/`checked_add` overflow and the cap
+  the activation frame; array operands push the cell address. A frame must fit the
+  configured `[build].stack_size` (default 1 MiB); `checked_mul`/`checked_add` overflow and the limit
   are backend diagnostics, never host allocations. `ElementAddr` does an
   unsigned compare against the length (negative indices become huge) in the
   index's own width, so 64-bit indices are never truncated, and traps with
@@ -233,7 +233,7 @@ WP3 lets arrays of primitive elements cross internal function calls.
   the callee's own cell, so a `var` parameter never writes into the caller and
   every recursive activation has its own copy. A whole-array `Store` through a
   share reference is a `memory.copy` too. Parameter cells count against the
-  32 KiB frame cap of the callee.
+  frame limit (the configured stack size) of the callee.
 - Exports: `main` and `[export]` functions with array or array-reference
   parameters are rejected by the backend with LE900 ("cannot take arrays or
   array references; the external array ABI is not defined"). There is no
@@ -303,8 +303,8 @@ WP4 finishes fixed arrays for primitive and nested-array elements.
   per array value.
 - Layout: `array_layout` is the size and alignment of an array type, the
   element size times the length with `checked_mul` at every level, so nested
-  sizes are products and overflow is the same "exceeds the 32 KiB activation
-  frame limit" diagnostic as an over-large frame. Layout cost depends on the
+  sizes are products and overflow is the same "exceeds the configured stack
+  size" diagnostic as an over-large frame. Layout cost depends on the
   nesting depth of the type only, never on a source-supplied count; no host
   allocation scales with a count. Call output cells, join parameter cells and
   nested value cells count against the cap (each array-typed IR value owns a

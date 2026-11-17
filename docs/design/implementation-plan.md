@@ -107,7 +107,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   initialiser; primitive field reads `p.x` in expressions and conditions; and
   `p.x.copy()`. `pub` types and fields work across modules. IR uses
   `TypeDef`/`Type::Struct`, `StructNew` and `FieldAddr` + `Load`; the backend
-  lays fields out in declaration order at natural alignment inside the 32 KiB frame.
+  lays fields out in declaration order at natural alignment inside the activation frame (bounded by the configured `[build].stack_size`, default 1 MiB).
   Reading a primitive field into an owned position copies it implicitly (see
   "Implicit primitive copy" below). Everything else on
   structs is gated with TE017 (`var` structs, field assignment, whole-struct
@@ -163,8 +163,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   and arrays or array references in exported signatures (`main`, `[export]`,
   parameters or results), which the backend rejects with LE900. Layout: each
   array local, value, call result and join parameter owns an inline cell in the
-  32 KiB-capped activation frame (repetition also uses a hidden accumulator
-  cell; sizes use checked multiplication and nested sizes are products);
+  activation frame, which must fit the configured `[build].stack_size` (default
+  1 MiB; repetition also uses a hidden accumulator cell, so it takes twice the
+  array size, a known inefficiency; sizes use checked multiplication and nested sizes are products);
   larger layouts are a backend diagnostic. Literal lengths are capped at
   `u32::MAX` as an analysis bound, not a memory guarantee. See the WP1-WP4
   checkpoints in `fixed-array-implementation.md`.

@@ -45,7 +45,7 @@ unsupported. The private pointer representation is not a stable ABI.
 A struct local or value also owns an inline frame cell. Fields are laid out in
 declaration order at natural alignment (size and alignment of the struct are those of
 its largest field, size rounded up) using checked arithmetic; the cell shares the
-32 KiB frame cap with arrays, and an oversized struct is a backend diagnostic.
+configured stack size (`[build].stack_size`) limit with arrays, and an oversized struct is a backend diagnostic.
 `StructNew` stores each field at its offset, in place in the destination local's cell
 when it is bound immediately (the array construction mechanism), and `FieldAddr` adds
 the constant field offset to the cell address, so `Load` is unchanged. Struct

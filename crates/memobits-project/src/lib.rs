@@ -10,6 +10,17 @@ use std::{
 
 pub const DEFAULT_MANIFEST: &str = "project.toml";
 
+/// Default `[build].stack_size`: 1 MiB.
+pub const DEFAULT_STACK_SIZE: u32 = 1024 * 1024;
+/// Smallest accepted `[build].stack_size`: 4 KiB.
+pub const MIN_STACK_SIZE: u32 = 4 * 1024;
+/// Largest accepted `[build].stack_size`: 256 MiB. Together with the reserved
+/// low addresses this stays far below the 4 GiB limit of a 32-bit memory and
+/// leaves room for static data and the heap.
+pub const MAX_STACK_SIZE: u32 = 256 * 1024 * 1024;
+/// `[build].stack_size` must be a multiple of this many bytes.
+pub const STACK_SIZE_ALIGNMENT: u32 = 16;
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -20,6 +31,17 @@ pub struct Manifest {
     pub prelude: BTreeMap<String, String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
+    #[serde(default)]
+    pub build: Build,
+}
+
+/// Optional `[build]` table.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    /// Size of the stack in bytes. Kept signed so a negative value reaches
+    /// validation with a clear message; see [`Manifest::stack_size`].
+    pub stack_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -64,13 +86,15 @@ pub enum Error {
     },
     Toml(toml::de::Error),
     Invalid(String),
+    /// A `[build]` setting is out of range or malformed.
+    Build(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Toml(source) => write!(f, "invalid project manifest: {source}"),
-            Self::Invalid(message) => f.write_str(message),
+            Self::Invalid(message) | Self::Build(message) => f.write_str(message),
         }
     }
 }
@@ -106,7 +130,32 @@ impl Manifest {
         manifest.validate()?;
         Ok(manifest)
     }
+    /// The validated stack size in bytes, or the 1 MiB default.
+    pub fn stack_size(&self) -> u32 {
+        self.build
+            .stack_size
+            .and_then(|size| u32::try_from(size).ok())
+            .unwrap_or(DEFAULT_STACK_SIZE)
+    }
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(size) = self.build.stack_size {
+            let range = format!("{MIN_STACK_SIZE} to {MAX_STACK_SIZE}");
+            if size <= 0 {
+                return Err(Error::Build(format!(
+                    "build.stack_size must be a positive number of bytes ({range}), got {size}"
+                )));
+            }
+            if size < i64::from(MIN_STACK_SIZE) || size > i64::from(MAX_STACK_SIZE) {
+                return Err(Error::Build(format!(
+                    "build.stack_size {size} is outside the supported range of {range} bytes"
+                )));
+            }
+            if size % i64::from(STACK_SIZE_ALIGNMENT) != 0 {
+                return Err(Error::Build(format!(
+                    "build.stack_size {size} must be a multiple of {STACK_SIZE_ALIGNMENT} bytes"
+                )));
+            }
+        }
         if self.package.name.trim().is_empty() {
             return Err(invalid("package.name must not be empty"));
         }
@@ -277,5 +326,26 @@ mod tests {
         assert!(Manifest::parse("[package]\nname='demo'\n[export]\nVector='math::Vec'").is_ok());
         assert!(Manifest::parse("[package]\nname='demo'\nentry='main::' ").is_err());
         assert!(Manifest::parse("[package]\nname='demo'\nentry='main::run'\nscr='src'").is_err());
+    }
+    #[test]
+    fn build_stack_size_defaults_and_validates() {
+        let base = "[package]\nname='demo'\nentry='main::run'\n";
+        assert_eq!(Manifest::parse(base).unwrap().stack_size(), 1_048_576);
+        let with = |v: &str| Manifest::parse(&format!("{base}[build]\nstack_size={v}\n"));
+        assert_eq!(with("4194304").unwrap().stack_size(), 4_194_304);
+        assert_eq!(with("4096").unwrap().stack_size(), 4096);
+        assert_eq!(with("268435456").unwrap().stack_size(), MAX_STACK_SIZE);
+        for bad in ["0", "-16", "4080", "4100", "268435472", "99999999999"] {
+            assert!(matches!(with(bad), Err(Error::Build(_))), "{bad}");
+        }
+        assert!(matches!(with("'big'"), Err(Error::Toml(_))));
+        assert!(matches!(with("1.5"), Err(Error::Toml(_))));
+        assert!(Manifest::parse(&format!("{base}[build]\nstack=1\n")).is_err());
+        assert_eq!(
+            Manifest::parse(&format!("{base}[build]\n"))
+                .unwrap()
+                .stack_size(),
+            DEFAULT_STACK_SIZE
+        );
     }
 }
