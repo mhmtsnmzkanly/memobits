@@ -1,0 +1,154 @@
+// Bounded byte lexer fixture. See docs/design/enf-lexer-slice.md for scope.
+type Bytes = Array<u8, 16>;
+
+type IntegerToken {
+    value: u32,
+    start: i32,
+    end: i32,
+}
+
+type LexError: Error {
+    offset: Option<i32>,
+}
+
+type Scan = Result<Option<IntegerToken>, LexError>;
+
+fn space(byte: u8) -> Bool {
+    byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+fn digit(byte: u8) -> Bool {
+    byte >= 48 && byte <= 57
+}
+
+fn digit_value(byte: u8) -> u32 {
+    // After digit() succeeds, count from ASCII zero with a u32 result.
+    var ascii: u8 = 48;
+    var value: u32 = 0;
+    loop {
+        if ascii == byte { return value; }
+        ascii += 1;
+        value += 1;
+    }
+}
+
+// Start the cursor at zero for each input and stop scanning after an error.
+fn scan(bytes: borrow Bytes, length: i32, cursor: share i32) -> Scan {
+    if length < 0 || length > 16 {
+        return Err(LexError { code: 1, offset: None });
+    }
+    loop {
+        let position := cursor.copy();
+        if position == length { return Ok(None); }
+        if !space(bytes[position]) { break; }
+        cursor += 1;
+    }
+
+    let start := cursor.copy();
+    if !digit(bytes[start]) {
+        return Err(LexError { code: 2, offset: Some(start) });
+    }
+    var value: u32 = 0;
+    loop {
+        // Index with an owned integer snapshot of the shared cursor.
+        let position := cursor.copy();
+        if position == length { break; }
+        let byte := bytes[position];
+        if !digit(byte) { break; }
+        let next := digit_value(byte);
+        if value > 429496729 || (value == 429496729 && next > 5) {
+            return Err(LexError { code: 3, offset: Some(position) });
+        }
+        value = value * 10 + next;
+        cursor += 1;
+    }
+    Ok(Some(IntegerToken { value: value, start: start, end: cursor.copy() }))
+}
+
+fn token_is(scan_result: Scan, value: u32, start: i32, end: i32) -> Bool {
+    match scan_result {
+        Ok(token) => match token {
+            Some(integer) => integer.value == value && integer.start == start && integer.end == end,
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn at_end(scan_result: Scan) -> Bool {
+    match scan_result {
+        Ok(token) => match token { None => true, Some(_) => false },
+        Err(_) => false,
+    }
+}
+
+fn error_is(scan_result: Scan, code: u32, offset: Option<i32>) -> Bool {
+    match scan_result {
+        Err(error) => {
+            let LexError { code: actual_code, offset: actual } := error;
+            if actual_code != code { return false; }
+            match actual {
+                Some(position) => match offset {
+                    Some(expected) => position == expected,
+                    None => false,
+                },
+                None => match offset { None => true, Some(_) => false },
+            }
+        },
+        Ok(_) => false,
+    }
+}
+
+fn main() -> Result<i32, Error> {
+    // The table in the design note defines the expected scans. Bytes after
+    // the supplied length are padding; the extra digit in spaced is ignored.
+    let spaces: Bytes = [9, 13, 10, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let spaced: Bytes = [32, 48, 48, 55, 9, 52, 50, 57, 0, 0, 0, 0, 0, 0, 0, 0];
+    let maximum: Bytes = [52, 50, 57, 52, 57, 54, 55, 50, 57, 53, 0, 0, 0, 0, 0, 0];
+    let overflow: Bytes = [52, 50, 57, 52, 57, 54, 55, 50, 57, 54, 0, 0, 0, 0, 0, 0];
+    let comma: Bytes = [49, 50, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let utf8: Bytes = [195, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    var cursor := 0;
+    if !at_end(scan(spaces.borrow(), 0, cursor.share())) { return Err(Error { code: 1 }); }
+    if !at_end(scan(spaces.borrow(), 4, cursor.share())) || cursor != 4 {
+        return Err(Error { code: 2 });
+    }
+    cursor = 0;
+    if !token_is(scan(spaced.borrow(), 7, cursor.share()), 7, 1, 4)
+        || !token_is(scan(spaced.borrow(), 7, cursor.share()), 42, 5, 7)
+        || !at_end(scan(spaced.borrow(), 7, cursor.share())) || cursor != 7 {
+        return Err(Error { code: 3 });
+    }
+    cursor = 0;
+    if !token_is(scan(maximum.borrow(), 10, cursor.share()), 4294967295, 0, 10)
+        || !at_end(scan(maximum.borrow(), 10, cursor.share())) {
+        return Err(Error { code: 4 });
+    }
+    cursor = 0;
+    if !error_is(scan(overflow.borrow(), 10, cursor.share()), 3, Some(9)) {
+        return Err(Error { code: 5 });
+    }
+    cursor = 0;
+    if !token_is(scan(comma.borrow(), 3, cursor.share()), 12, 0, 2)
+        || !error_is(scan(comma.borrow(), 3, cursor.share()), 2, Some(2)) {
+        return Err(Error { code: 6 });
+    }
+    cursor = 0;
+    if !error_is(scan(utf8.borrow(), 2, cursor.share()), 2, Some(0)) {
+        return Err(Error { code: 7 });
+    }
+    cursor = 0;
+    if !error_is(scan(utf8.borrow(), 1, cursor.share()), 2, Some(0)) {
+        return Err(Error { code: 8 });
+    }
+    cursor = 0;
+    if !error_is(scan(spaces.borrow(), -1, cursor.share()), 1, None) {
+        return Err(Error { code: 9 });
+    }
+    cursor = 0;
+    if !error_is(scan(spaces.borrow(), 17, cursor.share()), 1, None) {
+        return Err(Error { code: 10 });
+    }
+    Ok(0)
+}

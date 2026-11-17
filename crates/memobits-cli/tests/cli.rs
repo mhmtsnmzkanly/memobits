@@ -9,18 +9,29 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
+    assert_example_runs_in_both_modes("astar", b"Result: Ok(i32(12))\n");
+}
+
+#[test]
+fn enf_lexer_example_checks_byte_fixtures_in_source_and_wasm() {
+    assert_example_runs_in_both_modes("enf-lexer", b"Result: Ok(i32(0))\n");
+}
+
+fn assert_example_runs_in_both_modes(project: &str, expected: &[u8]) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/projects/astar/project.toml");
+        .join("../../examples/projects")
+        .join(project)
+        .join("project.toml");
     let manifest = manifest.to_str().unwrap();
     // Build into an isolated directory so the standalone run uses only Wasm.
     let f = Fixture::new();
     let source = f.run(&["run", "--project", manifest]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(i32(12))\n");
+    assert_eq!(source.stdout, expected);
 
-    let build = f.run(&["build", "--project", manifest, "--output", "astar.wasm"]);
+    let build = f.run(&["build", "--project", manifest, "--output", "example.wasm"]);
     assert!(build.status.success(), "{build:?}");
-    let artifact = f.run(&["run", "astar.wasm"]);
+    let artifact = f.run(&["run", "example.wasm"]);
     assert!(artifact.status.success(), "{artifact:?}");
     assert_eq!(artifact.stdout, source.stdout);
 }

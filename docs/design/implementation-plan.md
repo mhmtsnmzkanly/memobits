@@ -209,8 +209,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `Result` and `Attempt` functions with primitive success payloads.
 - Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
-- The [bounded ENF lexer fixture](enf-lexer-slice.md) has a design and
-  acceptance cases. Implementation and protocol conformance are pending.
+- The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
+  acceptance cases from source and standalone Wasm. Protocol grammar,
+  UTF-8 token handling and parser conformance require a protocol reference.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

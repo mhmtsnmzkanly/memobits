@@ -49,24 +49,26 @@ Keep offsets in bytes. Once the protocol reference establishes where text
 is permitted, define the UTF-8 validation and scalar-handling contract for
 those tokens.
 
-## Next implementation and verification
+## Implementation and verification
 
-Add a self-checking project under `examples/projects/enf-lexer` using fixed
-arrays, a mutable cursor passed by `share`, owned outcomes, and a nominal
-`LexError` derived from `Error`. Build the byte fixtures in guest code.
-Assert values, spans, error codes and offsets, and check that trailing padding
-is ignored. Return `Result<i32, Error>` from `main` so the CLI can compare the
-same typed output in both modes. Each fixture failure should return a distinct
-entry error code. Successful verification should print `Result: Ok(i32(0))`
-in both modes.
+The [self-checking project](../../examples/projects/enf-lexer/src/main.mb)
+uses guest-side fixed arrays, a mutable cursor passed by `share`, owned
+outcomes, and a nominal `LexError` derived from `Error`. Array indexing uses
+an owned snapshot from `cursor.copy()` because a shared cursor used directly
+as an index produces TE007. Digit conversion counts from ASCII zero with a
+`u32` result using the supported typed arithmetic.
 
-Once the project exists, run from the repository root.
+The checks cover values, spans, error codes and offsets, and verify that
+trailing padding is ignored. Each failed check returns a distinct entry code
+from `main`. Both runs print `Result: Ok(i32(0))` on success. From the
+repository root, run:
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/enf-lexer/project.toml
-cargo run -p memobits-cli -- build --project examples/projects/enf-lexer/project.toml
-cargo run -p memobits-cli -- run examples/projects/enf-lexer/target/memobits/app.wasm
+artifact_dir=$(mktemp -d)
+cargo run -p memobits-cli -- build --project examples/projects/enf-lexer/project.toml --output "$artifact_dir/enf.wasm"
+cargo run -p memobits-cli -- run "$artifact_dir/enf.wasm"
 ```
 
-Add a CLI integration test against that manifest, building into a temporary
-directory for the standalone artifact run.
+The CLI integration test uses this manifest and runs the built artifact from
+an isolated temporary directory.
