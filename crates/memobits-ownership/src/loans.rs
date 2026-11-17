@@ -1,10 +1,10 @@
 //! Experimental loan liveness over validated reference IR.
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    Access, ArrayInit, Block, Edge, Function, Instruction, InstructionKind, LocalId, Operand,
-    Program, Source, TerminatorKind, Type, UseMode, ValueId,
+    Access, ArrayInit, Block, Constant, Edge, Function, Instruction, InstructionKind, LoanId,
+    LocalId, Operand, Program, Source, TerminatorKind, Type, UseMode, ValueId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -23,17 +23,75 @@ enum Root {
     External,
 }
 
+/// One projection step below a root: a struct field, an array element with a
+/// known constant index, or an array element with an unknown index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Step {
+    Field(u32),
+    Const(u128),
+    Dynamic,
+}
+
+/// A memory location: a root and the projection path from it. A path that is a
+/// prefix of another names an enclosing location, which overlaps it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Place {
+    root: Root,
+    path: Vec<Step>,
+}
+
+impl Place {
+    fn whole(root: Root) -> Self {
+        Self {
+            root,
+            path: Vec::new(),
+        }
+    }
+}
+
+/// Conservative step overlap: only provably different steps are disjoint.
+/// Distinct fields never overlap, distinct constant indices never overlap, and
+/// a dynamic index may equal any index.
+fn steps_may_overlap(left: Step, right: Step) -> bool {
+    match (left, right) {
+        (Step::Field(a), Step::Field(b)) => a == b,
+        (Step::Const(a), Step::Const(b)) => a == b,
+        _ => true,
+    }
+}
+
+fn places_may_overlap(left: &Place, right: &Place) -> bool {
+    if left.root == Root::External && right.root == Root::External {
+        return true;
+    }
+    left.root == right.root
+        && left
+            .path
+            .iter()
+            .zip(&right.path)
+            .all(|(a, b)| steps_may_overlap(*a, *b))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Provenance {
-    roots: BTreeSet<Root>,
+    roots: BTreeSet<Place>,
+    /// Every loan this reference derives from, including its own.
     loans: BTreeSet<LoanKey>,
+    /// The loans created for this reference itself. A loan that is only an
+    /// ancestor of a live reference is an intermediate path step: it stays
+    /// reachable for transport checks but does not conflict on its own, since
+    /// the live descendants cover exactly the memory still reachable.
+    own: BTreeSet<LoanKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LoanInfo {
-    roots: BTreeSet<Root>,
+    roots: BTreeSet<Place>,
     parents: BTreeSet<LoanKey>,
     access: Access,
+    /// Only set on entries of the active set: a live reference holds this loan
+    /// itself rather than through a descendant.
+    direct: bool,
 }
 
 #[derive(Clone)]
@@ -109,6 +167,8 @@ pub fn check_loans(program: &Program) -> Vec<Diagnostic> {
 fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
     let reachable = reachable(function);
     let liveness = liveness(function, &reachable);
+    let consts = constants(function);
+    let intermediates = intermediate_addresses(function);
     let (inputs, infos) = provenance(function, &reachable);
     let mut diagnostics = Vec::new();
 
@@ -125,7 +185,13 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &infos,
             );
             let mut after_state = state.clone();
-            transfer_provenance(function, instruction, &mut after_state, &mut infos.clone());
+            transfer_provenance(
+                function,
+                instruction,
+                &mut after_state,
+                &mut infos.clone(),
+                &consts,
+            );
             let after = active_loans(
                 function,
                 &after_state,
@@ -140,9 +206,17 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &before,
                 &after,
                 &infos,
+                &consts,
+                &intermediates,
                 &mut diagnostics,
             );
-            transfer_provenance(function, instruction, &mut state, &mut infos.clone());
+            transfer_provenance(
+                function,
+                instruction,
+                &mut state,
+                &mut infos.clone(),
+                &consts,
+            );
         }
         check_terminator(
             function,
@@ -226,7 +300,9 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Load { reference: operand } => vec![operand],
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
-        InstructionKind::FieldAddr { base, .. } => vec![base],
+        InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
+            vec![base]
+        }
         InstructionKind::StructNew { fields, .. } => fields.iter().collect(),
         InstructionKind::ArrayNew { init } => match init {
             ArrayInit::Elements(elements) => elements.iter().collect(),
@@ -412,24 +488,157 @@ fn roots_for_owner(function: &Function, state: &[Provenance], operand: &Operand)
     if type_at(function, operand.source).is_some_and(is_reference) {
         let mut provenance = operand_provenance(function, state, operand);
         if provenance.roots.is_empty() {
-            provenance.roots.insert(Root::External);
+            provenance.roots.insert(Place::whole(Root::External));
         }
         provenance
     } else {
         let mut provenance = Provenance::default();
         match operand.source {
             Source::Local(local) => {
-                provenance.roots.insert(Root::Local(local.0));
+                provenance.roots.insert(Place::whole(Root::Local(local.0)));
             }
             Source::Value(value) => {
-                provenance.roots.insert(Root::Value(value.0));
+                provenance.roots.insert(Place::whole(Root::Value(value.0)));
             }
             Source::Function(_) => {
-                provenance.roots.insert(Root::External);
+                provenance.roots.insert(Place::whole(Root::External));
             }
         }
         provenance
     }
+}
+
+/// The locations an address instruction (`Borrow`, `FieldAddr`, `ElementAddr`)
+/// may refer to: the owner's locations extended by the instruction's step.
+/// External locations carry no path, because two unknown bases cannot be
+/// compared field by field.
+fn address_provenance(
+    function: &Function,
+    state: &[Provenance],
+    instruction: &Instruction,
+    consts: &[Option<u128>],
+) -> Option<(Provenance, Access, LoanId)> {
+    let (loan, owner, access, step) = match &instruction.kind {
+        InstructionKind::Borrow {
+            loan,
+            owner,
+            access,
+        } => (loan, owner, access, None),
+        InstructionKind::FieldAddr {
+            loan,
+            base,
+            field,
+            access,
+        } => (loan, base, access, Some(Step::Field(*field))),
+        InstructionKind::ElementAddr {
+            loan,
+            base,
+            index,
+            access,
+        } => {
+            let step = match index.source {
+                Source::Value(value) => consts
+                    .get(value.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map_or(Step::Dynamic, Step::Const),
+                _ => Step::Dynamic,
+            };
+            (loan, base, access, Some(step))
+        }
+        _ => return None,
+    };
+    let mut provenance = roots_for_owner(function, state, owner);
+    if let Some(step) = step {
+        provenance.roots = provenance
+            .roots
+            .into_iter()
+            .map(|mut place| {
+                if place.root != Root::External {
+                    place.path.push(step);
+                }
+                place
+            })
+            .collect();
+    }
+    Some((provenance, *access, *loan))
+}
+
+/// Address values that exist only to be projected further (`g.rows` in
+/// `g.rows[0]`): used exactly once, as the base of another address instruction.
+/// Their creation is path computation, not an access of their own place; the
+/// final address instruction of the chain carries the access and is checked.
+fn intermediate_addresses(function: &Function) -> HashSet<u32> {
+    let mut uses = vec![0u32; function.values.len()];
+    let mut as_base = vec![0u32; function.values.len()];
+    let mut count = |operand: &Operand, base: bool| {
+        if let Source::Value(value) = operand.source {
+            if let Some(slot) = uses.get_mut(value.0 as usize) {
+                *slot += 1;
+            }
+            if base {
+                if let Some(slot) = as_base.get_mut(value.0 as usize) {
+                    *slot += 1;
+                }
+            }
+        }
+    };
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            let base = match &instruction.kind {
+                InstructionKind::FieldAddr { base, .. }
+                | InstructionKind::ElementAddr { base, .. } => Some(base),
+                _ => None,
+            };
+            for operand in instruction_operands(&instruction.kind) {
+                count(
+                    operand,
+                    base.is_some_and(|base| std::ptr::eq(base, operand)),
+                );
+            }
+        }
+        for operand in terminator_operands(&block.terminator.kind) {
+            count(operand, false);
+        }
+    }
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                InstructionKind::FieldAddr { .. }
+                    | InstructionKind::ElementAddr { .. }
+                    | InstructionKind::Borrow { .. }
+            )
+        })
+        .filter_map(|instruction| instruction.output)
+        .filter(|output| uses[output.0 as usize] == 1 && as_base[output.0 as usize] == 1)
+        .map(|output| output.0)
+        .collect()
+}
+
+/// Integer constants by value id, so constant indices can be told apart.
+fn constants(function: &Function) -> Vec<Option<u128>> {
+    let mut result = vec![None; function.values.len()];
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            if let (InstructionKind::Constant(Constant::Integer(text)), Some(output)) =
+                (&instruction.kind, instruction.output)
+            {
+                let text = text.replace('_', "");
+                let parsed = match text.strip_prefix("0x") {
+                    Some(hex) => u128::from_str_radix(hex, 16).ok(),
+                    None => text.parse::<u128>().ok(),
+                };
+                if let Some(slot) = result.get_mut(output.0 as usize) {
+                    *slot = parsed;
+                }
+            }
+        }
+    }
+    result
 }
 
 fn merge_info(infos: &mut HashMap<LoanKey, LoanInfo>, key: LoanKey, info: LoanInfo) -> bool {
@@ -451,6 +660,7 @@ fn transfer_provenance(
     instruction: &Instruction,
     state: &mut [Provenance],
     infos: &mut HashMap<LoanKey, LoanInfo>,
+    consts: &[Option<u128>],
 ) -> bool {
     let Some(output) = instruction.output else {
         if let InstructionKind::Assign { target, value, .. } = &instruction.kind {
@@ -468,33 +678,23 @@ fn transfer_provenance(
     };
     let output_index = function.locals.len() + output.0 as usize;
     let new = match &instruction.kind {
-        InstructionKind::Borrow {
-            loan,
-            owner,
-            access,
-        }
-        | InstructionKind::ElementAddr {
-            loan,
-            base: owner,
-            access,
-            ..
-        }
-        | InstructionKind::FieldAddr {
-            loan,
-            base: owner,
-            access,
-            ..
-        } => {
-            let owner_provenance = roots_for_owner(function, state, owner);
+        InstructionKind::Borrow { .. }
+        | InstructionKind::ElementAddr { .. }
+        | InstructionKind::FieldAddr { .. } => {
+            let (owner_provenance, access, loan) =
+                address_provenance(function, state, instruction, consts)
+                    .expect("address instruction");
             let key = LoanKey::Site(loan.0);
             let info = LoanInfo {
                 roots: owner_provenance.roots.clone(),
                 parents: owner_provenance.loans.clone(),
-                access: *access,
+                access,
+                direct: false,
             };
             let info_changed = merge_info(infos, key, info);
             let mut new = owner_provenance;
             new.loans.insert(key);
+            new.own = BTreeSet::from([key]);
             if let Some(slot) = state.get_mut(output_index) {
                 let state_changed = *slot != new;
                 *slot = new;
@@ -512,8 +712,9 @@ fn transfer_provenance(
         }
         InstructionKind::Call { .. } if is_reference(&function.values[output.0 as usize]) => {
             Provenance {
-                roots: BTreeSet::from([Root::External]),
+                roots: BTreeSet::from([Place::whole(Root::External)]),
                 loans: BTreeSet::new(),
+                own: BTreeSet::new(),
             }
         }
         _ => Provenance::default(),
@@ -530,6 +731,7 @@ fn provenance(
     reachable: &[bool],
 ) -> (Vec<Vec<Provenance>>, HashMap<LoanKey, LoanInfo>) {
     let slots = slot_count(function);
+    let consts = constants(function);
     let mut inputs = vec![vec![Provenance::default(); slots]; function.blocks.len()];
     let mut infos = HashMap::new();
     for (local, parameter) in function
@@ -540,14 +742,16 @@ fn provenance(
         if parameter.access != Access::Owned {
             let key = LoanKey::Parameter(local.0);
             let info = LoanInfo {
-                roots: BTreeSet::from([Root::Parameter(local.0)]),
+                roots: BTreeSet::from([Place::whole(Root::Parameter(local.0))]),
                 parents: BTreeSet::new(),
                 access: parameter.access,
+                direct: false,
             };
             merge_info(&mut infos, key, info);
             inputs[function.entry.0 as usize][local.0 as usize] = Provenance {
-                roots: BTreeSet::from([Root::Parameter(local.0)]),
+                roots: BTreeSet::from([Place::whole(Root::Parameter(local.0))]),
                 loans: BTreeSet::from([key]),
+                own: BTreeSet::from([key]),
             };
         }
     }
@@ -561,7 +765,7 @@ fn provenance(
             }
             let mut state = inputs[block_index].clone();
             for instruction in &block.instructions {
-                transfer_provenance(function, instruction, &mut state, &mut infos);
+                transfer_provenance(function, instruction, &mut state, &mut infos, &consts);
             }
             for edge in edges(&block.terminator.kind) {
                 let Some(target) = function.blocks.get(edge.target.0 as usize) else {
@@ -580,6 +784,7 @@ fn provenance(
                 for (target, incoming) in target_state.iter_mut().zip(edge_state) {
                     target.roots.extend(incoming.roots);
                     target.loans.extend(incoming.loans);
+                    target.own.extend(incoming.own);
                 }
             }
         }
@@ -598,6 +803,7 @@ fn active_loans(
 ) -> HashMap<LoanKey, LoanInfo> {
     let mut active = HashMap::new();
     let mut queue = VecDeque::new();
+    let mut direct = BTreeSet::new();
     for (index, provenance) in state.iter().enumerate() {
         let reference = if index < function.locals.len() {
             is_reference(&function.locals[index].ty)
@@ -609,6 +815,7 @@ fn active_loans(
         };
         if live.get(index).copied().unwrap_or(false) && reference {
             queue.extend(provenance.loans.iter().copied());
+            direct.extend(provenance.own.iter().copied());
         }
     }
     while let Some(key) = queue.pop_front() {
@@ -616,8 +823,10 @@ fn active_loans(
             continue;
         }
         if let Some(info) = infos.get(&key) {
-            active.insert(key, info.clone());
             queue.extend(info.parents.iter().copied());
+            let mut info = info.clone();
+            info.direct = direct.contains(&key);
+            active.insert(key, info);
         }
     }
     active
@@ -698,9 +907,9 @@ fn check_transport(
     }
 }
 
-fn roots_overlap(left: &BTreeSet<Root>, right: &BTreeSet<Root>) -> bool {
-    left.contains(&Root::External) && right.contains(&Root::External)
-        || left.iter().any(|root| right.contains(root))
+fn roots_overlap(left: &BTreeSet<Place>, right: &BTreeSet<Place>) -> bool {
+    left.iter()
+        .any(|a| right.iter().any(|b| places_may_overlap(a, b)))
 }
 
 fn loan_conflicts(new_access: Access, active_access: Access) -> bool {
@@ -725,8 +934,8 @@ fn parent_closure(
     result
 }
 
-fn immutable_root(function: &Function, roots: &BTreeSet<Root>) -> bool {
-    roots.iter().any(|root| match root {
+fn immutable_root(function: &Function, roots: &BTreeSet<Place>) -> bool {
+    roots.iter().any(|place| match &place.root {
         Root::Local(local) => function
             .locals
             .get(*local as usize)
@@ -737,13 +946,14 @@ fn immutable_root(function: &Function, roots: &BTreeSet<Root>) -> bool {
 }
 
 fn active_conflict(
-    roots: &BTreeSet<Root>,
+    roots: &BTreeSet<Place>,
     access: Access,
     active: &HashMap<LoanKey, LoanInfo>,
     exempt: &BTreeSet<LoanKey>,
 ) -> Option<LoanKey> {
     active.iter().find_map(|(key, info)| {
-        (!exempt.contains(key)
+        (info.direct
+            && !exempt.contains(key)
             && roots_overlap(roots, &info.roots)
             && loan_conflicts(access, info.access))
         .then_some(*key)
@@ -767,6 +977,8 @@ fn check_instruction(
     active_before: &HashMap<LoanKey, LoanInfo>,
     active_after: &HashMap<LoanKey, LoanInfo>,
     infos: &HashMap<LoanKey, LoanInfo>,
+    consts: &[Option<u128>],
+    intermediates: &HashSet<u32>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match &instruction.kind {
@@ -805,7 +1017,9 @@ fn check_instruction(
                     }
                 }
             }
-            let provenance = source_provenance(function, state, owner);
+            let provenance = address_provenance(function, state, instruction, consts)
+                .expect("address instruction")
+                .0;
             let ancestors = parent_closure(&provenance.loans, infos);
             if *access == Access::Share && immutable_root(function, &provenance.roots) {
                 diagnostics.push(diagnostic(
@@ -823,10 +1037,13 @@ fn check_instruction(
                     "Share loan site is re-entered while an earlier instance remains live",
                 ));
             }
+            let transient = instruction
+                .output
+                .is_some_and(|output| intermediates.contains(&output.0));
             if let Some(conflict) =
                 active_conflict(&provenance.roots, *access, active_before, &ancestors)
             {
-                if !repeated_site {
+                if !repeated_site && !transient {
                     diagnostics.push(diagnostic(
                         5,
                         instruction.span,
@@ -880,7 +1097,7 @@ fn check_instruction(
             }
         }
         InstructionKind::Assign { target, .. } => {
-            let roots = BTreeSet::from([Root::Local(target.0)]);
+            let roots = BTreeSet::from([Place::whole(Root::Local(target.0))]);
             if let Some(conflict) =
                 active_conflict(&roots, Access::Share, active_after, &BTreeSet::new())
             {

@@ -33,14 +33,29 @@ support reference returns.
 
 Struct owners follow the array rules: `StructNew` consumes its field operands,
 `FieldAddr` reads (not consumes) its owner (a struct local or a reference to one) and
-creates a loan, and any field loan overlaps the whole struct (no field-disjoint
-reasoning yet). Whole structs move like arrays (`Assign`, `Capture`, call arguments,
+creates a loan. `Extract` (destructuring) reads or, last, consumes its owner like any
+other owner operand. Whole structs move like arrays (`Assign`, `Capture`, call arguments,
 returns, join arguments); a field write or a move while a borrow of the struct is live
 is BE005, and two `Share` arguments of one struct in a call are BE005. A2 and A3
 (nested structs, array fields, arrays of structs; mixed `FieldAddr`/`ElementAddr` chains)
-needed no new rules: every address in a chain is a loan rooted at the root local, so a
-live reference to any sub-aggregate blocks writes anywhere in the root (field-disjoint
-loans are a later package).
+needed no new rules beyond the paths below.
+
+Field-disjoint loans (A4). Provenance and loans track *places*: a root (local, temporary,
+reference parameter, or external) plus a projection path of steps `Field(i)`,
+`Const(n)` (an index that is an integer `Constant` instruction) and `Dynamic` (any other
+index). `Borrow` keeps the owner's path; `FieldAddr` and `ElementAddr` extend it by one
+step (a path below an external root is not extended). Two places overlap when they have the
+same root and every step of the shorter path may equal the corresponding step of the longer
+one: distinct fields never overlap, distinct constant indices never overlap, a dynamic index
+may equal any index, and a prefix (a parent) overlaps everything below it. External roots
+overlap each other. This rule is applied to loan creation, loads, stores, owner moves and
+assignments, terminator operands and call arguments (`f(l.a.share(), l.b.share())` and
+`f(m[0].share(), m[1].share())` pass; `f(m[i].share(), m[j].share())` does not). Two
+refinements keep chains precise: an address value used exactly once as the base of another
+address instruction (`g.rows` in `g.rows[0]`) is path computation, so its creation is not
+checked as an access of its own place; and a loan that is live only as an ancestor of a live
+reference does not conflict by itself, the live descendants cover the memory still
+reachable. When in doubt, places overlap.
 
 Run tests with `cargo test --offline -p memobits-ownership`.
 

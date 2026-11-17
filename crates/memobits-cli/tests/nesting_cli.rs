@@ -278,7 +278,7 @@ fn zero_length_arrays_of_structs_and_per_element_repetition() {
 }
 
 #[test]
-fn sub_aggregates_can_be_lent_with_the_root_wide_loan_rule() {
+fn sub_aggregates_can_be_lent_and_disjoint_fields_are_independent() {
     let f = Fixture::new();
     assert_eq!(
         f.result(&format!(
@@ -299,20 +299,36 @@ fn sub_aggregates_can_be_lent_with_the_root_wide_loan_rule() {
         // 22 + 44 + 66 + 9
         "Result: i32(141)"
     );
-    // Conservative rule: a live reference to l.a blocks writing l.b. A later
-    // package relaxes this for proven disjoint fields.
-    let message = f.error(
-        &format!(
+    // A4: a live reference to l.a does not block writing l.b.
+    assert_eq!(
+        f.result(&format!(
             "{TYPES}fn main() -> i32 {{\n\
                  var l := Line {{ a: P {{ x: 1, y: 2 }}, b: P {{ x: 3, y: 4 }} }};\n\
                  let r := l.a.borrow();\n\
                  l.b.x = 5;\n\
-                 r.x\n\
+                 r.x * 10 + l.b.x\n\
              }}"
-        ),
-        "BE005",
+        )),
+        "Result: i32(15)"
     );
-    assert!(message.contains("l.b.x = 5"), "{message}");
+    // ... but writing the same field, or the whole root, still conflicts.
+    for write in [
+        "l.a.x = 5;",
+        "l = Line { a: P { x: 0, y: 0 }, b: P { x: 0, y: 0 } };",
+    ] {
+        let message = f.error(
+            &format!(
+                "{TYPES}fn main() -> i32 {{\n\
+                     var l := Line {{ a: P {{ x: 1, y: 2 }}, b: P {{ x: 3, y: 4 }} }};\n\
+                     let r := l.a.borrow();\n\
+                     {write}\n\
+                     r.x\n\
+                 }}"
+            ),
+            "BE005",
+        );
+        assert!(message.contains(write), "{message}");
+    }
 }
 
 #[test]

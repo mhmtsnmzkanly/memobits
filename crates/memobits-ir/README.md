@@ -36,6 +36,11 @@ and other structs, is rejected by validation. Mixed `FieldAddr` / `ElementAddr` 
 (`a[i].pts[j].x`) address nested aggregates level by level. Structs may be owned,
 `borrow` or `share` parameters, function results and block parameters, and a
 reference may refer to a struct; a whole-struct `Load` is invalid (fields are
-addressed and loaded one by one).
+addressed and loaded one by one). `Extract { base, field }` is the single way a field
+leaves a struct as an owned value (whole-value destructuring): it reads a struct owner
+with `Read`, or with `Consume` on the last extraction, and yields a fresh value of the
+field's type. Validation requires that an aggregate extraction with a `Read` base is
+followed in the same block by a consuming use (`Extract` or `Capture`) of the same base,
+so the whole value is consumed exactly once and no partial move can be expressed.
 
 Run tests with `cargo test --offline -p memobits-ir`.

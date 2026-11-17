@@ -14,7 +14,8 @@ use memobits_ir::{
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
-    Access, Block, Expr, ExprKind, ItemKind, Module, Parameter, StatementKind, Type,
+    Access, Block, Expr, ExprKind, FieldPattern, ItemKind, Module, Parameter, Statement,
+    StatementKind, Type,
 };
 
 mod typetable;
@@ -221,9 +222,9 @@ fn flow_block(block: &Block) -> Flow {
     let mut flow = Flow::NEXT;
     for statement in &block.statements {
         flow = flow.then(match &statement.kind {
-            StatementKind::Binding { value, .. } | StatementKind::Expression(value) => {
-                flow_expr(value)
-            }
+            StatementKind::Binding { value, .. }
+            | StatementKind::Destructure { value, .. }
+            | StatementKind::Expression(value) => flow_expr(value),
             StatementKind::Assign { target, value, .. } => flow_expr(target).then(flow_expr(value)),
             StatementKind::Return(value) => value
                 .as_ref()
@@ -674,6 +675,149 @@ impl Checker {
     fn lookup(&self, key: &str) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|scope| scope.get(key))
     }
+    /// `let P { x, y: alias } := value;`. The whole value is consumed; each
+    /// field binds a new owned local of the field's type.
+    fn destructure(
+        &mut self,
+        statement: &Statement,
+        mutable: bool,
+        path: &[String],
+        fields: &[FieldPattern],
+        value: &Expr,
+    ) {
+        let pattern_type = Type {
+            span: statement.span,
+            path: path.to_vec(),
+            arguments: Vec::new(),
+        };
+        let target = self.type_path(&pattern_type);
+        let table = Rc::clone(&self.table);
+        let info = match &target {
+            Ty::Struct(id, _) => Some(&table.structs[*id as usize]),
+            Ty::Error => None,
+            other => {
+                self.error(
+                    23,
+                    statement.span,
+                    format!("'{}' is not a struct type", name(other)),
+                );
+                None
+            }
+        };
+        self.allow_array_value(value);
+        let inferred = self.expr(value, Some(&target));
+        self.reject_extraction(value, &inferred);
+        if matches!(inferred, Ty::Reference { .. }) {
+            self.error(
+                2,
+                value.span,
+                "cannot destructure a reference; destructuring consumes an owned struct value",
+            );
+        } else {
+            self.ensure(&inferred, &target, value.span);
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        let mut bound: Vec<&str> = Vec::new();
+        let mut bindings = Vec::new();
+        for pattern in fields {
+            let declared =
+                info.and_then(|info| info.fields.iter().find(|field| field.name == pattern.field));
+            if let Some(info) = info {
+                if declared.is_none() {
+                    self.error(
+                        23,
+                        pattern.span,
+                        format!("struct '{}' has no field '{}'", info.name, pattern.field),
+                    );
+                }
+            }
+            if seen.contains(&pattern.field.as_str()) {
+                self.error(
+                    23,
+                    pattern.span,
+                    format!(
+                        "field '{}' is named more than once in the pattern",
+                        pattern.field
+                    ),
+                );
+            }
+            if bound.contains(&pattern.binding.as_str()) {
+                self.error(
+                    23,
+                    pattern.span,
+                    format!(
+                        "binding '{}' is introduced more than once in the pattern",
+                        pattern.binding
+                    ),
+                );
+            }
+            seen.push(&pattern.field);
+            bound.push(&pattern.binding);
+            let ty = declared.map_or(Ty::Error, |field| field.ty.clone());
+            bindings.push((pattern, ty));
+        }
+        if let Some(info) = info {
+            let missing: Vec<&str> = info
+                .fields
+                .iter()
+                .filter(|field| !seen.contains(&field.name.as_str()))
+                .map(|field| field.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                self.error(
+                    23,
+                    statement.span,
+                    format!(
+                        "destructuring of '{}' must name every field; missing: {}",
+                        info.name,
+                        missing.join(", ")
+                    ),
+                );
+            }
+            if info.module != self.module {
+                let private: Vec<&str> = info
+                    .fields
+                    .iter()
+                    .filter(|field| !field.public)
+                    .map(|field| field.name.as_str())
+                    .collect();
+                if !private.is_empty() {
+                    self.error(
+                        25,
+                        statement.span,
+                        format!(
+                            "cannot destructure struct '{}' outside module '{}': field(s) {} are private",
+                            info.name,
+                            info.module,
+                            private.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
+        // The bindings start after the initialiser, like `let`.
+        for (pattern, ty) in bindings {
+            let addr = pattern as *const FieldPattern as usize;
+            let id = self.register_local(
+                &pattern.binding,
+                &ty,
+                mutable,
+                IrAccess::Owned,
+                pattern.span,
+                addr,
+            );
+            self.scopes.last_mut().unwrap().insert(
+                pattern.binding.clone(),
+                Binding {
+                    ty,
+                    mutable,
+                    access: IrAccess::Owned,
+                    id,
+                    origin: addr,
+                },
+            );
+        }
+    }
     fn block(&mut self, block: &Block, expected: Option<&Ty>) -> (Ty, bool) {
         self.scopes.push(HashMap::new());
         for statement in &block.statements {
@@ -711,6 +855,12 @@ impl Checker {
                         },
                     );
                 }
+                StatementKind::Destructure {
+                    mutable,
+                    path,
+                    fields,
+                    value,
+                } => self.destructure(statement, *mutable, path, fields, value),
                 StatementKind::Assign {
                     target,
                     operator,

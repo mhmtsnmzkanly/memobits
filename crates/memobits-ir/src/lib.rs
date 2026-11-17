@@ -219,6 +219,17 @@ pub enum InstructionKind {
         field: u32,
         access: Access,
     },
+    /// Whole-value destructuring: read one field out of a struct owner into a
+    /// fresh owned value of the field's type (a primitive is copied, a nested
+    /// struct or array is moved by a bitwise copy). `base` is a struct owner
+    /// used with `Read`, or with `Consume` on the last extraction. An extraction
+    /// of an aggregate field with a `Read` base is only valid when a later
+    /// instruction of the same block consumes that base, so the whole value is
+    /// always consumed exactly once and no partial move is ever observable.
+    Extract {
+        base: Operand,
+        field: u32,
+    },
     /// Read the referent. The output is read-only provenance and cannot escape
     /// as an owned value without a future explicit copy operation.
     Load {
@@ -418,8 +429,15 @@ impl Program {
                 for value in &block.parameters {
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
                 }
-                for instruction in &block.instructions {
+                for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
+                    validate_extract_consumption(
+                        function,
+                        &block.instructions[instruction_index..],
+                        &mut errors,
+                        id,
+                        block_id,
+                    );
                     if let InstructionKind::Borrow { loan, .. }
                     | InstructionKind::ElementAddr { loan, .. }
                     | InstructionKind::FieldAddr { loan, .. } = &instruction.kind
@@ -694,6 +712,50 @@ fn use_mode_for_access(access: Access) -> Option<UseMode> {
         Access::Owned => None,
         Access::Borrow => Some(UseMode::Borrow),
         Access::Share => Some(UseMode::Share),
+    }
+}
+
+/// An aggregate `Extract` that only reads its base must be followed, in the
+/// same block, by an instruction that consumes the base. This keeps whole-value
+/// destructuring the only way an aggregate leaves a struct.
+fn validate_extract_consumption(
+    function: &Function,
+    rest: &[Instruction],
+    errors: &mut Vec<ValidationError>,
+    id: FunctionId,
+    block: BlockId,
+) {
+    let Some(Instruction {
+        kind: InstructionKind::Extract { base, .. },
+        output: Some(output),
+        ..
+    }) = rest.first()
+    else {
+        return;
+    };
+    let aggregate = function
+        .values
+        .get(output.0 as usize)
+        .is_some_and(|ty| matches!(ty, Type::Array { .. } | Type::Struct(_)));
+    if !aggregate || base.mode == UseMode::Consume {
+        return;
+    }
+    let consumed = rest[1..].iter().any(|later| match &later.kind {
+        InstructionKind::Extract { base: other, .. } => {
+            other.source == base.source && other.mode == UseMode::Consume
+        }
+        InstructionKind::Capture(operand) => {
+            operand.source == base.source && operand.mode == UseMode::Consume
+        }
+        _ => false,
+    });
+    if !consumed {
+        push(
+            errors,
+            id,
+            Some(block),
+            "aggregate field extraction must be followed by a consuming use of the whole value in the same block",
+        );
     }
 }
 
@@ -1258,6 +1320,70 @@ fn validate_instruction(
                 }
             }
         }
+        InstructionKind::Extract { base, field } => {
+            let actual = operand_type(program, function, base, errors, id, block);
+            if base.mode == UseMode::Borrow || base.mode == UseMode::Share {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "field extraction base must be read or consumed",
+                );
+            }
+            let field_type = match actual {
+                Some(Type::Struct(type_id)) => match program.types.get(type_id.0 as usize) {
+                    Some(TypeDef {
+                        kind: TypeDefKind::Struct { fields },
+                        ..
+                    }) => match fields.get(*field as usize) {
+                        Some(declared) => Some(declared.ty.clone()),
+                        None => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                format!("field index {field} is out of range"),
+                            );
+                            None
+                        }
+                    },
+                    None => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("struct type {:?} is out of range", type_id),
+                        );
+                        None
+                    }
+                },
+                Some(_) => {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "field extraction base must be a struct owner",
+                    );
+                    None
+                }
+                None => None,
+            };
+            match (out, field_type) {
+                (None, _) => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "field extraction requires an output value",
+                ),
+                (Some(output), Some(expected)) if output != &expected => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "field extraction output differs from the field type",
+                ),
+                _ => {}
+            }
+        }
         InstructionKind::Load { reference } => {
             let actual = operand_type(program, function, reference, errors, id, block);
             if instruction.output.is_none() {
@@ -1601,7 +1727,9 @@ fn validate_read_only_loaded_values(
                     report(block_id, base, false);
                     report(block_id, index, false);
                 }
-                InstructionKind::FieldAddr { base, .. } => report(block_id, base, false),
+                InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
+                    report(block_id, base, false)
+                }
                 InstructionKind::StructNew { fields, .. } => {
                     for field in fields {
                         report(block_id, field, true);

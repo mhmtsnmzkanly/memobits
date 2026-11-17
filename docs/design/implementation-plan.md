@@ -100,7 +100,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   execution share the same path and print scalar results. The former AST
   interpreter was removed from the repository and never defined the semantics.
 
-### Structs (A1, A2, A3)
+### Structs (A1, A2, A3, A4)
 
 - **Structs, first slice** (`memobits-analysis`, `-ir`, `-ownership`, `-wasm`):
   `type P { x: i32, pub y: i32 }` declarations with non-Unit primitive fields;
@@ -126,14 +126,21 @@ the implemented subset; a milestone is not complete merely because its crate exi
   (index, then index, then right-hand side, then the checked store), whole
   sub-aggregate replacement (`l.a = P { .. }`, `a[i] = P { .. }`,
   `p.pts = [..]`), `l.a.borrow()` / `a[i].share()` / `p.pts.borrow()` lent to
-  `borrow`/`share` parameters (any access through the root still overlaps the
-  whole root), and repetition of a struct literal evaluated per element.
+  `borrow`/`share` parameters (overlap follows projection paths since A4), and repetition of a struct literal evaluated per element.
   Moving a sub-aggregate out is TE022 for fields and elements alike (partial
   moves are deferred); recursive containment through arrays is TE026; layout
   nests with natural alignment and checked arithmetic inside the configured
   stack; structs and arrays in exported signatures stay LE900. Still gated:
   references to primitive fields and elements (`l.a.x.share()`), whole-struct
-  `.copy()`, field access on a call result and the A4 features. See the A3
+  `.copy()` and field access on a call result. See the A3 checkpoint in
+  `struct-implementation.md`.
+- **Structs, A4 (destructuring and disjoint loans)**: `let P { x, y: alias } := v;`
+  (and `var`) consumes the whole value and binds every field, primitive or
+  aggregate, through the IR instruction `Extract`; the validator keeps every other
+  partial move unrepresentable. Loans carry projection paths (fields, constant
+  and dynamic indices): distinct fields and distinct constant indices are
+  independent, a dynamic index overlaps every index, a parent overlaps its
+  children, and uncertain cases overlap. Structs are complete for this phase. See the A4
   checkpoint in `struct-implementation.md`.
 
 ### Known limits of the implemented subset
@@ -171,10 +178,10 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `share` parameters with the same `.borrow()` / `.share()` call-site spelling
   as primitives, element reads through either reference, element and compound
   writes and whole-array stores through `share`, local `let r := a.borrow();`
-  / `var r := a.share();` bindings and reborrowing a reference parameter. Any
-  element access overlaps the whole array in the loan checker (including rows:
-  two `share` rows of one matrix, or a write while any row/array borrow is
-  live, are BE005). Fixed arrays are complete for primitive and nested-array
+  / `var r := a.share();` bindings and reborrowing a reference parameter. Loans carry
+  projection paths (A4): two `share` rows of one matrix with constant indices
+  are independent, with a dynamic index (`m[i]`, `m[j]`) they are BE005, and a
+  write while an overlapping row or array borrow is live is BE005. Fixed arrays are complete for primitive and nested-array
   elements. Still gated: references to primitive elements (`a[0].share()`,
   TE017), indexing or borrowing a temporary (`make()[0]`, `[1, 2].borrow()`,
   TE017), extracting a row (aggregate element) into an owned position (TE022;
@@ -240,15 +247,16 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Milestone 13 (later design): task/host coordination, parallel execution,
   static storage, property/extension systems, ABI compatibility, and cross-language calls.
 - Milestone 4 gaps: enum type analysis, enum exhaustiveness, and three-state
-  outcome distinctions. Structs beyond A3 (A4: destructuring, field-disjoint loans) are gated, not analysed.
+  outcome distinctions. Struct forms beyond A4 (whole-struct `.copy()`, references to primitive fields) are gated, not analysed.
 
 ### Next step
 
 Fixed arrays of primitive and nested-array elements are complete (WP1-WP4), and
-structs through A3 (nesting of arrays and structs) are complete
-(`struct-implementation.md`). The next work is struct package A4: destructuring
-and field-disjoint loans (proven disjoint child fields borrowed independently;
-today every loan through a root overlaps the whole root). The implicit primitive copy
-decided in `decisions.md` is implemented. After that: copy of aggregates, enums on the same
-frame-cell model, and an external array ABI if exports ever need one. Keep TE017/TE022/LE900 gating every form not
-listed under the fixed-array and struct status above.
+structs are complete through A4 (nesting, destructuring and field-disjoint loans;
+`struct-implementation.md`). The next work is enums and `match` on the same
+frame-cell model, using the whole-value destructuring and path-aware loans as the
+base for variant payload patterns. The implicit primitive copy decided in
+`decisions.md` is implemented. After that: copy of aggregates, references to
+primitive fields, and an external array ABI if exports ever need one. Keep
+TE017/TE022/LE900 gating every form not listed under the fixed-array and struct
+status above.

@@ -277,15 +277,25 @@ fn results_and_values_follow_move_rules() {
 fn writes_conflict_with_live_borrows_of_the_whole_nested_array() {
     for source in [
         "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m.borrow(); m[1][0] = 9; r[0][0] + 0 }",
+        "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m[0].borrow(); m[0][0] += 1; r[1] + 0 }",
+        "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m[0].borrow(); m[0] = [1, 1]; r[0] + 0 }",
+        "fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {} \
+         fn main() { var m := [[1, 2], [3, 4]]; two(m[0].share(), m[0].share()); }",
+        "fn mixed(a: share Array<i32, 2>, b: borrow Array<i32, 2>) {} \
+         fn main() { var m := [[1, 2], [3, 4]]; mixed(m[0].share(), m[0].borrow()); }",
+    ] {
+        assert!(ownership(source).contains(&"BE005".into()), "{source}");
+    }
+    // Provably different constant rows are disjoint (A4 field-disjoint loans).
+    for source in [
         "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m[0].borrow(); m[1][0] = 9; r[0] + 0 }",
         "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m[0].borrow(); m[1] = [1, 1]; r[0] + 0 }",
-        "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m[0].borrow(); m[0][0] += 1; r[1] + 0 }",
         "fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {} \
          fn main() { var m := [[1, 2], [3, 4]]; two(m[0].share(), m[1].share()); }",
         "fn mixed(a: share Array<i32, 2>, b: borrow Array<i32, 2>) {} \
          fn main() { var m := [[1, 2], [3, 4]]; mixed(m[0].share(), m[1].borrow()); }",
     ] {
-        assert!(ownership(source).contains(&"BE005".into()), "{source}");
+        assert!(ownership(source).is_empty(), "{source}: {:?}", ownership(source));
     }
     // Once the borrow is dead the write is fine, and borrows can overlap.
     assert!(ownership(

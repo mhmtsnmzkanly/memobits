@@ -1,6 +1,6 @@
 # Structs project
 
-A buildable project for the struct slices A1, A2 and A3. `main::main` declares a
+A buildable project for the struct slices A1 to A4. `main::main` declares a
 `Size` struct with `i32`, `Bool` and `u8` fields, and uses `Point` from
 `src/geom.mb`, whose fields are all `pub`, through `use geom::Point;`.
 
@@ -25,12 +25,18 @@ It demonstrates:
   a literal, written with `sizes[1].width = 3;` and read through the
   `borrow` parameter of `total_area(sizes.borrow())`.
 
-Still gated: moving a sub-aggregate out (`let q := seg.to;`, TE022, partial
-moves are deferred), destructuring, references to primitive fields
-(`s.width.share()`), whole-struct
-`.copy()`, field access on a call result (`make_size(1, 2).width`) and structs in
-`main` or `[export]` signatures. See `docs/design/struct-implementation.md` for
-the A1, A2 and A3 checkpoints.
+- disjoint loans (A4): `let first := seg.from.borrow(); seg.to.y += 1;` writes
+  one field while a borrow of another is live, which the loan checker accepts
+  because the two locations cannot overlap;
+- destructuring (A4): `let Segment { from: start, to: end } := seg;` consumes
+  `seg` and binds every field (here two structs) to a new local.
+
+Still gated: moving a sub-aggregate out (`let q := seg.to;`, TE022, implicit
+partial moves are deferred), nested or partial destructuring patterns,
+references to primitive fields (`s.width.share()`), whole-struct `.copy()`,
+field access on a call result (`make_size(1, 2).width`) and structs in `main`
+or `[export]` signatures. See `docs/design/struct-implementation.md` for the
+A1 to A4 checkpoints.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/structs/project.toml
@@ -42,14 +48,17 @@ Observed output of each command, from the repository root (the absolute prefix
 of the built path is shortened to the repository root):
 
 ```text
-Result: i32(59)
-Built examples/projects/structs/target/memobits/app.wasm: 1 export(s), 2102 bytes
-Result: i32(59)
+Result: i32(63)
+Built examples/projects/structs/target/memobits/app.wasm: 1 export(s), 2570 bytes
+Result: i32(63)
 ```
 
-The result is 31 + 10 + 9 + 9. `make_size(3, 4)` builds a 3 by 4 `Size`, `grow`
+The result is 31 + 10 + 9 + 9 + 2 + 2. `make_size(3, 4)` builds a 3 by 4 `Size`, `grow`
 adds 2 to both sides through the `share` parameter, so `area` sees a 5 by 6
 square: `5 * 6` plus a bonus of 1 because `scale == 2`, gives 31. `p.x * p.y` is
 `2 * 5 = 10`. The segment ends at `(3, 5)` after the write and starts at
 `(1, 1)`, so `manhattan(seg.to.borrow()) + seg.from.x` is `8 + 1 = 9`. The two
 sizes are 1 by 1 and 3 by 2, whose areas (with the scale bonus) are `2 + 7 = 9`.
+After the write, `first` still reads the unchanged `from` point `(1, 1)`, so
+`flat` is `1 + 1 = 2`. Destructuring `seg` leaves `start = (1, 1)` and
+`end = (3, 6)`, so `spread` is `3 - 1 = 2`.

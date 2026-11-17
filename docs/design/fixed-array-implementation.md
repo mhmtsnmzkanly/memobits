@@ -219,7 +219,7 @@ WP3 lets arrays of primitive elements cross internal function calls.
 - Ownership and loans needed no new rules. An owned argument is captured (moved)
   when it is evaluated, so later arguments cannot use it (BE001). `.borrow()` /
   `.share()` are ordinary `Borrow` instructions rooted at the array local, so
-  every element access overlaps the whole array: an element write while a
+  every element access overlapped the whole array (A4 narrows this to projection paths: distinct constant indices are independent, a dynamic index overlaps every index): an element write while a
   borrow or share is live is BE005, two `share` (or share + borrow) arguments of
   one array in a call are BE005, and any number of `borrow` arguments are fine.
   These are tested in source form (`memobits-analysis/tests/array_references.rs`).

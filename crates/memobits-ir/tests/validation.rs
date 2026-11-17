@@ -1561,3 +1561,99 @@ fn nominal_struct_types_with_equal_fields_are_distinct() {
         "{errors:?}"
     );
 }
+
+fn extract_program(edit: impl FnOnce(&mut Program)) -> Program {
+    let mut program = struct_program();
+    // Replace the field address and load by one extraction of field `y`.
+    program.functions[0].values[3] = i32_ty();
+    program.functions[0].values.truncate(4);
+    program.functions[0].blocks[0].instructions.truncate(4);
+    program.functions[0].blocks[0].instructions.push(ins(
+        Some(3),
+        InstructionKind::Extract {
+            base: loc(0, UseMode::Consume),
+            field: 1,
+        },
+    ));
+    edit(&mut program);
+    program
+}
+
+fn extract_errors(edit: impl FnOnce(&mut Program)) -> Vec<String> {
+    extract_program(edit)
+        .validate()
+        .unwrap_err()
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
+}
+
+#[test]
+fn accepts_field_extraction_of_a_primitive_with_read_or_consume() {
+    assert_eq!(extract_program(|_| {}).validate(), Ok(()));
+    assert_eq!(
+        extract_program(|p| {
+            if let InstructionKind::Extract { base, .. } =
+                &mut p.functions[0].blocks[0].instructions[4].kind
+            {
+                base.mode = UseMode::Read;
+            }
+        })
+        .validate(),
+        Ok(())
+    );
+}
+
+#[test]
+fn rejects_invalid_field_extractions() {
+    let errors = extract_errors(|p| {
+        if let InstructionKind::Extract { field, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            *field = 2;
+        }
+    });
+    assert!(has(&errors, "field index 2 is out of range"), "{errors:?}");
+    let errors = extract_errors(|p| {
+        p.functions[0].values[3] = Type::Primitive(Primitive::Bool);
+    });
+    assert!(has(&errors, "differs from the field type"), "{errors:?}");
+    let errors = extract_errors(|p| {
+        if let InstructionKind::Extract { base, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            base.mode = UseMode::Borrow;
+        }
+    });
+    assert!(has(&errors, "read or consumed"), "{errors:?}");
+    let errors = extract_errors(|p| {
+        p.functions[0].blocks[0].instructions[4].output = None;
+    });
+    assert!(has(&errors, "requires an output"), "{errors:?}");
+}
+
+#[test]
+fn an_aggregate_extraction_must_be_followed_by_a_consuming_use() {
+    // Field `y` becomes a nested struct, so reading it out without consuming
+    // the whole value would be a partial move.
+    let nested = |p: &mut Program, mode: UseMode| {
+        p.types[0] = struct_def("P", vec![("x", i32_ty()), ("y", Type::Struct(TypeId(1)))]);
+        p.types.push(struct_def("Q", vec![("a", i32_ty())]));
+        p.functions[0].values[3] = Type::Struct(TypeId(1));
+        if let InstructionKind::Extract { base, .. } =
+            &mut p.functions[0].blocks[0].instructions[4].kind
+        {
+            base.mode = mode;
+        }
+    };
+    let errors = extract_errors(|p| nested(p, UseMode::Read));
+    assert!(
+        has(&errors, "consuming use of the whole value"),
+        "{errors:?}"
+    );
+    let errors = extract_errors(|p| nested(p, UseMode::Consume));
+    assert!(
+        !has(&errors, "consuming use of the whole value"),
+        "{errors:?}"
+    );
+}

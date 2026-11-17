@@ -195,7 +195,7 @@ fn transfer_instruction(
             transfer_operand(base, state, diagnostics.as_deref_mut(), function);
             transfer_operand(index, state, diagnostics, function);
         }
-        InstructionKind::FieldAddr { base, .. } => {
+        InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
             transfer_operand(base, state, diagnostics, function)
         }
         InstructionKind::StructNew { fields, .. } => {

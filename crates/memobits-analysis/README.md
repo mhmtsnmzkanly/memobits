@@ -124,7 +124,7 @@ followed to their targets wherever a type is named (annotations, signatures, arr
 element types, field types, literals); an alias cycle is TE026. Standalone checking
 (`check_types`, `lower_module`) uses the same table with a single unnamed module.
 
-Executable support covers A1, A2 and A3. A1: a struct literal `P { y: 2, x: 1 }` (all
+Executable support covers A1 to A4. A1: a struct literal `P { y: 2, x: 1 }` (all
 fields exactly once, any order, evaluated in source order) as the initialiser of a
 `let` binding, and primitive field reads `p.x` (copied implicitly into owned
 positions such as `f(p.x)`; `p.x.copy()` is optional).
@@ -161,3 +161,14 @@ arrays, is TE026.
 Structs in exported signatures are rejected later by the backend (LE900). Enum types used as value types report TE001 (and the declaration TE016).
 Lowering emits `StructNew` and `FieldAddr` + `Load`; `TypedModule::types` carries the
 checked struct definitions.
+
+A4 adds whole-value destructuring `let P { x, y: alias } := value;` (`var` for mutable
+bindings). Every field is named exactly once (missing, unknown or duplicate fields and
+duplicate binding names are TE023; naming a non-struct is TE023; a reference source is
+TE002; a field-extraction source such as `l.a` is TE022; a struct with a private field
+from another module is TE025). Each field binds a new owned local of the field's type,
+primitive or aggregate. Lowering evaluates the initialiser once, emits one
+`Extract { base, field }` plus an initialising `Assign` per binding in pattern order, and
+makes the last extraction `Consume` the whole value, so a source local is moved (BE001
+on later use) and a call result or literal is simply consumed. A struct with no fields
+is consumed by a `Capture`.

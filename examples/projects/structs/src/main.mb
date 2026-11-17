@@ -1,7 +1,8 @@
 // Structs with primitive fields: a constructor function, a function that
 // mutates its argument through `share`, a function that reads through `borrow`,
 // field reads and writes, and a public struct from another module. Aggregates
-// nest: a struct inside a struct and an array of structs.
+// nest: a struct inside a struct and an array of structs. Whole-value
+// destructuring and field-disjoint borrows close the struct package.
 use geom::Point;
 
 type Size {
@@ -67,6 +68,17 @@ fn main() -> i32 {
     sizes[1].width = 3;
     let extra := total_area(sizes.borrow());
 
+    // Disjoint loans: `seg.from` and `seg.to` are different locations, so a
+    // live borrow of one does not block a write to the other.
+    let first := seg.from.borrow();
+    seg.to.y += 1;
+    let flat := first.x + first.y;
+
+    // Destructuring consumes the whole value (`seg` is unusable afterwards) and
+    // binds every field to a new local, aggregates included.
+    let Segment { from: start, to: end } := seg;
+    let spread := end.x - start.x;
+
     // `s` is borrowed for the call and stays usable afterwards.
-    area(s.borrow()) + offset + reach + extra
+    area(s.borrow()) + offset + reach + extra + flat + spread
 }

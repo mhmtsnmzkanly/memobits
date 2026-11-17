@@ -185,6 +185,25 @@ impl Checker {
                     // Shadowing starts after the initializer is evaluated.
                     self.scopes.last_mut().unwrap().insert(name.clone());
                 }
+                StatementKind::Destructure {
+                    path,
+                    fields,
+                    value,
+                    ..
+                } => {
+                    self.ty(&Type {
+                        span: statement.span,
+                        path: path.clone(),
+                        arguments: Vec::new(),
+                    });
+                    self.expr(value);
+                    for field in fields {
+                        self.scopes
+                            .last_mut()
+                            .unwrap()
+                            .insert(field.binding.clone());
+                    }
+                }
                 StatementKind::Assign { target, value, .. } => {
                     self.expr(target);
                     self.expr(value);

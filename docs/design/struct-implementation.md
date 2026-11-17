@@ -27,11 +27,11 @@ fields) and `Array<S, N>` with struct elements. The layout nests (size and
 alignment computed recursively) and sub-aggregate moves follow the TE022 rule
 of arrays.
 
-**A4 — destructuring and field-disjoint loans (planned).**
+**A4 — destructuring and field-disjoint loans (implemented; see the A4 checkpoint).**
 Whole-value destructuring `let P { x, y: alias } := p;` (and `var` for mutable
 bindings), which names every accessible field, as decided in `decisions.md`.
 Field-disjoint loans: borrowing two different proven fields of one struct
-independently. Until then every field loan overlaps the whole struct.
+independently, and likewise distinct constant array indices.
 
 ## Design notes confirmed in the code
 
@@ -59,7 +59,8 @@ independently. Until then every field loan overlaps the whole struct.
   allocation.
 - **Loans.** A `FieldAddr` loan is rooted at the whole struct local. A live
   reference to any field therefore conflicts with a write to any other field of
-  the same struct (BE005). This is conservative; field-disjoint loans are A4.
+  the same struct (BE005). A1 to A3 were conservative here; A4 gives loans a
+  projection path (see the A4 checkpoint).
 - **Primitive copies.** `decisions.md` says primitive fields are copied
   implicitly, so `let q := p.x;` is valid. See the implicit primitive copy
   checkpoint below.
@@ -198,9 +199,9 @@ struct references", "cannot return structs"); there is no external struct ABI.
 
 ### Loans
 
-No new rules. A field address is a loan rooted at the whole struct local, so any
-live reference to a struct blocks writes to any of its fields and moves of the
-struct (BE005); field-disjoint loans are A4.
+A field address is a loan rooted at the whole struct local, so any live reference
+to a struct blocks writes to any of its fields and moves of the struct (BE005).
+(A4 narrows this to the field's own path.)
 
 ### Still gated
 
@@ -261,11 +262,10 @@ No new IR instruction and no new ownership rule were needed.
   array of structs strides by the struct size. Layout cost depends on type
   depth only. A frame over `[build].stack_size` is the usual LE900 diagnostic,
   a type whose size overflows 32 bits a layout-overflow diagnostic.
-- **Loans.** Unchanged: every `FieldAddr`/`ElementAddr` loan is rooted at the
-  root local, so any live reference to a sub-aggregate blocks writes anywhere
-  in the root. Writing `l.b.x` while `l.a.borrow()` is live is BE005. This is
-  deliberately conservative; A4 (field-disjoint loans) will accept it for
-  proven disjoint fields.
+- **Loans.** Every `FieldAddr`/`ElementAddr` loan is rooted at the root local, so
+  in A3 any live reference to a sub-aggregate blocks writes anywhere in the
+  root. A4 replaced this with projection paths: writing `l.b.x` while
+  `l.a.borrow()` is live is now accepted (see the A4 checkpoint).
 - **References to primitive fields.** `l.a.x.share()` / `a[i].x.borrow()` stay
   TE017, matching `m[i][j].share()` for arrays ("references to primitive
   elements and struct fields are not supported"). The IR could express them,
@@ -299,12 +299,99 @@ No new IR instruction and no new ownership rule were needed.
 | Write through a `let`, `borrow` or immutable root (`l.a.x = 1` on `let l`) | TE004 |
 | Constant index out of range at any level | TE008 |
 | Dynamic index out of range at any level | RE007 (trap, after the right-hand side) |
-| Write to `l.b.x` while `l.a.borrow()` is live | BE005 |
+| Write to `l.a.x` while `l.a.borrow()` is live (an overlapping path; `l.b.x` is accepted since A4) | BE005 |
 | Nested aggregate in a `main` / `[export]` signature | LE900 |
 | Frame (including nested cells) over the configured stack | LE900 |
 
 ### Still gated
 
 Whole-struct `.copy()`; references to primitive fields and elements; field
-access or indexing on a call result or literal (`make().a.x`); destructuring
-and field-disjoint loans (A4); aggregates in exported signatures (LE900).
+access or indexing on a call result or literal (`make().a.x`); aggregates in
+exported signatures (LE900). Destructuring and field-disjoint loans landed in A4.
+
+## A4 checkpoint
+
+Structs are complete for this phase. A4 adds whole-value destructuring and
+field-disjoint loans; nothing else about the language surface changed.
+
+### Destructuring
+
+Syntax: `let P { x, y: alias } := value;`, or `var` for mutable bindings. The
+type name may be a path (`geom::Point`) or an imported or aliased name. Every
+field is named exactly once; `x` is shorthand for `x: x`. The value is consumed
+whole: a source local is moved (later use is BE001), a call result or literal
+is simply consumed. Each field binds a new owned local of the field's type,
+primitive or aggregate (aggregates may move out because the whole value goes
+with them). `var` makes every binding mutable. A struct from another module
+needs every field `pub` (otherwise TE025). The initialiser is evaluated once,
+then the bindings are made in pattern order.
+
+**IR representation.** `InstructionKind::Extract { base, field }`: `base` is a
+struct owner, the output is a fresh owned value of the field type. Lowering
+evaluates the initialiser to one operand (a local or a temporary) and emits, per
+pattern entry, `Extract` plus an initialising `Assign` to the new local. All
+extractions read the base with `Read` except the last, which uses `Consume`, so
+the ownership pass sees the whole value consumed exactly once. A zero-field
+pattern consumes a local source with a `Capture`. No hidden local is needed.
+The IR validator keeps partial moves unrepresentable: an aggregate-typed
+`Extract` with a `Read` base must be followed, in the same block, by a consuming
+`Extract` or `Capture` of the same base. Nothing else moves a field out of a
+struct, and `FieldAddr` + `Load` still refuses aggregates. The backend loads a
+primitive at its field offset, or `memory.copy`s an aggregate field into the
+output value's own frame cell.
+
+| Form | Code |
+| --- | --- |
+| Missing field (`let P { x } := p;`), unknown field, a field named twice, a binding name introduced twice, a non-struct type name | TE023 (the message lists the missing fields) |
+| Nested pattern (`a: P { x, y }`), `..` omission, `:=` missing | SE002 |
+| Reference source (`let P { x, y } := r;` with `r: borrow P`) | TE002 |
+| Field or element source (`let P { x, y } := l.a;`) | TE022 |
+| Value of another struct type | TE002 |
+| Private field in another module's struct | TE025 |
+| Assignment to a binding made by `let` | TE004 |
+| Use of the source after destructuring | BE001 |
+
+### Field-disjoint loans
+
+Provenance and loans carry a place: a root (local, temporary, reference
+parameter, external) plus a path of steps `Field(i)`, `Const(n)` (an index
+produced by an integer `Constant`) and `Dynamic` (any other index).
+`Borrow` keeps the path; `FieldAddr` and `ElementAddr` extend it. Two places
+overlap when they have the same root and, comparing the steps both paths have,
+no pair is provably different. Distinct fields and distinct constant indices
+are different; a dynamic index may equal any index; a prefix overlaps
+everything below it, so moving or reassigning a root conflicts with any live
+loan below it. The rule applies to loan creation, loads, stores, owner moves,
+assignments, terminator operands and call arguments. Examples:
+
+- accepted: `l.a.borrow()` live while writing `l.b.x`;
+  `f(l.a.share(), l.b.share())`; `f(m[0].share(), m[1].share())`;
+  `m[0].share()` live while reading `m[1][2]`; `g.rows[0].share()` live while
+  writing `g.rows[1][2]` or `g.tag`.
+- rejected (BE005): the same field twice; `f(m[i].share(), m[j].share())`;
+  `a[i].share()` live while writing `a[0]`; any live loan below a root while the
+  root is moved or reassigned; `l.borrow()` live while writing `l.b.x` (a
+  parent overlaps its children).
+
+Two refinements keep chains precise. An address value used exactly once as the
+base of another address instruction (`g.rows` in `g.rows[0]`) is path
+computation, not an access of its own place, so it is not checked at creation;
+the last address of the chain carries the access. A loan that is live only
+because a live reference derives from it (an ancestor) does not conflict by
+itself, the live descendants cover the memory still reachable.
+
+References carry their places. A reborrow through a `borrow`/`share` parameter
+extends the parameter's root path, so inside a callee `p.a.borrow()` live while
+`p.b.x = 1` is accepted, and `p.a` against `p.a` is not. Different parameters
+are different roots (the call site has already proven them disjoint), and every
+external root (a call result reference) overlaps every other external root with
+no path. Loops: constants identify a fixed index, a dynamic index never matches
+a previous iteration, and the existing re-entered-`Share`-site rule is
+unchanged, so a loan live across a back edge keeps its path.
+
+### Still gated
+
+Whole-struct `.copy()` (TE017); references to primitive fields and elements
+(`l.a.x.share()`, TE017); field access or indexing on a temporary
+(`make().a.x`, TE017); implicit partial field moves (TE022); nested or partial
+destructuring patterns (SE002); aggregates in exported signatures (LE900).

@@ -59,7 +59,9 @@ is stored inline at its own natural alignment (written with `memory.copy` from t
 operand's cell), arrays of structs stride by the struct size, and layout is computed
 dependencies first with checked arithmetic (overflow is a diagnostic, an oversized frame
 the usual stack-size diagnostic). Chained `ElementAddr`/`FieldAddr` add runtime-checked
-element offsets and constant field offsets to the root cell address.
+element offsets and constant field offsets to the root cell address. `Extract` (A4
+destructuring) loads a primitive field at its constant offset, or `memory.copy`s an
+aggregate field into the output value's own frame cell.
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

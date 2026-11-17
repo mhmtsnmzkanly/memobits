@@ -244,9 +244,24 @@ fn lending_sub_aggregates_matches_the_whole_aggregate_rules() {
 }
 
 #[test]
-fn loans_are_conservative_at_the_root() {
-    // A live reference to one sub-aggregate blocks writes anywhere in the root;
-    // field-disjoint loans are a later package.
+fn loans_to_overlapping_locations_still_conflict() {
+    // A live reference to a location blocks writes to it, to anything below it
+    // and to anything that encloses it (A4 overlap rule).
+    for body in [
+        "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let r := l.a.borrow(); l.a.x = 5; let v := r.x;",
+        "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; both(l.a.share(), l.a.share());",
+        "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let r := l.a.borrow(); bump(l.a.share()); let v := r.x;",
+        "var a := [P { x: 0, y: 0 }; 3]; let r := a[0].borrow(); a[0].x = 2; let v := r.x;",
+        "var a := [P { x: 0, y: 0 }; 3]; both(a[0].share(), a[0].share());",
+        "var p := Poly { n: 1, pts: [1, 2, 3, 4], c: P { x: 5, y: 6 } }; let r := p.pts.borrow(); p.pts[0] = 1; let v := r[0];",
+        "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let r := l.a.borrow(); l = Line { a: P { x: 0, y: 0 }, b: P { x: 0, y: 0 } }; let v := r.x;",
+    ] {
+        loan_rejected(body);
+    }
+}
+
+#[test]
+fn loans_to_disjoint_fields_and_constant_elements_are_independent() {
     for body in [
         "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let r := l.a.borrow(); l.b.x = 5; let v := r.x;",
         "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; both(l.a.share(), l.b.share());",
@@ -254,9 +269,8 @@ fn loans_are_conservative_at_the_root() {
         "var a := [P { x: 0, y: 0 }; 3]; let r := a[0].borrow(); a[1].x = 2; let v := r.x;",
         "var a := [P { x: 0, y: 0 }; 3]; both(a[0].share(), a[1].share());",
         "var p := Poly { n: 1, pts: [1, 2, 3, 4], c: P { x: 5, y: 6 } }; let r := p.pts.borrow(); p.c.x = 1; let v := r[0];",
-        "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let r := l.a.borrow(); l = Line { a: P { x: 0, y: 0 }, b: P { x: 0, y: 0 } }; let v := r.x;",
     ] {
-        loan_rejected(body);
+        accepted_body(body);
     }
 }
 

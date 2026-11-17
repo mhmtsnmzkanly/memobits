@@ -433,8 +433,13 @@ fn malformed_struct_literals_and_destructuring_have_clear_diagnostics() {
     for (source, expected) in [
         ("fn f() { let p := P { x }; }", "shorthand is not supported"),
         ("fn f() { let p := P { x: 1 y: 2 }; }", "expected '}'"),
-        ("fn f() { let P { x } := p; }", "destructuring bindings"),
-        ("fn f() { var P { x } := p; }", "destructuring bindings"),
+        (
+            "fn f() { let P { x: Q { y } } := p; }",
+            "nested destructuring",
+        ),
+        ("fn f() { let P { x, .. } := p; }", "`..`"),
+        ("fn f() { let P { x: 1 } := p; }", "expected identifier"),
+        ("fn f() { let P { x } = p; }", "expected ':='"),
     ] {
         let result = parse(SourceId(4), source);
         assert!(

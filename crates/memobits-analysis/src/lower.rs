@@ -10,7 +10,9 @@ use memobits_ir::{
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
-use memobits_syntax::{Block, Expr, ExprKind, ItemKind, Module, Statement, StatementKind};
+use memobits_syntax::{
+    Block, Expr, ExprKind, FieldPattern, ItemKind, Module, Statement, StatementKind,
+};
 
 use crate::types::{
     check_resolved_typed, check_typed_module, ExprId, FunctionFacts, PathTarget, StructFact,
@@ -436,6 +438,78 @@ impl<'a> Builder<'a> {
     fn path(&self, expr: &Expr) -> PathTarget {
         self.paths[&self.id(expr)]
     }
+    /// Whole-value destructuring. The initialiser is lowered once. Every field
+    /// is then read out of that value with `Extract` (a primitive is copied, an
+    /// aggregate field is moved by a bitwise copy) and assigned to its own
+    /// local, in pattern order. The last extraction takes the whole value with
+    /// `Consume`, so the ownership pass sees the source consumed exactly once
+    /// (a source local becomes unavailable, BE001 on later use). A struct with no
+    /// fields is consumed by a capture instead.
+    fn lower_destructure(&mut self, fields: &[FieldPattern], value: &Expr) {
+        let Some(source) = self.lower_expr(value) else {
+            return;
+        };
+        let Some(Type::Struct(id)) = self.operand_type(source) else {
+            unreachable!("checked destructuring source");
+        };
+        let types = self.types;
+        let definition = &types[id.0 as usize];
+        if fields.is_empty() {
+            self.capture_consumed(source);
+            return;
+        }
+        for (position, pattern) in fields.iter().enumerate() {
+            let index = definition
+                .fields
+                .iter()
+                .position(|field| field.name == pattern.field)
+                .expect("checked destructuring field");
+            let field_ty = definition.fields[index].ty.clone();
+            let mut base = source;
+            base.mode = if position + 1 == fields.len() {
+                UseMode::Consume
+            } else {
+                UseMode::Read
+            };
+            let Some(extracted) = self.emit(
+                pattern.span,
+                InstructionKind::Extract {
+                    base,
+                    field: index as u32,
+                },
+                Some(field_ty),
+            ) else {
+                return;
+            };
+            let target = self.local_at(pattern as *const FieldPattern as usize);
+            self.emit(
+                pattern.span,
+                InstructionKind::Assign {
+                    target,
+                    value: consume(extracted),
+                    initialize: true,
+                },
+                None,
+            );
+        }
+    }
+    fn capture_consumed(&mut self, source: Operand) {
+        if matches!(source.source, Source::Local(_)) {
+            self.emit(
+                source.span.unwrap_or(self.function.span),
+                InstructionKind::Capture(consume(source)),
+                self.operand_type(source),
+            );
+        }
+    }
+    fn local_at(&self, addr: usize) -> LocalId {
+        self.facts
+            .locals
+            .iter()
+            .find(|l| l.node_addr == addr)
+            .expect("checked binding fact")
+            .id
+    }
     fn local(&self, statement: &Statement) -> LocalId {
         self.facts
             .locals
@@ -621,6 +695,9 @@ impl<'a> Builder<'a> {
                             );
                         }
                     }
+                }
+                StatementKind::Destructure { fields, value, .. } => {
+                    self.lower_destructure(fields, value);
                 }
                 StatementKind::Assign {
                     target,

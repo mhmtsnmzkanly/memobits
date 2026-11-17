@@ -252,9 +252,9 @@ fn a_field_reference_keeps_the_whole_struct_borrowed() {
 }
 
 #[test]
-fn field_references_to_different_fields_still_overlap() {
-    // Field-disjoint loans are not reasoned about yet: two live Share
-    // references to different fields of one struct conflict.
+fn field_references_to_different_fields_are_disjoint() {
+    // Distinct fields of one struct are independent locations (A4): a live
+    // Share reference to field 0 does not block a write through field 1.
     let program = function(
         true,
         vec![reference(Access::Share), reference(Access::Share), i32_ty()],
@@ -271,7 +271,7 @@ fn field_references_to_different_fields_still_overlap() {
             ),
         ],
     );
-    assert!(loan_codes(&program).contains(&"BE005".to_string()));
+    assert!(loan_codes(&program).is_empty());
 }
 
 #[test]

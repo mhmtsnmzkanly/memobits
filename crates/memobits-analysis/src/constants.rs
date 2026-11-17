@@ -177,9 +177,9 @@ fn check_block(
 ) {
     for statement in &block.statements {
         match &statement.kind {
-            StatementKind::Binding { value, .. } | StatementKind::Expression(value) => {
-                check_expr(value, types, diagnostics)
-            }
+            StatementKind::Binding { value, .. }
+            | StatementKind::Destructure { value, .. }
+            | StatementKind::Expression(value) => check_expr(value, types, diagnostics),
             StatementKind::Assign { target, value, .. } => {
                 check_expr(target, types, diagnostics);
                 check_expr(value, types, diagnostics);

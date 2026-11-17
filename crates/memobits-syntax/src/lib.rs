@@ -91,6 +91,14 @@ pub struct Block {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum StatementKind {
+    /// `let Type { field, field: alias } := value;` (or `var`). Every field is
+    /// named; the parser does not check them against the declaration.
+    Destructure {
+        mutable: bool,
+        path: Vec<String>,
+        fields: Vec<FieldPattern>,
+        value: Expr,
+    },
     Binding {
         mutable: bool,
         name: String,
@@ -151,6 +159,13 @@ pub enum ExprKind {
         then_branch: Block,
         else_branch: Option<Box<Expr>>,
     },
+}
+/// One `field` or `field: alias` entry of a destructuring pattern.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldPattern {
+    pub span: Span,
+    pub field: String,
+    pub binding: String,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldInit {
@@ -654,6 +669,71 @@ impl Parser {
             tail,
         })
     }
+    /// A binding head `Name {` or `a::Name {` marks a destructuring pattern.
+    fn at_destructure(&self) -> bool {
+        let mut at = self.pos;
+        loop {
+            if !matches!(
+                self.tokens.get(at),
+                Some(Token {
+                    kind: TokenKind::Word(_),
+                    ..
+                })
+            ) {
+                return false;
+            }
+            match self.tokens.get(at + 1) {
+                Some(Token {
+                    kind: TokenKind::Symbol(s),
+                    ..
+                }) if s == "{" => return true,
+                Some(Token {
+                    kind: TokenKind::Symbol(s),
+                    ..
+                }) if s == "::" => at += 2,
+                _ => return false,
+            }
+        }
+    }
+    /// `{ field, field: alias, ... }`. Nested patterns and `..` are gated.
+    fn field_patterns(&mut self) -> PResult<Vec<FieldPattern>> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.at("}") && !self.eof() {
+            let start = self.current().span.start;
+            if self.at(".") {
+                return self
+                    .fail("`..` in a destructuring pattern is not supported; name every field");
+            }
+            let field = self.name()?;
+            let binding = if self.eat(":") {
+                let alias = self.name()?;
+                if self.at("{") || self.at("::") {
+                    return self.fail(
+                        "nested destructuring patterns are not supported yet; bind the field to a name",
+                    );
+                }
+                alias
+            } else {
+                if self.at("{") {
+                    return self.fail(
+                        "nested destructuring patterns are not supported yet; bind the field to a name",
+                    );
+                }
+                field.clone()
+            };
+            fields.push(FieldPattern {
+                span: self.span(start),
+                field,
+                binding,
+            });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(fields)
+    }
     fn statement(&mut self) -> PResult<(Option<Statement>, Option<Expr>)> {
         let start = self.current().span.start;
         let kind = if self.at("let") || self.at("var") {
@@ -661,11 +741,24 @@ impl Parser {
             if !mutable {
                 self.expect("let")?;
             }
-            if matches!(self.tokens.get(self.pos + 1), Some(Token { kind: TokenKind::Symbol(s), .. }) if s == "{")
-            {
-                return self.fail(
-                    "destructuring bindings (`let Type { field } := value;`) are not supported yet",
-                );
+            if self.at_destructure() {
+                let path = self.path()?;
+                let fields = self.field_patterns()?;
+                self.expect(":=")?;
+                let value = self.expr(0)?;
+                self.expect(";")?;
+                return Ok((
+                    Some(Statement {
+                        span: self.span(start),
+                        kind: StatementKind::Destructure {
+                            mutable,
+                            path,
+                            fields,
+                            value,
+                        },
+                    }),
+                    None,
+                ));
             }
             let name = self.name()?;
             let annotation = if self.eat(":=") {

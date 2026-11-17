@@ -231,7 +231,9 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Load { .. }
         | InstructionKind::Store { .. } => None,
         InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
-        InstructionKind::StructNew { .. } | InstructionKind::FieldAddr { .. } => None,
+        InstructionKind::StructNew { .. }
+        | InstructionKind::FieldAddr { .. }
+        | InstructionKind::Extract { .. } => None,
         InstructionKind::Call { callee, .. } => match callee.source {
             Source::Function(_) => None,
             _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
@@ -708,7 +710,9 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     count(base);
                     count(index);
                 }
-                InstructionKind::FieldAddr { base, .. } => count(base),
+                InstructionKind::FieldAddr { base, .. } | InstructionKind::Extract { base, .. } => {
+                    count(base)
+                }
                 InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
                 InstructionKind::Store { reference, value } => {
                     count(reference);
@@ -1953,6 +1957,43 @@ fn compile_instruction(
                             dst_mem: 0,
                         });
                     }
+                }
+            }
+        }
+        InstructionKind::Extract { base, field } => {
+            let output = output.ok_or("field extraction lacks an output")?;
+            let Type::Struct(type_id) = value_type(function, base)? else {
+                return Err("field extraction base is not a struct".into());
+            };
+            let struct_layout = layout
+                .structs
+                .get(type_id.0 as usize)
+                .ok_or("field extraction refers to a missing struct")?;
+            let offset = *struct_layout
+                .offsets
+                .get(*field as usize)
+                .ok_or("field extraction refers to a missing field")?;
+            match struct_layout.fields[*field as usize] {
+                FieldStorage::Primitive(kind) => {
+                    emit_operand(body, function, param_count, base, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    emit_load(body, kind);
+                    body.instruction(&WasmInstruction::LocalSet(output));
+                }
+                FieldStorage::Aggregate(size) => {
+                    // A nested struct or array moves into the output's own cell.
+                    let cell = array_cell_of(layout, Slot::Value(instruction.output.unwrap().0))?;
+                    let frame = frame.ok_or("aggregate cell requires frame")?;
+                    emit_address(body, frame, cell.offset);
+                    emit_operand(body, function, param_count, base, layout, Some(frame))?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    body.instruction(&WasmInstruction::I32Const(size as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
                 }
             }
         }

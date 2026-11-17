@@ -1264,9 +1264,9 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "wrap it in parentheses",
         ),
         (
-            "let P { x, y } := P { x: 1, y: 2 }; 0",
+            "let P { x, y: Q { z } } := P { x: 1, y: 2 }; 0",
             "SE002",
-            "destructuring",
+            "nested destructuring",
         ),
     ] {
         f.write(
