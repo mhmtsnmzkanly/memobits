@@ -47,9 +47,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
 10. **A* validation consumer** — build fixed-grid helpers and an A* example to
     exercise loops, collections, enums, ownership, and numeric behavior in a
     nontrivial client.
-11. **ENF validation consumer** — build a bounded lexer/parser subset with UTF-8
-    and protocol-specific numeric constraints; expand conformance only after the
-    language core is reliable.
+11. **ENF validation consumer** — start with the
+    [bounded lexer fixture](enf-lexer-slice.md). Use a protocol reference to
+    define UTF-8 handling, numeric constraints and parser conformance.
 12. **Optimization** — measure representative programs, then optimize IR/Wasm
     while preserving diagnostics, ownership semantics, checked behavior, and
     portable output. Track compile time and runtime separately.
@@ -209,7 +209,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `Result` and `Attempt` functions with primitive success payloads.
 - Dynamic lists, UTF-8 strings, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
-- Local and remote package dependencies, the ENF validation consumer,
+- The [bounded ENF lexer fixture](enf-lexer-slice.md) has a design and
+  acceptance cases. Implementation and protocol conformance are pending.
+- Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 
 ### A* validation consumer
