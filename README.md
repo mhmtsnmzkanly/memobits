@@ -73,6 +73,16 @@ Code, diagnostics, and documentation are written in English.
 
 ## Examples
 
+- [Runnable language guide](examples/projects/language-guide/src/main.mb)
+  walks through the executable language. Both runs below print
+  `Result: Ok(i32(42))`.
+
+```sh
+cargo run -p memobits-cli -- run --project examples/projects/language-guide/project.toml
+cargo run -p memobits-cli -- build --project examples/projects/language-guide/project.toml
+cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobits/app.wasm
+```
+
 - `examples/projects/` — buildable projects with a `project.toml`.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
