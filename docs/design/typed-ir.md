@@ -54,8 +54,11 @@ when permitted by the binding's mutation rules.
 - Call arguments retain left-to-right evaluation order.
 - Library roots exclude unrelated application entry code.
 
-Aggregate layout and Wasm emission consume validated IR. Heap-backed cleanup
-and embedded-loan tracking remain pending. The IR is an internal compiler format.
+Aggregate layout and Wasm emission consume validated IR. A function-local
+`Option<borrow T>` can store a read-only handle in its `Some` variant. Enum
+creation, consuming local transfer and extraction preserve its loan. IR
+validation gates signatures, nesting, wrapper addresses and block parameters.
+Heap-backed cleanup remains pending. The IR is an internal compiler format.
 
 ## Current lowering and validation
 

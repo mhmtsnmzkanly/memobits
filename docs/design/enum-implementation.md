@@ -41,9 +41,11 @@ concrete instance, so IR and Wasm use the ordinary enum pipeline.
 Type arguments such as `Option<i32>` instantiate compiler-known types;
 user-defined generic declarations remain deferred, as required by `decisions.md`.
 Prelude variants are `Some`/`None`, `Ok`/`Err`, and `Done`/`Skipped`/`Failed`.
-Reference payloads such as `Option<borrow i32>` are pending. They require
-loans to survive construction, moves, calls and matching. B3 loans cover
-borrowing the storage of an enum with owned payloads.
+Explicitly typed local `Option<borrow T>` bindings support construction,
+consuming local moves and consuming matches. The wrapper carries the loan on
+the referent until the wrapper or extracted reference reaches its last use.
+B3 loans cover borrowing the storage of an enum with owned payloads. See the
+[local borrow Option gates](outcome-implementation.md#function-local-borrow-option).
 
 ## Design notes confirmed in the code
 
@@ -190,7 +192,8 @@ B1 defines the cell layout and the tag value so B2 only adds instructions.
 | Unit variant used as a temporary (`Shape::Empty;`, `Shape::Empty + 1`) | TE017 |
 | `.copy()` of an enum | TE017 |
 | Moving an enum out of a field or element (`let t := h.s;`, `let t := a[0];`) | TE022 |
-| Reference payloads and references to enum payloads or tags | not expressible (B3) |
+| Reference payloads outside the local borrow Option slice | TE017 for compiler-known type arguments |
+| Direct syntax for references to enum payloads or tags | unavailable |
 | Enums in `main` / `[export]` signatures (parameters, results, references) | LE900 |
 | Enum frame over the configured stack size | LE900 |
 | Enum size over 32 bits | layout-overflow diagnostic |

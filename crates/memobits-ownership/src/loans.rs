@@ -368,10 +368,9 @@ impl Explain<'_> {
     }
 
     fn holds(&self, state: &[Provenance], operand: &Operand, key: LoanKey) -> bool {
-        type_at(self.function, operand.source).is_some_and(is_reference)
-            && operand_provenance(self.function, state, operand)
-                .loans
-                .contains(&key)
+        operand_provenance(self.function, state, operand)
+            .loans
+            .contains(&key)
     }
 }
 
@@ -453,7 +452,6 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
         let mut state = inputs[block_index].clone();
         for (instruction_index, instruction) in block.instructions.iter().enumerate() {
             let before = active_loans(
-                function,
                 &state,
                 &liveness.before[block_index][instruction_index],
                 &infos,
@@ -467,7 +465,6 @@ fn check_function(program: &Program, function: &Function) -> Vec<Diagnostic> {
                 &consts,
             );
             let after = active_loans(
-                function,
                 &after_state,
                 &liveness.after[block_index][instruction_index],
                 &infos,
@@ -1014,11 +1011,7 @@ fn transfer_provenance(
     let Some(output) = instruction.output else {
         if let InstructionKind::Assign { target, value, .. } = &instruction.kind {
             let target_index = target.0 as usize;
-            let new = if is_reference(&function.locals[target_index].ty) {
-                operand_provenance(function, state, value)
-            } else {
-                Provenance::default()
-            };
+            let new = operand_provenance(function, state, value);
             let changed = state[target_index] != new;
             state[target_index] = new;
             return changed;
@@ -1053,8 +1046,19 @@ fn transfer_provenance(
             }
             return info_changed;
         }
-        InstructionKind::Capture(operand) if is_reference(&function.values[output.0 as usize]) => {
-            operand_provenance(function, state, operand)
+        InstructionKind::Capture(operand) => operand_provenance(function, state, operand),
+        // A local borrow Option is the only validated enum with a reference
+        // payload. Its Some variant transports one handle; None carries none.
+        InstructionKind::EnumNew { payload, .. } => payload
+            .first()
+            .filter(|operand| type_at(function, operand.source).is_some_and(is_reference))
+            .map_or_else(Provenance::default, |operand| {
+                operand_provenance(function, state, operand)
+            }),
+        InstructionKind::VariantExtract { base, .. }
+            if is_reference(&function.values[output.0 as usize]) =>
+        {
+            operand_provenance(function, state, base)
         }
         InstructionKind::Load { reference }
             if is_reference(&function.values[output.0 as usize]) =>
@@ -1148,7 +1152,6 @@ fn provenance(
 }
 
 fn active_loans(
-    function: &Function,
     state: &[Provenance],
     live: &[bool],
     infos: &HashMap<LoanKey, LoanInfo>,
@@ -1157,15 +1160,7 @@ fn active_loans(
     let mut queue = VecDeque::new();
     let mut direct = BTreeSet::new();
     for (index, provenance) in state.iter().enumerate() {
-        let reference = if index < function.locals.len() {
-            is_reference(&function.locals[index].ty)
-        } else {
-            function
-                .values
-                .get(index - function.locals.len())
-                .is_some_and(is_reference)
-        };
-        if live.get(index).copied().unwrap_or(false) && reference {
+        if live.get(index).copied().unwrap_or(false) {
             queue.extend(provenance.loans.iter().copied());
             direct.extend(provenance.own.iter().copied());
         }
@@ -1223,7 +1218,7 @@ fn check_terminator(
     infos: &HashMap<LoanKey, LoanInfo>,
     diagnostics: &mut Vec<Pending>,
 ) {
-    let active = active_loans(function, state, live, infos);
+    let active = active_loans(state, live, infos);
     for operand in terminator_operands(&block.terminator.kind) {
         if type_at(function, operand.source).is_some_and(is_reference) {
             check_transport(
@@ -1376,21 +1371,25 @@ fn check_instruction(
     intermediates: &HashSet<u32>,
     diagnostics: &mut Vec<Pending>,
 ) {
-    match &instruction.kind {
-        InstructionKind::Capture(operand) | InstructionKind::Assign { value: operand, .. }
-            if type_at(function, operand.source).is_some_and(is_reference) =>
-        {
-            check_transport(
-                program,
-                function,
-                state,
-                operand,
-                active_before,
-                infos,
-                diagnostics,
-            );
+    let transported = match &instruction.kind {
+        InstructionKind::Capture(operand) | InstructionKind::Assign { value: operand, .. } => {
+            Some(operand)
         }
-        _ => {}
+        InstructionKind::EnumNew { payload, .. } => payload.first(),
+        _ => None,
+    };
+    if let Some(operand) =
+        transported.filter(|op| type_at(function, op.source).is_some_and(is_reference))
+    {
+        check_transport(
+            program,
+            function,
+            state,
+            operand,
+            active_before,
+            infos,
+            diagnostics,
+        );
     }
     match &instruction.kind {
         InstructionKind::Borrow {

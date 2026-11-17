@@ -229,6 +229,52 @@ impl TypeTable {
         false
     }
 
+    pub(super) fn is_borrow_option(&self, ty: &Ty) -> bool {
+        let Ty::Enum(id, _) = ty else { return false };
+        let Some(index) = (*id as usize).checked_sub(self.types.len()) else {
+            return false;
+        };
+        matches!(
+            self.instances.borrow().get(index),
+            Some((TemplateId::Option, args, _))
+                if matches!(args.as_slice(), [ResolvedArgument::Type(Ty::Reference { .. })])
+        )
+    }
+
+    pub(super) fn resolve_local(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
+        if let (
+            Some(template),
+            [memobits_syntax::TypeArgument::Reference {
+                access: memobits_syntax::Access::Borrow,
+                referent,
+                span,
+            }],
+        ) = (templates::lookup(&ty.path), ty.arguments.as_slice())
+        {
+            if template.id == TemplateId::Option {
+                let inner = self.resolve(module, referent)?;
+                if inner == super::UNIT {
+                    return Err(TypeFailure {
+                        span: *span,
+                        code: 17,
+                        message: "Option<borrow T> requires a non-Unit referent".into(),
+                    });
+                }
+                let argument = Ty::Reference {
+                    access: memobits_ir::Access::Borrow,
+                    inner: Box::new(inner),
+                    origin: super::ReferenceOrigin::Temporary,
+                };
+                return Ok(self.instantiate_enum(
+                    template,
+                    vec![ResolvedArgument::Type(argument)],
+                    ty.span,
+                ));
+            }
+        }
+        self.resolve(module, ty)
+    }
+
     pub(super) fn check_template_argument(
         &self,
         template: &Template,
@@ -236,6 +282,11 @@ impl TypeTable {
         ty: &Ty,
         span: Span,
     ) -> Result<(), TypeFailure> {
+        if self.is_borrow_option(ty) {
+            return Err(super::templates::unsupported_reference_argument(
+                template, span,
+            ));
+        }
         if matches!(kind, ParameterKind::ErrorType)
             && !matches!(ty, Ty::Struct(id, _) if self.is_error_type(*id))
         {

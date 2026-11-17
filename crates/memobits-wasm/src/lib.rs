@@ -468,6 +468,8 @@ fn member_layout(
             let (size, align) = storage_layout(*kind)?;
             Some((size, align, FieldStorage::Primitive(*kind)))
         }
+        // Validated local borrow Option payloads store a Wasm address.
+        Type::Reference { .. } => Some((4, 4, FieldStorage::Primitive(Primitive::U32))),
         nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
             nested_struct_layouts(types, nested, done, active)?;
             let (size, align) = type_layout(
@@ -2598,12 +2600,28 @@ fn compile_instruction(
             let Type::Enum(type_id) = value_type(function, base)? else {
                 return Err("variant extraction base is not an enum".into());
             };
-            let variant_layout = layout
+            let enum_layout = layout
                 .structs
                 .get(type_id.0 as usize)
                 .and_then(|enum_type| enum_type.enum_layout.as_ref())
-                .and_then(|enum_layout| enum_layout.variants.get(*variant as usize))
+                .ok_or("variant extraction refers to a missing enum")?;
+            let variant_layout = enum_layout
+                .variants
+                .get(*variant as usize)
                 .ok_or("variant extraction refers to a missing variant")?;
+            if matches!(
+                function.values[instruction.output.unwrap().0 as usize],
+                Type::Reference { .. }
+            ) {
+                // A malformed control flow must not read stale pointer bytes from None.
+                emit_operand(body, function, param_count, base, layout, frame)?;
+                emit_load(body, Primitive::U8); // local borrow Option has two variants
+                body.instruction(&WasmInstruction::I32Const(*variant as i32));
+                body.instruction(&WasmInstruction::I32Ne);
+                body.instruction(&WasmInstruction::If(BlockType::Empty));
+                body.instruction(&WasmInstruction::Unreachable);
+                body.instruction(&WasmInstruction::End);
+            }
             let offset = *variant_layout
                 .offsets
                 .get(*field as usize)

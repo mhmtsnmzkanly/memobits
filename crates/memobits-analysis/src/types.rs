@@ -579,7 +579,9 @@ impl Checker {
     }
     /// Executable arrays hold non-Unit primitive, struct or nested array elements.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
-        if self.executable
+        if self.table.is_borrow_option(element) {
+            self.error(17, span, "Option<borrow T> cannot be stored in an array");
+        } else if self.executable
             && !matches!(
                 element,
                 Ty::Error | Ty::Never | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
@@ -706,7 +708,14 @@ impl Checker {
         }
     }
     fn type_path(&mut self, ty: &Type) -> Ty {
-        match self.table.resolve(&self.module, ty) {
+        self.report_type_resolution(ty, self.table.resolve(&self.module, ty))
+    }
+    fn report_type_resolution(
+        &mut self,
+        ty: &Type,
+        resolved: Result<Ty, typetable::TypeFailure>,
+    ) -> Ty {
+        match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
                 // A failure inside an alias target is reported at the alias.
@@ -905,7 +914,9 @@ impl Checker {
                     annotation,
                     value,
                 } => {
-                    let annotation = annotation.as_ref().map(|ty| self.type_path(ty));
+                    let annotation = annotation.as_ref().map(|ty| {
+                        self.report_type_resolution(ty, self.table.resolve_local(&self.module, ty))
+                    });
                     self.allow_array_value(value);
                     let inferred = self.expr(value, annotation.as_ref());
                     self.reject_extraction(value, &inferred);
@@ -913,6 +924,13 @@ impl Checker {
                         self.ensure(&inferred, ann, value.span);
                     }
                     let ty = annotation.unwrap_or(inferred);
+                    if *mutable && self.table.is_borrow_option(&ty) {
+                        self.error(
+                            17,
+                            statement.span,
+                            "Option<borrow T> requires an immutable local binding",
+                        );
+                    }
                     let id = self.register_local(
                         name,
                         &ty,
@@ -1200,6 +1218,14 @@ impl Checker {
         // An array owner may be borrowed or shared as a whole.
         self.index_base = base as *const Expr as usize;
         let base_ty = self.expr(base, expected_inner);
+        if self.table.is_borrow_option(&base_ty) {
+            self.error(
+                17,
+                base.span,
+                "cannot borrow or share the storage of Option<borrow T>",
+            );
+            return Ty::Error;
+        }
         if is_row
             && !matches!(
                 base_ty,
@@ -1704,7 +1730,24 @@ impl Checker {
             let actual = self.expr(argument, want);
             self.reject_extraction(argument, &actual);
             if let Some(want) = want {
-                self.ensure(&actual, want, argument.span);
+                if matches!(want, Ty::Reference { .. })
+                    && !matches!(
+                        actual,
+                        Ty::Reference {
+                            access: IrAccess::Borrow,
+                            ..
+                        } | Ty::Never
+                            | Ty::Error
+                    )
+                {
+                    self.error(
+                        17,
+                        argument.span,
+                        "Some requires a borrow reference for Option<borrow T>",
+                    );
+                } else {
+                    self.ensure(&actual, want, argument.span);
+                }
             }
             diverges |= actual == Ty::Never;
         }
@@ -1934,7 +1977,7 @@ impl Checker {
             let ty = self.expr(&arm.body, arm_expected);
             self.reject_extraction(&arm.body, &ty);
             self.scopes.pop();
-            if matches!(ty, Ty::Reference { .. }) {
+            if matches!(ty, Ty::Reference { .. }) || self.table.is_borrow_option(&ty) {
                 self.error(
                     17,
                     arm.body.span,
@@ -2623,7 +2666,7 @@ impl Checker {
             }
             ExprKind::Block(block) => {
                 let ty = self.block(block, expected).0;
-                if matches!(ty, Ty::Reference { .. }) {
+                if matches!(ty, Ty::Reference { .. }) || self.table.is_borrow_option(&ty) {
                     self.error(
                         17,
                         expr.span,
@@ -2643,7 +2686,8 @@ impl Checker {
                 let cond = read_type(self.expr(condition, Some(&BOOL)));
                 self.ensure(&cond, &BOOL, condition.span);
                 let (then_ty, _) = self.block(then_branch, expected);
-                if matches!(then_ty, Ty::Reference { .. }) {
+                if matches!(then_ty, Ty::Reference { .. }) || self.table.is_borrow_option(&then_ty)
+                {
                     self.error(
                         17,
                         then_branch.span,
@@ -2652,7 +2696,9 @@ impl Checker {
                 }
                 if let Some(other) = else_branch {
                     let else_ty = self.expr(other, expected.or(Some(&then_ty)));
-                    if matches!(else_ty, Ty::Reference { .. }) {
+                    if matches!(else_ty, Ty::Reference { .. })
+                        || self.table.is_borrow_option(&else_ty)
+                    {
                         self.error(
                             17,
                             other.span,

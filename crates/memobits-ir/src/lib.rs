@@ -56,7 +56,7 @@ pub enum TypeDefKind {
     Struct { fields: Vec<FieldDef> },
     /// A tagged union with at least one variant. A variant's index is its
     /// declaration position and doubles as its tag value. Payload types follow
-    /// the field rules of structs (no references, no Unit).
+    /// the field rules of structs, with a local borrow Option exception.
     Enum { variants: Vec<VariantDef> },
 }
 
@@ -90,6 +90,32 @@ pub struct TypeDef {
     pub error_ancestry: Option<ErrorAncestry>,
     pub entry_outcome: Option<EntryOutcome>,
     pub kind: TypeDefKind,
+}
+
+impl TypeDef {
+    fn borrow_option_referent(&self) -> Option<&Type> {
+        if !self.path.name.starts_with("Option<borrow ")
+            || self.error_ancestry.is_some()
+            || self.entry_outcome.is_some()
+        {
+            return None;
+        }
+        let TypeDefKind::Enum { variants } = &self.kind else {
+            return None;
+        };
+        let [some, none] = variants.as_slice() else {
+            return None;
+        };
+        match some.payload.as_slice() {
+            [Type::Reference {
+                access: Access::Borrow,
+                inner,
+            }] if some.name == "Some" && none.name == "None" && none.payload.is_empty() => {
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -460,6 +486,29 @@ impl Program {
                     "entry block cannot have parameters",
                 );
             }
+            if self.signature_contains_borrow_option(&function.signature) {
+                push(
+                    &mut errors,
+                    id,
+                    None,
+                    "borrow Option is not supported in signatures",
+                );
+            }
+            for ty in function
+                .locals
+                .iter()
+                .map(|local| &local.ty)
+                .chain(&function.values)
+            {
+                if self.contains_borrow_option(ty) && !self.is_borrow_option(ty) {
+                    push(
+                        &mut errors,
+                        id,
+                        None,
+                        "borrow Option cannot be nested or addressed",
+                    );
+                }
+            }
             for parameter in &function.signature.parameters {
                 validate_parameter_type(
                     type_count,
@@ -517,13 +566,47 @@ impl Program {
             }
             let mut defined = HashSet::new();
             let mut loans = HashSet::new();
+            let mut borrow_option_initializers = HashSet::new();
             for (block_index, block) in function.blocks.iter().enumerate() {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
+                    if function
+                        .values
+                        .get(value.0 as usize)
+                        .is_some_and(|ty| self.is_borrow_option(ty))
+                    {
+                        push(
+                            &mut errors,
+                            id,
+                            Some(block_id),
+                            "borrow Option cannot be passed across a block edge",
+                        );
+                    }
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
                 }
                 for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
+                    // Initialization is a declaration site. A loop may execute
+                    // that site again, but a second site would permit reassignment.
+                    if let InstructionKind::Assign {
+                        target,
+                        initialize: true,
+                        ..
+                    } = instruction.kind
+                    {
+                        let is_wrapper = function
+                            .locals
+                            .get(target.0 as usize)
+                            .is_some_and(|local| self.is_borrow_option(&local.ty));
+                        if is_wrapper && !borrow_option_initializers.insert(target) {
+                            push(
+                                &mut errors,
+                                id,
+                                Some(block_id),
+                                "borrow Option local has more than one initialization site",
+                            );
+                        }
+                    }
                     validate_extract_consumption(
                         function,
                         &block.instructions[instruction_index..],
@@ -565,6 +648,33 @@ impl Program {
 }
 
 impl Program {
+    fn is_borrow_option(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Enum(id) if self.types.get(id.0 as usize)
+            .and_then(TypeDef::borrow_option_referent).is_some())
+    }
+
+    fn contains_borrow_option(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Array { element, .. } | Type::Reference { inner: element, .. } => {
+                self.contains_borrow_option(element)
+            }
+            Type::Function(signature) => self.signature_contains_borrow_option(signature),
+            _ => self.is_borrow_option(ty),
+        }
+    }
+
+    fn signature_contains_borrow_option(&self, signature: &Signature) -> bool {
+        self.contains_borrow_option(&signature.result)
+            || signature
+                .parameters
+                .iter()
+                .any(|parameter| self.contains_borrow_option(&parameter.ty))
+    }
+
+    fn valid_field_type(&self, ty: &Type) -> bool {
+        field_type_is_valid(ty, self.types.len()) && !self.contains_borrow_option(ty)
+    }
+
     fn has_error_ancestor(&self, actual: &Type, expected: &Type) -> bool {
         let (Type::Struct(mut child), Type::Struct(ancestor)) = (actual, expected) else {
             return false;
@@ -685,7 +795,7 @@ impl Program {
                                 path.name, field.name
                             ));
                         }
-                        if !field_type_is_valid(&field.ty, self.types.len()) {
+                        if !self.valid_field_type(&field.ty) {
                             report(format!(
                                 "field '{}' of struct '{}' must be a non-Unit primitive, a struct, an enum or an array of such types; reference fields are not supported",
                                 field.name, path.name
@@ -705,13 +815,14 @@ impl Program {
                                 path.name, variant.name
                             ));
                         }
-                        if variant
-                            .payload
-                            .iter()
-                            .any(|ty| !field_type_is_valid(ty, self.types.len()))
-                        {
+                        let valid = if let Some(inner) = definition.borrow_option_referent() {
+                            self.valid_field_type(inner)
+                        } else {
+                            variant.payload.iter().all(|ty| self.valid_field_type(ty))
+                        };
+                        if !valid {
                             report(format!(
-                                "payload of variant '{}' of enum '{}' must be non-Unit primitives, structs, enums or arrays of such types; reference payloads are not supported",
+                                "payload of variant '{}' of enum '{}' must be non-Unit primitives, structs, enums or arrays of such types or a supported local borrow Option reference",
                                 variant.name, path.name
                             ));
                         }
@@ -1097,6 +1208,18 @@ fn validate_instruction(
         }
         InstructionKind::Capture(operand) => {
             let input = operand_type(program, function, operand, errors, id, block);
+            if input
+                .as_ref()
+                .is_some_and(|ty| program.is_borrow_option(ty))
+                && operand.mode != UseMode::Consume
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "borrow Option capture must consume its operand",
+                );
+            }
             if out.is_none() {
                 push(errors, id, Some(block), "capture requires an output value");
             }
@@ -1954,6 +2077,15 @@ fn validate_instruction(
                 }
                 None => None,
             };
+            if matches!(payload_type, Some(Type::Reference { .. })) && base.mode != UseMode::Consume
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "extracting a borrow Option payload must consume the wrapper",
+                );
+            }
             match (out, payload_type) {
                 (None, _) => push(
                     errors,
@@ -2135,7 +2267,11 @@ fn validate_instruction(
                 }
             }
         }
-        InstructionKind::Assign { target, value, .. } => {
+        InstructionKind::Assign {
+            target,
+            value,
+            initialize,
+        } => {
             if instruction.output.is_some() {
                 push(
                     errors,
@@ -2145,6 +2281,18 @@ fn validate_instruction(
                 );
             }
             let actual = operand_type(program, function, value, errors, id, block);
+            if actual
+                .as_ref()
+                .is_some_and(|ty| program.is_borrow_option(ty))
+                && (!initialize || value.mode != UseMode::Consume)
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "borrow Option assignment requires a consuming initialization",
+                );
+            }
             match function.locals.get(target.0 as usize) {
                 None => push(
                     errors,

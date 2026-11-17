@@ -13,16 +13,14 @@ with primitive success payloads. The full B4 contract is in
   arguments through local and module aliases, then interns each outcome by
   template identity and resolved arguments. Nested instances participate in
   recursive value layout checks. User-defined generics remain unavailable.
-- Within a compiler-known type or error-type argument slot, syntax records
-  `borrow T` and `share T` with their access mode and full argument span.
-  Referent names and public visibility are checked at any nesting depth.
-  Analysis rejects each reference argument with TE017 at its span, including
-  in unused aliases, fields, and signatures, and rejects inferred reference
-  payloads at the payload expression. This applies even to `None` with a
-  reference argument. Integer slots still require literals. The gate runs
-  before instance creation for the rejected type, and IR validation still
-  rejects reference fields and enum payloads. Contextual primitive payloads
-  can still load a value through a standalone reference.
+- Syntax records `borrow T` and `share T` arguments with their access mode and
+  full span. Name resolution checks referent names and visibility at any
+  nesting depth. Analysis allows a written borrow argument only in a direct
+  local `Option<borrow T>` binding annotation. Other written reference
+  arguments produce TE017 at the argument span, and inferred reference
+  payloads produce TE017 at the payload expression. Integer slots still
+  require literals. Contextual owned primitive payloads can still load
+  a value through a standalone reference.
 - `Some`, `None`, `Ok`, `Err`, `Done`, `Skipped`, and `Failed` use the
   concrete expected instance when one is available. An alias-qualified
   constructor such as `Work::Done(value)` supplies its own instance. Local
@@ -77,6 +75,45 @@ with primitive success payloads. The full B4 contract is in
   private types (ME010). Base references use ordinary module visibility
   (ME007), and public derivations cannot expose a private local base (ME010).
 
+## Function-local borrow Option
+
+```memobits
+fn main() -> i32 {
+    var owner := 7;
+    let wrapped: Option<borrow i32> = Some(owner.borrow());
+    let moved := wrapped;
+    let old := match moved { Some(r) => r.copy(), None => 0 };
+    owner = 9;
+    old + owner
+}
+```
+
+- Use an immutable local binding with a direct `Option<borrow T>` annotation
+  to construct `Some` or `None`. The referent can be a supported non-Unit
+  primitive, struct, enum or fixed array, including a referent named through
+  an alias. `Some` consumes an existing borrow handle or a fresh borrow
+  conversion. A share needs an explicit borrow reborrow before wrapping.
+- Initializing another immutable local from a wrapper moves it. A consuming
+  match binds the original read-only reference in the `Some` arm. The binding
+  supports ordinary borrow operations, including reborrowing for an internal
+  borrow parameter. Use `.copy()` to make a primitive match result from
+  the reference. Wasm stores the referent address as the `Some` payload.
+- The live wrapper and any live extracted handle retain the referent loan.
+  Mutating, sharing or moving the owner conflicts while that loan is live.
+  The loan ends after the last use, including before the arm body if the
+  payload is discarded or its binding goes unused. `None` carries no loan.
+- Wrapper types in aliases, fields, nested arrays or outcomes, signatures and
+  returns remain gated. So do mutable wrapper bindings, taking a reference
+  to wrapper storage, and wrapper-valued block, branch or match results.
+  Extracted handles follow the existing restrictions on reference results
+  and rebinding. These gates prevent a handle to a block-local owner from
+  leaving that scope. IR validates the supported payload shape and the local
+  transport restrictions. Each wrapper local has at most one static
+  initialization site. Ownership treats initialization as a definition that
+  replaces the slot's previous availability and provenance. A second site
+  would therefore permit reassignment of an immutable wrapper. The same site
+  can execute on each loop iteration.
+
 ## Application entry adapter
 
 - The supported success payloads are `Bool`, integers through 64 bits, and
@@ -104,18 +141,12 @@ with primitive success payloads. The full B4 contract is in
 
 ## Remaining gates
 
-1. The first executable reference payload should be a function-local
-   `Option<borrow T>`. Enable it only when construction carries the referent's
-   provenance and matching yields a read-only reference to that referent.
-   Acceptance requires that a live wrapper or extracted binding rejects
-   conflicting mutation and owner moves, a final use releases the loan, and
-   a reference to a local owner cannot leave the owner's scope or be returned.
-   Preserve owned enum moves and B3 borrows of enum storage. Keep every
-   transfer outside the proven subset gated.
-   Expand coverage to aggregate moves and branch joins by carrying all
-   possible origins, then to calls, destructuring and nested outcomes as
-   each transfer gains validation, provenance and escape checks. Keep share
-   payloads gated until exclusive access is tracked across the same transfers.
+1. Expand embedded-loan tracking to wrapper assignment and branch results by
+   carrying all possible origins and checking owner scope. Calls, nesting,
+   borrowing wrapper storage and destructuring through larger aggregates
+   each need their own validation, provenance and escape checks. Share
+   payloads also require exclusive access tracking across each supported
+   transfer.
 2. Explicit owned conversion to an Error ancestor remains unimplemented and
    still has no spelling. The accepted design preserves concrete identity after
    conversion. The entry metadata and decoder must support reporting that
@@ -129,7 +160,10 @@ Analysis tests cover alias interning, nested outcomes, inference and arity
 failures, shadowing, the Error bound, exhaustiveness, and aggregate moves.
 They also cover ancestor-first layout, non-error bases, duplicate inherited
 fields, derivation cycles, recursive value layouts, and rejection of invalid
-ancestor calls. Loan tests cover last-use release, overlapping call arguments,
+ancestor calls. Local borrow Option tests cover consuming transport, wrapper and extracted
+loan conflicts, rejected scope escapes, malformed IR transport, and Wasm
+execution of both variants with last-use release. Loan tests also cover
+last-use release, overlapping call arguments,
 live loans, and immutable share handles. Wasm tests exercise transitive
 reborrows, whole ancestor stores on array elements, and invalid IR ancestry.
 Resolver tests cover imported aliases, invalid variants, and

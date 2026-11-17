@@ -156,3 +156,64 @@ fn disjoint_writes_and_the_variant_offsets_agree_during_a_live_payload_borrow() 
         11 + 2 + 50
     );
 }
+
+#[test]
+fn local_borrow_option_stores_the_referent_address_and_releases_after_last_use() {
+    let source = "
+        type P { x: i32 }
+        type Alias = P;
+        fn read(p: borrow P) -> i32 { p.x }
+        fn main() -> i32 {
+            var owner := P { x: 7 };
+            let handle := owner.borrow();
+            let wrapped: Option<borrow Alias> = Some(handle);
+            let moved := wrapped;
+            let old := match moved {
+                Some(r) => {
+                    let copied := read(r);
+                    owner.x = 13;
+                    copied
+                },
+                None => 100
+            };
+            let empty: Option<borrow P> = None;
+            let fallback := match empty { Some(r) => r.x, None => 5 };
+            let number := 3;
+            let scalar: Option<borrow i32> = Some(number.borrow());
+            let n := match scalar { Some(r) => r.copy(), None => 0 };
+            old * 1000 + owner.x * 100 + fallback * 10 + n
+        }";
+    assert_eq!(run(source), 8353);
+}
+
+#[test]
+fn unused_payload_releases_the_loan_before_the_arm_body() {
+    assert_eq!(
+        run("
+        fn main() -> i32 {
+            var n := 7;
+            let wrapped: Option<borrow i32> = Some(n.borrow());
+            match wrapped { Some(_) => { n = 13; n }, None => 0 }
+        }"),
+        13
+    );
+}
+
+#[test]
+fn a_loop_reexecutes_the_same_borrow_option_initializer() {
+    assert_eq!(
+        run("
+        fn main() -> i32 {
+            var n := 1;
+            var sum := 0;
+            loop {
+                if n == 4 { break; }
+                let wrapped: Option<borrow i32> = Some(n.borrow());
+                sum += match wrapped { Some(r) => r.copy(), None => 0 };
+                n += 1;
+            }
+            sum
+        }"),
+        6
+    );
+}

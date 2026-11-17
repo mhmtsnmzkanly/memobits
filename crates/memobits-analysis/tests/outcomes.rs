@@ -568,3 +568,193 @@ fn error_ancestor_call_reborrows_keep_the_original_loan() {
         );
     }
 }
+
+#[test]
+fn local_borrow_option_keeps_the_owner_loan_through_moves_and_extraction() {
+    for body in [
+        "owner.x = 2; match moved { Some(r) => r.x, None => 0 }",
+        "let taken := owner; match moved { Some(r) => r.x, None => 0 }",
+        "match moved { Some(r) => { owner.x = 2; r.x }, None => 0 }",
+        "match moved { Some(r) => { let taken := owner; r.x }, None => 0 }",
+        "match moved { Some(r) => { let exclusive := owner.share(); exclusive.x + r.x }, None => 0 }",
+    ] {
+        let source = format!(
+            "type P {{ x: i32 }} fn main() -> i32 {{
+                var owner := P {{ x: 1 }};
+                let value: Option<borrow P> = Some(owner.borrow());
+                let moved := value;
+                {body}
+            }}"
+        );
+        let errors = memobits_ownership::check_ownership(&lower(&source));
+        assert!(errors.iter().any(|error| error.code.to_string() == "BE005"), "{source}: {errors:?}");
+    }
+}
+
+#[test]
+fn local_borrow_option_extraction_is_read_only_and_allows_later_owner_moves() {
+    let source = "type P { x: i32 }
+        fn main() -> i32 {
+            var owner := P { x: 7 };
+            let wrapped: Option<borrow P> = Some(owner.borrow());
+            match wrapped { Some(r) => { let x := r.x; let moved := owner; x + moved.x }, None => 0 }
+        }";
+    assert!(memobits_ownership::check_ownership(&lower(source)).is_empty());
+
+    let write_through_borrow = source.replace("let x := r.x;", "r.x = 9; let x := r.x;");
+    let parsed = parse(SourceId(91), &write_through_borrow);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
+    assert!(
+        errors.iter().any(|error| error.code.to_string() == "TE004"
+            && error
+                .message
+                .contains("cannot assign through borrow binding")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn local_borrow_option_unsupported_transports_are_gated() {
+    for body in [
+        "var value: Option<borrow i32> = Some(owner.borrow());",
+        "let value: Option<borrow i32> = Some(owner.share());",
+        "let value: Option<borrow i32> = Some(owner);",
+        "let value: Option<borrow i32> = { let inner := 2; let local: Option<borrow i32> = Some(inner.borrow()); local };",
+        "let value: Option<borrow i32> = if true { None } else { None };",
+        "let value: Option<borrow i32> = None; let next := Some(value);",
+        "let value: Option<borrow i32> = None; let next := [value];",
+        "let value: Option<borrow i32> = None; let r := value.borrow();",
+        "let value: Option<borrow i32> = Some(owner.borrow()); let r := match value { Some(r) => r, None => owner.borrow() };",
+        "let value: Option<borrow i32> = None; let next := match true_option() { Some(_) => value, None => value };",
+    ] {
+        let source = format!(
+            "fn true_option() -> Option<i32> {{ Some(1) }}
+             fn main() {{ var owner := 1; {body} }}"
+        );
+        let parsed = parse(SourceId(91), &source);
+        assert!(parsed.diagnostics.is_empty(), "{source}: {:?}", parsed.diagnostics);
+        let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
+        assert!(errors.iter().any(|error| error.code.to_string() == "TE017"), "{source}: {errors:?}");
+    }
+}
+
+#[test]
+fn ir_rejects_escaping_or_nonconsuming_borrow_option_transport() {
+    use memobits_ir::{InstructionKind, UseMode};
+
+    let program = lower(
+        "fn main() -> i32 {
+            let owner := 9;
+            let wrapped: Option<borrow i32> = Some(owner.borrow());
+            match wrapped { Some(r) => r.copy(), None => 0 }
+        }",
+    );
+    let mut escaping = program.clone();
+    let function = &mut escaping.functions[0];
+    *function.signature.result = function.locals[1].ty.clone();
+    assert!(escaping
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| error.message.contains("not supported in signatures")));
+
+    let mut copying = program;
+    let base = copying.functions[0]
+        .blocks
+        .iter_mut()
+        .flat_map(|block| &mut block.instructions)
+        .find_map(|instruction| match &mut instruction.kind {
+            InstructionKind::VariantExtract { base, .. } => Some(base),
+            _ => None,
+        })
+        .unwrap();
+    base.mode = UseMode::Read;
+    assert!(copying
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| error.message.contains("must consume the wrapper")));
+}
+
+#[test]
+fn ir_rejects_a_second_borrow_option_initializer_without_an_intervening_move() {
+    use memobits_ir::InstructionKind;
+
+    let mut program = lower(
+        "fn main() {
+            let first: Option<borrow i32> = None;
+            let second: Option<borrow i32> = None;
+        }",
+    );
+    let mut targets = program.functions[0].blocks[0]
+        .instructions
+        .iter_mut()
+        .filter_map(|instruction| match &mut instruction.kind {
+            InstructionKind::Assign {
+                target,
+                initialize: true,
+                ..
+            } => Some(target),
+            _ => None,
+        });
+    let first = *targets.next().unwrap();
+    *targets.next().unwrap() = first;
+    let errors = program.validate().unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("more than one initialization site")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn borrow_option_reborrow_freezes_its_parent_share_until_last_use() {
+    let source = "type P { x: i32 }
+        fn update(parent: share P) -> i32 {
+            let wrapped: Option<borrow P> = Some(parent.borrow());
+            let old := match wrapped {
+                Some(r) => { let old := r.x; parent.x = 8; old },
+                None => 0
+            };
+            old + parent.x
+        }
+        fn main() -> i32 { var owner := P { x: 7 }; update(owner.share()) }";
+    assert!(memobits_ownership::check_ownership(&lower(source)).is_empty());
+    for before_last_use in [
+        source.replace(
+            "let old := match wrapped",
+            "parent.x = 8; let old := match wrapped",
+        ),
+        source.replace(
+            "let old := r.x; parent.x = 8;",
+            "parent.x = 8; let old := r.x;",
+        ),
+    ] {
+        let errors = memobits_ownership::check_ownership(&lower(&before_last_use));
+        assert!(
+            errors.iter().any(|error| error.code.to_string() == "BE005"),
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn borrow_option_loan_is_live_only_on_branches_that_use_it() {
+    let source = "fn branch(flag: Bool) -> i32 {
+        var owner := 7;
+        let wrapped: Option<borrow i32> = Some(owner.borrow());
+        if flag { match wrapped { Some(r) => r.copy(), None => 0 } }
+        else { owner = 9; owner }
+    }
+    fn main() -> i32 { branch(true) + branch(false) }";
+    assert!(memobits_ownership::check_ownership(&lower(source)).is_empty());
+
+    let before_split = source.replace("if flag", "owner = 8; if flag");
+    let errors = memobits_ownership::check_ownership(&lower(&before_split));
+    assert!(
+        errors.iter().any(|error| error.code.to_string() == "BE005"),
+        "{errors:?}"
+    );
+}
