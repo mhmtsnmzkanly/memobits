@@ -92,7 +92,7 @@ fn variant_exists(
                 return variants.iter().any(|candidate| candidate.name == variant);
             }
             Some(TypeDefinition::Alias(target)) => {
-                if let Some(template) = templates::lookup(&target.path) {
+                if let Some(template) = templates::lookup_type(target) {
                     return template.variant_index(variant).is_some();
                 }
                 let [head, tail @ ..] = target.path.as_slice() else {

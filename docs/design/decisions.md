@@ -82,7 +82,7 @@ only where explicitly stated; unresolved API spellings remain proposals.
 
 - Type declarations use `type Name { fields... }` for field-based types,
   `type Name [ variants... ]` for enums, and `type Name = Other;` for aliases.
-- Type parameters exist only on compiler-known types: `Array<T, N>`, `List<T>`,
+- Type parameters exist only on compiler-known types: `Array<T, N>`, `Bytes<N>`, `List<T>`,
   `Option<T>`, `Result<T, E>`, and the three-state `Attempt<T, E>`. They share
   one category with `Array`: the compiler instantiates them per use.
   User-defined generic types are not available now, but the door stays open:

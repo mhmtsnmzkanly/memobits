@@ -510,7 +510,7 @@ impl Parser {
         let path = self.path()?;
         let mut arguments = Vec::new();
         if self.eat("<") {
-            let Some(template) = templates::lookup(&path) else {
+            let Some(template) = templates::lookup_applied(&path) else {
                 return self.fail("only compiler-known templates support type arguments");
             };
             if template.parameters.is_empty() {

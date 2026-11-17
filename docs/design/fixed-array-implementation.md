@@ -1,5 +1,11 @@
 # Fixed-array implementation sequence
 
+`Bytes<N>` is a built-in spelling for `Array<u8, N>`. It accepts the same
+nonnegative integer literal lengths, including zero, and uses ordinary array
+literals. The two spellings have identical type identity, ownership, borrowing,
+layout and ABI restrictions. Bare `Bytes` still resolves as a user-defined
+type or import. Dynamic byte buffers are outside this slice.
+
 The accepted design uses homogeneous `Array<T, N>`, array literals `[a, b]`,
 repetition `[expression; N]`, and checked indexing. This document separates
 syntax support from executable collection semantics.

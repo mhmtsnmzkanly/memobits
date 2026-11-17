@@ -249,7 +249,7 @@ impl TypeTable {
                 referent,
                 span,
             }],
-        ) = (templates::lookup(&ty.path), ty.arguments.as_slice())
+        ) = (templates::lookup_type(ty), ty.arguments.as_slice())
         {
             if template.id == TemplateId::Option {
                 let inner = self.resolve(module, referent)?;
@@ -637,14 +637,14 @@ impl TypeTable {
         let mut ty = base;
         let mut aliases = HashSet::new();
         loop {
-            if templates::lookup(&ty.path).is_some_and(|template| template.id == TemplateId::Error)
-            {
+            let template = templates::lookup_type(ty);
+            if template.is_some_and(|template| template.id == TemplateId::Error) {
                 let Ty::Struct(id, _) = self.resolve(module, ty)? else {
                     unreachable!("Error is a struct");
                 };
                 return Ok(id);
             }
-            if templates::lookup(&ty.path).is_some()
+            if template.is_some()
                 || matches!(ty.path.as_slice(), [name] if primitive(name).is_some())
             {
                 return Err(TypeFailure {
@@ -720,15 +720,14 @@ impl TypeTable {
         result
     }
 
-    /// Resolve a written type in `module`: primitives, `Array<T, N>`, structs, enums
-    /// and aliases (followed to their targets).
+    /// Resolve a written type in `module`, following aliases to their targets.
     pub fn resolve(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
         let failure = |code: u16, message: String| TypeFailure {
             span: ty.span,
             code,
             message,
         };
-        if let Some(template) = templates::lookup(&ty.path) {
+        if let Some(template) = templates::lookup_type(ty) {
             let arguments = resolve_arguments(template, ty, |kind, argument| {
                 let resolved = self.resolve(module, argument)?;
                 self.check_template_argument(template, kind, &resolved, argument.span)?;
@@ -746,6 +745,12 @@ impl TypeTable {
                         unreachable!("template argument contract checked above");
                     };
                     return Ok(Ty::Array(Box::new(element.clone()), *count));
+                }
+                TemplateId::Bytes => {
+                    let [ResolvedArgument::Integer(count)] = arguments.as_slice() else {
+                        unreachable!("template argument contract checked above");
+                    };
+                    return Ok(Ty::Array(Box::new(Ty::Primitive("u8")), *count));
                 }
             }
         }

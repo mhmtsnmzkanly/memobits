@@ -1,6 +1,6 @@
 # Guest UTF-8 validator
 
-[The validator](src/main.mb) checks the logical prefix of an `Array<u8, 8>`
+[The validator](src/main.mb) checks the logical prefix of a `Bytes<8>` buffer
 and returns the number of Unicode scalars on success. Its lead-byte and
 continuation ranges cover one- through four-byte sequences and exclude
 overlong encodings, surrogates, and values above U+10FFFF.

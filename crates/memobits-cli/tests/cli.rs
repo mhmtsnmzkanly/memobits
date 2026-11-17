@@ -22,6 +22,46 @@ fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
     assert_example_runs_in_both_modes("utf8-validator", b"Result: Ok(i32(0))\n");
 }
 
+#[test]
+fn language_guide_checks_bytes_array_equivalence_in_source_and_wasm() {
+    assert_example_runs_in_both_modes("language-guide", b"Result: Ok(i32(42))\n");
+}
+
+#[test]
+fn applied_bytes_coexists_with_a_bare_bytes_import_and_moves_like_an_array() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bytes'\nentry='main::main'\n",
+    );
+    f.write("src/model.mb", "pub type Bytes = u8;");
+    let source = "use self::model::Bytes;
+        fn consume(data: Array<u8, 1>) -> u8 { data[0] }
+        fn main() -> u8 {
+            let value: Bytes = 42;
+            let data: Bytes<1> = [value];
+            consume(data)
+        }";
+    f.write("src/main.mb", source);
+    let output = f.run(&["run"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"Result: u8(42)\n");
+
+    f.write(
+        "src/main.mb",
+        &source.replace("consume(data)", "consume(data); data[0]"),
+    );
+    err(f.run(&["run"]), "BE001");
+
+    f.write(
+        "src/main.mb",
+        "type Bytes [ Tag ]
+         type Buffer = Bytes<1>;
+         fn main() -> u8 { Buffer::Tag; 0 }",
+    );
+    err(f.run(&["resolve"]), "NE004");
+}
+
 fn assert_example_runs_in_both_modes(project: &str, expected: &[u8]) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/projects")

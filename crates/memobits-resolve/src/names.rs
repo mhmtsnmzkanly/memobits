@@ -44,7 +44,7 @@ pub(crate) fn check(
             } => {
                 types.insert(name.clone());
                 if let TypeDefinition::Alias(target) = definition {
-                    aliases.insert(name.clone(), target.path.clone());
+                    aliases.insert(name.clone(), target);
                 }
                 if let TypeDefinition::Enum(v) = definition {
                     variants.insert(
@@ -145,18 +145,18 @@ pub(crate) fn check(
     }
     (checker.diagnostics, checker.qualified)
 }
-struct Checker {
+struct Checker<'a> {
     types: BTreeSet<String>,
     imports: BTreeMap<String, String>,
     variants: BTreeMap<String, BTreeSet<String>>,
     /// Local `type Name = path;` aliases, followed when a variant path starts
     /// with an alias name.
-    aliases: BTreeMap<String, Vec<String>>,
+    aliases: BTreeMap<String, &'a Type>,
     scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
     qualified: Vec<(String, Span, bool)>,
 }
-impl Checker {
+impl Checker<'_> {
     fn ty(&mut self, ty: &Type) {
         for argument in &ty.arguments {
             match argument {
@@ -166,7 +166,7 @@ impl Checker {
                 TypeArgument::Integer(_) => {}
             }
         }
-        if templates::lookup(&ty.path).is_some() {
+        if templates::lookup_type(ty).is_some() {
             return;
         }
         if ty.path.len() > 1 {
@@ -184,7 +184,15 @@ impl Checker {
         let mut seen = BTreeSet::new();
         while head.len() == 1 && seen.insert(head[0].clone()) {
             match self.aliases.get(&head[0]) {
-                Some(target) => head = target.clone(),
+                Some(target) => {
+                    if templates::lookup_type(target)
+                        .is_some_and(|template| template.id == templates::TemplateId::Bytes)
+                    {
+                        self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+                        return;
+                    }
+                    head = target.path.clone();
+                }
                 None => break,
             }
         }

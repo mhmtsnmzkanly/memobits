@@ -101,6 +101,27 @@ fn stations() -> Bool {
         && pair[1].readings[2] == 9
 }
 
+// Bytes<N> is a built-in spelling for Array<u8, N>. Either spelling works
+// across assignments, calls, and returns, including borrowed and shared calls.
+fn set_first_byte(buffer: share Array<u8, 2>) {
+    buffer[0] = 42;
+}
+
+fn first_byte(buffer: borrow Bytes<2>) -> u8 {
+    buffer[0]
+}
+
+fn return_bytes(buffer: Array<u8, 2>) -> Bytes<2> {
+    buffer
+}
+
+fn fixed_bytes() -> Bool {
+    var bytes: Bytes<2> = [0; 2];
+    set_first_byte(bytes.share());
+    let array: Array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
+    first_byte(array.borrow()) == 42
+}
+
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, Bool) ]
 type Sample = Reading;
@@ -257,5 +278,6 @@ fn main() -> Result<i32, Error> {
     if !enums() { return Err(Error { code: 3 }); }
     if !optional_borrow() { return Err(Error { code: 4 }); }
     if !outcomes() { return Err(Error { code: 5 }); }
+    if !fixed_bytes() { return Err(Error { code: 6 }); }
     Ok(42)
 }

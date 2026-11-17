@@ -1,13 +1,11 @@
 // UTF-8 validation over an eight-byte buffer. Byte constants are decimal.
-type Bytes = Array<u8, 8>;
-
 type Utf8Error: Error {
     offset: Option<i32>,
 }
 
 type Validation = Result<i32, Utf8Error>;
 
-fn validate(bytes: borrow Bytes, length: i32) -> Validation {
+fn validate(bytes: borrow Bytes<8>, length: i32) -> Validation {
     if length < 0 || length > 8 {
         return Err(Utf8Error { code: 1, offset: None });
     }
@@ -57,14 +55,14 @@ fn validate(bytes: borrow Bytes, length: i32) -> Validation {
     }
 }
 
-fn count_is(bytes: Bytes, length: i32, expected: i32) -> Bool {
+fn count_is(bytes: Bytes<8>, length: i32, expected: i32) -> Bool {
     match validate(bytes.borrow(), length) {
         Ok(count) => count == expected,
         Err(_) => false,
     }
 }
 
-fn error_is(bytes: Bytes, length: i32, code: u32, expected: Option<i32>) -> Bool {
+fn error_is(bytes: Bytes<8>, length: i32, code: u32, expected: Option<i32>) -> Bool {
     match validate(bytes.borrow(), length) {
         Ok(_) => false,
         Err(error) => {

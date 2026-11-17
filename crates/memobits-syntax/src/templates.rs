@@ -1,5 +1,7 @@
 //! Compiler-known template shapes shared by parsing, name resolution and analysis.
 
+use crate::Type;
+
 #[derive(Clone, Copy)]
 pub enum ParameterKind {
     Type,
@@ -10,6 +12,7 @@ pub enum ParameterKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TemplateId {
     Array,
+    Bytes,
     Option,
     Result,
     Attempt,
@@ -44,6 +47,13 @@ const TEMPLATES: &[Template] = &[
         name: "Array",
         parameters: &[ParameterKind::Type, ParameterKind::Integer],
         argument_error: "Array requires an element type and integer literal length",
+    },
+    Template {
+        id: TemplateId::Bytes,
+        name: "Bytes",
+        parameters: &[ParameterKind::Integer],
+        variants: &[],
+        argument_error: "Bytes requires one integer literal length",
     },
     Template {
         id: TemplateId::Option,
@@ -107,8 +117,22 @@ pub fn by_id(id: TemplateId) -> &'static Template {
 }
 
 pub fn lookup(path: &[String]) -> Option<&'static Template> {
+    // Only the applied spelling Bytes<N> is built in. Bare Bytes can still
+    // name an existing user-defined type or import.
+    lookup_applied(path).filter(|template| template.id != TemplateId::Bytes)
+}
+
+pub fn lookup_applied(path: &[String]) -> Option<&'static Template> {
     let [name] = path else { return None };
     TEMPLATES.iter().find(|template| template.name == name)
+}
+
+pub fn lookup_type(ty: &Type) -> Option<&'static Template> {
+    if ty.arguments.is_empty() {
+        lookup(&ty.path)
+    } else {
+        lookup_applied(&ty.path)
+    }
 }
 
 /// Look up a short prelude variant and its index in the defining template.

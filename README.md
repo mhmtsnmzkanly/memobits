@@ -91,6 +91,7 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
 - [Guest UTF-8 validator](examples/projects/utf8-validator/README.md) checks
   Unicode scalar encodings and reports byte offsets for malformed input.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
+  Use `Bytes<N>` as a built-in spelling for `Array<u8, N>`.
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of
   public fields.

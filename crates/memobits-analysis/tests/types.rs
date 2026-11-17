@@ -113,6 +113,26 @@ fn primitive_reference_escapes_and_invalid_writes_are_rejected() {
 }
 
 #[test]
+fn fixed_bytes_use_array_length_and_element_rules() {
+    assert!(codes("fn f() { let b: Bytes<0> = []; let a: Array<u8, 0> = b; }").is_empty());
+    for (source, expected) in [
+        ("fn f(b: Bytes<4_294_967_296>) {}", "TE008"),
+        ("fn f(b: Bytes<2>) { let a: Array<u8, 3> = b; }", "TE002"),
+        ("fn f(b: Bytes<2>) { let a: Array<i8, 2> = b; }", "TE002"),
+    ] {
+        let diagnostics = codes(source);
+        assert!(
+            diagnostics.iter().any(|code| code == expected),
+            "{source}: {diagnostics:?}"
+        );
+    }
+    for ty in ["Bytes<-1>", "Bytes<n>", "Bytes<1.0>", "Bytes<u8, 1>"] {
+        let parsed = parse(SourceId(9), &format!("fn f(b: {ty}) {{}}"));
+        assert!(!parsed.diagnostics.is_empty(), "{ty}");
+    }
+}
+
+#[test]
 fn fixed_arrays_infer_homogeneous_elements_and_contextual_literals() {
     for source in [
         "fn f() { let a := [1, 2]; let b: Array<i32, 2> = a; }",

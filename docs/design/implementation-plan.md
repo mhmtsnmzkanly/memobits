@@ -199,6 +199,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   of a field or element is gated, while whole-struct destructuring consumes its
   owner. See [fixed arrays](fixed-array-implementation.md) and
   [structs](struct-implementation.md) for supported projections and operations.
+  `Bytes<N>` resolves to `Array<u8, N>` with the same fixed-length, ownership,
+  lowering and ABI rules.
 - Borrow and share support internal primitive and aggregate parameters.
   Distinct struct fields and constant indices can be treated as disjoint.
   Dynamic indices are conservative. Reference returns, reference-valued
