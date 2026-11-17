@@ -836,7 +836,7 @@ fn rejects_malformed_array_types() {
     };
     assert!(messages(f)
         .iter()
-        .any(|m| m.contains("reference must refer to a primitive value or an array")));
+        .any(|m| m.contains("reference must refer to a primitive value, an array or a struct")));
 }
 
 #[test]
@@ -1357,7 +1357,7 @@ fn rejects_invalid_field_addresses() {
 
 #[test]
 fn rejects_unsupported_struct_shapes() {
-    // Whole-struct load, struct block parameters and struct signature types.
+    // A whole-struct load is never valid, and a reference never refers to a reference.
     let errors = struct_errors(|p| {
         let f = &mut p.functions[0];
         f.values[3] = Type::Reference {
@@ -1365,33 +1365,101 @@ fn rejects_unsupported_struct_shapes() {
             inner: Box::new(Type::Struct(TypeId(0))),
         };
     });
-    assert!(has(&errors, "must refer to a primitive"), "{errors:?}");
+    assert!(has(&errors, "output type is incompatible"), "{errors:?}");
     let errors = struct_errors(|p| {
         let f = &mut p.functions[0];
-        f.signature.parameters.push(ParameterType {
-            access: Access::Owned,
-            ty: Type::Struct(TypeId(0)),
-        });
-        f.parameter_locals.push(LocalId(0));
+        f.values[3] = Type::Reference {
+            access: Access::Borrow,
+            inner: Box::new(Type::Reference {
+                access: Access::Borrow,
+                inner: Box::new(Type::Struct(TypeId(0))),
+            }),
+        };
     });
-    assert!(has(&errors, "cannot be a struct yet"), "{errors:?}");
-    let errors = struct_errors(|p| {
-        *p.functions[0].signature.result = Type::Struct(TypeId(0));
-    });
-    assert!(has(&errors, "cannot be a struct yet"), "{errors:?}");
-    let errors = struct_errors(|p| {
-        let f = &mut p.functions[0];
-        f.values.push(Type::Struct(TypeId(0)));
+    assert!(has(&errors, "must refer to"), "{errors:?}");
+}
+
+#[test]
+fn accepts_struct_signatures_references_and_block_parameters() {
+    let struct_ty = Type::Struct(TypeId(0));
+    let mut program = struct_program();
+    {
+        let f = &mut program.functions[0];
+        // fn f(a: P, b: borrow P, c: share P) -> P
+        for (access, local_ty) in [
+            (Access::Owned, struct_ty.clone()),
+            (
+                Access::Borrow,
+                Type::Reference {
+                    access: Access::Borrow,
+                    inner: Box::new(struct_ty.clone()),
+                },
+            ),
+            (
+                Access::Share,
+                Type::Reference {
+                    access: Access::Share,
+                    inner: Box::new(struct_ty.clone()),
+                },
+            ),
+        ] {
+            f.signature.parameters.push(ParameterType {
+                access,
+                ty: struct_ty.clone(),
+            });
+            f.locals.push(Local {
+                name: "q".into(),
+                ty: local_ty,
+                mutable: false,
+                span: span(),
+            });
+            f.parameter_locals.push(LocalId(f.locals.len() as u32 - 1));
+        }
+        *f.signature.result = struct_ty.clone();
+        f.blocks[0].terminator.kind = TerminatorKind::Unreachable;
+        // A struct-typed block parameter.
+        f.values.push(struct_ty.clone());
         f.blocks.push(Block {
             parameters: vec![ValueId(5)],
             instructions: vec![],
             terminator: Terminator {
                 span: None,
-                kind: TerminatorKind::Return(None),
+                kind: TerminatorKind::Unreachable,
             },
         });
-    });
-    assert!(has(&errors, "struct block parameters"), "{errors:?}");
+        // A field address through a share reference parameter, at Share access.
+        f.values.push(Type::Reference {
+            access: Access::Share,
+            inner: Box::new(i32_ty()),
+        });
+        f.blocks[0].instructions.push(ins(
+            Some(6),
+            InstructionKind::FieldAddr {
+                loan: LoanId(1),
+                base: loc(3, UseMode::Share),
+                field: 0,
+                access: Access::Share,
+            },
+        ));
+    }
+    assert_eq!(program.validate(), Ok(()));
+    // A borrow reference cannot be strengthened into a share field address.
+    let mut weaker = program.clone();
+    if let InstructionKind::FieldAddr { base, .. } =
+        &mut weaker.functions[0].blocks[0].instructions[6].kind
+    {
+        *base = loc(2, UseMode::Share);
+    }
+    let errors: Vec<_> = weaker
+        .validate()
+        .unwrap_err()
+        .into_iter()
+        .map(|e| e.message)
+        .collect();
+    assert!(
+        has(&errors, "cannot strengthen reference access"),
+        "{errors:?}"
+    );
 }
 
 #[test]

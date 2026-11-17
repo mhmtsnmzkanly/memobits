@@ -14,12 +14,12 @@ Named struct declarations with non-Unit primitive fields; struct literals as
 primitive fields inside expressions; `.copy()` of a primitive field; and `pub`
 types and fields across `use` and qualified paths. Everything else stays gated.
 
-**A2 — `var` structs, field assignment, whole-struct moves, struct parameters, borrow/share, struct results (planned).**
-`var` struct bindings and `p.x = v` / `p.x op= v` writes, gated today with TE017.
-Whole-struct moves (`let q := p;`, passing and returning a struct), struct
-parameters and results, and `borrow`/`share` of a struct owner and its fields.
-Owned struct arguments and results follow the array model: the callee owns a
-copy in its own frame cell, and struct-return storage belongs to the caller.
+**A2 — `var` structs, field assignment, whole-struct moves, struct parameters, borrow/share, struct results (implemented; see the A2 checkpoint).**
+`var` struct bindings and `p.x = v` / `p.x op= v` writes, whole-struct moves
+(`let q := p;`, passing and returning a struct), struct parameters and results,
+and `borrow`/`share` of a whole struct. Owned struct arguments and results
+follow the array model: the callee owns a copy in its own frame cell, and
+struct-return storage belongs to the caller. Field-level references stay gated.
 
 **A3 — nested structs, array fields, arrays of structs (planned).**
 Struct-typed and array-typed fields (a struct inside a struct, `Array<T, N>`
@@ -122,9 +122,93 @@ Two field references to different fields of one struct also conflict (BE005).
 
 ### Not in A1
 
-Everything in packages A2 to A4 above. In particular, `var` structs, whole-struct values, struct parameters and results, nested
-or array-typed fields, destructuring, and field-disjoint loans are all still
-gated.
+Everything in packages A2 to A4 above. The A1 gate table above predates A2:
+its `var`, field assignment, whole-struct, parameter, result, reference and
+literal-position rows are lifted by the A2 checkpoint below.
+
+## A2 checkpoint
+
+A2 reuses the aggregate machinery written for arrays instead of adding struct
+copies of it. The IR validator, the frame-cell allocator, owned-parameter copy
+in, hidden result pointers, join parameters as frame cells, `Assign`/`Capture`
+as `memory.copy`, and in-place construction (`construction_aliases`) already
+worked on "array or struct" values; A2 removed the struct bans and generalised
+the remaining array-only checks (`is_aggregate`, `aggregate_bytes`).
+
+### Executes
+
+- `var` struct bindings and `var` owned struct parameters.
+- Field writes `p.x = v` and `p.x op= v` (`+= -= *= /= %=`, the scalar rules;
+  `Bool` fields take `=` only). Through `var` owners, owned `var` parameters,
+  `share` parameters, and `var` share bindings.
+- Whole-struct moves: `let q := p;`, `q = p;` (a `var` target), a literal or call
+  result as the right-hand side, `return p;`, struct-valued `if`/block results.
+  After a move the source is unavailable (BE001) until reassigned.
+- Parameters `p: P` (moves the caller's value; `var p: P` lets the callee mutate
+  its own copy), `p: borrow P` and `p: share P`. Call sites write `p.borrow()` /
+  `p.share()`; the signature decides access. Field reads work through `borrow`
+  and `share`; `share` also writes fields and may assign a whole struct
+  (`p = P { .. };`, a `memory.copy`). Local reference bindings (`let r := p.borrow();`,
+  `var s := p.share();`) and reborrows to an equal or weaker access.
+- Results `-> P` for a literal, a local, an owned parameter or a call, used as an
+  initialiser, assignment right-hand side or owned argument (`use_p(make())`).
+- Mixed-width fields (`u8`, `i64`, `f32`, `Bool`, `i16`, `f64`) keep their
+  layout through all of the above; narrow stores never touch neighbours.
+
+### Lowering and evaluation order
+
+Per `decisions.md`, a field write evaluates the base, then the right-hand side,
+then performs the store: `FieldAddr(Share)` and `Store` are adjacent and come
+after the right-hand side's instructions. A compound write reads the field first
+(`FieldAddr(Borrow)` + `Load`), then evaluates the right-hand side, then stores.
+Consequence for `p.x = f(p.share())` and `p.x += f(p.share())`: they are
+accepted. The share loan lives only for the call, which has ended before the
+address for the write is formed, so the call's effects happen first and the
+store lands last; the compound form uses the field value read before the call.
+A reference that is still live across the write (a `let r := p.borrow();` used
+afterwards) conflicts as usual (BE005).
+
+### Backend
+
+A struct reference is the owner cell's address (`i32`). A struct-typed
+parameter or result is a pointer: an owned parameter is copied into the callee's
+own cell in the prologue; a struct result is written through the hidden trailing
+pointer (the call's own value cell in the caller's frame) by one `memory.copy`
+in `return`. Block parameters of struct type are frame cells; a join edge copies
+the argument. `FieldAddr` accepts a struct owner or a reference to one.
+`main` and `[export]` functions with struct, struct-reference or struct-result
+signatures are rejected by the backend with LE900 ("cannot take structs or
+struct references", "cannot return structs"); there is no external struct ABI.
+
+### Diagnostics
+
+| Problem | Code |
+| --- | --- |
+| Field write to a `let` struct, an owned non-`var` parameter, a `borrow` parameter or binding, or a `let` share binding | TE004 |
+| Write to a private field of another module's struct | TE025 (existing) |
+| Field write of the wrong type, unknown field, compound write on `Bool` | TE002, TE024, TE007 |
+| Use after whole-struct move | BE001 |
+| Field write, whole assignment or move while a borrow is live; two `share`s (or share + borrow) of one struct in one call | BE005 |
+| `make().x`, `P { .. }.x`, a struct literal as a temporary | TE017 |
+| `p.x.borrow()` / `p.x.share()` (field-level references) | TE017 |
+| `p.copy()` (whole-struct copy) | TE017 |
+| Struct-typed fields, array fields, arrays of structs | TE017 |
+| Struct or struct reference in `main` / `[export]` signature | LE900 |
+| `var` on a `borrow`/`share` parameter | TE017 |
+
+### Loans
+
+No new rules. A field address is a loan rooted at the whole struct local, so any
+live reference to a struct blocks writes to any of its fields and moves of the
+struct (BE005); field-disjoint loans are A4.
+
+### Still gated
+
+Struct-typed fields, array-typed fields, arrays of structs (A3); destructuring
+and field-disjoint loans (A4); `p.x.share()` and `p.x.borrow()`; whole-struct
+`.copy()`; field access on a call result or literal; structs and struct
+references in exported signatures (LE900); returning or storing references;
+rebinding a reference handle.
 
 ## Implicit primitive copy checkpoint
 

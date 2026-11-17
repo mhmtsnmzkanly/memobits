@@ -625,6 +625,10 @@ impl<'a> Builder<'a> {
                         self.lower_element_assign(statement.span, target, operator, value);
                         continue;
                     }
+                    if matches!(target.kind, ExprKind::Field { .. }) {
+                        self.lower_field_assign(statement.span, target, operator, value);
+                        continue;
+                    }
                     let PathTarget::Local(local) = self.path(target) else {
                         unreachable!("checked assignment")
                     };
@@ -836,6 +840,100 @@ impl<'a> Builder<'a> {
         };
         let assigned = self.owned(assigned)?;
         let reference = self.address_chain(array, &positions, Access::Share, span)?;
+        self.emit(
+            span,
+            InstructionKind::Store {
+                reference,
+                value: assigned,
+            },
+            None,
+        );
+        Some(())
+    }
+    /// Address one field of a struct owner or of a reference to a struct. The
+    /// result is a reference with the requested access.
+    fn field_addr(
+        &mut self,
+        mut owner: Operand,
+        field_name: &str,
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        let id = match self.operand_type(owner) {
+            Some(Type::Struct(id)) => id,
+            Some(Type::Reference { inner, .. }) => match *inner {
+                Type::Struct(id) => id,
+                _ => unreachable!("checked struct field base"),
+            },
+            _ => unreachable!("checked struct field base"),
+        };
+        let definition = &self.types[id.0 as usize];
+        let index = definition
+            .fields
+            .iter()
+            .position(|field| field.name == field_name)
+            .expect("checked struct field");
+        let field_type = definition.fields[index].ty.clone();
+        let loan = LoanId(self.next_loan);
+        self.next_loan += 1;
+        owner.mode = access_mode(access);
+        let mut reference = self.emit(
+            span,
+            InstructionKind::FieldAddr {
+                loan,
+                base: owner,
+                field: index as u32,
+                access,
+            },
+            Some(Type::Reference {
+                access,
+                inner: Box::new(field_type),
+            }),
+        )?;
+        reference.mode = access_mode(access);
+        Some(reference)
+    }
+    /// `p.x = v` and `p.x op= v`. The base is evaluated first, then the
+    /// right-hand side; the field address and the store are adjacent. A
+    /// compound write reads the field first, then evaluates the right-hand side.
+    fn lower_field_assign(
+        &mut self,
+        span: Span,
+        target: &Expr,
+        operator: &str,
+        value: &Expr,
+    ) -> Option<()> {
+        let ExprKind::Field { base, name } = &target.kind else {
+            unreachable!("checked field place")
+        };
+        let owner = self.lower_expr(base)?;
+        let previous = if operator == "=" {
+            None
+        } else {
+            let reference = self.field_addr(owner, name, Access::Borrow, span)?;
+            Some(self.load_element(reference, span)?)
+        };
+        let rhs = self.lower_expr(value)?;
+        let rhs = self.scalar(rhs)?;
+        let assigned = match previous {
+            None => rhs,
+            Some(previous) => {
+                let field = self
+                    .operand_type(previous)
+                    .expect("compound field read is a value");
+                self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: binary_op(operator),
+                        left: read(previous),
+                        right: read(rhs),
+                    },
+                    Some(field),
+                )?
+            }
+        };
+        let assigned = self.owned(assigned)?;
+        let reference = self.field_addr(owner, name, Access::Share, span)?;
         self.emit(
             span,
             InstructionKind::Store {
@@ -1180,36 +1278,9 @@ impl<'a> Builder<'a> {
                 )
             }
             ExprKind::Field { base, name } => {
-                // Field read: checked address of the field, then a load.
+                // Field read: address of the field, then a load.
                 let owner = self.lower_expr(base)?;
-                let Some(Type::Struct(id)) = self.operand_type(owner) else {
-                    unreachable!("checked struct field base")
-                };
-                let definition = &self.types[id.0 as usize];
-                let index = definition
-                    .fields
-                    .iter()
-                    .position(|field| &field.name == name)
-                    .expect("checked struct field");
-                let field_type = definition.fields[index].ty.clone();
-                let loan = LoanId(self.next_loan);
-                self.next_loan += 1;
-                let mut base = owner;
-                base.mode = access_mode(Access::Borrow);
-                let mut reference = self.emit(
-                    expr.span,
-                    InstructionKind::FieldAddr {
-                        loan,
-                        base,
-                        field: index as u32,
-                        access: Access::Borrow,
-                    },
-                    Some(Type::Reference {
-                        access: Access::Borrow,
-                        inner: Box::new(field_type),
-                    }),
-                )?;
-                reference.mode = access_mode(Access::Borrow);
+                let reference = self.field_addr(owner, name, Access::Borrow, expr.span)?;
                 self.load_element(reference, expr.span)
             }
             ExprKind::Struct { fields, .. } => {

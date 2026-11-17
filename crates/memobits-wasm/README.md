@@ -48,8 +48,13 @@ its largest field, size rounded up) using checked arithmetic; the cell shares th
 configured stack size (`[build].stack_size`) limit with arrays, and an oversized struct is a backend diagnostic.
 `StructNew` stores each field at its offset, in place in the destination local's cell
 when it is bound immediately (the array construction mechanism), and `FieldAddr` adds
-the constant field offset to the cell address, so `Load` is unchanged. Struct
-parameters, results and references do not exist in the IR yet.
+the constant field offset to the cell address (a struct owner's cell or a struct
+reference's pointer), so `Load` is unchanged. Structs reuse the array aggregate paths:
+owned struct parameters are copied into the callee's cell, `borrow`/`share` parameters
+are the owner's address, results go through the hidden trailing pointer, struct block
+parameters are frame cells, and whole-struct `Assign`/`Capture`/`Store` are
+`memory.copy`. `main` and `[export]` signatures with structs or struct references are
+rejected with LE900 (no external struct ABI).
 
 `cargo test --offline -p memobits-wasm` validates generated modules with
 wasmparser and executes representative exports with wasmi.

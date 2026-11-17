@@ -29,8 +29,11 @@ created by `StructNew` (one consumed operand per field, declaration order) and a
 field is addressed by `FieldAddr { loan, base, field, access }`, the bounds-check-free
 twin of `ElementAddr` that yields a `Reference` to the field type and is read with
 `Load`. Validation checks type and field indices, operand count and types, access
-modes and shared loan IDs. Struct fields are non-Unit primitives for now (so
-recursive or nested struct types are rejected), and struct parameters, results,
-block parameters, references and whole-struct loads are not valid yet.
+modes and shared loan IDs. `FieldAddr` accepts a struct owner or a `Reference` to a
+struct (with at most the referent's access). Struct fields are non-Unit primitives
+for now (so recursive or nested struct types are rejected). Structs may be owned,
+`borrow` or `share` parameters, function results and block parameters, and a
+reference may refer to a struct; a whole-struct `Load` is invalid (fields are
+addressed and loaded one by one).
 
 Run tests with `cargo test --offline -p memobits-ir`.

@@ -59,14 +59,15 @@ Code, diagnostics, and documentation are written in English.
 - [Fixed arrays](docs/design/fixed-array-implementation.md) — array
   implementation sequence and checkpoints.
 - [Structs](docs/design/struct-implementation.md) — struct implementation
-  sequence (A1 implemented) and checkpoints.
+  sequence (A1 and A2 implemented) and checkpoints.
 - [Illustrative syntax guide](examples/design/language-guide.mb) (not executable).
 
 ## Examples
 
 - `examples/projects/` — buildable projects with a `project.toml`.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
-- `examples/projects/structs/` — structs: literals, field reads with implicit copies, and a
-  two-module use of public fields.
+- `examples/projects/structs/` — structs: a constructor function, a share-mutating
+  function, a borrow-reading function, literals, field reads and a two-module use of
+  public fields.
 - `examples/analysis/` — single files for the analysis and ownership commands.
 - `examples/design/` — illustrative target syntax.

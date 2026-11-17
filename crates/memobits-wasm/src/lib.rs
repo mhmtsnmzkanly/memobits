@@ -37,11 +37,12 @@ fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
 /// are emitted, retaining their relative Program order. All source IR is
 /// validated and checked before this artifact selection.
 ///
-/// Internal direct calls support borrow/share references to non-Unit primitives
-/// and to (nested) fixed arrays of them, owned array parameters (copied into the
-/// callee's frame) and array results (written through a hidden pointer to
-/// caller-allocated storage). Exported signatures remain primitive-only; reference
-/// and array ABIs are not defined. Indirect calls, reference results and other
+/// Internal direct calls support borrow/share references to non-Unit primitives,
+/// to (nested) fixed arrays of them and to structs, owned array and struct
+/// parameters (copied into the callee's frame) and array and struct results
+/// (written through a hidden pointer to caller-allocated storage). Exported
+/// signatures remain primitive-only; reference, array and struct ABIs are not
+/// defined. Indirect calls, reference results and other
 /// pointees are rejected.
 /// Integer arithmetic is checked in every profile; a failed runtime check
 /// traps with Wasm `unreachable` until the host runtime maps traps to language
@@ -144,6 +145,21 @@ pub fn compile_with(
                 .signature
                 .parameters
                 .iter()
+                .any(|p| matches!(p.ty, Type::Struct(_)))
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot take structs or struct references; the external struct ABI is not defined",
+                    Some(function.span),
+                ));
+            } else if matches!(function.signature.result.as_ref(), Type::Struct(_)) {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot return structs; the external struct ABI is not defined",
+                    Some(function.span),
+                ));
+            } else if function
+                .signature
+                .parameters
+                .iter()
                 .any(|p| matches!(p.ty, Type::Array { .. }))
             {
                 errors.push(diagnostic(
@@ -236,18 +252,26 @@ fn primitive_signature<'a>(
     result: &Type,
 ) -> bool {
     parameters.all(|p| match p.access {
-        memobits_ir::Access::Owned => matches!(p.ty, Type::Primitive(_) | Type::Array { .. }),
+        memobits_ir::Access::Owned => {
+            matches!(
+                p.ty,
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+            )
+        }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
             matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
-                || matches!(p.ty, Type::Array { .. })
+                || matches!(p.ty, Type::Array { .. } | Type::Struct(_))
         }
-    }) && matches!(result, Type::Primitive(_) | Type::Array { .. })
+    }) && matches!(
+        result,
+        Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+    )
 }
 
 fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
-        // A struct is an inline frame-cell value; it never crosses a signature.
+        // A struct is an inline frame-cell value, passed internally by address.
         Type::Struct(_) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
@@ -255,6 +279,7 @@ fn supported_type(ty: &Type) -> bool {
         } => match inner.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             array @ Type::Array { .. } => supported_type(array),
+            Type::Struct(_) => true,
             _ => false,
         },
         Type::Array { element, .. } => match element.as_ref() {
@@ -424,14 +449,14 @@ impl FrameLayout {
                             Type::Primitive(primitive) => {
                                 storage_layout(*primitive).map_err(error)?;
                             }
-                            Type::Array { .. } => {}
+                            Type::Array { .. } | Type::Struct(_) => {}
                             _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
                         }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
                     // An array owner already has its cell (one per array local or value).
-                    Type::Array { .. } => {}
+                    Type::Array { .. } | Type::Struct(_) => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -701,13 +726,20 @@ fn array_layout(ty: &Type) -> Result<(u32, u32), String> {
     }
 }
 
-/// Byte size of the pointee of an array operand type (owner or reference).
-fn array_bytes(ty: &Type) -> Result<u32, String> {
+/// Byte size of the pointee of an aggregate operand type (array or struct,
+/// owner or reference).
+fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
     match ty {
-        Type::Array { .. } => array_layout(ty).map(|(size, _)| size),
-        Type::Reference { inner, .. } => array_bytes(inner),
-        _ => Err("expected an array type".into()),
+        Type::Array { .. } | Type::Struct(_) => aggregate_layout(structs, ty).map(|(size, _)| size),
+        Type::Reference { inner, .. } => aggregate_bytes(structs, inner),
+        _ => Err("expected an array or struct type".into()),
     }
+}
+
+/// Aggregate values (arrays and structs) live in frame cells and are passed
+/// and returned by address.
+fn is_aggregate(ty: &Type) -> bool {
+    matches!(ty, Type::Array { .. } | Type::Struct(_))
 }
 
 fn align_up(value: u32, align: u32) -> Option<u32> {
@@ -873,8 +905,7 @@ fn encode_frames(
     for signature in &signatures {
         // An array result is written through a hidden trailing pointer
         // parameter to caller-allocated storage; the Wasm result list is empty.
-        let hidden =
-            matches!(signature.result.as_ref(), Type::Array { .. }).then_some(ValType::I32);
+        let hidden = is_aggregate(signature.result.as_ref()).then_some(ValType::I32);
         let params = signature
             .parameters
             .iter()
@@ -887,10 +918,9 @@ fn encode_frames(
             })
             .chain(hidden)
             .collect::<Vec<_>>();
-        let results = if matches!(
-            signature.result.as_ref(),
-            Type::Primitive(Primitive::Unit) | Type::Array { .. }
-        ) {
+        let results = if matches!(signature.result.as_ref(), Type::Primitive(Primitive::Unit))
+            || is_aggregate(signature.result.as_ref())
+        {
             Vec::new()
         } else {
             vec![wasm_type(&signature.result)]
@@ -976,7 +1006,7 @@ fn compile_function(
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
         .map_err(|error| error.message)?;
-    let result_is_array = matches!(function.signature.result.as_ref(), Type::Array { .. });
+    let result_is_array = is_aggregate(function.signature.result.as_ref());
     // Wasm parameters: the source parameters plus, for an array result, one
     // hidden pointer to the caller-allocated result storage (last parameter).
     let param_count = function.signature.parameters.len() as u32 + u32::from(result_is_array);
@@ -1847,9 +1877,15 @@ fn compile_instruction(
         }
         InstructionKind::FieldAddr { base, field, .. } => {
             let output = output.ok_or("field address lacks an output")?;
-            // The base is a struct owner: its operand is the cell address.
-            let Type::Struct(type_id) = value_type(function, base)? else {
-                return Err("field address base is not a struct".into());
+            // The base is a struct owner (its operand is the cell address) or
+            // a reference to a struct (its operand is the owner's address).
+            let type_id = match value_type(function, base)? {
+                Type::Struct(type_id) => type_id,
+                Type::Reference { inner, .. } => match *inner {
+                    Type::Struct(type_id) => type_id,
+                    _ => return Err("field address base is not a struct".into()),
+                },
+                _ => return Err("field address base is not a struct".into()),
             };
             let offset = layout
                 .structs
@@ -1925,10 +1961,13 @@ fn compile_instruction(
             emit_operand(body, function, param_count, reference, layout, frame)?;
             emit_operand(body, function, param_count, value, layout, frame)?;
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
-                if matches!(inner.as_ref(), Type::Array { .. }) {
-                    // Whole-array store through a share reference: the value
-                    // operand is the address of an array cell of the same layout.
-                    body.instruction(&WasmInstruction::I32Const(array_bytes(&inner)? as i32));
+                if is_aggregate(inner.as_ref()) {
+                    // Whole-aggregate store through a share reference: the value
+                    // operand is the address of a cell of the same layout.
+                    body.instruction(&WasmInstruction::I32Const(aggregate_bytes(
+                        &layout.structs,
+                        &inner,
+                    )? as i32));
                     body.instruction(&WasmInstruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
@@ -1960,7 +1999,7 @@ fn compile_instruction(
             }
             let value = output.ok_or("call lacks an output")?;
             let id = instruction.output.unwrap();
-            if matches!(function.values[id.0 as usize], Type::Array { .. }) {
+            if is_aggregate(&function.values[id.0 as usize]) {
                 // Struct-return: the callee writes its result into this call's
                 // own value cell in the caller's frame (never into a dead
                 // callee frame), passed as the hidden trailing pointer.
@@ -2156,12 +2195,15 @@ fn compile_terminator(
         TerminatorKind::Return(value) => {
             if let Some(value) = value {
                 let ty = value_type(function, value)?;
-                if matches!(ty, Type::Array { .. }) {
+                if is_aggregate(&ty) {
                     // Write the result through the hidden pointer parameter
                     // (the last Wasm parameter) before the frame is released.
                     body.instruction(&WasmInstruction::LocalGet(param_count - 1));
                     emit_operand(body, function, param_count, value, layout, frame)?;
-                    body.instruction(&WasmInstruction::I32Const(array_bytes(&ty)? as i32));
+                    body.instruction(&WasmInstruction::I32Const(aggregate_bytes(
+                        &layout.structs,
+                        &ty,
+                    )? as i32));
                     body.instruction(&WasmInstruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
@@ -2199,9 +2241,8 @@ fn emit_edge(
     // swaps and loop backedges.
     // Array parameters live in frame cells: their arguments are copied in
     // memory after the scalars are staged, so they take no stack slot.
-    let is_array = |parameter: &memobits_ir::ValueId| {
-        matches!(function.values[parameter.0 as usize], Type::Array { .. })
-    };
+    let is_array =
+        |parameter: &memobits_ir::ValueId| is_aggregate(&function.values[parameter.0 as usize]);
     for (argument, parameter) in arguments.iter().zip(parameters) {
         if !is_array(parameter) {
             emit_operand(body, function, param_count, argument, layout, frame)?;

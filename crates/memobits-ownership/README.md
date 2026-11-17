@@ -32,8 +32,12 @@ implement complete language-level borrow semantics. The backend also does not
 support reference returns.
 
 Struct owners follow the array rules: `StructNew` consumes its field operands,
-`FieldAddr` reads (not consumes) its owner and creates a loan, and any field loan
-overlaps the whole struct (no field-disjoint reasoning yet).
+`FieldAddr` reads (not consumes) its owner (a struct local or a reference to one) and
+creates a loan, and any field loan overlaps the whole struct (no field-disjoint
+reasoning yet). Whole structs move like arrays (`Assign`, `Capture`, call arguments,
+returns, join arguments); a field write or a move while a borrow of the struct is live
+is BE005, and two `Share` arguments of one struct in a call are BE005. A2 needed no
+new rules.
 
 Run tests with `cargo test --offline -p memobits-ownership`.
 

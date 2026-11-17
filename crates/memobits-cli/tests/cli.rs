@@ -1257,21 +1257,7 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "TE024",
             "has no field 'z'",
         ),
-        (
-            "var p := P { x: 1, y: 2 }; 0",
-            "TE017",
-            "`var` struct bindings",
-        ),
-        (
-            "let p := P { x: 1, y: 2 }; p.x = 3; 0",
-            "TE017",
-            "assigning to a struct field",
-        ),
-        (
-            "let p := P { x: 1, y: 2 }; let q := p; 0",
-            "TE017",
-            "whole structs",
-        ),
+        ("let p := P { x: 1, y: 2 }; p.x = 3; 0", "TE004", ""),
         (
             "if 1 == P { x: 1, y: 2 } { 1 } else { 2 }",
             "SE002",
@@ -1303,21 +1289,6 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "alias cycle",
         ),
         (
-            "type P { x: i32 } fn f(p: P) {} fn main() -> i32 { 0 }",
-            "TE017",
-            "function signature",
-        ),
-        (
-            "type P { x: i32 } fn main(p: P) -> i32 { 0 }",
-            "TE017",
-            "function signature",
-        ),
-        (
-            "type P { x: i32 } fn f() -> P { P { x: 1 } } fn main() -> i32 { 0 }",
-            "TE017",
-            "function signature",
-        ),
-        (
             "type P { x: i32 } type Q { p: P } fn main() -> i32 { 0 }",
             "TE017",
             "struct-typed fields",
@@ -1330,7 +1301,7 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
         (
             "type P { x: i32 } fn main() -> i32 { let a := [P { x: 1 }]; 0 }",
             "TE017",
-            "struct literals can only",
+            "primitive and nested array elements only",
         ),
         (
             "type E [ A, B ] fn main() -> i32 { let e: E = 1; 0 }",
@@ -1356,7 +1327,7 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
         "src/app.mb",
         "pub type P { pub x: i32 } pub fn f(p: P) -> i32 { 0 } fn main() -> i32 { 0 }",
     );
-    err(f.run(&["build", "--lib"]), "TE017");
+    err(f.run(&["build", "--lib"]), "LE900");
 }
 
 #[test]

@@ -124,18 +124,27 @@ followed to their targets wherever a type is named (annotations, signatures, arr
 element types, field types, literals); an alias cycle is TE026. Standalone checking
 (`check_types`, `lower_module`) uses the same table with a single unnamed module.
 
-Executable support is the first slice (A1): a struct literal `P { y: 2, x: 1 }` (all
+Executable support covers A1 and A2. A1: a struct literal `P { y: 2, x: 1 }` (all
 fields exactly once, any order, evaluated in source order) as the initialiser of a
 `let` binding, and primitive field reads `p.x` (copied implicitly into owned
 positions such as `f(p.x)`; `p.x.copy()` is optional). Fields are primitives only.
+A2 adds `var` struct bindings; field writes `p.x = v` / `p.x op= v` (through a `var`
+owner, a `var` owned parameter, a `share` parameter or a `var` share binding; TE004
+otherwise), whole-struct moves and assignment (`let q := p;`, `q = p;`, literal or call
+result as right-hand side, struct-valued `if`/block results), struct parameters
+(owned, `borrow P`, `share P`; call sites write `p.borrow()` / `p.share()`) and
+results. Field reads work through references. A struct value is accepted in the same
+owned-value positions as an array (binding initialiser, `=` right-hand side, return and
+tail, owned argument, branch tails). Field writes lower to the base, then the
+right-hand side, then adjacent `FieldAddr(Share)` + `Store` (compound writes read the
+field first).
 Literal shape errors (missing, unknown or duplicate field, non-struct name) are TE023,
 field access on a non-struct or an unknown field is TE024, field privacy (reading a
 private field of another module's struct, or building such a struct from another
 module unless every field is `pub`) is TE025, and a struct that contains itself by value
-(or an alias cycle) is TE026. Everything else is TE017: `var` struct bindings, field
-assignment, whole-struct moves/assignments/uses, literals outside a `let` initialiser,
-struct parameters, results and references (including exported signatures),
-struct-typed and array-typed fields, arrays of structs, `.borrow()`/`.share()` of a
-struct. Enum types used as value types report TE001 (and the declaration TE016).
+(or an alias cycle) is TE026. Still TE017: struct literals as temporaries or field
+bases, field access on a call result (`make().x`), field-level references
+(`p.x.share()`), `p.copy()`, struct-typed and array-typed fields, arrays of structs.
+Structs in exported signatures are rejected later by the backend (LE900). Enum types used as value types report TE001 (and the declaration TE016).
 Lowering emits `StructNew` and `FieldAddr` + `Load`; `TypedModule::types` carries the
 checked struct definitions.

@@ -417,14 +417,6 @@ impl Program {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
                     define_value(function, *value, &mut defined, &mut errors, id, block_id);
-                    if matches!(function.values.get(value.0 as usize), Some(Type::Struct(_))) {
-                        push(
-                            &mut errors,
-                            id,
-                            Some(block_id),
-                            "struct block parameters are not supported yet",
-                        );
-                    }
                 }
                 for instruction in &block.instructions {
                     validate_instruction(self, function, instruction, &mut errors, id, block_id);
@@ -542,14 +534,6 @@ fn validate_parameter_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    if matches!(ty, Type::Struct(_)) {
-        push(
-            errors,
-            id,
-            None,
-            format!("{context} type cannot be a struct yet"),
-        );
-    }
     validate_type_shape(type_count, ty, errors, id, context);
 }
 
@@ -566,14 +550,6 @@ fn validate_signature_value_type(
             id,
             None,
             format!("{context} type cannot be a reference"),
-        );
-    }
-    if matches!(ty, Type::Struct(_)) {
-        push(
-            errors,
-            id,
-            None,
-            format!("{context} type cannot be a struct yet"),
         );
     }
     validate_type_shape(type_count, ty, errors, id, context);
@@ -625,15 +601,20 @@ fn validate_type_shape(
                     format!("{context} reference cannot use Owned access"),
                 );
             }
-            if !matches!(inner.as_ref(), Type::Primitive(_) | Type::Array { .. }) {
+            if !matches!(
+                inner.as_ref(),
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+            ) {
                 push(
                     errors,
                     id,
                     None,
-                    format!("{context} reference must refer to a primitive value or an array"),
+                    format!(
+                        "{context} reference must refer to a primitive value, an array or a struct"
+                    ),
                 );
             }
-            if matches!(inner.as_ref(), Type::Array { .. }) {
+            if matches!(inner.as_ref(), Type::Array { .. } | Type::Struct(_)) {
                 validate_type_shape(type_count, inner, errors, id, context);
             }
         }
@@ -861,13 +842,17 @@ fn validate_instruction(
                     }
                     Some(*inner)
                 }
-                Type::Primitive(_) | Type::Array { .. } if *access != Access::Owned => Some(actual),
+                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_)
+                    if *access != Access::Owned =>
+                {
+                    Some(actual)
+                }
                 _ => {
                     push(
                         errors,
                         id,
                         Some(block),
-                        "borrow source must be a primitive or array owner or a reference",
+                        "borrow source must be a primitive, array or struct owner or a reference",
                     );
                     None
                 }
@@ -1136,33 +1121,30 @@ fn validate_instruction(
                     "field address base mode does not match requested access",
                 );
             }
-            let field_type = match actual {
-                Some(Type::Struct(type_id)) if *access != Access::Owned => {
-                    match program.types.get(type_id.0 as usize) {
-                        Some(TypeDef {
-                            kind: TypeDefKind::Struct { fields },
-                            ..
-                        }) => match fields.get(*field as usize) {
-                            Some(declared) => Some(declared.ty.clone()),
-                            None => {
-                                push(
-                                    errors,
-                                    id,
-                                    Some(block),
-                                    format!("field index {field} is out of range"),
-                                );
-                                None
-                            }
-                        },
-                        None => {
-                            push(
-                                errors,
-                                id,
-                                Some(block),
-                                format!("struct type {:?} is out of range", type_id),
-                            );
-                            None
-                        }
+            // A struct owner, or a reference to a struct (a `borrow`/`share`
+            // parameter or binding) whose access is at least the requested one.
+            let struct_id = match actual {
+                Some(Type::Struct(type_id)) if *access != Access::Owned => Some(type_id),
+                Some(Type::Reference {
+                    access: owner_access,
+                    inner,
+                }) if matches!(inner.as_ref(), Type::Struct(_)) => {
+                    let permitted = match access {
+                        Access::Owned => false,
+                        Access::Borrow => matches!(owner_access, Access::Borrow | Access::Share),
+                        Access::Share => owner_access == Access::Share,
+                    };
+                    if !permitted {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "field address cannot strengthen reference access",
+                        );
+                    }
+                    match *inner {
+                        Type::Struct(type_id) => Some(type_id),
+                        _ => None,
                     }
                 }
                 Some(_) => {
@@ -1170,12 +1152,39 @@ fn validate_instruction(
                         errors,
                         id,
                         Some(block),
-                        "field address base must be a struct owner",
+                        "field address base must be a struct owner or struct reference",
                     );
                     None
                 }
                 None => None,
             };
+            let field_type =
+                struct_id.and_then(|type_id| match program.types.get(type_id.0 as usize) {
+                    Some(TypeDef {
+                        kind: TypeDefKind::Struct { fields },
+                        ..
+                    }) => match fields.get(*field as usize) {
+                        Some(declared) => Some(declared.ty.clone()),
+                        None => {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                format!("field index {field} is out of range"),
+                            );
+                            None
+                        }
+                    },
+                    None => {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            format!("struct type {:?} is out of range", type_id),
+                        );
+                        None
+                    }
+                });
             if let (Some(field_type), Some(output)) = (field_type, out) {
                 let expected = Type::Reference {
                     access: *access,

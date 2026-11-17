@@ -302,26 +302,14 @@ fn reading_a_primitive_field_into_an_owned_position_copies_it() {
 fn gated_forms_are_diagnostics_not_panics() {
     let p = "let p := P { x: 1, y: 2 };";
     for (source, text) in [
-        // var struct bindings and field assignment
-        (format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; }}"), "`var` struct bindings"),
-        (format!("{P} fn main() {{ {p} p.x = 3; }}"), "assigning to a struct field"),
-        (format!("{P} fn main() {{ {p} p.x += 3; }}"), "assigning to a struct field"),
-        // whole-struct move / assignment / use as a value
-        (format!("{P} fn main() {{ {p} let q := p; }}"), "whole structs cannot be used as values"),
-        (format!("{P} fn main() {{ {p} p; }}"), "whole structs cannot be used as values"),
-        (format!("{P} fn main() {{ var q := 1; {p} q = p; }}"), "whole structs cannot be used as values"),
-        (format!("{P} fn main() {{ let q: P = if true {{ P {{ x: 1, y: 2 }} }} else {{ P {{ x: 3, y: 4 }} }}; }}"), "struct literals can only initialise"),
-        (format!("{P} fn main() {{ P {{ x: 1, y: 2 }}; }}"), "struct literals can only initialise"),
-        (format!("{P} fn main() {{ let x := P {{ x: 1, y: 2 }}.x; }}"), "struct literals can only initialise"),
-        (format!("{P} fn main() {{ let a := [P {{ x: 1, y: 2 }}]; }}"), "struct literals can only initialise"),
-        // parameters, results, references
-        (format!("{P} fn f(p: P) {{}} fn main() {{}}"), "cannot appear in a function signature"),
-        (format!("{P} fn f(p: borrow P) {{}} fn main() {{}}"), "cannot appear in a function signature"),
-        (format!("{P} fn f(p: share P) {{}} fn main() {{}}"), "cannot appear in a function signature"),
-        (format!("{P} fn f() -> P {{ P {{ x: 1, y: 2 }} }} fn main() {{}}"), "cannot appear in a function signature"),
-        (format!("{P} pub fn main(p: P) {{}}"), "cannot appear in a function signature"),
-        (format!("{P} fn main() {{ {p} let r := p.borrow(); }}"), "borrow/share conversion of a struct"),
-        (format!("{P} fn main() {{ {p} let r := p.share(); }}"), "borrow/share conversion of a struct"),
+        // temporaries: a struct literal is only an owned value
+        (format!("{P} fn main() {{ P {{ x: 1, y: 2 }}; }}"), "struct literals must be used as an owned value"),
+        (format!("{P} fn main() {{ let x := P {{ x: 1, y: 2 }}.x; }}"), "named local structs only"),
+        (format!("{P} fn main() {{ let a := [P {{ x: 1, y: 2 }}]; }}"), "executable arrays support"),
+        // whole-struct use outside an owned position
+        (format!("{P} fn main() {{ {p} p; }}"), "whole arrays and structs can only be moved"),
+        // field-level references and whole-struct copies
+        (format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; let r := p.x.share(); }}"), "borrow/share of a struct field"),
         (format!("{P} fn main() {{ {p} let q := p.copy(); }}"), "copy is currently available only for primitive values"),
         // struct-typed and array-typed fields, arrays of structs
         (format!("{P} type L {{ a: P }} fn main() {{}}"), "struct-typed fields are not supported"),

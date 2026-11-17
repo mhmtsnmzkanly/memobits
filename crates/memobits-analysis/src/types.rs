@@ -454,13 +454,11 @@ struct Checker {
     diagnostics: Vec<Diagnostic>,
     executable: bool,
     /// Addresses of expressions in an owned-value position (binding initialiser,
-    /// `=` right-hand side, return/tail value, owned array argument, array element)
-    /// that may be a whole array: literals, repetitions, named arrays, and the
-    /// tails of `if`/block expressions in such a position.
+    /// `=` right-hand side, return/tail value, owned aggregate argument, array
+    /// element) that may be a whole aggregate: array and struct literals,
+    /// repetitions, named locals, and the tails of `if`/block expressions in
+    /// such a position.
     allowed_arrays: HashSet<usize>,
-    /// Addresses of struct literals that initialise a `let` binding: the only
-    /// position in which a whole struct value is accepted.
-    allowed_structs: HashSet<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
     /// Address of the path expression currently checked as an index or field base.
@@ -492,22 +490,11 @@ impl Checker {
         }
         value
     }
-    /// Types in function signatures. Array parameters (owned, `borrow` or
-    /// `share`) and owned array results are supported; structs are not yet.
+    /// Types in function signatures: primitives, fixed arrays and structs,
+    /// passed owned, `borrow` or `share`, and returned owned. The external ABI
+    /// of exported signatures is the backend's concern (LE900).
     fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
-        let resolved = self.type_path(ty);
-        if matches!(resolved, Ty::Struct(..)) {
-            self.error(
-                17,
-                ty.span,
-                format!(
-                    "struct type '{}' cannot appear in a function signature yet: struct parameters, results and references (and exported struct signatures) are not supported",
-                    name(&resolved)
-                ),
-            );
-            return Ty::Error;
-        }
-        resolved
+        self.type_path(ty)
     }
     /// Executable arrays hold non-Unit primitive elements or nested arrays.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
@@ -522,12 +509,15 @@ impl Checker {
             );
         }
     }
-    /// Whole-array values are produced by a literal, repetition, call or named
-    /// local in an owned-value position. The position propagates into the tails
+    /// Whole aggregate values (arrays and structs) are produced by a literal,
+    /// repetition, call or named local in an owned-value position. The position propagates into the tails
     /// of `if` and block expressions, which therefore may produce arrays too.
     fn allow_array_value(&mut self, value: &Expr) {
         match &value.kind {
-            ExprKind::Array(_) | ExprKind::RepeatArray { .. } | ExprKind::Path(_) => {
+            ExprKind::Array(_)
+            | ExprKind::RepeatArray { .. }
+            | ExprKind::Struct { .. }
+            | ExprKind::Path(_) => {
                 self.allowed_arrays.insert(value as *const Expr as usize);
             }
             ExprKind::Block(block) => {
@@ -652,24 +642,12 @@ impl Checker {
                 } => {
                     let annotation = annotation.as_ref().map(|ty| self.type_path(ty));
                     self.allow_array_value(value);
-                    if matches!(value.kind, ExprKind::Struct { .. }) {
-                        self.allowed_structs.insert(value as *const Expr as usize);
-                    }
                     let inferred = self.expr(value, annotation.as_ref());
                     self.reject_extraction(value, &inferred);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
                     }
                     let ty = annotation.unwrap_or(inferred);
-                    if self.executable && *mutable && matches!(ty, Ty::Struct(..)) {
-                        self.error(
-                            17,
-                            statement.span,
-                            format!(
-                                "`var` struct bindings are not supported yet: '{name}' would allow field assignment; bind the struct with `let`"
-                            ),
-                        );
-                    }
                     let id = self.register_local(
                         name,
                         &ty,
@@ -827,14 +805,56 @@ impl Checker {
                             }
                             element
                         }
-                        ExprKind::Field { .. } => {
-                            self.expr(target, None);
-                            self.error(
-                                17,
-                                target.span,
-                                "assigning to a struct field is not supported yet: structs are immutable `let` values in this version",
-                            );
-                            Ty::Error
+                        ExprKind::Field { base, .. } => {
+                            // Reads the field (privacy, existence) and yields its type.
+                            let field = self.expr(target, None);
+                            if let ExprKind::Path(path) = &base.kind {
+                                if let Some(binding) =
+                                    path.first().and_then(|name| self.lookup(name)).cloned()
+                                {
+                                    let name = &path[0];
+                                    let writable =
+                                        binding.mutable || binding.access == IrAccess::Share;
+                                    match &binding.ty {
+                                        Ty::Struct(..) if !writable => self.error(
+                                            4,
+                                            target.span,
+                                            format!(
+                                                "cannot assign to a field of immutable struct binding '{name}'; declare it with var"
+                                            ),
+                                        ),
+                                        Ty::Reference {
+                                            access: IrAccess::Borrow,
+                                            inner,
+                                            ..
+                                        } if matches!(inner.as_ref(), Ty::Struct(..)) => self
+                                            .error(
+                                                4,
+                                                target.span,
+                                                format!(
+                                                    "cannot assign to a field through borrow binding '{name}'"
+                                                ),
+                                            ),
+                                        Ty::Reference {
+                                            access: IrAccess::Share,
+                                            inner,
+                                            ..
+                                        } if matches!(inner.as_ref(), Ty::Struct(..))
+                                            && !writable =>
+                                        {
+                                            self.error(
+                                                4,
+                                                target.span,
+                                                format!(
+                                                    "cannot assign to a field through immutable share binding '{name}'"
+                                                ),
+                                            )
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            field
                         }
                         _ => {
                             self.expr(target, None);
@@ -952,7 +972,7 @@ impl Checker {
                 self.error(
                     17,
                     expression.span,
-                    "copy is currently available only for primitive values (integers, floats and Bool); copying arrays and rows is not supported yet",
+                    "copy is currently available only for primitive values (integers, floats and Bool); copying arrays, rows and structs is not supported yet",
                 );
                 Ty::Error
             }
@@ -988,11 +1008,12 @@ impl Checker {
             _ => None,
         };
         if owner_binding.is_none() {
-            self.error(
-                17,
-                base.span,
-                "borrow/share conversion requires a named local owner or reference",
-            );
+            let message = if matches!(base.kind, ExprKind::Field { .. }) {
+                "borrow/share of a struct field is not supported yet: borrow or share the whole struct"
+            } else {
+                "borrow/share conversion requires a named local owner or reference"
+            };
+            self.error(17, base.span, message);
             self.expr(base, None);
             return Ty::Error;
         }
@@ -1029,7 +1050,7 @@ impl Checker {
                 inner,
                 origin,
             } => (inner, origin, Some(access)),
-            primitive @ (Ty::Primitive(_) | Ty::Array(..)) => {
+            primitive @ (Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..)) => {
                 let origin = owner_binding
                     .as_ref()
                     .map_or(ReferenceOrigin::Temporary, |binding| {
@@ -1039,29 +1060,24 @@ impl Checker {
                 (Box::new(primitive), origin, current_access)
             }
             ty @ (Ty::Never | Ty::Error) => return ty,
-            Ty::Struct(..) => {
-                self.error(
-                    17,
-                    base.span,
-                    "borrow/share conversion of a struct is not supported yet",
-                );
-                return Ty::Error;
-            }
             _ => {
                 self.error(
                     17,
                     base.span,
-                    "borrow/share conversion requires a primitive or array owner or reference",
+                    "borrow/share conversion requires a primitive, array or struct owner or reference",
                 );
                 return Ty::Error;
             }
         };
 
-        if !matches!(inner.as_ref(), Ty::Primitive(_) | Ty::Array(..)) {
+        if !matches!(
+            inner.as_ref(),
+            Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..)
+        ) {
             self.error(
                 17,
                 base.span,
-                "borrow/share conversion currently supports primitive values and arrays only",
+                "borrow/share conversion currently supports primitive values, arrays and structs only",
             );
             return Ty::Error;
         }
@@ -1128,6 +1144,12 @@ impl Checker {
                     }
         }
         let base_ty = self.expr(base, None);
+        // A struct reference (`borrow`/`share` parameter or binding) reads
+        // its fields like its owner.
+        let base_ty = match base_ty {
+            Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Struct(..)) => *inner,
+            other => other,
+        };
         match base_ty {
             Ty::Struct(id, struct_name) => {
                 let table = Rc::clone(&self.table);
@@ -1158,8 +1180,11 @@ impl Checker {
             }
             Ty::Never | Ty::Error => Ty::Error,
             Ty::Reference { .. } => {
-                // References to structs only arise from gated forms, which
-                // have their own diagnostic.
+                self.error(
+                    24,
+                    expr.span,
+                    "field access requires a struct value or a reference to one",
+                );
                 Ty::Error
             }
             other => {
@@ -1404,24 +1429,14 @@ impl Checker {
                         });
                     }
                     if self.executable
-                        && matches!(binding.ty, Ty::Array(..))
+                        && matches!(binding.ty, Ty::Array(..) | Ty::Struct(..))
                         && self.index_base != expr as *const Expr as usize
                         && !self.array_allowed(expr)
                     {
                         self.error(
                             17,
                             expr.span,
-                            "whole arrays can only be moved into a binding, assignment, argument, element, result or branch value, or indexed",
-                        );
-                    }
-                    if self.executable
-                        && matches!(binding.ty, Ty::Struct(..))
-                        && self.index_base != expr as *const Expr as usize
-                    {
-                        self.error(
-                            17,
-                            expr.span,
-                            "whole structs cannot be used as values yet: only `let` initialisation from a literal and field reads (`p.x`) are supported; moving, assigning, passing or returning a struct is not",
+                            "whole arrays and structs can only be moved into a binding, assignment, argument, element, result or branch value, or indexed or read by field",
                         );
                     }
                     return binding.ty;
@@ -1613,10 +1628,10 @@ impl Checker {
                     for (i, arg) in arguments.iter().enumerate() {
                         if params.get(i).is_some_and(|parameter| {
                             parameter.access == IrAccess::Owned
-                                && matches!(parameter.ty, Ty::Array(..))
+                                && matches!(parameter.ty, Ty::Array(..) | Ty::Struct(..))
                         }) {
-                            // An owned array parameter takes a literal, repetition,
-                            // call result, `if` or named array moved into the call.
+                            // An owned aggregate parameter takes a literal, repetition,
+                            // call result, `if` or named value moved into the call.
                             self.allow_array_value(arg);
                         }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
@@ -1680,15 +1695,11 @@ impl Checker {
                 ty
             }
             ExprKind::Struct { path, fields } => {
-                if self.executable
-                    && !self
-                        .allowed_structs
-                        .contains(&(expr as *const Expr as usize))
-                {
+                if self.executable && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
-                        "struct literals can only initialise a `let` binding yet (`let p := P { .. };`); they cannot be a temporary, argument, result, field base or branch value",
+                        "struct literals must be used as an owned value (binding initializer, assignment, argument, result or branch value); they cannot be a temporary or field base",
                     );
                 }
                 let literal_type = Type {
@@ -1892,7 +1903,6 @@ fn check_standalone(
         diagnostics: table_diagnostics,
         executable: capture,
         allowed_arrays: HashSet::new(),
-        allowed_structs: HashSet::new(),
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
@@ -2209,7 +2219,6 @@ fn checker() -> Checker {
         diagnostics: Vec::new(),
         executable: true,
         allowed_arrays: HashSet::new(),
-        allowed_structs: HashSet::new(),
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
