@@ -10,6 +10,28 @@ The accepted design uses homogeneous `Array<T, N>`, array literals `[a, b]`,
 repetition `[expression; N]`, and checked indexing. This document separates
 syntax support from executable collection semantics.
 
+## Future Bytes API inspirations
+
+These Rust crates suggest areas to explore after the
+[first executable String slice](utf8-text-slice.md).
+
+- Buffer cursors and borrowed byte ranges. [bytes](https://docs.rs/bytes/latest/bytes/)
+- Checked fixed-width numeric reads and writes with explicit endianness.
+  [byteorder](https://docs.rs/byteorder/latest/byteorder/)
+- Search and delimiter handling on arbitrary bytes, including invalid UTF-8.
+  [bstr](https://docs.rs/bstr/latest/bstr/)
+- Typed views over binary data with explicit layout constraints.
+  [zerocopy](https://docs.rs/zerocopy/latest/zerocopy/)
+- Packed flags and bit-level views with explicit bit order.
+  [bitvec](https://docs.rs/bitvec/latest/bitvec/)
+
+Advance an idea only when a concrete consumer shows what it needs and why
+existing array operations fall short. Check bounds, loan lifetimes, and
+aliasing where relevant. Typed views also need layout, alignment and value
+validity checks. Verify behavior in source and Wasm, and benchmark against
+ordinary array code when reduced copying or faster access is the motivation.
+These themes leave the current `Bytes<N>` array equivalence in place.
+
 ## Syntax foundation
 
 Represent element lists, repetitions, and indexing explicitly in the AST.

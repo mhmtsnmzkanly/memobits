@@ -200,7 +200,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   owner. See [fixed arrays](fixed-array-implementation.md) and
   [structs](struct-implementation.md) for supported projections and operations.
   `Bytes<N>` resolves to `Array<u8, N>` with the same fixed-length, ownership,
-  lowering and ABI rules.
+  lowering and ABI rules. [Future Bytes API ideas](fixed-array-implementation.md#future-bytes-api-inspirations)
+  follow the first executable String slice and depend on a concrete consumer.
 - Borrow and share support internal primitive and aggregate parameters.
   Distinct struct fields and constant indices can be treated as disjoint.
   Dynamic indices are conservative. Reference returns, reference-valued
