@@ -182,6 +182,65 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     }
 }
 #[test]
+fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
+    let program = lower(
+        r#"
+        fn fill() -> List<u32> {
+            var items: List<u32> = [];
+            loop {
+                items.push(items.len());
+                if items.len() == 8_000 { break; }
+            }
+            items
+        }
+        fn discard(items: List<u32>) {}
+        fn main() -> Result<Bool, Error> {
+            var items := fill();
+            var step := 0;
+            loop {
+                if step % 2 == 0 { discard(items); }
+                items = fill();
+                items = items;
+                let tail := match items.get(7_999) { Some(value) => value == 7_999, None => false };
+                if !tail { return Err(Error { code: 1 }); }
+                items = [];
+                if items.len() != 0 { return Err(Error { code: 2 }); }
+                step += 1;
+                if step == 4 { break; }
+                items = fill();
+            }
+            Ok(true)
+        }
+    "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(2),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let mut settled = 0;
+    for iteration in 0..5 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        let data = memory.data(&store);
+        assert_eq!(data[result as usize], 0);
+        if iteration == 1 {
+            settled = data.len();
+        }
+        if iteration >= 2 {
+            assert_eq!(data.len(), settled);
+        }
+    }
+}
+
+#[test]
 fn owned_list_calls_and_returns_reuse_blocks_after_normal_exits() {
     let program = lower(
         r#"

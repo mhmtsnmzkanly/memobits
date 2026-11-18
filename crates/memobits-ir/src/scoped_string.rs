@@ -416,12 +416,11 @@ pub(super) fn call_binding(
     let destination = match result {
         Type::String => string_destination(function, *target, *initialize),
         Type::List(_) => {
-            *initialize
-                && !function.parameter_locals.contains(target)
+            (!initialize || !function.parameter_locals.contains(target))
                 && function
                     .locals
                     .get(target.0 as usize)
-                    .is_some_and(|local| &local.ty == result)
+                    .is_some_and(|local| &local.ty == result && (*initialize || local.mutable))
         }
         _ => false,
     };

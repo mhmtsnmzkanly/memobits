@@ -26,12 +26,12 @@ A direct internal owned parameter takes a named whole List local by move.
 Arguments evaluate left to right. An earlier owned argument is staged
 until invocation, and normal exits before the call release it in the caller.
 Once invoked, the callee owns and cleans up the block. A direct internal
-function can also return a named whole List local. Bind the call result
-directly to a new local. The callee stages the descriptor before ending
-its local scopes. The receiving binding owns the block and releases it
-on a normal exit unless it moves onward. Discarded or temporary results,
-whole-list replacement, indirect calls, nesting, subscript syntax, and
-exports remain gated at this checkpoint.
+function can also return a named whole List local. Assign the call result
+directly to a new local or to an existing mutable local. The callee stages
+the descriptor before ending its local scopes. The receiving binding owns
+the block and releases it on a normal exit unless it moves onward.
+Discarded or temporary results, replacement through shares, indirect calls,
+nesting, subscript syntax, and exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -70,8 +70,8 @@ exclusive loan rules. Push through a stored share handle remains gated.
 An owned parameter receives its own frame descriptor and takes the
 allocation from the caller's moved slot. A return clears the moved
 callee slot before cleanup and transfers the staged descriptor through
-the caller's private aggregate return cell. Defer whole-local replacement,
-nested List storage,
+the caller's private aggregate return cell. Defer replacement through
+shares, nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
@@ -108,6 +108,13 @@ release the owner once. A move transfers the block and clears the source
 ownership marker, so mixed moved/live paths can use the existing cleanup
 approach. Freed blocks are reusable, and committed pages stay at their
 high-water mark.
+
+Whole mutable local assignment evaluates the RHS before releasing the old
+block. The RHS may borrow that List while rebuilding it. Assigning `[]`
+releases the old block and installs an empty descriptor. A moved slot has
+zero allocation provenance, so the same assignment handles both paths
+after a conditional move. Self-assignment keeps the descriptor in place,
+with the usual availability and loan checks.
 
 ## Implementation and checks
 

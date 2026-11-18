@@ -808,6 +808,86 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn list_replacement_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='replace-list'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn rebuild(old: borrow List<u32>) -> List<u32> {
+            var result: List<u32> = [];
+            result.push(0);
+            let previous := match old.get(0) { Some(value) => value, None => 0 };
+            result.push(previous + old.len());
+            result
+        }
+        fn consume(items: List<u32>) -> u32 { items.len() }
+        fn pass(items: List<u32>) -> List<u32> { items }
+        fn check(move_old: Bool) -> Bool {
+            var items: List<u32> = [];
+            items.push(40);
+            items = rebuild(items.borrow());
+            items = items;
+            items = pass(items);
+            let old_ok := match items.get(1) { Some(value) => value == 41, None => false };
+            var next: List<u32> = [];
+            next.push(99);
+            if move_old { consume(items); }
+            items = next;
+            let moved_ok := match items.get(0) { Some(value) => value == 99, None => false };
+            items = [];
+            old_ok && moved_ok && items.len() == 0
+        }
+        fn early() -> Bool {
+            var items: List<u8> = [];
+            items.push(255);
+            items = { return items.len() == 1; [] };
+            false
+        }
+        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true) && early()) }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "replace.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "replace.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_replacement_rejects_live_loans_and_unavailable_sources() {
+    let f = Fixture::new();
+    for (body, code) in [
+        (
+            "let held := items.borrow(); items = []; held.len();",
+            "BE005",
+        ),
+        (
+            "let held := items.share(); items = []; held.len();",
+            "BE005",
+        ),
+        (
+            "let held := items.borrow(); items = items; held.len();",
+            "BE005",
+        ),
+        ("let moved := items; items = items;", "BE001"),
+        ("let fixed: List<u8> = []; fixed = [];", "TE004"),
+    ] {
+        f.write(
+            "list.mb",
+            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+        );
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+}
+
+#[test]
 fn owned_list_returns_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
@@ -859,12 +939,7 @@ fn list_returns_keep_temporary_and_abi_gates() {
         (
             "make();",
             "TE018",
-            "directly initialize a new whole List local",
-        ),
-        (
-            "var result: List<u8> = []; result = make();",
-            "TE018",
-            "directly initialize a new whole List local",
+            "assigned directly to a whole List local",
         ),
         ("make().len();", "TE017", "requires a local binding"),
         (
@@ -1354,10 +1429,6 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
         ),
         ("fn main() { let items: List<i32> = []; }", "TE017"),
         ("fn main() { let items: List<u8> = [1]; }", "TE017"),
-        (
-            "fn main() { var items: List<u8> = []; items = []; }",
-            "TE018",
-        ),
         (
             "fn main() { let items: List<u8> = []; let array := [items]; }",
             "TE017",

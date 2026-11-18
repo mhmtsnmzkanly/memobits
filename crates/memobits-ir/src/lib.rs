@@ -2716,13 +2716,18 @@ fn validate_instruction(
                 );
             }
             if matches!(actual, Some(Type::List(_)))
-                && (!initialize || value.mode != UseMode::Consume)
+                && (value.mode != UseMode::Consume
+                    || !initialize
+                        && function
+                            .locals
+                            .get(target.0 as usize)
+                            .is_some_and(|local| !local.mutable))
             {
                 push(
                     errors,
                     id,
                     Some(block),
-                    "List assignment currently requires a consuming initialization",
+                    "List assignment requires a consuming move and a mutable target for replacement",
                 );
             }
             match function.locals.get(target.0 as usize) {
@@ -2990,7 +2995,7 @@ fn validate_operand_escapes(
                             errors,
                             id,
                             block_id,
-                            "List call result must directly initialize a new whole List local",
+                            "List call result must be assigned directly to a whole List local",
                         );
                     }
                     if facts.returns_heap

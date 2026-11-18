@@ -1078,11 +1078,15 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                         source: Source::Value(assigned),
                         ..
                     },
-                ..
+                initialize,
             } = &consumer.kind
             else {
                 continue;
             };
+            if !initialize && matches!(producer.kind, InstructionKind::EmptyList) {
+                // The previous List descriptor must survive until the replacement.
+                continue;
+            }
             let source_is_target = matches!(
                 &producer.kind,
                 InstructionKind::Capture(Operand { source: Source::Local(local), .. }) if local == target
@@ -2221,6 +2225,20 @@ fn release_string_local(
     Ok(())
 }
 
+fn release_list_cell(
+    body: &mut WasmFunction,
+    cell: ArrayCell,
+    frame: Option<FrameState>,
+    heap_copy_index: Option<u32>,
+) -> Result<(), String> {
+    if let Some(copy) = heap_copy_index {
+        emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
+        list_descriptor::load_allocation(body);
+        body.instructions().call(copy + 1);
+    }
+    Ok(())
+}
+
 fn clear_moved_heap_source(
     body: &mut WasmFunction,
     function: &Function,
@@ -2961,12 +2979,8 @@ fn compile_instruction(
             )?;
         }
         InstructionKind::EndListLocal { local } => {
-            if let Some(copy) = heap_copy_index {
-                let cell = array_cell_of(layout, Slot::Local(local.0))?;
-                emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
-                list_descriptor::load_allocation(body);
-                body.instructions().call(copy + 1);
-            }
+            let cell = array_cell_of(layout, Slot::Local(local.0))?;
+            release_list_cell(body, cell, frame, heap_copy_index)?;
         }
         InstructionKind::ListPush { target, value } => {
             let list = match &function.locals[target.0 as usize].ty {
@@ -3571,12 +3585,17 @@ fn compile_instruction(
             initialize,
         } => {
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
-                if !initialize && heap_locals.contains(target) {
+                let list = matches!(function.locals[target.0 as usize].ty, Type::List(_));
+                if !initialize && (list || heap_locals.contains(target)) {
                     // A self-move leaves the descriptor in the same slot.
                     if value.source == Source::Local(*target) {
                         return Ok(());
                     }
-                    release_string_local(body, *target, layout, frame, heap_copy_index)?;
+                    if list {
+                        release_list_cell(body, cell, frame, heap_copy_index)?;
+                    } else {
+                        release_string_local(body, *target, layout, frame, heap_copy_index)?;
+                    }
                 }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
                 clear_moved_heap_source(
