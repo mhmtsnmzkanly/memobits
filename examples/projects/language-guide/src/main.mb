@@ -145,14 +145,20 @@ fn owned_list_length(items: List<u32>) -> u32 {
     items.len()
 }
 
+fn make_words(first: u32) -> List<u32> {
+    var words: List<u32> = [];
+    words.push(first);
+    words
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
     var bytes: List<u8> = [];
-    var words: List<u32> = [];
-    let before := bytes.len() + words.len();
+    let before := bytes.len();
     bytes.push(42);
-    words.push(1000);
+    // Bind a direct internal List result to take ownership of its block.
+    let words := make_words(1000);
     var moved := words;
     // An exclusive call can grow the List that the caller owns.
     append_word(moved.share(), 2000);

@@ -182,19 +182,23 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     }
 }
 #[test]
-fn owned_list_calls_reuse_blocks_after_invocation_and_skipped_calls() {
+fn owned_list_calls_and_returns_reuse_blocks_after_normal_exits() {
     let program = lower(
         r#"
         fn consume(items: List<u32>, early: Bool) -> Bool {
             if early { return items.len() == 12_000; }
             false
         }
-        fn check(skip: Bool) -> Bool {
+        fn make() -> List<u32> {
             var items: List<u32> = [];
             loop {
                 items.push(23);
                 if items.len() == 12_000 { break; }
             }
+            items
+        }
+        fn check(skip: Bool) -> Bool {
+            let items := make();
             consume(items, { if skip { return true; } true })
         }
         fn main() -> Result<Bool, Error> {
@@ -204,7 +208,7 @@ fn owned_list_calls_reuse_blocks_after_invocation_and_skipped_calls() {
     );
     let artifact = compile_application_traced(
         &program,
-        FunctionId(2),
+        FunctionId(3),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();

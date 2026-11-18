@@ -218,8 +218,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   reads with checked unsigned bounds. Direct internal borrow parameters
   can read either primitive List type. Share parameters can also push
   through the caller descriptor. Direct owned parameters take named local
-  moves with cleanup on either side of invocation. Live conflicting loans
-  block access. General
+  moves with cleanup on either side of invocation. Direct returns move a
+  named List local into a new caller binding. Live conflicting loans block
+  access. General
   aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
   `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static

@@ -202,6 +202,7 @@ fn compile_target(
                 .parameters
                 .iter()
                 .any(|parameter| matches!(parameter.ty, Type::List(_)))
+                || matches!(function.signature.result.as_ref(), Type::List(_))
             {
                 errors.push(diagnostic(
                     "Wasm exported signatures cannot use List; the external List ABI is not defined",
@@ -389,7 +390,12 @@ fn primitive_signature<'a>(
         }
     }) && matches!(
         result,
-        Type::Primitive(_) | Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+        Type::Primitive(_)
+            | Type::String
+            | Type::List(_)
+            | Type::Array { .. }
+            | Type::Struct(_)
+            | Type::Enum(_)
     )
 }
 
@@ -2224,10 +2230,15 @@ fn clear_moved_heap_source(
     frame: Option<FrameState>,
     heap_locals: &HashSet<LocalId>,
 ) -> Result<(), String> {
-    if matches!(operand.source, Source::Local(source) if heap_locals.contains(&source)) {
-        emit_operand(body, function, param_count, operand, layout, frame)?;
-        body.instruction(&WasmInstruction::I32Const(0));
-        string_descriptor::store_allocation(body);
+    if let Source::Local(source) = operand.source {
+        if matches!(function.locals[source.0 as usize].ty, Type::List(_)) {
+            emit_operand(body, function, param_count, operand, layout, frame)?;
+            list_descriptor::clear_allocation(body);
+        } else if heap_locals.contains(&source) {
+            emit_operand(body, function, param_count, operand, layout, frame)?;
+            body.instruction(&WasmInstruction::I32Const(0));
+            string_descriptor::store_allocation(body);
+        }
     }
     Ok(())
 }
@@ -3568,12 +3579,6 @@ fn compile_instruction(
                     release_string_local(body, *target, layout, frame, heap_copy_index)?;
                 }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
-                if matches!(value.source, Source::Local(_))
-                    && matches!(function.locals[target.0 as usize].ty, Type::List(_))
-                {
-                    emit_operand(body, function, param_count, value, layout, frame)?;
-                    list_descriptor::clear_allocation(body);
-                }
                 clear_moved_heap_source(
                     body,
                     function,

@@ -1085,14 +1085,6 @@ fn validate_signature_value_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    if matches!(ty, Type::List(_)) {
-        push(
-            errors,
-            id,
-            None,
-            format!("{context} cannot use List in this slice"),
-        );
-    }
     validate_type_shape(type_count, ty, errors, id, context);
 }
 
@@ -1543,14 +1535,6 @@ fn validate_instruction(
         }
         InstructionKind::Capture(operand) => {
             let input = operand_type(program, function, operand, errors, id, block);
-            if matches!(input, Some(Type::List(_))) {
-                push(
-                    errors,
-                    id,
-                    Some(block),
-                    "List moves currently require a new local binding",
-                );
-            }
             if input
                 .as_ref()
                 .is_some_and(|ty| program.is_borrow_option(ty))
@@ -2773,6 +2757,17 @@ fn validate_instruction(
             }
             match callee_type {
                 Some(Type::Function(signature)) => {
+                    if matches!(signature.result.as_ref(), Type::List(_))
+                        && !matches!(callee.source, Source::Function(_))
+                    {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "List results require a direct internal call",
+                        );
+                    }
+
                     if signature.parameters.len() != arguments.len() {
                         push(
                             errors,
@@ -2926,7 +2921,41 @@ fn validate_operand_escapes(
 
     let shares = scoped_string::share_borrows(function);
     for (index, block) in function.blocks.iter().enumerate() {
+        let block_id = Some(BlockId(index as u32));
+        let list_return = scoped_string::return_capture(block).filter(|(_, source)| {
+            matches!(function.signature.result.as_ref(), Type::List(_))
+                && function
+                    .locals
+                    .get(source.0 as usize)
+                    .is_some_and(|local| &local.ty == function.signature.result.as_ref())
+        });
+        if matches!(function.signature.result.as_ref(), Type::List(_))
+            && matches!(&block.terminator.kind, TerminatorKind::Return(_))
+            && list_return.is_none()
+        {
+            push(
+                errors,
+                id,
+                block_id,
+                "List return requires a named whole local",
+            );
+        }
         for (position, instruction) in block.instructions.iter().enumerate() {
+            if let InstructionKind::Capture(_) = &instruction.kind {
+                if matches!(
+                    output_type(function, instruction.output),
+                    Some(Type::List(_))
+                ) && !list_return.is_some_and(|(returned, _)| returned == position)
+                {
+                    push(
+                        errors,
+                        id,
+                        block_id,
+                        "List moves currently require a new local binding or a direct return",
+                    );
+                }
+            }
+
             if matches!(
                 instruction.kind,
                 InstructionKind::ValidateUtf8 {
@@ -2945,10 +2974,32 @@ fn validate_operand_escapes(
                     let Some(facts) = heap_strings.get(target.0 as usize) else {
                         continue;
                     };
-                    let block_id = Some(BlockId(index as u32));
+                    let result = program.functions[target.0 as usize]
+                        .signature
+                        .result
+                        .as_ref();
+                    if matches!(result, Type::List(_))
+                        && scoped_string::call_binding(
+                            function,
+                            &block.instructions[position..],
+                            result,
+                        )
+                        .is_none()
+                    {
+                        push(
+                            errors,
+                            id,
+                            block_id,
+                            "List call result must directly initialize a new whole List local",
+                        );
+                    }
                     if facts.returns_heap
-                        && scoped_string::call_binding(function, &block.instructions[position..])
-                            .is_none()
+                        && scoped_string::call_binding(
+                            function,
+                            &block.instructions[position..],
+                            &Type::String,
+                        )
+                        .is_none()
                     {
                         push(errors, id, block_id,
                             "heap String call result must be assigned directly to a whole String local");

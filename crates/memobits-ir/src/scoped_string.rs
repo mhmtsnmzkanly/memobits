@@ -131,9 +131,11 @@ impl super::Program {
                                         .push(Slot::Local(index, target));
                                 }
                             }
-                            if let Some((callee, target)) =
-                                call_binding(function, &block.instructions[position..])
-                            {
+                            if let Some((callee, target)) = call_binding(
+                                function,
+                                &block.instructions[position..],
+                                &Type::String,
+                            ) {
                                 moves
                                     .entry(Slot::Return(callee))
                                     .or_default()
@@ -383,10 +385,11 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
     (instruction.output == Some(result)).then_some((position, source))
 }
 
-/// A heap call result must be assigned to a whole local after argument cleanup.
+/// Find a direct call result assigned to a permitted local after argument cleanup.
 pub(super) fn call_binding(
     function: &Function,
     instructions: &[Instruction],
+    result: &Type,
 ) -> Option<(usize, LocalId)> {
     let [call, after @ ..] = instructions else {
         return None;
@@ -410,10 +413,20 @@ pub(super) fn call_binding(
         return None;
     };
     let output = call.output?;
-    (value.source == Source::Value(output)
-        && value.mode == UseMode::Consume
-        && string_destination(function, *target, *initialize))
-    .then_some((callee.0 as usize, *target))
+    let destination = match result {
+        Type::String => string_destination(function, *target, *initialize),
+        Type::List(_) => {
+            *initialize
+                && !function.parameter_locals.contains(target)
+                && function
+                    .locals
+                    .get(target.0 as usize)
+                    .is_some_and(|local| &local.ty == result)
+        }
+        _ => false,
+    };
+    (value.source == Source::Value(output) && value.mode == UseMode::Consume && destination)
+        .then_some((callee.0 as usize, *target))
 }
 
 fn is_cleanup(instruction: &Instruction) -> bool {

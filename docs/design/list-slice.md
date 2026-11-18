@@ -25,9 +25,13 @@ caller descriptor in place, and the caller retains cleanup responsibility.
 A direct internal owned parameter takes a named whole List local by move.
 Arguments evaluate left to right. An earlier owned argument is staged
 until invocation, and normal exits before the call release it in the caller.
-Once invoked, the callee owns and cleans up the block. Whole-list
-replacement, List returns, indirect calls, nesting, subscript syntax,
-and exports remain gated at this checkpoint.
+Once invoked, the callee owns and cleans up the block. A direct internal
+function can also return a named whole List local. Bind the call result
+directly to a new local. The callee stages the descriptor before ending
+its local scopes. The receiving binding owns the block and releases it
+on a normal exit unless it moves onward. Discarded or temporary results,
+whole-list replacement, indirect calls, nesting, subscript syntax, and
+exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -64,8 +68,10 @@ to another. Borrow and share parameters receive the caller's private
 descriptor address for the direct call. A share follows the usual
 exclusive loan rules. Push through a stored share handle remains gated.
 An owned parameter receives its own frame descriptor and takes the
-allocation from the caller's moved slot. Defer List returns, whole-local
-replacement, nested List storage,
+allocation from the caller's moved slot. A return clears the moved
+callee slot before cleanup and transfers the staged descriptor through
+the caller's private aggregate return cell. Defer whole-local replacement,
+nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
@@ -114,8 +120,8 @@ high-water mark.
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,
    use after move, live-borrow conflicts, successful push and move after
-   last use, ownership transfer and skipped-call cleanup, unsupported
-   escapes, and rejected ABI shapes.
+   last use, ownership transfer across arguments and returns, skipped-call
+   cleanup, unsupported escapes, and rejected ABI shapes.
 4. In one Wasm instance, repeat a fixed workload through fallthrough,
    return, break and continue. Check reuse after the first high-water
    mark, mixed move paths, and preservation of a distinct live list

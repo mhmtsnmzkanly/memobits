@@ -590,13 +590,6 @@ impl Checker {
         }
         value
     }
-    fn signature_result(&mut self, ty: &Type) -> Ty {
-        let resolved = self.type_path(ty);
-        if matches!(resolved, Ty::List(_)) {
-            self.error(17, ty.span, "List returns are not supported in this slice");
-        }
-        resolved
-    }
     /// Executable arrays hold non-Unit primitive, struct or nested array elements.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
         if self.table.is_borrow_option(element) {
@@ -3186,10 +3179,7 @@ fn check_standalone(
                         ty: c.type_path(&p.ty),
                     })
                     .collect();
-                let result = result
-                    .as_ref()
-                    .map(|t| c.signature_result(t))
-                    .unwrap_or(UNIT);
+                let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
                 if c.functions
                     .insert(name.clone(), Ty::Function(params, Box::new(result)))
                     .is_some()
@@ -3355,10 +3345,7 @@ pub(crate) fn check_resolved_mode(
                             ty: c.type_path(&p.ty),
                         })
                         .collect();
-                    let result = result
-                        .as_ref()
-                        .map(|t| c.signature_result(t))
-                        .unwrap_or(UNIT);
+                    let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),
                         Ty::Function(params, Box::new(result)),

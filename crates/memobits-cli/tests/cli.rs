@@ -808,6 +808,99 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn owned_list_returns_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-return'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", r#"
+        fn bytes(empty: Bool) -> List<u8> {
+            var result: List<u8> = [];
+            if empty { return result; }
+            result.push(255);
+            result
+        }
+        fn grown() -> List<u32> {
+            var result: List<u32> = [];
+            loop {
+                result.push(result.len() + 100);
+                if result.len() == 128 { break; }
+            }
+            result
+        }
+        fn forward(items: List<u32>, marker: u32) -> List<u32> { items }
+        fn main() -> Result<Bool, Error> {
+            let empty := bytes(true);
+            let byte_list := bytes(false);
+            let original := grown();
+            var words := forward(original, 7);
+            words.push(4_294_967_295);
+            let first := match byte_list.get(0) { Some(value) => value == 255, None => false };
+            let grown := match words.get(127) { Some(value) => value == 227, None => false };
+            let last := match words.get(128) { Some(value) => value == 4_294_967_295, None => false };
+            Ok(empty.len() == 0 && first && grown && last && words.len() == 129)
+        }
+    "#);
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "return-list.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "return-list.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_returns_keep_temporary_and_abi_gates() {
+    let f = Fixture::new();
+    for (body, code, message) in [
+        (
+            "make();",
+            "TE018",
+            "directly initialize a new whole List local",
+        ),
+        (
+            "var result: List<u8> = []; result = make();",
+            "TE018",
+            "directly initialize a new whole List local",
+        ),
+        ("make().len();", "TE017", "requires a local binding"),
+        (
+            "let indirect := make; let result := indirect();",
+            "TE018",
+            "direct internal call",
+        ),
+    ] {
+        f.write(
+            "list.mb",
+            &format!(
+            "fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn main() {{ {body} }}"
+        ),
+        );
+        let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
+    f.write("list.mb", "fn make() -> List<u8> { let items: List<u8> = []; items } fn forward() -> List<u8> { make() }");
+    err(f.run(&["ownership", "list.mb"]), "TE018");
+
+    f.write(
+        "project.toml",
+        "[package]\nname='list-return-abi'\nentry='main::main'\n[export]\nmake='main::make'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "pub fn make() -> List<u8> { let items: List<u8> = []; items } fn main() {}",
+    );
+    let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        diagnostic.contains("external List ABI is not defined"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn owned_list_arguments_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
@@ -1273,7 +1366,7 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
             "fn main() { let items: List<u8> = []; items.share(); }",
             "TE017",
         ),
-        ("fn main() -> List<u32> { [] }", "TE017"),
+        ("fn main() -> List<u32> { [] }", "TE018"),
     ] {
         f.write("lists.mb", source);
         err(f.run(&["ownership", "lists.mb"]), code);
