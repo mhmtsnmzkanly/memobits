@@ -29,12 +29,12 @@ combined bytes remain valid UTF-8 and can be read with the existing String
 operations or lent to an internal borrow parameter.
 
 This slice accepts concat as the direct initializer of an immutable local.
-The owned result stays in that binding until its lexical exit. Moving,
-returning, sharing for mutation or replacing it requires broader drop
-elaboration. Typed IR verifies that the owning descriptor cannot escape and
-that all normal exits release these bindings in reverse initialization
-order. Descriptors now carry allocation provenance. Zero denotes static
-bytes, and a nonzero value points to the owned heap block's header.
+A direct move into another immutable local transfers the owning descriptor.
+Owned call arguments, returned or temporary owners, sharing for mutation
+and replacement require broader drop elaboration. A nonzero descriptor
+provenance field points to the owned block's header. A move clears that
+field in the source. Zero provenance covers static bytes and moved slots,
+and cleanup skips either.
 
 Guest allocation grows memory only as needed, after checking the widened
 exclusive byte end and its page ceiling. A failed grow traps at the concat
@@ -44,7 +44,7 @@ fitting block before extending the heap. Headers are four-byte aligned and
 store capacity independently of the String's current byte length, so a
 smaller reuse preserves the larger block's capacity. Blocks are reused
 whole, and memory pages remain at their high-water mark. The existing
-lexical gate still verifies release order and prevents escaping owners.
+lexical gate still verifies scope exits and prevents unsupported escapes.
 
 Once the foundation works, List can reuse the byte allocator and owned
 cleanup. Element initialization, element drops, and capacity changes belong
@@ -53,12 +53,12 @@ to later List work.
 ## Audit of scoped allocation
 
 At each reachable block entry, the IR validator requires every incoming
-edge to agree on the live concat locals and their order. A normal exit pops
-only the most recently initialized local. A callee must return with its own
-allocation stack empty, so its cleanup preserves the caller's allocations.
-The move and loan checks run before Wasm emission. They prevent descriptor
-transfer and reject a live borrow across release, even when release order is
-otherwise valid. Two inputs may borrow the same String. Both reads finish
+edge to agree on the heap bindings still in scope, even when their move
+states differ. A callee must end all of its heap bindings before returning.
+Release uses the block address, so it preserves other live allocations
+regardless of their order. The move and loan checks run before Wasm emission
+and reject a move or release while a borrow remains live. Two inputs may
+borrow the same String. Both reads finish
 before the result is published. Copies target a freed block or a new extent
 disjoint from both live inputs. These guarantees assume the generated guest controls its
 memory. A host with access to the private outcome memory export must preserve
@@ -75,13 +75,10 @@ have page-reuse coverage.
    [shared descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
    to locate an allocation record and reuse freed blocks. Tests cover a
    larger block reused for a smaller request, then reused at full size.
-   The lexical gate still prevents out-of-order releases in source.
-2. Extend cleanup to the next ownership context before admitting its
-   transfers. For local moves, transfer the release obligation with the
-   descriptor and elaborate each exit from its incoming ownership state.
-   Drop available owners, skip moved ones, and use a runtime flag only when
-   mixed paths still share a cleanup site. Test a move between scopes where
-   the newer allocation survives the older owner's exit.
+2. Local moves now transfer the release obligation with the descriptor.
+   Scope exit consults provenance, so mixed paths need no separate flag.
+   Tests cover moving an older allocation while a newer allocation remains
+   live, and moving on one branch while retaining the original on another.
 3. Cover ownership across calls, returns and temporary results before
    permitting those uses. Transfer the result before dropping the callee's
    other owners. Drop discarded temporaries on normal exits. Evaluate a
@@ -131,18 +128,11 @@ Lowering now emits `EndStringLocal` for owned String bindings and parameters
 at normal lexical exits. A String result moves out before its binding ends.
 The move checker invalidates the local and the loan checker rejects a live
 loan across its exit. The marker accepts a moved local and emits no Wasm
-operation for static locals. For a verified concat local, the backend instead
-releases the most recent allocation. The move transfer clears the local
-after its exit regardless of the incoming state.
-
-For a future heap-backed local, elaborate the exit from its incoming state.
-A definitely available local needs a drop, subject to the descriptor's
-static/heap distinction. A definitely unavailable local needs no drop.
-Use an edge-specific cleanup when the mixed paths are already separate.
-Use a runtime flag only for a mixed exit that still shares a cleanup site.
-Such a flag is set on successful initialization or reassignment and cleared
-on a move or drop. No flags or frees are emitted in the current slice.
-Other owner types and temporary cleanup remain separate work.
+operation for static locals. For a heap String local, the backend releases
+the allocation if its descriptor still owns a block. The move transfer
+clears the source's ownership field, and scope exit marks the local
+unavailable regardless of its incoming state. Other owner types and
+temporary cleanup remain separate work.
 
 Extend the private String descriptor so cleanup distinguishes static
 literal storage from an owned allocation. Stack cells still hold descriptors.

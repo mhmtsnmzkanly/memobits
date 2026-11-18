@@ -239,13 +239,14 @@ fn text_concat() -> Bool {
     let left := "café";
     let right := "😀";
     // concat borrows both inputs. The new String owns its bytes until this
-    // binding leaves scope. This slice keeps it in the original let binding.
+    // binding leaves scope. Moving to a new let transfers that obligation.
     let joined := left.concat(right.borrow());
     let left_moved := left;
     let with_suffix := joined.concat("!");
     let empty := "".concat("");
-    byte_length(joined.borrow()) == 9 && left_moved.len() == 5
-        && byte_is(joined.byte_at(4), 169) && scalar_is(joined.scalar_at(5), 128_512)
+    let moved := joined;
+    byte_length(moved.borrow()) == 9 && left_moved.len() == 5
+        && byte_is(moved.byte_at(4), 169) && scalar_is(moved.scalar_at(5), 128_512)
         && with_suffix.len() == 10 && byte_is(with_suffix.byte_at(9), 33)
         && empty.len() == 0 && no_byte(empty.byte_at(0))
 }

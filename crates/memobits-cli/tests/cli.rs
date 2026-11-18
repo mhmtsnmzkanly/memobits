@@ -62,12 +62,16 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
             "direct immutable local initializer",
         ),
         (
-            r#"let joined := "a".concat("b"); let moved := joined; moved.len();"#,
-            "original binding",
+            r#"let joined := "a".concat("b"); var moved := joined; moved.len();"#,
+            "new immutable local",
         ),
         (
             r#"let joined := "a".concat("b"); take(joined);"#,
-            "original binding",
+            "new immutable local",
+        ),
+        (
+            r#"let joined := "a".concat("b"); let view := joined.borrow(); let moved := joined; view.len();"#,
+            "while it is borrowed",
         ),
         (
             r#"var left := "a"; let joined := left.concat({ left = "x"; "b" });"#,
@@ -83,6 +87,61 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
     }
+}
+
+#[test]
+fn concat_moves_across_nested_scopes_release_once_on_either_branch() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-moves'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn first_is(value: borrow String, expected: u8) -> Bool {
+            match value.byte_at(0) { Some(byte) => byte == expected, None => false }
+        }
+        fn check(move_inward: Bool) -> Bool {
+            let joined := "a".concat("b");
+            let size := if move_inward {
+                let inner := joined;
+                { let moved := inner; moved.len() }
+            } else {
+                joined.len()
+            };
+            let first := "x".concat("y");
+            let second := "m".concat("n");
+            size == 2 && first_is(first.borrow(), 120) && first_is(second.borrow(), 109)
+        }
+        fn main() -> Result<Bool, Error> {
+            Ok(check(true) && check(false) && check(true))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "moves.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "moves.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn concat_move_on_one_branch_invalidates_the_original_at_the_join() {
+    let f = Fixture::new();
+    f.write(
+        "text.mb",
+        r#"fn main(flag: Bool) -> u32 {
+        let joined := "é".concat("😀");
+        if flag { let moved := joined; moved.len(); }
+        joined.len()
+    }"#,
+    );
+    let diagnostic = err(f.run(&["ownership", "text.mb"]), "BE001");
+    assert!(diagnostic.contains("on some paths"), "{diagnostic}");
 }
 
 #[test]

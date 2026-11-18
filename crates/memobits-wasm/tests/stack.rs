@@ -155,7 +155,13 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
             var steps := 0;
             loop {{
                 let joined := left.concat(right);
-                if early {{ return joined.len(); }}
+                let len := if steps % 2 == 0 {{
+                    let moved := joined;
+                    moved.len()
+                }} else {{
+                    joined.len()
+                }};
+                if early {{ return len; }}
                 steps += 1;
                 if steps < 4 {{ continue; }}
                 break;
@@ -307,7 +313,7 @@ fn concat_release_rejects_a_borrow_used_after_scope_exit() {
 }
 
 #[test]
-fn concat_ir_rejects_missing_and_out_of_order_cleanup() {
+fn concat_ir_requires_cleanup_but_allows_non_lifo_release() {
     use memobits_ir::InstructionKind;
 
     let source = r#"fn main() -> u32 {
@@ -319,11 +325,9 @@ fn concat_ir_rejects_missing_and_out_of_order_cleanup() {
     let mut reversed = missing.clone();
     let instructions = &mut missing.functions[0].blocks[0].instructions;
     instructions.pop();
-    assert!(missing
-        .validate()
-        .unwrap_err()
-        .iter()
-        .any(|error| error.message.contains("return leaves a concat local live")));
+    assert!(missing.validate().unwrap_err().iter().any(|error| error
+        .message
+        .contains("return leaves a heap String local in scope")));
 
     let instructions = &mut reversed.functions[0].blocks[0].instructions;
     let ends: Vec<_> = instructions
@@ -335,11 +339,12 @@ fn concat_ir_rejects_missing_and_out_of_order_cleanup() {
         .collect();
     assert_eq!(ends.len(), 2);
     instructions.swap(ends[0], ends[1]);
-    assert!(reversed
-        .validate()
-        .unwrap_err()
-        .iter()
-        .any(|error| error.message.contains("reverse initialization order")));
+    reversed.validate().unwrap();
+    let artifact =
+        compile_application_traced(&reversed, FunctionId(0), &CompileOptions::default()).unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    assert_eq!(main.call(&mut store, ()).unwrap(), 3);
 }
 
 #[test]

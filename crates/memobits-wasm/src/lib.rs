@@ -898,15 +898,7 @@ impl FrameLayout {
             slots,
             arrays,
             structs: structs.to_vec(),
-            concat_locals: function
-                .blocks
-                .iter()
-                .flat_map(|block| &block.instructions)
-                .filter_map(|instruction| match instruction.kind {
-                    InstructionKind::InitConcatString { target, .. } => Some(target),
-                    _ => None,
-                })
-                .collect(),
+            concat_locals: function.scoped_string_locals(),
             size,
         })
     }
@@ -3222,7 +3214,17 @@ fn compile_instruction(
         }
         InstructionKind::Assign { target, value, .. } => {
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
-                return emit_array_copy(body, function, param_count, cell, value, layout, frame);
+                emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
+                if let Source::Local(source) = value.source {
+                    if layout.concat_locals.contains(&source) {
+                        // The destination descriptor now owns the block. Zero
+                        // provenance leaves the old binding empty on this path.
+                        emit_operand(body, function, param_count, value, layout, frame)?;
+                        body.instruction(&WasmInstruction::I32Const(0));
+                        string_descriptor::store_allocation(body);
+                    }
+                }
+                return Ok(());
             }
             if let Some(slot) = layout.slots.get(&target.0) {
                 emit_address(body, frame.ok_or("owner cell requires frame")?, slot.offset);

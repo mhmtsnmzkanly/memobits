@@ -2612,7 +2612,12 @@ fn validate_operand_escapes(
         if matches!(operand.source, Source::Local(local) if concat_locals.contains(&local))
             && (escape || captures || !matches!(operand.mode, UseMode::Read | UseMode::Borrow))
         {
-            push(errors, id, Some(block), "concat result must remain in its original binding and can only be read or borrowed");
+            push(
+                errors,
+                id,
+                Some(block),
+                "heap String can only be read, borrowed, or moved into a new immutable local",
+            );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
             push(
@@ -2679,7 +2684,18 @@ fn validate_operand_escapes(
                     report(block_id, left, false, false);
                     report(block_id, right, false, false);
                 }
-                InstructionKind::Assign { value, .. } => report(block_id, value, true, false),
+                InstructionKind::Assign {
+                    target,
+                    value,
+                    initialize,
+                } => {
+                    if !*initialize
+                        || !scoped_string::local_move_source(function, *target, value)
+                            .is_some_and(|source| concat_locals.contains(&source))
+                    {
+                        report(block_id, value, true, false);
+                    }
+                }
                 InstructionKind::InitConcatString { strings, .. } => {
                     for source in strings {
                         report(block_id, source, false, false);
