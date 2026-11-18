@@ -1232,14 +1232,14 @@ fn validate_instruction(
             let valid_local = function
                 .locals
                 .get(target.0 as usize)
-                .is_some_and(|local| local.ty == Type::String && !local.mutable)
+                .is_some_and(|local| local.ty == Type::String)
                 && !function.parameter_locals.contains(target);
             if !valid_local || instruction.output.is_some() {
                 push(
                     errors,
                     id,
                     Some(block),
-                    "concat requires an immutable String local and no output",
+                    "concat requires a new String local and no output",
                 );
             }
             for source in strings {
@@ -2622,7 +2622,7 @@ fn validate_operand_escapes(
                             .is_none()
                     {
                         push(errors, id, Some(BlockId(index as u32)),
-                            "heap String call result must directly initialize a new immutable local");
+                            "heap String call result must be assigned directly to a whole String local");
                     }
                 }
             }
@@ -2638,7 +2638,7 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                "heap String can only be read, borrowed, or moved into a new immutable local or an internal owned String parameter",
+                "heap String can only be read, borrowed, moved to a whole String local or passed to an internal owned String parameter",
             );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
@@ -2719,9 +2719,8 @@ fn validate_operand_escapes(
                     value,
                     initialize,
                 } => {
-                    if !*initialize
-                        || !scoped_string::local_move_source(function, *target, value)
-                            .is_some_and(|source| heap_locals.contains(&source))
+                    if scoped_string::local_move_source(function, *target, value, *initialize)
+                        .is_none()
                     {
                         report(block_id, value, true, false);
                     }

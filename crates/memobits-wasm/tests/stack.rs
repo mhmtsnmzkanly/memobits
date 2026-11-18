@@ -295,6 +295,50 @@ fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
 }
 
 #[test]
+fn mutable_string_replacement_reuses_blocks_after_mixed_moves() {
+    let literal = "é".repeat(24_000);
+    let program = lower(&format!(
+        r#"
+        fn main() -> Result<Bool, Error> {{
+            let seed := "{literal}";
+            var text := seed.concat("");
+            var step := 0;
+            loop {{
+                text = text.concat("");
+                if step % 2 == 0 {{
+                    let retired := text;
+                    if retired.len() != 48_000 {{ return Err(Error {{ code: 1 }}); }}
+                }}
+                text = seed.concat("");
+                if text.len() != 48_000 {{ return Err(Error {{ code: 2 }}); }}
+                step += 1;
+                if step == 6 {{ break; }}
+            }}
+            Ok(true)
+        }}
+        "#
+    ));
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(0),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), 3 * 65_536);
+    }
+}
+
+#[test]
 fn concat_release_rejects_a_borrow_used_after_scope_exit() {
     use memobits_ir::InstructionKind;
 

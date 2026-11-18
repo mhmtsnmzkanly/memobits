@@ -56,12 +56,14 @@ byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`
 to decode a Unicode scalar at a byte offset as `Option<u32>`.
 `let joined := left.concat(right);` borrows its inputs and allocates owned
-text for that immutable binding. The result can be read, borrowed, or moved
-to another immutable local. A direct internal call can take multiple owned
+text for that binding. The result can be read, borrowed, or moved to
+another local. A whole mutable String local can be replaced. The RHS runs
+before the previous allocation is released. A direct internal call can take multiple owned
 String arguments, evaluated left to right. Scope exit releases it from the binding that
 still owns it. An internal function can return an owning local when the
-direct call initializes a new immutable caller local. Temporary heap results,
-exported String signatures, and nested String storage are gated. Application
+direct call initializes or replaces a whole caller local. Unbound heap
+results, share mutation of heap owners, exported String signatures, and
+nested String storage are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

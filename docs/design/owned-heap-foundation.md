@@ -28,8 +28,13 @@ independently owned String. The inputs stay usable after the call. The
 combined bytes remain valid UTF-8 and can be read with the existing String
 operations or lent to an internal borrow parameter.
 
-This slice accepts concat as the direct initializer of an immutable local.
-A direct move into another immutable local transfers the owning descriptor.
+Concat can initialize a whole String local or replace a mutable whole
+String local. Direct moves between local bindings transfer the owning
+descriptor. Replacement evaluates the RHS first, so it can still borrow
+the previous value. After evaluation, assignment releases the previous
+allocation and installs the replacement. Moved and static slots have zero
+provenance, so the same code handles mixed move paths. A self-move keeps
+the descriptor in place.
 A direct internal call can take multiple owned String arguments in any
 parameter position. Arguments evaluate left to right. An earlier move from
 a local stages the descriptor in a hidden immutable binding, which gets
@@ -37,8 +42,8 @@ lexical cleanup if later evaluation returns, breaks, or continues out of
 the call. Invocation transfers the staged descriptors to callee parameters.
 A trap discards the instance, including any staged allocations.
 A function can return an owning local through a direct internal call whose
-result directly initializes a new immutable caller local. Discarded results,
-result temporaries, sharing for mutation and replacement require broader drop
+result directly initializes or replaces a whole caller local. Discarded
+results, unbound heap temporaries, and share mutation require broader drop
 elaboration. A nonzero descriptor
 provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
@@ -98,9 +103,11 @@ have page-reuse coverage.
 3. Direct return transfers the result before dropping the callee's other
    owners. Tests cover early returns, a static alternative, forwarding and
    repeated reuse in the same Wasm instance.
-4. Extend normal-exit cleanup to discarded results and general temporaries.
-   Evaluate a replacement before releasing the previous owner, including whole
-   replacement through a share. Verify exact returned bytes, mixed ownership
+4. Whole-local replacement releases the previous block after RHS evaluation.
+   Tests cover live loans, moves on one branch, and repeated reuse.
+5. Extend normal-exit cleanup to discarded results and general temporaries.
+   Whole replacement through a share also needs ownership tracking for the
+   pointee. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm
    execution. A trap still discards the whole instance.
 
@@ -161,7 +168,7 @@ Add a consuming cleanup operation to IR and place it where an initialized
 owner is discarded on normal control flow. Use move availability and lexical
 scope exits to cover discarded temporaries, fallthrough, return, break and
 continue. A return moves its result out before cleanup of remaining owners.
-On reassignment, including whole replacement through a share, evaluate the
+On reassignment, evaluate the
 new value first, then drop the old value if it is initialized and still
 owned. At joins, drop only on paths that retain the owner. Borrowed and moved
 values must never be freed by the old binding. The existing loan checker must

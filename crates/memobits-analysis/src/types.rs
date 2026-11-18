@@ -932,7 +932,7 @@ impl Checker {
                     });
                     self.allow_array_value(value);
                     let previous = self.concat_initializer;
-                    self.concat_initializer = (!mutable).then_some(value as *const Expr as usize);
+                    self.concat_initializer = Some(value as *const Expr as usize);
                     let inferred = self.expr(value, annotation.as_ref());
                     self.concat_initializer = previous;
                     self.reject_extraction(value, &inferred);
@@ -1075,7 +1075,16 @@ impl Checker {
                     if operator == "=" {
                         self.allow_array_value(value);
                     }
+                    let previous = self.concat_initializer;
+                    if operator == "="
+                        && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
+                            && self.lookup(&path[0]).is_some_and(|binding|
+                                binding.mutable && binding.ty == Ty::String))
+                    {
+                        self.concat_initializer = Some(value as *const Expr as usize);
+                    }
                     let value_ty = self.expr(value, Some(&target_ty));
+                    self.concat_initializer = previous;
                     if operator == "=" {
                         self.reject_extraction(value, &value_ty);
                     }
@@ -1206,7 +1215,7 @@ impl Checker {
             self.error(
                 17,
                 expression.span,
-                "concat requires a direct immutable local initializer",
+                "concat requires a direct whole String local initializer or assignment",
             );
         }
         let expected = usize::from(method != "len");

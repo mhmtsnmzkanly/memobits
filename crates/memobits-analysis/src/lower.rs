@@ -696,24 +696,15 @@ impl<'a> Builder<'a> {
 
     fn lower_concat_initializer(
         &mut self,
-        binding: &Statement,
+        target: LocalId,
         left: &Expr,
         right: &Expr,
         span: Span,
-    ) {
-        let Some(left) = self
-            .lower_expr(left)
-            .and_then(|value| self.borrow(value, Access::Borrow))
-        else {
-            return;
-        };
-        let Some(right) = self
-            .lower_expr(right)
-            .and_then(|value| self.borrow(value, Access::Borrow))
-        else {
-            return;
-        };
-        let target = self.local(binding);
+    ) -> Option<()> {
+        let left = self.lower_expr(left)?;
+        let left = self.borrow(left, Access::Borrow)?;
+        let right = self.lower_expr(right)?;
+        let right = self.borrow(right, Access::Borrow)?;
         self.emit(
             span,
             InstructionKind::InitConcatString {
@@ -723,6 +714,7 @@ impl<'a> Builder<'a> {
             None,
         );
         self.string_locals.push(target);
+        Some(())
     }
 
     fn end_string_locals(&mut self, from: usize, span: Span) {
@@ -774,7 +766,7 @@ impl<'a> Builder<'a> {
                         if let ExprKind::Field { base, name } = &callee.kind {
                             if name == "concat" {
                                 self.lower_concat_initializer(
-                                    statement,
+                                    self.local(statement),
                                     base,
                                     &arguments[0],
                                     value.span,
@@ -807,6 +799,40 @@ impl<'a> Builder<'a> {
                     let PathTarget::Local(local) = self.path(target) else {
                         unreachable!("checked assignment")
                     };
+                    if let ExprKind::Call { callee, arguments } = &value.kind {
+                        if let ExprKind::Field { base, name } = &callee.kind {
+                            if name == "concat" {
+                                let staged = self.hidden_local(
+                                    "String replacement",
+                                    Type::String,
+                                    value.span,
+                                );
+                                let scope_start = self.string_locals.len();
+                                if self
+                                    .lower_concat_initializer(
+                                        staged,
+                                        base,
+                                        &arguments[0],
+                                        value.span,
+                                    )
+                                    .is_some()
+                                {
+                                    self.emit(
+                                        statement.span,
+                                        InstructionKind::Assign {
+                                            target: local,
+                                            value: consume(op(Source::Local(staged), value.span)),
+                                            initialize: false,
+                                        },
+                                        None,
+                                    );
+                                    self.end_string_locals(scope_start, statement.span);
+                                    self.string_locals.truncate(scope_start);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     let previous = (operator != "=").then(|| op(Source::Local(local), target.span));
                     let previous = previous
                         .and_then(|operand| self.scalar(operand))

@@ -2058,6 +2058,24 @@ fn emit_array_copy(
     Ok(())
 }
 
+fn release_string_local(
+    body: &mut WasmFunction,
+    local: LocalId,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+    concat_index: Option<u32>,
+) -> Result<(), String> {
+    let cell = array_cell_of(layout, Slot::Local(local.0))?;
+    emit_address(
+        body,
+        frame.ok_or("String local requires a frame")?,
+        cell.offset,
+    );
+    let releaser = concat_index.ok_or("missing String release helper")? + 1;
+    body.instruction(&WasmInstruction::Call(releaser));
+    Ok(())
+}
+
 fn clear_moved_heap_source(
     body: &mut WasmFunction,
     function: &Function,
@@ -2663,14 +2681,7 @@ fn compile_instruction(
     match &instruction.kind {
         InstructionKind::EndStringLocal { local } => {
             if heap_locals.contains(local) {
-                let cell = array_cell_of(layout, Slot::Local(local.0))?;
-                emit_address(
-                    body,
-                    frame.ok_or("concat local requires a frame")?,
-                    cell.offset,
-                );
-                let releaser = concat_index.ok_or("missing String release helper")? + 1;
-                body.instruction(&WasmInstruction::Call(releaser));
+                release_string_local(body, *local, layout, frame, concat_index)?;
             }
         }
         InstructionKind::InitConcatString { target, strings } => {
@@ -3245,8 +3256,19 @@ fn compile_instruction(
             emit_operand(body, function, param_count, value, layout, frame)?;
             emit_store(body, reference_primitive(function, reference)?);
         }
-        InstructionKind::Assign { target, value, .. } => {
+        InstructionKind::Assign {
+            target,
+            value,
+            initialize,
+        } => {
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
+                if !initialize && heap_locals.contains(target) {
+                    // A self-move leaves the descriptor in the same slot.
+                    if value.source == Source::Local(*target) {
+                        return Ok(());
+                    }
+                    release_string_local(body, *target, layout, frame, concat_index)?;
+                }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
                 clear_moved_heap_source(
                     body,

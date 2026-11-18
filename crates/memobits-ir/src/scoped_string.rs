@@ -40,9 +40,11 @@ impl super::Program {
                         InstructionKind::Assign {
                             target,
                             value,
-                            initialize: true,
+                            initialize,
                         } => {
-                            if let Some(source) = local_move_source(function, *target, value) {
+                            if let Some(source) =
+                                local_move_source(function, *target, value, *initialize)
+                            {
                                 moves
                                     .entry(Slot::Local(index, source))
                                     .or_default()
@@ -119,7 +121,7 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
     (instruction.output == Some(result)).then_some((position, source))
 }
 
-/// A heap call result must initialize an immutable local after argument cleanup.
+/// A heap call result must be assigned to a whole local after argument cleanup.
 pub(super) fn call_binding(
     function: &Function,
     instructions: &[Instruction],
@@ -140,7 +142,7 @@ pub(super) fn call_binding(
     let InstructionKind::Assign {
         target,
         value,
-        initialize: true,
+        initialize,
     } = &after.iter().find(|inst| !is_cleanup(inst))?.kind
     else {
         return None;
@@ -148,7 +150,7 @@ pub(super) fn call_binding(
     let output = call.output?;
     (value.source == Source::Value(output)
         && value.mode == UseMode::Consume
-        && immutable_string_local(function, *target))
+        && string_destination(function, *target, *initialize))
     .then_some((callee.0 as usize, *target))
 }
 
@@ -181,25 +183,26 @@ pub(super) fn owned_call_transfer(
     Some((local, target, *function.parameter_locals.get(position)?))
 }
 
-/// Only a declaration of a new immutable local can receive a heap owner.
+/// A heap owner may move to a new local or replace a mutable local.
 pub(super) fn local_move_source(
     function: &Function,
     target: LocalId,
     value: &Operand,
+    initialize: bool,
 ) -> Option<LocalId> {
     let Source::Local(source) = value.source else {
         return None;
     };
-    (source != target && value.mode == UseMode::Consume && immutable_string_local(function, target))
+    (value.mode == UseMode::Consume && string_destination(function, target, initialize))
         .then_some(source)
 }
 
-fn immutable_string_local(function: &Function, target: LocalId) -> bool {
+fn string_destination(function: &Function, target: LocalId, initialize: bool) -> bool {
     function
         .locals
         .get(target.0 as usize)
-        .is_some_and(|local| local.ty == Type::String && !local.mutable)
-        && !function.parameter_locals.contains(&target)
+        .is_some_and(|local| local.ty == Type::String && (initialize || local.mutable))
+        && (!initialize || !function.parameter_locals.contains(&target))
 }
 
 pub(super) fn validate(
@@ -227,7 +230,7 @@ pub(super) fn validate(
         // A moved binding remains in lexical scope. The separate move checker
         // tracks availability, and the descriptor tracks who owns the block.
         let mut in_scope = entries[block_id.0 as usize].clone().unwrap();
-        for (position, instruction) in block.instructions.iter().enumerate() {
+        for instruction in &block.instructions {
             let initialized = match &instruction.kind {
                 InstructionKind::InitConcatString { target, .. } => Some(*target),
                 InstructionKind::Assign {
@@ -235,26 +238,15 @@ pub(super) fn validate(
                     value,
                     initialize,
                 } if locals.contains(target) => {
-                    let from_call = block.instructions[..position]
-                        .iter()
-                        .rposition(|inst| !is_cleanup(inst))
-                        .and_then(|previous| {
-                            call_binding(function, &block.instructions[previous..])
-                        })
-                        .is_some_and(|(callee, bound)| {
-                            bound == *target
-                                && facts.get(callee).is_some_and(|fact| fact.returns_heap)
-                        });
-                    if *initialize
-                        && (from_call
-                            || local_move_source(function, *target, value)
-                                .is_some_and(|source| in_scope.contains(&source)))
+                    let source_outside_scope = matches!(value.source, Source::Local(source)
+                        if locals.contains(&source) && !in_scope.contains(&source));
+                    if !string_destination(function, *target, *initialize)
+                        || source_outside_scope
+                        || (!initialize && !in_scope.contains(target))
                     {
-                        Some(*target)
-                    } else {
-                        push(errors, id, Some(block_id), "cannot replace a heap String local or initialize it from outside its scope");
-                        None
+                        push(errors, id, Some(block_id), "heap String assignment requires a whole local in scope or a new binding");
                     }
+                    initialize.then_some(*target)
                 }
                 InstructionKind::EndStringLocal { local } if locals.contains(local) => {
                     if !in_scope.remove(local) {

@@ -46,7 +46,7 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
 }
 
 #[test]
-fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
+fn heap_strings_reject_unbound_results_and_conflicting_loans() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -54,20 +54,20 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
     );
     for (body, message) in [
         (
-            r#"var joined := "a".concat("b");"#,
-            "direct immutable local initializer",
-        ),
-        (
             r#""a".concat("b").len();"#,
-            "direct immutable local initializer",
+            "direct whole String local initializer or assignment",
         ),
         (
-            r#"let joined := "a".concat("b"); var moved := joined; moved.len();"#,
-            "new immutable local",
+            r#"var joined := "a".concat("b"); let view := joined.borrow(); joined = "c"; view.len();"#,
+            "while it is borrowed",
+        ),
+        (
+            r#"var joined := "a"; let view := joined.share(); joined = "b".concat("c"); view.len();"#,
+            "heap String can only be read, borrowed",
         ),
         (
             r#"let joined := "a".concat("b"); returns(joined).len();"#,
-            "must directly initialize a new immutable local",
+            "must be assigned directly to a whole String local",
         ),
         (
             r#"let joined := "a".concat("b"); earlier(joined, joined.len());"#,
@@ -100,6 +100,57 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
     }
+}
+
+#[test]
+fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-replacement'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn use_owner(value: String) -> u32 { value.len() }
+        fn add(value: borrow String) -> String {
+            let result := value.concat("😀");
+            result
+        }
+        fn check(move_first: Bool) -> Bool {
+            var text := "é";
+            text = text.concat("!");
+            text = text.concat("x");
+            text = text;
+            var new_text := add(text.borrow());
+            if move_first { use_owner(text); }
+            text = new_text;
+            new_text = "ok";
+            if text.len() != 8 || new_text.len() != 2 { return false; }
+            text = add(text.borrow());
+            let suffix_ok := match text.scalar_at(8) {
+                Some(value) => value == 128_512, None => false
+            };
+            text = "done";
+            suffix_ok && text.len() == 4
+        }
+        fn early() -> u32 {
+            var text := "é".concat("!");
+            text = text.concat({ return use_owner_before_exit(text.borrow()); "unreachable" });
+            text.len()
+        }
+        fn use_owner_before_exit(value: borrow String) -> u32 { value.len() }
+        fn main() -> Result<Bool, Error> { Ok(check(true) && check(false) && early() == 3) }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "replacement.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "replacement.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
 }
 
 #[test]
@@ -190,9 +241,9 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
 }
 
 #[test]
-fn heap_returns_require_an_immediate_immutable_binding() {
+fn heap_returns_require_a_direct_whole_local_destination() {
     let f = Fixture::new();
-    for body in ["make();", "make().len();", "var result := make();"] {
+    for body in ["make();", "make().len();"] {
         f.write(
             "text.mb",
             &format!(
@@ -202,7 +253,7 @@ fn heap_returns_require_an_immediate_immutable_binding() {
         );
         let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
         assert!(
-            diagnostic.contains("must directly initialize a new immutable local"),
+            diagnostic.contains("must be assigned directly to a whole String local"),
             "{body}: {diagnostic}"
         );
     }
