@@ -742,6 +742,59 @@ impl<'a> Builder<'a> {
         self.lower_expr(expr);
     }
 
+    fn lower_string_read_receiver(&mut self, base: &Expr) -> Option<Operand> {
+        if let ExprKind::Call { callee, arguments } = &base.kind {
+            if let ExprKind::Field { base: left, name } = &callee.kind {
+                if name == "concat" {
+                    let owner = self.hidden_local("String read receiver", Type::String, base.span);
+                    self.lower_concat_initializer(owner, left, &arguments[0], base.span)?;
+                    return Some(op(Source::Local(owner), base.span));
+                }
+            }
+            if self.ty(base) == Some(Type::String) {
+                let result = self.lower_expr(base)?;
+                let owner = self.hidden_local("String read receiver", Type::String, base.span);
+                self.initialize_local(owner, consume(result), base.span);
+                return Some(op(Source::Local(owner), base.span));
+            }
+        }
+        self.lower_expr(base)
+    }
+
+    fn lower_string_read(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        method: &str,
+        arguments: &[Expr],
+    ) -> Option<Operand> {
+        let scope_start = self.string_locals.len();
+        let result = (|| {
+            let receiver = self.lower_string_read_receiver(base)?;
+            let instruction = if method == "len" {
+                InstructionKind::StringLen {
+                    source: read(receiver),
+                }
+            } else {
+                // Keep the receiver loan live while evaluating the offset.
+                let source = read(self.borrow(receiver, Access::Borrow)?);
+                let offset = self.lower_expr(&arguments[0])?;
+                let offset = read(self.scalar(offset)?);
+                match method {
+                    "byte_at" => InstructionKind::StringByteAt { source, offset },
+                    "scalar_at" => InstructionKind::StringScalarAt { source, offset },
+                    _ => InstructionKind::StringIsCharBoundary { source, offset },
+                }
+            };
+            self.emit(expr.span, instruction, self.ty(expr))
+        })();
+        if result.is_some() {
+            self.end_string_locals(scope_start, expr.span);
+        }
+        self.string_locals.truncate(scope_start);
+        result
+    }
+
     fn end_string_locals(&mut self, from: usize, span: Span) {
         for index in (from..self.string_locals.len()).rev() {
             let local = self.string_locals[index];
@@ -1446,29 +1499,11 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
-                    if matches!(name.as_str(), "is_char_boundary" | "byte_at" | "scalar_at") {
-                        let receiver = self.lower_expr(base)?;
-                        // Keep the receiver loan live while evaluating the offset.
-                        let source = self.borrow(receiver, Access::Borrow)?;
-                        let offset = self.lower_expr(&arguments[0])?;
-                        let offset = read(self.scalar(offset)?);
-                        let source = read(source);
-                        let instruction = match name.as_str() {
-                            "byte_at" => InstructionKind::StringByteAt { source, offset },
-                            "scalar_at" => InstructionKind::StringScalarAt { source, offset },
-                            _ => InstructionKind::StringIsCharBoundary { source, offset },
-                        };
-                        return self.emit(expr.span, instruction, self.ty(expr));
-                    }
-                    if name == "len" {
-                        let source = self.lower_expr(base)?;
-                        return self.emit(
-                            expr.span,
-                            InstructionKind::StringLen {
-                                source: read(source),
-                            },
-                            self.ty(expr),
-                        );
+                    if matches!(
+                        name.as_str(),
+                        "len" | "is_char_boundary" | "byte_at" | "scalar_at"
+                    ) {
+                        return self.lower_string_read(expr, base, name, arguments);
                     }
                     let access = match name.as_str() {
                         "borrow" => Access::Borrow,

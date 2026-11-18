@@ -54,8 +54,8 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
     );
     for (body, message) in [
         (
-            r#""a".concat("b").len();"#,
-            "whole String local destination or a standalone expression statement",
+            r#""a".concat("b").borrow();"#,
+            "or an immediate read-only method",
         ),
         (
             r#"var joined := "a".concat("b"); let view := joined.borrow(); joined = "c"; view.len();"#,
@@ -66,8 +66,8 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
             "heap String can only be read, borrowed",
         ),
         (
-            r#"let joined := "a".concat("b"); returns(joined).len();"#,
-            "must be assigned directly to a whole String local",
+            r#"let joined := "a".concat("b"); returns(joined).borrow();"#,
+            "borrow/share conversion requires a named local",
         ),
         (
             r#"let joined := "a".concat("b"); earlier(joined, joined.len());"#,
@@ -309,9 +309,63 @@ fn discarded_heap_call_preserves_trap_diagnostics() {
 }
 
 #[test]
+fn immediate_heap_string_reads_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-read'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make() -> String {
+            let text := "é".concat("😀");
+            text
+        }
+        fn byte_is(value: Option<u8>, expected: u8) -> Bool {
+            match value { Some(byte) => byte == expected, None => false }
+        }
+        fn scalar_is(value: Option<u32>, expected: u32) -> Bool {
+            match value { Some(scalar) => scalar == expected, None => false }
+        }
+        fn early() -> Bool {
+            make().byte_at({ return true; 0 });
+            false
+        }
+        fn order() -> Bool {
+            var step := 0;
+            let result := "é".concat({ step = 1; "😀" }).scalar_at({
+                if step != 1 { return false; }
+                step = 2;
+                2
+            });
+            scalar_is(result, 128_512) && step == 2
+        }
+        fn main() -> Result<Bool, Error> {
+            Ok("é".concat("😀").len() == 6 && make().len() == 6
+                && byte_is("é".concat("😀").byte_at(1), 169)
+                && byte_is(make().byte_at(5), 128)
+                && "é".concat("😀").is_char_boundary(2) && !make().is_char_boundary(1)
+                && scalar_is("é".concat("😀").scalar_at(0), 233)
+                && scalar_is(make().scalar_at(2), 128_512)
+                && early() && order())
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "read.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "read.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
 fn heap_returns_reject_nested_temporaries() {
     let f = Fixture::new();
-    for body in ["make().len();", "take(make());"] {
+    for body in ["take(make());", "take({ make() });"] {
         f.write(
             "text.mb",
             &format!(

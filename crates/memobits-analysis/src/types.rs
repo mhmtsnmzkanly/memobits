@@ -1211,14 +1211,19 @@ impl Checker {
         arguments: &[Expr],
     ) -> Ty {
         self.allow_array_value(base);
+        let previous = self.concat_destination;
+        if method != "concat" {
+            self.concat_destination = Some(base as *const Expr as usize);
+        }
         let receiver = read_type(self.expr(base, None));
+        self.concat_destination = previous;
         let offset_type = Ty::Primitive("u32");
         if method == "concat" && self.concat_destination != Some(expression as *const Expr as usize)
         {
             self.error(
                 17,
                 expression.span,
-                "concat requires a whole String local destination or a standalone expression statement",
+                "concat requires a whole String local destination, a standalone expression statement, or an immediate read-only method",
             );
         }
         let expected = usize::from(method != "len");

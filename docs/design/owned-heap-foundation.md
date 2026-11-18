@@ -46,7 +46,11 @@ result directly initializes or replaces a whole caller local. A standalone
 concat or direct String-returning call can also discard its result. The
 statement binds the result to a hidden owner and ends its scope immediately.
 An early exit during evaluation cleans up only owners already initialized.
-Nested heap temporaries and share mutation require broader drop elaboration.
+Immediate `.len()`, `.byte_at()`, `.is_char_boundary()` and `.scalar_at()`
+reads can also use concat or direct call results. A hidden local owns the
+receiver before the offset is evaluated. It releases the allocation after
+the read or on an early normal exit while evaluating the offset. Other
+nested heap uses and share mutation require broader drop elaboration.
 A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
@@ -109,7 +113,9 @@ have page-reuse coverage.
    Tests cover live loans, moves on one branch, and repeated reuse.
 5. Standalone discard reuses lexical cleanup. Repeated concat and call
    discards reuse one block within the same Wasm instance.
-6. Extend normal-exit cleanup to general temporaries.
+6. Immediate read-only receivers stay live through offset evaluation and
+   reuse the same cleanup on fallthrough and early control flow.
+7. Extend normal-exit cleanup to general temporaries.
    Whole replacement through a share also needs ownership tracking for the
    pointee. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm
