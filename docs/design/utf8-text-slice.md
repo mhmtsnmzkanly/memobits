@@ -121,6 +121,95 @@ whole source is sufficient for a first read-only view. Return types and
 syntax remain open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.html#method.get) ·
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
 
+## Fallible construction from fixed bytes
+
+The proposed first consumer constructs an owned String from the logical
+prefix of a `borrow Bytes<8>` and an explicit `i32` length. This matches
+the [guest validator](../../examples/projects/utf8-validator/README.md)
+and keeps the caller's fixed buffer available on either outcome. Success
+copies exactly the validated prefix into private String storage. Padding
+is ignored, embedded NUL is preserved, and a zero-length prefix yields
+empty text. Generalizing to other fixed sizes can follow the first consumer.
+
+Rust's `String::from_utf8` takes ownership of a `Vec<u8>` and can reuse its
+allocation. A Memobits fixed array has a different layout and no transferable
+String allocation. Borrowing the fixed input and copying the prefix gives
+the owned result without consuming the buffer. Replacement-character
+decoding is outside this strict constructor.
+[Rust String::from_utf8](https://doc.rust-lang.org/std/string/struct.String.html#method.from_utf8)
+
+### Outcomes and offsets
+
+Use an internal `Result<String, Utf8Error>` with the validator's error
+shape, a derived error carrying `offset: Option<i32>`. Validate the length
+before indexing and report the first failing byte. Offsets are zero-based
+within the logical prefix.
+
+| Input prefix or length | Outcome |
+| --- | --- |
+| `[195, 169, 0]`, length 3 | `Ok` with exactly these three UTF-8 bytes |
+| Any buffer, length 0 | `Ok` with empty text |
+| Length below 0 or above 8 | Code 1, no offset |
+| `[128]`, length 1 | Code 2, invalid lead at offset 0 |
+| `[195]`, length 1 | Code 3, first missing byte at offset 1 |
+| `[226, 65]`, length 2 | Code 4, invalid continuation at offset 1 |
+
+Use the validator's lead-specific ranges for overlong sequences, surrogates
+and values above U+10FFFF. A present invalid byte takes precedence over a
+later missing byte. Perform the complete validation before requesting heap
+storage. Allocation failure then follows the existing guest heap trap and
+instance-discard behavior. `Err(Utf8Error)` represents length or encoding
+failure. No descriptor is published on allocation failure.
+[Heap foundation](owned-heap-foundation.md)
+
+### Compiler prerequisite and implementation order
+
+This internal function with a scalar entry isolates the current layout
+blocker from the application entry ABI.
+
+```mb
+fn construct() -> Result<String, Error> { Ok("é") }
+
+fn main() -> i32 {
+    match construct() { Ok(text) => if text.len() == 2 { 0 } else { 1 }, Err(_) => 2 }
+}
+```
+
+`mb ownership` accepts this literal case. `mb build` reports `LE900`
+because Wasm `member_layout` rejects String enum payloads. Replacing the
+body with `let text := "é".concat("!"); Ok(text)` also exposes an earlier
+`TE018` gate on moving a heap String into `EnumNew`. Lifting the layout
+gate alone would leave heap ownership untracked inside the result.
+The primitive-only application outcome ABI is a separate boundary.
+[Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
+[Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
+
+1. Support a direct internal `Result<String, E>` with a literal String
+   success payload, using the private descriptor layout. Keep the first
+   consumer to a direct return and an owned match, with primitive entry
+   output. Keep other nested String storage and exports gated.
+2. Extend that exact path to heap owners. Move the descriptor into
+   `Ok`, clear the source allocation field, and transfer the result across
+   the internal return. In the caller, consume the result in an owned
+   match and transfer `Ok(text)` into the arm's String local. The `Err`
+   arm has no String owner. Gate unconsumed results, wildcard discards of
+   heap success payloads and unsupported moves until those paths have drop
+   coverage. Prove that early arm exits free once and repeated matches reuse
+   blocks.
+3. Add the fixed-buffer constructor. Use the guest validator's cases as
+   the contract for a checked validation-and-copy path. Current guest code
+   can validate bytes, while publication of a descriptor from dynamic bytes
+   requires a compiler-provided operation that validates before allocating
+   and copying. Reuse the checked allocator and String descriptor. Choose
+   the source spelling when that path is implemented.
+
+Run the executable slices from source and as standalone Wasm with a
+primitive self-checking entry. Verify exact bytes and scalar reads, all
+validator error classes and offsets, success and error arms, repeated
+same-instance reuse, and a forced heap-growth failure on valid input.
+Under the same memory limit, invalid bytes must still return their
+validation error.
+
 ## Later String optimization
 
 After the first executable slice, evaluate `smol_str`, `compact_str`,

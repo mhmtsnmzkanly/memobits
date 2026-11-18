@@ -245,6 +245,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   Unicode scalar at a byte offset as `Option<u32>`. Exported String
   signatures, nested storage and a public scalar iterator remain gated. The
   runnable guide demonstrates scalar traversal with an explicit loop.
+  [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
+  is planned after internal `Result<String, E>` layout and success-payload
+  ownership are supported.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 
