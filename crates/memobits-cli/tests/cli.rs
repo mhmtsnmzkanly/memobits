@@ -8,6 +8,44 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-aliases'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn byte_is(s: borrow String, offset: u32, expected: u8) -> Bool {
+            match s.byte_at(offset) { Some(byte) => byte == expected, None => false }
+        }
+        fn doubled(input: borrow String, descend: Bool) -> Bool {
+            let joined := input.concat(input);
+            if descend && !doubled(joined.borrow(), false) { return false; }
+            // The callee's released region can be reused while joined is live.
+            let joined_again := joined.concat("");
+            joined.len() == input.len() * 2
+                && byte_is(joined.borrow(), input.len(), 195)
+                && byte_is(joined_again.borrow(), joined_again.len() - 1, 169)
+        }
+        fn main() -> Result<Bool, Error> {
+            let text := "".concat("é");
+            Ok(doubled(text.borrow(), true) && byte_is(text.borrow(), 1, 169))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "concat.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "concat.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
 fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
     let f = Fixture::new();
     f.write(

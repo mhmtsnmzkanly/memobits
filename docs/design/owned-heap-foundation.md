@@ -47,26 +47,49 @@ Once the foundation works, List can reuse the byte allocator and owned
 cleanup. Element initialization, element drops, and capacity changes belong
 to later List work.
 
-## Prerequisites for transferring heap Strings
+## Audit of scoped allocation
 
-1. Extend the [shared Wasm descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
-   to distinguish literal/static storage from
-   heap storage and identify the allocation to release. Keep length and byte
-   reads valid for both storage classes. Publish a new owner only after
-   checked size calculation, allocation and UTF-8 byte copying succeed.
-2. Add a consuming drop and elaborate `EndStringLocal` from the incoming
-   ownership state. Drop on available paths, skip moved paths and use a
-   runtime flag only when a mixed path cannot be handled on separate edges.
-   Keep a returned value alive after the callee's remaining owners are dropped.
-3. Cover owners outside lexical locals. Drop discarded results and abandoned
-   temporaries on normal exits. Evaluate replacement values first, then
-   release the previous heap value when still owned, including whole
-   replacement through a share. Existing moves must transfer the release
-   obligation across calls, returns and CFG edges exactly once.
-4. Wire checked guest growth and block reuse to the real owned result.
-   Verify repeated short-lived concatenations in one instance, forced growth
-   failure, mixed-path cleanup, and exact bytes after a callee returns text.
-   Exercise the same source through the source runner and standalone Wasm.
+At each reachable block entry, the IR validator requires every incoming
+edge to agree on the live concat locals and their order. A normal exit pops
+only the most recently initialized local. A callee must return with its own
+allocation stack empty, so its cleanup preserves the caller's allocations.
+The move and loan checks run before Wasm emission. They prevent descriptor
+transfer and reject a live borrow across release, even when release order is
+otherwise valid. Two inputs may borrow the same String. Both reads finish
+before the result is published, and both copies target new space above all
+live allocations. These guarantees assume the generated guest controls its
+memory. A host with access to the private outcome memory export must preserve
+the guest's descriptors and bytes.
+
+Regression cases exercise aliased input, recursive borrowing of a heap
+String, reuse after a callee releases its allocations, and an intentionally
+premature exit with a live borrow. Normal return, break and continue also
+have page-reuse coverage.
+
+## Progression to arbitrary ownership
+
+1. Keep the lexical gate and change the existing concat allocator and
+   release together. The [shared descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
+   should distinguish static storage from heap storage and locate the
+   allocation record. The record needs the reserved block extent, which
+   remains valid when a smaller request reuses it. This lets release put a
+   whole block on a private free list without rewinding past live data.
+   Check reuse before growing the heap. Publish the descriptor only after
+   allocation and copying succeed. Test reuse of a larger free block and
+   out-of-order frees alongside the production lexical consumer.
+2. Extend cleanup to the next ownership context before admitting its
+   transfers. For local moves, transfer the release obligation with the
+   descriptor and elaborate each exit from its incoming ownership state.
+   Drop available owners, skip moved ones, and use a runtime flag only when
+   mixed paths still share a cleanup site. Test a move between scopes where
+   the newer allocation survives the older owner's exit.
+3. Cover ownership across calls, returns and temporary results before
+   permitting those uses. Transfer the result before dropping the callee's
+   other owners. Drop discarded temporaries on normal exits. Evaluate a
+   replacement before releasing the previous owner, including whole
+   replacement through a share. Verify exact returned bytes, mixed ownership
+   joins, and bounded memory use under repeated source and standalone Wasm
+   execution. A trap still discards the whole instance.
 
 ## Allocation and failure
 

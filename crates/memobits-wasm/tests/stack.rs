@@ -227,6 +227,40 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
 }
 
 #[test]
+fn concat_release_rejects_a_borrow_used_after_scope_exit() {
+    use memobits_ir::InstructionKind;
+
+    let mut program = lower(
+        r#"fn main() -> u32 {
+        let joined := "a".concat("é");
+        let view := joined.borrow();
+        view.len()
+    }"#,
+    );
+    let instructions = &mut program.functions[0].blocks[0].instructions;
+    let end = instructions.pop().unwrap();
+    assert!(matches!(end.kind, InstructionKind::EndStringLocal { .. }));
+    let read = instructions
+        .iter()
+        .position(|instruction| matches!(instruction.kind, InstructionKind::StringLen { .. }))
+        .unwrap();
+    instructions.insert(read, end);
+
+    // The allocation order is still valid. The outstanding alias is what
+    // makes this early release unsafe.
+    assert!(program.validate().is_ok());
+    let errors = compile_application_traced(&program, FunctionId(0), &CompileOptions::default())
+        .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code.to_string() == "BE005"
+                && error.message.contains("end the scope")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn concat_ir_rejects_missing_and_out_of_order_cleanup() {
     use memobits_ir::InstructionKind;
 
