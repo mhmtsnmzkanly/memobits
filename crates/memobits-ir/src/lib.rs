@@ -2034,6 +2034,14 @@ fn validate_instruction(
                         None
                     }
                 });
+            if payload_type == Some(Type::String) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "String enum payloads require a consuming match",
+                );
+            }
             if let (Some(payload_type), Some(output)) = (payload_type, out) {
                 let expected = Type::Reference {
                     access: *access,
@@ -2240,6 +2248,14 @@ fn validate_instruction(
                     id,
                     Some(block),
                     "extracting a borrow Option payload must consume the wrapper",
+                );
+            }
+            if payload_type == Some(Type::String) && base.mode != UseMode::Consume {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "String enum payloads require a consuming match",
                 );
             }
             match (out, payload_type) {

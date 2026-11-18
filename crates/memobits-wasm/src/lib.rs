@@ -457,6 +457,7 @@ struct StructLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnumLayout {
     tag_size: u32,
+    static_string_success: bool,
     variants: Vec<VariantLayout>,
 }
 
@@ -501,14 +502,11 @@ fn member_layout(
         }
         nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
             nested_struct_layouts(types, nested, done, active)?;
-            let (size, align) = type_layout(
-                &|id| {
-                    done.get(id as usize)
-                        .and_then(Option::as_ref)
-                        .map(|layout| (layout.size, layout.align))
-                },
-                nested,
-            )?;
+            let layout_at = |id: u32| done.get(id as usize).and_then(Option::as_ref);
+            if matches!(nested, Type::Enum(id) if layout_at(id.0).is_some_and(has_string_success)) {
+                return Err("Wasm does not yet support nested Result<String, E> storage".into());
+            }
+            let (size, align) = type_layout(&layout_at, nested)?;
             Some((size, align, FieldStorage::Aggregate(size)))
         }
         _ => None,
@@ -587,13 +585,26 @@ fn struct_layout_at(
                 257..=65536 => 2,
                 _ => 4,
             };
+            let static_string_success = definition.entry_outcome == Some(EntryOutcome::Result)
+                && variants
+                    .first()
+                    .is_some_and(|variant| variant.payload == [Type::String]);
             // First pass: member sizes, so the payload area's alignment is known.
             let mut sized: Vec<Vec<(u32, u32, FieldStorage)>> = Vec::with_capacity(variants.len());
             let mut payload_align = 1u32;
-            for variant in variants {
+            for (index, variant) in variants.iter().enumerate() {
                 let mut members = Vec::with_capacity(variant.payload.len());
                 for ty in &variant.payload {
-                    let Some(member) = member_layout(types, ty, done, active)? else {
+                    let member = if static_string_success && index == 0 {
+                        Some((
+                            string_descriptor::SIZE,
+                            string_descriptor::ALIGN,
+                            FieldStorage::Aggregate(string_descriptor::SIZE),
+                        ))
+                    } else {
+                        member_layout(types, ty, done, active)?
+                    };
+                    let Some(member) = member else {
                         return Err(format!(
                             "payload of variant '{}' of enum '{}' has an unsupported type",
                             variant.name, definition.path.name
@@ -629,6 +640,7 @@ fn struct_layout_at(
                 error_identity: None,
                 enum_layout: Some(EnumLayout {
                     tag_size,
+                    static_string_success,
                     variants: laid_out,
                 }),
             }
@@ -657,29 +669,33 @@ fn nested_struct_layouts(
 /// size by the length with checked arithmetic at every level; the cost depends
 /// on the nesting depth of the type only, never on a source-supplied count.
 fn aggregate_layout(structs: &[StructLayout], ty: &Type) -> Result<(u32, u32), String> {
-    type_layout(
-        &|id| {
-            structs
-                .get(id as usize)
-                .map(|layout| (layout.size, layout.align))
-        },
-        ty,
-    )
+    type_layout(&|id| structs.get(id as usize), ty)
 }
 
-fn type_layout(
-    struct_layout: &dyn Fn(u32) -> Option<(u32, u32)>,
+fn has_string_success(layout: &StructLayout) -> bool {
+    layout
+        .enum_layout
+        .as_ref()
+        .is_some_and(|layout| layout.static_string_success)
+}
+
+fn type_layout<'a>(
+    struct_layout: &dyn Fn(u32) -> Option<&'a StructLayout>,
     ty: &Type,
 ) -> Result<(u32, u32), String> {
     match ty {
         Type::Primitive(kind) => storage_layout(*kind),
         Type::String => Ok((string_descriptor::SIZE, string_descriptor::ALIGN)),
-        Type::Struct(id) | Type::Enum(id) => {
-            struct_layout(id.0).ok_or_else(|| "type is out of range".to_string())
-        }
+        Type::Struct(id) | Type::Enum(id) => struct_layout(id.0)
+            .map(|layout| (layout.size, layout.align))
+            .ok_or_else(|| "type is out of range".to_string()),
         Type::Array { element, len } => {
             if **element == Type::String {
                 return Err("Wasm does not yet support String array elements".into());
+            }
+            if matches!(element.as_ref(), Type::Enum(id) if struct_layout(id.0).is_some_and(has_string_success))
+            {
+                return Err("Wasm does not yet support nested Result<String, E> storage".into());
             }
             let (size, align) = type_layout(struct_layout, element)?;
             let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
@@ -3074,11 +3090,11 @@ fn compile_instruction(
                 .ok_or("variant extraction refers to a missing variant")?;
             if matches!(
                 function.values[instruction.output.unwrap().0 as usize],
-                Type::Reference { .. }
+                Type::Reference { .. } | Type::String
             ) {
-                // A malformed control flow must not read stale pointer bytes from None.
+                // An inactive payload may contain arbitrary descriptor or reference bytes.
                 emit_operand(body, function, param_count, base, layout, frame)?;
-                emit_load(body, Primitive::U8); // local borrow Option has two variants
+                emit_load(body, Primitive::U8); // Borrow Option and String Result have two variants
                 body.instruction(&WasmInstruction::I32Const(*variant as i32));
                 body.instruction(&WasmInstruction::I32Ne);
                 body.instruction(&WasmInstruction::If(BlockType::Empty));

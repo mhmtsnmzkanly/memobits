@@ -48,8 +48,10 @@ layout share one private Wasm layout definition. Moving a String copies the
 descriptor through aggregate call and storage paths. Guest code has no
 operation that writes to the literal bytes. For an
 outcome entry, the runner's existing memory export still exposes linear
-memory to the embedding host. Exported String signatures and embedded
-String storage in arrays, structs, or enum payloads are gated.
+memory to the embedding host. Internal `Result<String, E>` can store a
+static String in its `Ok` payload. A consuming match moves it into a
+String local. Other embedded String storage, borrowed String payload
+matches, and exported String signatures remain gated.
 
 ## Byte length
 
@@ -164,8 +166,8 @@ failure. No descriptor is published on allocation failure.
 
 ### Compiler prerequisite and implementation order
 
-This internal function with a scalar entry isolates the current layout
-blocker from the application entry ABI.
+This internal function with a scalar entry exercises the supported static
+case with the application entry ABI left scalar.
 
 ```mb
 fn construct() -> Result<String, Error> { Ok("é") }
@@ -175,19 +177,19 @@ fn main() -> i32 {
 }
 ```
 
-`mb ownership` accepts this literal case. `mb build` reports `LE900`
-because Wasm `member_layout` rejects String enum payloads. Replacing the
-body with `let text := "é".concat("!"); Ok(text)` also exposes an earlier
-`TE018` gate on moving a heap String into `EnumNew`. Lifting the layout
-gate alone would leave heap ownership untracked inside the result.
-The primitive-only application outcome ABI is a separate boundary.
+The static case uses the private String descriptor layout in `Ok` and
+the existing aggregate return and extraction paths. The descriptor's
+allocation field stays zero. Replacing the body with
+`let text := "é".concat("!"); Ok(text)` reports `TE018` because heap
+ownership is still gated at enum construction. The application outcome
+ABI continues to require a primitive success payload.
 [Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
 [Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
 
-1. Support a direct internal `Result<String, E>` with a literal String
-   success payload, using the private descriptor layout. Keep the first
-   consumer to a direct return and an owned match, with primitive entry
-   output. Keep other nested String storage and exports gated.
+1. Implemented internal `Result<String, E>` for static success descriptors,
+   including construction, return, receipt and consuming match. A String
+   local or internal call result can be used when heap provenance is absent.
+   Containers of these results and external signatures remain gated.
 2. Extend that exact path to heap owners. Move the descriptor into
    `Ok`, clear the source allocation field, and transfer the result across
    the internal return. In the caller, consume the result in an owned

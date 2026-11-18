@@ -74,8 +74,9 @@ caller local passed as `text.share()`. The caller owns the replacement.
 whole local or direct `share String` parameter, and returns unit. It uses
 checked concat followed by replacement.
 Installing heap text through forwarded shares or share aliases, other
-nested heap uses, exported String signatures, and nested String storage
-are gated. Application
+nested heap uses and exported String signatures are gated. An internal
+`Result<String, E>` can return a static String to a consuming match.
+Heap-backed success payloads and other nested String storage are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

@@ -888,6 +888,94 @@ fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
 }
 
 #[test]
+fn internal_static_string_results_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='string-result'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type TextError: Error { offset: i32 }
+        fn literal() -> String { "😀" }
+        fn make(use_literal: Bool, fail: Bool) -> Result<String, TextError> {
+            if fail { return Err(TextError { code: 7, offset: 2 }); }
+            if use_literal { return Ok("é"); }
+            let text := literal();
+            Ok(text)
+        }
+        fn inspect(result: Result<String, TextError>) -> u32 {
+            match result {
+                Ok(text) => match text.scalar_at(0) { Some(value) => value, None => 0 },
+                Err(error) => {
+                    let TextError { code, offset } := error;
+                    if offset == 2 { code } else { 0 }
+                }
+            }
+        }
+        fn main() -> Result<Bool, Error> {
+            let first := make(true, false);
+            Ok(inspect(first) == 233 && inspect(make(false, false)) == 128_512
+                && inspect(make(false, true)) == 7)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "result.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "result.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn internal_string_results_reject_heap_success_payloads() {
+    let f = Fixture::new();
+    for body in [
+        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text);"#,
+        r#"let result := wrap("é".concat("!"));"#,
+        r#"let result: Result<String, Error> = Ok(heap());"#,
+        r#"var text := "é"; append(text.share()); let result: Result<String, Error> = Ok(text);"#,
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"
+            fn wrap(text: String) -> Result<String, Error> {{ Ok(text) }}
+            fn heap() -> String {{ let text := "é".concat("!"); text }}
+            fn append(text: share String) {{ text.push_str("!"); }}
+            fn main() {{ {body} }}
+        "#
+            ),
+        );
+        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+        assert!(diagnostic.contains("heap String"), "{body}: {diagnostic}");
+    }
+}
+
+#[test]
+fn internal_string_results_require_consuming_payload_matches() {
+    let f = Fixture::new();
+    f.write(
+        "text.mb",
+        r#"
+        fn main() -> u32 {
+            let result: Result<String, Error> = Ok("é");
+            match result.borrow() { Ok(text) => text.len(), Err(_) => 0 }
+        }
+    "#,
+    );
+    let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+    assert!(
+        diagnostic.contains("String enum payloads require a consuming match"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn wasm_gates_string_exports_and_nested_storage() {
     let f = Fixture::new();
     f.write(
@@ -916,9 +1004,24 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "String fields or enum payloads",
         ),
         (
-            r#"fn main() -> Result<String, Error> { Ok("é") }"#,
+            r#"pub fn main() -> Result<String, Error> { Ok("é") }"#,
             &["build"][..],
-            "String fields or enum payloads",
+            "primitive success payload",
+        ),
+        (
+            r#"pub fn main() -> Result<String, Error> { Ok("é") }"#,
+            &["build", "--lib"][..],
+            "exported signatures cannot return enums",
+        ),
+        (
+            "type Box { text: Result<String, Error> } fn main() {}",
+            &["build"][..],
+            "nested Result<String, E> storage",
+        ),
+        (
+            r#"fn main() { let result: Result<String, Error> = Ok("é"); let items := [result]; }"#,
+            &["build"][..],
+            "nested Result<String, E> storage",
         ),
     ] {
         f.write("src/main.mb", source);
