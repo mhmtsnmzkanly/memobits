@@ -262,6 +262,11 @@ pub enum ArrayInit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstructionKind {
     Constant(Constant),
+    /// End lexical storage for a String local, even if it has been moved.
+    /// This invalidates the local without consuming a value or freeing bytes.
+    EndStringLocal {
+        local: LocalId,
+    },
     /// Read the byte length of an owned String or a reference to one.
     StringLen {
         source: Operand,
@@ -1213,6 +1218,21 @@ fn validate_instruction(
 ) {
     let out = output_type(function, instruction.output);
     match &instruction.kind {
+        InstructionKind::EndStringLocal { local } => {
+            if instruction.output.is_some()
+                || !function
+                    .locals
+                    .get(local.0 as usize)
+                    .is_some_and(|local| local.ty == Type::String)
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "String scope exit requires a String local and no output",
+                );
+            }
+        }
         InstructionKind::Constant(value) => {
             if out.is_none() {
                 push(errors, id, Some(block), "constant requires an output value");
@@ -2620,7 +2640,7 @@ fn validate_read_only_loaded_values(
                         report(block_id, argument, true);
                     }
                 }
-                InstructionKind::Constant(_) => {}
+                InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}
             }
         }
         match &block.terminator.kind {

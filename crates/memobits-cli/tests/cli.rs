@@ -8,6 +8,42 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn string_scope_exits_preserve_values_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='text'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn choose(outer: String, early: Bool) -> String {
+            var step := 0;
+            loop {
+                let outer := "é";
+                if early { return outer; }
+                step += 1;
+                if step == 1 { continue; }
+                break;
+            }
+            { let moved := outer; moved }
+        }
+        fn main() -> Result<u32, Error> {
+            Ok(choose("outer", true).len() + choose("outer", false).len())
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(7))\n");
+    let build = f.run(&["build", "--output", "scope.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "scope.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
 fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
     let f = Fixture::new();
     f.write(

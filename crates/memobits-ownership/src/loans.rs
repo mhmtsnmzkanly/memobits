@@ -598,7 +598,7 @@ fn mark_operand(live: &mut [bool], function: &Function, operand: &Operand) {
 
 fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
-        InstructionKind::Constant(_) => Vec::new(),
+        InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => Vec::new(),
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
         | InstructionKind::StringLen { source: operand }
@@ -1516,6 +1516,19 @@ fn check_instruction(
                 diagnostics.push(conflict_diagnostic(
                     instruction.span,
                     "write",
+                    (function, program),
+                    conflict,
+                ));
+            }
+        }
+        InstructionKind::EndStringLocal { local } => {
+            let roots = BTreeSet::from([Place::whole(Root::Local(local.0))]);
+            if let Some(conflict) =
+                active_conflict(&roots, Access::Share, active_after, &BTreeSet::new())
+            {
+                diagnostics.push(conflict_diagnostic(
+                    instruction.span,
+                    "end the scope of",
                     (function, program),
                     conflict,
                 ));

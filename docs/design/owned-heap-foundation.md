@@ -71,9 +71,13 @@ from diagnostic replay. Both run the same block and edge transfers,
 including consumption of return values and parallel binding of successor
 parameters. This gives cleanup elaboration a common starting point.
 An unavailable slot at a join may still own a value on some incoming paths.
-Cleanup still needs lexical exit information and a way to distinguish those
-paths, such as cleanup on predecessor edges or a conditional drop flag.
-Static String values need no cleanup instruction today.
+Lowering now emits `EndStringLocal` for owned String bindings and parameters
+at normal lexical exits. A String result moves out before its binding ends.
+The move checker invalidates the local and the loan checker rejects a live
+loan across its exit. The marker accepts a moved local and emits no Wasm
+operation because String bytes remain static. It records the end of storage,
+while future drop elaboration still needs to distinguish paths that retain
+an owner. Other owner types and temporary cleanup are outside this step.
 
 Extend the private String descriptor so cleanup distinguishes static
 literal storage from an owned allocation. Stack cells still hold descriptors.

@@ -49,6 +49,12 @@ then replays the same transfers for diagnostics. This information is a
 starting point for normal-exit cleanup. A slot that is unavailable at a
 join can still hold an owner on an individual incoming path.
 
+`EndStringLocal` marks an owned String local's lexical exit. Lowering emits
+it on fallthrough, return, break and continue, using local IDs to distinguish
+shadowed bindings. Results move out before the marker. It invalidates the
+binding even if its value was already moved, and a loan may not survive it.
+Static literal bytes require no runtime action.
+
 ## Verification targets
 
 - Repeated arithmetic reads of one scalar remain valid.

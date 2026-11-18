@@ -44,6 +44,108 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
+fn string_scope_exits_end_shadowed_owners_and_preserve_return_values() {
+    use memobits_ir::{InstructionKind, Source, TerminatorKind, UseMode};
+
+    let source = r#"
+        fn make(input: String, again: Bool) -> String {
+            let label := "outer";
+            loop {
+                let label := "inner";
+                if again { continue; }
+                if label.len() == 5 { break; }
+                return input;
+            }
+            { let result := label; result }
+        }
+    "#;
+    let parsed = parse(SourceId(9), source);
+    let program =
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap();
+    assert!(memobits_ownership::check_ownership(&program).is_empty());
+    let function = &program.functions[0];
+    let labels: Vec<_> = function
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, local)| local.name == "label")
+        .collect();
+    assert_eq!(labels.len(), 2);
+    for (exit, expected) in [
+        ("continue", vec![labels[1].0]),
+        ("break", vec![labels[1].0]),
+        ("return", vec![labels[1].0, labels[0].0, 0]),
+    ] {
+        let block = function
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .terminator
+                    .span
+                    .is_some_and(|span| source[span.start..span.end].starts_with(exit))
+            })
+            .unwrap();
+        let ended: Vec<_> = block
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction.kind {
+                InstructionKind::EndStringLocal { local } => Some(local.0 as usize),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, expected, "{exit}");
+        if let TerminatorKind::Return(Some(value)) = &block.terminator.kind {
+            let Source::Value(result) = value.source else {
+                panic!("return must use the captured String")
+            };
+            assert!(matches!(&block.instructions[0].kind,
+                InstructionKind::Capture(operand)
+                    if operand.source == Source::Local(memobits_ir::LocalId(0))
+                    && operand.mode == UseMode::Consume && block.instructions[0].output == Some(result)));
+        }
+    }
+}
+
+#[test]
+fn string_scope_end_invalidates_owner_and_rejects_live_loans() {
+    use memobits_ir::InstructionKind;
+
+    for (source, expected) in [
+        (r#"fn f() -> u32 { let s := "é"; s.len() }"#, "BE001"),
+        (
+            r#"fn f() -> u32 { let s := "é"; let view := s.borrow(); view.len() }"#,
+            "BE005",
+        ),
+    ] {
+        let parsed = parse(SourceId(9), source);
+        let mut program =
+            memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap();
+        let instructions = &mut program.functions[0].blocks[0].instructions;
+        let exit = instructions
+            .iter()
+            .position(|instruction| {
+                matches!(instruction.kind, InstructionKind::EndStringLocal { .. })
+            })
+            .unwrap();
+        let end = instructions.remove(exit);
+        let read = instructions
+            .iter()
+            .position(|instruction| matches!(instruction.kind, InstructionKind::StringLen { .. }))
+            .unwrap();
+        instructions.insert(read, end);
+        assert!(program.validate().is_ok());
+        let diagnostics = memobits_ownership::check_ownership(&program);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.to_string() == expected),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn string_scalar_at_requires_u32_and_returns_owned_option_u32() {
     assert!(
         codes(r#"fn f(s: borrow String, n: u32) -> Option<u32> { s.scalar_at(n) }"#).is_empty()

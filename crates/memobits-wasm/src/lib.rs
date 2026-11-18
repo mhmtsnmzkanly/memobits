@@ -306,6 +306,7 @@ fn compile_target(
 fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
     match &instruction.kind {
         InstructionKind::Constant(_)
+        | InstructionKind::EndStringLocal { .. }
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
@@ -925,7 +926,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
     for block in &function.blocks {
         for instruction in &block.instructions {
             match &instruction.kind {
-                InstructionKind::Constant(_) => {}
+                InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}
                 InstructionKind::Capture(operand)
                 | InstructionKind::Copy { source: operand }
                 | InstructionKind::StringLen { source: operand }
@@ -2600,6 +2601,7 @@ fn compile_instruction(
         .output
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
+        InstructionKind::EndStringLocal { .. } => {} // Literal bytes have static storage.
         InstructionKind::Constant(Constant::String(text)) => {
             let value = instruction.output.ok_or("String literal lacks an output")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;

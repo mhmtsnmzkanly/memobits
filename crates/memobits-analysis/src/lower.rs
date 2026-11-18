@@ -154,17 +154,7 @@ pub fn lower_module(
             entry: BlockId(0),
         };
         let mut builder = Builder::new(function, fact, &facts.types);
-        builder.lower_block(body);
-        if let Some(current) = builder.current {
-            let value = builder.last_value.take();
-            let result = builder.function.signature.result.as_ref().clone();
-            let returned = if result == Type::Primitive(Primitive::Unit) {
-                None
-            } else {
-                value.and_then(|value| builder.owned_to(value, &result))
-            };
-            builder.finish(current, TerminatorKind::Return(returned), Some(body.span));
-        }
+        builder.lower_body(body);
         functions.push(builder.function);
     }
     let program = Program {
@@ -300,19 +290,7 @@ pub fn lower_resolved(
                     entry: BlockId(0),
                 };
                 let mut builder = Builder::new(function, fact, &typed.types);
-                builder.lower_block(body);
-                if let Some(current) = builder.current {
-                    let value = builder.last_value.take();
-                    let returned = if builder.function.signature.result.as_ref()
-                        == &Type::Primitive(Primitive::Unit)
-                    {
-                        None
-                    } else {
-                        let result = builder.function.signature.result.as_ref().clone();
-                        value.and_then(|value| builder.owned_to(value, &result))
-                    };
-                    builder.finish(current, TerminatorKind::Return(returned), Some(body.span));
-                }
+                builder.lower_body(body);
                 functions.push(builder.function);
             }
         }
@@ -402,6 +380,7 @@ struct LoopTargets {
     header: BlockId,
     exit: BlockId,
     had_break: bool,
+    scope_start: usize,
 }
 struct Builder<'a> {
     function: Function,
@@ -413,7 +392,7 @@ struct Builder<'a> {
     variants: HashMap<ExprId, VariantUse>,
     matches: HashMap<ExprId, &'a MatchFact>,
     current: Option<BlockId>,
-    last_value: Option<Operand>,
+    string_locals: Vec<LocalId>,
     loops: Vec<LoopTargets>,
     next_loan: u32,
     /// Values produced by `Load`: read-only provenance that must be copied
@@ -443,6 +422,12 @@ impl<'a> Builder<'a> {
             .map(|u| (u.expression, *u))
             .collect();
         let matches = facts.matches.iter().map(|m| (m.expression, m)).collect();
+        let string_locals = function
+            .parameter_locals
+            .iter()
+            .copied()
+            .filter(|local| function.locals[local.0 as usize].ty == Type::String)
+            .collect();
         Self {
             function,
             facts,
@@ -453,7 +438,7 @@ impl<'a> Builder<'a> {
             variants,
             matches,
             current: Some(BlockId(0)),
-            last_value: None,
+            string_locals,
             loops: Vec::new(),
             next_loan: 0,
             loaded: HashSet::new(),
@@ -512,15 +497,7 @@ impl<'a> Builder<'a> {
                 return;
             };
             let target = self.local_at(pattern as *const FieldPattern as usize);
-            self.emit(
-                pattern.span,
-                InstructionKind::Assign {
-                    target,
-                    value: consume(extracted),
-                    initialize: true,
-                },
-                None,
-            );
+            self.initialize_local(target, consume(extracted), pattern.span);
         }
     }
     fn capture_consumed(&mut self, source: Operand) {
@@ -702,7 +679,58 @@ impl<'a> Builder<'a> {
             );
         }
     }
+    fn initialize_local(&mut self, local: LocalId, value: Operand, span: Span) {
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: local,
+                value,
+                initialize: true,
+            },
+            None,
+        );
+        if self.function.locals[local.0 as usize].ty == Type::String {
+            self.string_locals.push(local);
+        }
+    }
+
+    fn end_string_locals(&mut self, from: usize, span: Span) {
+        for index in (from..self.string_locals.len()).rev() {
+            let local = self.string_locals[index];
+            self.emit(span, InstructionKind::EndStringLocal { local }, None);
+        }
+    }
+
+    fn preserve_scope_result(&mut self, value: Operand, from: usize) -> Option<Operand> {
+        if matches!(value.source, Source::Local(local) if self.string_locals[from..].contains(&local))
+        {
+            self.capture(consume(value))
+        } else {
+            Some(value)
+        }
+    }
+
+    fn return_from_body(&mut self, returned: Option<Operand>, span: Span) {
+        if let Some(current) = self.current {
+            let returned = returned.and_then(|value| self.preserve_scope_result(value, 0));
+            self.end_string_locals(0, span);
+            self.finish(current, TerminatorKind::Return(returned), Some(span));
+        }
+    }
+
+    fn lower_body(&mut self, body: &Block) {
+        let value = self.lower_block(body);
+        let result = self.function.signature.result.as_ref().clone();
+        let returned = if result == Type::Primitive(Primitive::Unit) {
+            None
+        } else {
+            value.and_then(|value| self.owned_to(value, &result))
+        };
+        self.return_from_body(returned, body.span);
+    }
+
     fn lower_block(&mut self, block: &Block) -> Option<Operand> {
+        let scope_start = self.string_locals.len();
         for statement in &block.statements {
             if self.current.is_none() {
                 break;
@@ -714,15 +742,7 @@ impl<'a> Builder<'a> {
                         let target = self.local(statement);
                         let ty = self.function.locals[target.0 as usize].ty.clone();
                         if let Some(rhs) = self.owned_to(rhs, &ty) {
-                            self.emit(
-                                statement.span,
-                                InstructionKind::Assign {
-                                    target,
-                                    value: rhs,
-                                    initialize: true,
-                                },
-                                None,
-                            );
+                            self.initialize_local(target, rhs, statement.span);
                         }
                     }
                 }
@@ -802,22 +822,20 @@ impl<'a> Builder<'a> {
                         }
                         None => None,
                     };
-                    if let Some(current) = self.current {
-                        self.finish(
-                            current,
-                            TerminatorKind::Return(returned),
-                            Some(statement.span),
-                        );
-                    }
+                    self.return_from_body(returned, statement.span);
                 }
                 StatementKind::Loop(body) => self.lower_loop(body, statement.span),
                 StatementKind::Break => {
-                    let target = self.loops.last().expect("checked break").exit;
-                    self.loops.last_mut().unwrap().had_break = true;
+                    let loop_targets = self.loops.last_mut().expect("checked break");
+                    loop_targets.had_break = true;
+                    let (target, start) = (loop_targets.exit, loop_targets.scope_start);
+                    self.end_string_locals(start, statement.span);
                     self.goto(target, Vec::new(), statement.span);
                 }
                 StatementKind::Continue => {
-                    let target = self.loops.last().expect("checked continue").header;
+                    let loop_targets = self.loops.last().expect("checked continue");
+                    let (target, start) = (loop_targets.header, loop_targets.scope_start);
+                    self.end_string_locals(start, statement.span);
                     self.goto(target, Vec::new(), statement.span);
                 }
             }
@@ -830,7 +848,11 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        self.last_value = value;
+        let value = value.and_then(|value| self.preserve_scope_result(value, scope_start));
+        if self.current.is_some() {
+            self.end_string_locals(scope_start, block.span);
+        }
+        self.string_locals.truncate(scope_start);
         value
     }
     /// Address one element of an array operand. The bounds check is part of the
@@ -1185,6 +1207,7 @@ impl<'a> Builder<'a> {
             header,
             exit,
             had_break: false,
+            scope_start: self.string_locals.len(),
         });
         self.lower_block(body);
         if self.current.is_some() {
@@ -1551,6 +1574,7 @@ impl<'a> Builder<'a> {
         );
         let mut reaches = false;
         for ((arm, arm_fact), block) in arms.iter().zip(&fact.arms).zip(arm_blocks) {
+            let scope_start = self.string_locals.len();
             self.current = Some(block);
             if let Some(variant) = arm_fact.variant {
                 let payload = &definition.variants[variant as usize].payload;
@@ -1618,21 +1642,17 @@ impl<'a> Builder<'a> {
                         },
                         Some(payload[*index].clone()),
                     )?;
-                    self.emit(
-                        arm.pattern.span,
-                        InstructionKind::Assign {
-                            target: *local,
-                            value: consume(extracted),
-                            initialize: true,
-                        },
-                        None,
-                    );
+                    self.initialize_local(*local, consume(extracted), arm.pattern.span);
                 }
             }
             if let Some(value) = self.lower_expr(&arm.body) {
-                self.join(join_id, value, arm.body.span);
-                reaches = true;
+                if let Some(value) = self.preserve_scope_result(value, scope_start) {
+                    self.end_string_locals(scope_start, arm.body.span);
+                    self.join(join_id, value, arm.body.span);
+                    reaches = true;
+                }
             }
+            self.string_locals.truncate(scope_start);
         }
         self.current = reaches.then_some(join_id);
         parameter.map(|id| op(Source::Value(id), expr.span))

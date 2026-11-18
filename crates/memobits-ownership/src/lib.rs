@@ -208,6 +208,7 @@ fn transfer_instruction(
     function: &Function,
 ) {
     match &instruction.kind {
+        InstructionKind::EndStringLocal { local } => state[local.0 as usize] = false,
         InstructionKind::Constant(_) => {}
         InstructionKind::Capture(operand) => {
             transfer_operand(operand, state, diagnostics, function)
