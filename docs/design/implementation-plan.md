@@ -224,7 +224,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `.is_char_boundary(offset)` checks scalar boundaries. `.byte_at(index)`
   returns a raw byte as `Option<u8>`, and `.scalar_at(index)` decodes a
   Unicode scalar at a byte offset as `Option<u32>`. Exported String
-  signatures, nested storage and scalar iteration remain gated.
+  signatures, nested storage and a public scalar iterator remain gated. The
+  runnable guide demonstrates scalar traversal with an explicit loop.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

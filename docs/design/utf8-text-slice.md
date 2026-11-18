@@ -93,15 +93,29 @@ iterator representation and the scalar type open.
 [Rust str::bytes](https://doc.rust-lang.org/std/primitive.str.html#method.bytes) ·
 [Rust str::char_indices](https://doc.rust-lang.org/std/primitive.str.html#method.char_indices)
 
+The runnable guide already walks mixed text with an explicit loop. It reads
+each scalar with `scalar_at`, advances by that scalar's UTF-8 width, and
+checks the starting byte offsets and final length.
+
 Text slicing should use checked half-open byte ranges. Require
 `0 <= start <= end <= byte length` and both endpoints on scalar boundaries.
 Zero and the byte length are valid endpoints. In `Aé`, the range `[1, 3)`
 yields `é` and `[1, 2)` fails. Prefer a fallible operation for invalid
 ranges, along the lines of Rust's `get`. Single-integer string indexing
-remains unsupported. A borrowed slice or byte view must stay within its
-source loan, so defer these results until reference provenance and escape
-checking can support them. The exact return type and range syntax remain
-open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.html#method.get) ·
+remains unsupported. A `borrow String` points to the owner's whole descriptor.
+A subrange needs its own base address and length while retaining the loan of
+the original owner. A borrow of a temporary descriptor would instead track
+the temporary's storage. The current local `Option<borrow T>` can carry a
+reference to an existing place, but it cannot provide a branch or call result
+that ties a newly derived view to the input loan. Loan checking rejects
+reference-valued call results, and borrow Options cannot cross IR block edges
+or appear in signatures.
+
+A bounded slice therefore needs a view representation, a checked projection
+that preserves source provenance, and rules for transporting the fallible
+result without letting it outlive its source. A conservative loan of the
+whole source is sufficient for a first read-only view. Return types and
+syntax remain open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.html#method.get) ·
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
 
 ## Later String optimization
