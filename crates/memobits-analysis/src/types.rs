@@ -593,13 +593,13 @@ impl Checker {
     /// Types in function signatures: primitives, fixed arrays and structs,
     /// passed owned, `borrow` or `share`, and returned owned. The external ABI
     /// of exported signatures is the backend's concern (LE900).
-    fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
+    fn signature_type(&mut self, ty: &Type, access: IrAccess) -> Ty {
         let resolved = self.type_path(ty);
-        if matches!(resolved, Ty::List(_)) {
+        if matches!(resolved, Ty::List(_)) && access != IrAccess::Borrow {
             self.error(
                 17,
                 ty.span,
-                "List values are currently limited to local bindings",
+                "List signatures currently support only borrow parameters",
             );
         }
         resolved
@@ -1349,7 +1349,7 @@ impl Checker {
     fn list_get(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
-        let Ty::List(element) = receiver else {
+        let Ty::List(element) = read_type(receiver) else {
             self.error(17, base.span, "get() requires a whole List local");
             return Ty::Error;
         };
@@ -1545,6 +1545,7 @@ impl Checker {
             } => (inner, origin, Some(access)),
             owner @ (Ty::Primitive(_)
             | Ty::String
+            | Ty::List(_)
             | Ty::Array(..)
             | Ty::Struct(..)
             | Ty::Enum(..)) => {
@@ -1567,9 +1568,23 @@ impl Checker {
             }
         };
 
+        if matches!(inner.as_ref(), Ty::List(_)) && access != IrAccess::Borrow {
+            self.error(
+                17,
+                expression.span,
+                "List only supports read-only borrows in this slice",
+            );
+            return Ty::Error;
+        }
+
         if !matches!(
             inner.as_ref(),
-            Ty::Primitive(_) | Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+            Ty::Primitive(_)
+                | Ty::String
+                | Ty::List(_)
+                | Ty::Array(..)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
         ) {
             self.error(
                 17,
@@ -2863,6 +2878,13 @@ impl Checker {
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
                         self.concat_destination = previous_concat;
                         self.temporary_string_borrow_argument = previous_borrow;
+                        if !direct
+                            && params
+                                .get(i)
+                                .is_some_and(|parameter| matches!(parameter.ty, Ty::List(_)))
+                        {
+                            self.error(17, arg.span, "List borrows require a direct internal call");
+                        }
                         if params
                             .get(i)
                             .is_none_or(|parameter| parameter.access == IrAccess::Owned)
@@ -3140,12 +3162,12 @@ fn check_standalone(
                     .iter()
                     .map(|p| FunctionParameter {
                         access: ir_access(p.access),
-                        ty: c.signature_type(&p.ty, false),
+                        ty: c.signature_type(&p.ty, ir_access(p.access)),
                     })
                     .collect();
                 let result = result
                     .as_ref()
-                    .map(|t| c.signature_type(t, true))
+                    .map(|t| c.signature_type(t, IrAccess::Owned))
                     .unwrap_or(UNIT);
                 if c.functions
                     .insert(name.clone(), Ty::Function(params, Box::new(result)))
@@ -3309,12 +3331,12 @@ pub(crate) fn check_resolved_mode(
                         .iter()
                         .map(|p| FunctionParameter {
                             access: ir_access(p.access),
-                            ty: c.signature_type(&p.ty, false),
+                            ty: c.signature_type(&p.ty, ir_access(p.access)),
                         })
                         .collect();
                     let result = result
                         .as_ref()
-                        .map(|t| c.signature_type(t, true))
+                        .map(|t| c.signature_type(t, IrAccess::Owned))
                         .unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),

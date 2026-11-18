@@ -827,7 +827,10 @@ impl<'a> Builder<'a> {
         let result = (|| {
             let receiver = self.lower_string_with_temporary_owner(base)?;
             let instruction = if method == "len" {
-                if matches!(self.operand_type(receiver), Some(Type::List(_))) {
+                let receiver_type = self.operand_type(receiver);
+                if matches!(receiver_type, Some(Type::List(_)))
+                    || matches!(receiver_type, Some(Type::Reference { inner, .. }) if matches!(*inner, Type::List(_)))
+                {
                     InstructionKind::ListLen {
                         source: read(receiver),
                     }

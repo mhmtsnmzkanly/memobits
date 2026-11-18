@@ -133,6 +133,10 @@ fn fixed_bytes() -> Bool {
     valid && copied && first_byte(array.borrow()) == 42
 }
 
+fn list_word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
+    items.get(index)
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -143,8 +147,8 @@ fn primitive_lists() -> Bool {
     words.push(1000);
     var moved := words;
     moved.push(2000);
-    // get copies a primitive element and returns None outside the list.
-    let word := match moved.get(1) {
+    // A direct call borrows the List. get copies the element out.
+    let word := match list_word_at(moved.borrow(), 1) {
         Some(value) => value == 2000,
         None => false
     };

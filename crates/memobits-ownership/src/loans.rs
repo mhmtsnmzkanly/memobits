@@ -1505,6 +1505,10 @@ fn check_instruction(
             }
         }
         InstructionKind::Load { reference }
+        | InstructionKind::ListLen { source: reference }
+        | InstructionKind::ListGet {
+            source: reference, ..
+        }
         | InstructionKind::StringLen { source: reference }
         | InstructionKind::StringIsCharBoundary {
             source: reference, ..
@@ -1575,7 +1579,7 @@ fn check_instruction(
                 ));
             }
         }
-        InstructionKind::EndStringLocal { local } => {
+        InstructionKind::EndStringLocal { local } | InstructionKind::EndListLocal { local } => {
             let roots = BTreeSet::from([Place::whole(Root::Local(local.0))]);
             if let Some(conflict) =
                 active_conflict(&roots, Access::Share, active_after, &BTreeSet::new())
@@ -1583,6 +1587,19 @@ fn check_instruction(
                 diagnostics.push(conflict_diagnostic(
                     instruction.span,
                     "end the scope of",
+                    (function, program),
+                    conflict,
+                ));
+            }
+        }
+        InstructionKind::ListPush { target, .. } => {
+            let roots = BTreeSet::from([Place::whole(Root::Local(target.0))]);
+            if let Some(conflict) =
+                active_conflict(&roots, Access::Share, active_before, &BTreeSet::new())
+            {
+                diagnostics.push(conflict_diagnostic(
+                    instruction.span,
+                    "push to",
                     (function, program),
                     conflict,
                 ));

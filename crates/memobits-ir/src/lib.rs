@@ -123,7 +123,11 @@ impl TypeDef {
             [Type::Reference {
                 access: Access::Borrow,
                 inner,
-            }] if some.name == "Some" && none.name == "None" && none.payload.is_empty() => {
+            }] if !matches!(inner.as_ref(), Type::List(_))
+                && some.name == "Some"
+                && none.name == "None"
+                && none.payload.is_empty() =>
+            {
                 Some(inner)
             }
             _ => None,
@@ -581,7 +585,7 @@ impl Program {
             for parameter in &function.signature.parameters {
                 validate_parameter_type(
                     type_count,
-                    &parameter.ty,
+                    parameter,
                     &mut errors,
                     id,
                     "function parameter",
@@ -1050,11 +1054,12 @@ fn parameter_local_type(parameter: &ParameterType) -> Type {
 /// primitives, passed by ownership, `borrow` or `share`.
 fn validate_parameter_type(
     type_count: usize,
-    ty: &Type,
+    parameter: &ParameterType,
     errors: &mut Vec<ValidationError>,
     id: FunctionId,
     context: &str,
 ) {
+    let ty = &parameter.ty;
     if matches!(ty, Type::Reference { .. }) {
         push(
             errors,
@@ -1063,7 +1068,7 @@ fn validate_parameter_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    if matches!(ty, Type::List(_)) {
+    if matches!(ty, Type::List(_)) && parameter.access != Access::Borrow {
         push(
             errors,
             id,
@@ -1125,7 +1130,7 @@ fn validate_type_shape(
             for parameter in &signature.parameters {
                 validate_parameter_type(
                     type_count,
-                    &parameter.ty,
+                    parameter,
                     errors,
                     id,
                     "function type parameter",
@@ -1152,6 +1157,7 @@ fn validate_type_shape(
                 inner.as_ref(),
                 Type::Primitive(_)
                     | Type::String
+                    | Type::List(_)
                     | Type::Array { .. }
                     | Type::Struct(_)
                     | Type::Enum(_)
@@ -1165,9 +1171,17 @@ fn validate_type_shape(
                     ),
                 );
             }
+            if matches!(inner.as_ref(), Type::List(_)) && *access != Access::Borrow {
+                push(
+                    errors,
+                    id,
+                    None,
+                    "List references must be read-only borrows",
+                );
+            }
             if matches!(
                 inner.as_ref(),
-                Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
             ) {
                 validate_type_shape(type_count, inner, errors, id, context);
             }
@@ -1187,6 +1201,21 @@ fn validate_type_shape(
                 ),
             ),
         },
+    }
+}
+
+/// A List read accepts an owner or a read-only reference to its descriptor.
+fn list_read_element(ty: &Type) -> Option<Primitive> {
+    match ty {
+        Type::List(element) => Some(*element),
+        Type::Reference {
+            access: Access::Borrow,
+            inner,
+        } => match inner.as_ref() {
+            Type::List(element) => Some(*element),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1361,11 +1390,8 @@ fn validate_instruction(
         InstructionKind::ListGet { source, index } => {
             let input = operand_type(program, function, source, errors, id, block);
             let index_type = operand_type(program, function, index, errors, id, block);
-            let valid_output = match (input, out) {
-                (
-                    Some(Type::List(element @ (Primitive::U8 | Primitive::U32))),
-                    Some(Type::Enum(option)),
-                ) => {
+            let valid_output = match (input.as_ref().and_then(list_read_element), out) {
+                (Some(element @ (Primitive::U8 | Primitive::U32)), Some(Type::Enum(option))) => {
                     let name = if element == Primitive::U8 {
                         "Option<u8>"
                     } else {
@@ -1394,7 +1420,7 @@ fn validate_instruction(
         }
         InstructionKind::ListLen { source } => {
             let input = operand_type(program, function, source, errors, id, block);
-            if !matches!(input, Some(Type::List(_)))
+            if input.as_ref().and_then(list_read_element).is_none()
                 || !matches!(source.source, Source::Local(_))
                 || source.mode != UseMode::Read
                 || out != Some(&Type::Primitive(Primitive::U32))
@@ -1689,6 +1715,11 @@ fn validate_instruction(
                         );
                     }
                     Some(*inner)
+                }
+                Type::List(_)
+                    if *access == Access::Borrow && matches!(owner.source, Source::Local(_)) =>
+                {
+                    Some(actual)
                 }
                 Type::Primitive(_)
                 | Type::String
@@ -2514,6 +2545,14 @@ fn validate_instruction(
                             "load operand mode does not match reference access",
                         );
                     }
+                    if matches!(inner.as_ref(), Type::List(_)) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "whole Lists cannot be loaded through a borrow",
+                        );
+                    }
                     if matches!(inner.as_ref(), Type::Array { .. }) {
                         push(
                             errors,
@@ -2744,6 +2783,16 @@ fn validate_instruction(
                         .zip(argument_types)
                         .zip(&signature.parameters)
                     {
+                        if matches!(parameter.ty, Type::List(_))
+                            && !matches!(callee.source, Source::Function(_))
+                        {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "List borrows require a direct internal call",
+                            );
+                        }
                         // Internal direct calls pass the original reference address.
                         let pointee_matches = |inner: &Type| {
                             inner == &parameter.ty

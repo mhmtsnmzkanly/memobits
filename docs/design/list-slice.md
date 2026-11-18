@@ -15,8 +15,12 @@ local bindings, non-consuming `.len()` and `.get(index)`, and `.push(value)`
 on whole mutable locals. Empty construction allocates no heap block. A push evaluates
 the element once and returns unit. Moves transfer the block and normal scope
 exits release the owner. The applied spelling is built in, and bare `List`
-can still name a user type. Replacement, indexing syntax, nesting, borrows,
-call signatures and exports remain gated at this checkpoint.
+can still name a user type. Direct internal calls accept `borrow List<T>`
+for these element types. Use `.borrow()` on a whole local to create the
+read-only handle. The callee can use `.len()` and `.get()`. A live loan
+blocks pushes, moves and cleanup of the owner until its last use.
+Replacement, subscript syntax, nesting, shares, owned calls, and exports
+remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -48,8 +52,9 @@ first slice keeps the access rules and types already used in Memobits.
 [Rust Vec](https://doc.rust-lang.org/std/vec/struct.Vec.html)
 
 Scope the owner to whole local bindings, including moves from one local
-to another. Defer owned call arguments and returns, reference parameters
-and explicit shares, whole-local replacement, nested List storage,
+to another. Borrow parameters receive the caller's private descriptor
+address for the direct call. Defer owned call arguments and returns,
+exclusive parameters and shares, whole-local replacement, nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
@@ -97,8 +102,8 @@ high-water mark.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,
-   use after move, unsupported reference or escape forms, and rejected ABI
-   shapes.
+   use after move, live-borrow conflicts, successful push and move after
+   last use, unsupported escapes, and rejected ABI shapes.
 4. In one Wasm instance, repeat a fixed workload through fallthrough,
    return, break and continue. Check reuse after the first high-water
    mark, mixed move paths, and preservation of a distinct live list

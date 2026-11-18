@@ -808,6 +808,97 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn borrowed_list_reads_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-borrows'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
+            if index < items.len() { return items.get(index); }
+            None
+        }
+        fn byte_at(items: borrow List<u8>, index: u32) -> Option<u8> {
+            if index < items.len() { return items.get(index); }
+            None
+        }
+        fn word_is(value: Option<u32>, expected: u32) -> Bool {
+            match value { Some(word) => word == expected, None => false }
+        }
+        fn main() -> Result<Bool, Error> {
+            var words: List<u32> = [];
+            var index: u32 = 0;
+            loop {
+                words.push(index + 10);
+                index += 1;
+                if index == 100 { break; }
+            }
+            let held := words.borrow();
+            let before := held.len() == 100 && word_is(word_at(held, 99), 109);
+            words.push(4_294_967_295);
+            let moved := words;
+            var bytes: List<u8> = [];
+            bytes.push(255);
+            let byte_ok := match byte_at(bytes.borrow(), 0) {
+                Some(byte) => byte == 255, None => false
+            };
+            let view := moved.borrow();
+            let absent := match view.get(4_294_967_295) {
+                Some(_) => false, None => true
+            };
+            Ok(before && byte_ok && absent && word_is(word_at(moved.borrow(), 100), 4_294_967_295))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "borrow.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "borrow.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn list_borrow_conflicts_and_call_boundaries_are_checked() {
+    let f = Fixture::new();
+    for (body, code, message) in [
+        ("let held := items.borrow(); items.push(1); held.len();", "BE005", "while it is borrowed"),
+        ("let held := items.borrow(); held.get({ items.push(1); 0 });", "BE005", "while it is borrowed"),
+        ("let held := items.borrow(); let moved := items; held.get(0);", "BE005", "while it is borrowed"),
+        ("inspect(items);", "TE017", "explicit .borrow()"),
+        ("let indirect := inspect; indirect(items.borrow());", "TE017", "direct internal call"),
+        ("items.share();", "TE017", "read-only borrows"),
+        ("let view: Option<borrow List<u8>> = Some(items.borrow());", "TE017", "cannot be stored in Option"),
+        ("let dangling := { var inner: List<u8> = []; inner.push(5); inner.borrow() }; dangling.len();", "TE017", "reference-valued block results"),
+    ] {
+        f.write("list.mb", &format!(
+            "fn inspect(view: borrow List<u8>) {{ view.len(); }} fn main() {{ var items: List<u8> = []; {body} }}"
+        ));
+        let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
+
+    f.write(
+        "project.toml",
+        "[package]\nname='list-borrow-abi'\nentry='main::main'\n[export]\ninspect='main::inspect'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "pub fn inspect(view: borrow List<u8>) -> u32 { view.len() } fn main() {}",
+    );
+    let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        diagnostic.contains("external List ABI is not defined"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn list_get_reads_copied_values_after_growth_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
@@ -1002,7 +1093,7 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
             "TE017",
         ),
         (
-            "fn main() { let items: List<u8> = []; items.borrow(); }",
+            "fn main() { var items: List<u8> = []; items.share(); }",
             "TE017",
         ),
         (

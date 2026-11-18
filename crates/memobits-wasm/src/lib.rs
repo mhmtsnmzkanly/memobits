@@ -197,6 +197,18 @@ fn compile_target(
                 ));
                 continue;
             }
+            if function
+                .signature
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter.ty, Type::List(_)))
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot use List; the external List ABI is not defined",
+                    Some(function.span),
+                ));
+                continue;
+            }
             if application {
                 match outcome_entry(program, function, &structs, static_layout) {
                     Ok(Some(adapter)) => {
@@ -367,7 +379,8 @@ fn primitive_signature<'a>(
             )
         }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
-            matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
+            (p.access == memobits_ir::Access::Borrow && matches!(p.ty, Type::List(_)))
+                || matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
                 || matches!(
                     p.ty,
                     Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
@@ -384,6 +397,10 @@ fn supported_type(ty: &Type) -> bool {
         Type::Primitive(_) => true,
         // A struct or enum is an inline frame-cell value, passed internally by address.
         Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) => true,
+        Type::Reference {
+            access: memobits_ir::Access::Borrow,
+            inner,
+        } if matches!(inner.as_ref(), Type::List(_)) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
@@ -790,14 +807,14 @@ impl FrameLayout {
                             Type::Primitive(primitive) => {
                                 storage_layout(*primitive).map_err(error)?;
                             }
-                            Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                            Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                             _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
                         }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
                     // An array owner already has its cell (one per array local or value).
-                    Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                    Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -2965,7 +2982,12 @@ fn compile_instruction(
             let frame = frame.ok_or("List get requires a frame")?;
             let value = instruction.output.ok_or("List get lacks an output")?;
             let (tag, payload) = scalar_option_offsets(layout, function, value)?;
-            let Type::List(element) = value_type(function, source)? else {
+            let source_type = value_type(function, source)?;
+            let owner_type = match &source_type {
+                Type::Reference { inner, .. } => inner.as_ref(),
+                owner => owner,
+            };
+            let Type::List(element) = *owner_type else {
                 return Err("List get source is not a List".into());
             };
             let (width, _) = storage_layout(element)?;

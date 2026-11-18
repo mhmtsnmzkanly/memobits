@@ -299,6 +299,13 @@ impl TypeTable {
         {
             if template.id == TemplateId::Option {
                 let inner = self.resolve(module, referent)?;
+                if matches!(inner, Ty::List(_)) {
+                    return Err(TypeFailure {
+                        span: *span,
+                        code: 17,
+                        message: "List borrows cannot be stored in Option in this slice".into(),
+                    });
+                }
                 if inner == super::UNIT {
                     return Err(TypeFailure {
                         span: *span,
