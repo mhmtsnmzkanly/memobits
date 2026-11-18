@@ -3003,7 +3003,7 @@ fn compile_instruction(
                 }
             }
             if enum_layout.string_success && *variant == 0 {
-                // Validated heap Ok construction immediately reaches a consuming match.
+                // The Result owns this descriptor until the consuming match.
                 clear_moved_heap_source(
                     body,
                     function,

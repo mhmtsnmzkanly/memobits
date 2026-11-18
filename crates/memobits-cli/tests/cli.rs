@@ -970,6 +970,82 @@ fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
 }
 
 #[test]
+fn returned_heap_string_results_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='heap-string-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make(mode: i32, text: String) -> Result<String, Error> {
+            if mode == 1 { return Ok("é"); }
+            if mode == 2 { return Err(Error { code: 7 }); }
+            Ok(text)
+        }
+        fn length(mode: i32) -> u32 {
+            let result := make(mode, "a".concat("😀"));
+            match result {
+                Ok(value) => {
+                    if value.len() == 5 { return value.len(); }
+                    value.len()
+                },
+                Err(error) => error.code
+            }
+        }
+        fn main() -> Result<Bool, Error> {
+            let empty := match make(0, "".concat("")) {
+                Ok(value) => value.len() == 0,
+                Err(_) => false
+            };
+            Ok(empty && length(0) == 5 && length(1) == 2 && length(2) == 7)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "returned-result.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "returned-result.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn returned_heap_results_require_an_immediate_consuming_match() {
+    let f = Fixture::new();
+    for body in [
+        "make();",
+        "let result := make();",
+        "let result := make(); match result { Ok(_) => {}, Err(_) => {} };",
+        "let result := make(); match result { Err(_) => {}, _ => {} };",
+        "let result := make(); match result.borrow() { Ok(_) => {}, Err(_) => {} };",
+        "let result := make(); 1 + 1; match result { Ok(value) => { value.len(); }, Err(_) => {} };",
+        "take(make());",
+        "forward();",
+    ] {
+        let forward = if body == "forward();" {
+            "fn forward() -> Result<String, Error> { make() }"
+        } else {
+            ""
+        };
+        f.write("text.mb", &format!(r#"
+            fn make() -> Result<String, Error> {{
+                let text := "é".concat("!");
+                return Ok(text);
+            }}
+            fn take(result: Result<String, Error>) {{}}
+            {forward}
+            fn main() {{ {body} }}
+        "#));
+        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+        assert!(diagnostic.contains("requires an immediate consuming match"), "{body}: {diagnostic}");
+    }
+}
+
+#[test]
 fn heap_string_results_reject_escape_and_ignore_paths() {
     let f = Fixture::new();
     for body in [
@@ -993,7 +1069,10 @@ fn heap_string_results_reject_escape_and_ignore_paths() {
             ),
         );
         let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
-        assert!(diagnostic.contains("heap String"), "{body}: {diagnostic}");
+        assert!(
+            diagnostic.contains("heap String") || diagnostic.contains("heap Result<String, E>"),
+            "{body}: {diagnostic}"
+        );
     }
 }
 
@@ -1051,6 +1130,16 @@ fn wasm_gates_string_exports_and_nested_storage() {
         ),
         (
             r#"pub fn main() -> Result<String, Error> { Ok("é") }"#,
+            &["build", "--lib"][..],
+            "exported signatures cannot return enums",
+        ),
+        (
+            r#"pub fn main() -> Result<String, Error> { let text := "é".concat("!"); Ok(text) }"#,
+            &["build"][..],
+            "primitive success payload",
+        ),
+        (
+            r#"pub fn main() -> Result<String, Error> { let text := "é".concat("!"); Ok(text) }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
         ),

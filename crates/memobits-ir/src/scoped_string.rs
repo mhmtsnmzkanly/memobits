@@ -11,14 +11,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct HeapStrings {
     pub locals: HashSet<LocalId>,
     pub(super) returns_heap: bool,
+    pub(super) returns_heap_ok: bool,
     pub(super) writes_heap: HashSet<usize>,
-    pub(super) matched_ok: HashSet<ValueId>,
+    pub(super) approved_ok: HashSet<ValueId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Slot {
     Local(usize, LocalId),
     Return(usize),
+    ResultReturn(usize),
     ShareWrite(usize, usize),
 }
 
@@ -57,14 +59,20 @@ impl super::Program {
                             }
                         }
                         InstructionKind::EnumNew { .. } => {
-                            if let Some((value, source, target)) =
-                                immediately_matched_ok(self, function, block, position)
-                            {
-                                facts[index].matched_ok.insert(value);
-                                moves
-                                    .entry(Slot::Local(index, source))
-                                    .or_default()
-                                    .push(Slot::Local(index, target));
+                            if let Some((value, source)) = owned_ok(self, function, instruction) {
+                                let destination = if returns_ok(block, position, value) {
+                                    Some(Slot::ResultReturn(index))
+                                } else {
+                                    immediate_result_match(self, function, block, position)
+                                        .map(|target| Slot::Local(index, target))
+                                };
+                                if let Some(destination) = destination {
+                                    facts[index].approved_ok.insert(value);
+                                    moves
+                                        .entry(Slot::Local(index, source))
+                                        .or_default()
+                                        .push(destination);
+                                }
                             }
                         }
                         InstructionKind::Store { reference, value } => {
@@ -98,6 +106,16 @@ impl super::Program {
                                     }
                                 }
                             }
+                            if let Source::Function(callee) = callee.source {
+                                if let Some(target) =
+                                    immediate_result_match(self, function, block, position)
+                                {
+                                    moves
+                                        .entry(Slot::ResultReturn(callee.0 as usize))
+                                        .or_default()
+                                        .push(Slot::Local(index, target));
+                                }
+                            }
                             if let Some((callee, target)) =
                                 call_binding(function, &block.instructions[position..])
                             {
@@ -118,6 +136,9 @@ impl super::Program {
                 Slot::ShareWrite(function, parameter) => {
                     facts[function].writes_heap.insert(parameter)
                 }
+                Slot::ResultReturn(function) => {
+                    !std::mem::replace(&mut facts[function].returns_heap_ok, true)
+                }
                 Slot::Return(function) => {
                     !std::mem::replace(&mut facts[function].returns_heap, true)
                 }
@@ -132,17 +153,11 @@ impl super::Program {
     }
 }
 
-/// A heap Ok may cross only the operations that place it in the consuming
-/// match cell, select its arm, and move the unwrapped owner into a local.
-fn immediately_matched_ok(
+fn owned_ok(
     program: &super::Program,
     function: &Function,
-    block: &Block,
-    position: usize,
-) -> Option<(ValueId, LocalId, LocalId)> {
-    let [pack, bind, scrutinee, tag] = &block.instructions[position..] else {
-        return None;
-    };
+    pack: &Instruction,
+) -> Option<(ValueId, LocalId)> {
     let InstructionKind::EnumNew {
         ty,
         variant: 0,
@@ -162,13 +177,54 @@ fn immediately_matched_ok(
     else {
         return None;
     };
-    if function.locals.get(source.0 as usize)?.ty != Type::String {
+    (function.locals.get(source.0 as usize)?.ty == Type::String).then_some((pack.output?, *source))
+}
+
+fn returns_ok(block: &Block, position: usize, result: ValueId) -> bool {
+    block.instructions[position + 1..].iter().all(is_cleanup)
+        && matches!(block.terminator.kind, TerminatorKind::Return(Some(Operand {
+            source: Source::Value(value), mode: UseMode::Consume, ..
+        })) if value == result)
+}
+
+/// A heap Result may cross only argument cleanup, consuming initializations
+/// for the match, and extraction of its String into the success arm's local.
+pub(super) fn immediate_result_match(
+    program: &super::Program,
+    function: &Function,
+    block: &Block,
+    position: usize,
+) -> Option<LocalId> {
+    let producer = block.instructions.get(position)?;
+    let result = producer.output?;
+    let Type::Enum(ty) = function.values.get(result.0 as usize)? else {
+        return None;
+    };
+    let definition = program.types.get(ty.0 as usize)?;
+    if definition.entry_outcome != Some(EntryOutcome::Result)
+        || !matches!(&definition.kind, super::TypeDefKind::Enum { variants }
+            if variants.first().is_some_and(|ok| ok.payload == [Type::String]))
+    {
         return None;
     }
-    let result = pack.output?;
-    let binding = move_initialization(bind, Source::Value(result))?;
-    let cell = move_initialization(scrutinee, Source::Local(binding))?;
-    if binding == cell
+
+    let mut after = block.instructions[position + 1..].iter();
+    let first = if matches!(producer.kind, InstructionKind::Call { .. }) {
+        after.find(|inst| !is_cleanup(inst))?
+    } else {
+        after.next()?
+    };
+    let binding = move_initialization(first, Source::Value(result))?;
+    let next = after.next()?;
+    let (cell, tag) = if let Some(cell) = move_initialization(next, Source::Local(binding)) {
+        if binding == cell {
+            return None;
+        }
+        (cell, after.next()?)
+    } else {
+        (binding, next)
+    };
+    if after.next().is_some()
         || !matches!(&tag.kind, InstructionKind::EnumTag { base }
         if base.source == Source::Local(cell) && base.mode == UseMode::Read)
     {
@@ -210,7 +266,7 @@ fn immediately_matched_ok(
         return None;
     }
     let target = move_initialization(init, Source::Value(extract.output?))?;
-    string_destination(function, target, true).then_some((result, *source, target))
+    string_destination(function, target, true).then_some(target)
 }
 
 fn move_initialization(instruction: &Instruction, source: Source) -> Option<LocalId> {

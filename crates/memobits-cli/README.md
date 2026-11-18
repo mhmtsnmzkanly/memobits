@@ -77,9 +77,10 @@ Installing heap text through forwarded shares or share aliases, other
 nested heap uses and exported String signatures are gated. An internal
 `Result<String, E>` can return a static String to a consuming match.
 A heap-backed `Ok` can be bound and immediately matched in the same
-function with explicit `Ok(value)` and `Err` arms. Returning a heap-backed
-Result, ignoring its success owner, and other nested String storage are
-gated. Application
+function with explicit `Ok(value)` and `Err` arms. A direct internal call
+can also return a heap-backed Result to an immediate consuming match, with
+an optional binding. Ignoring the success owner, forwarding the Result
+without matching it, and other nested String storage are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

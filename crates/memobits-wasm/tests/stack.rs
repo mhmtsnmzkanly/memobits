@@ -448,7 +448,7 @@ fn repeated_string_discard_reuses_one_block() {
 }
 
 #[test]
-fn immediately_matched_heap_ok_reuses_the_arm_allocation() {
+fn immediate_heap_result_matches_reuse_the_arm_allocation() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
@@ -463,11 +463,26 @@ fn immediately_matched_heap_ok_reuses_the_arm_allocation() {
                 }}
             }}
         }}
+        fn make(seed: borrow String) -> Result<String, Error> {{
+            let text := seed.concat("");
+            Ok(text)
+        }}
+        fn check_return(seed: borrow String, early: Bool) -> Bool {{
+            let result := make(seed);
+            match result {{
+                Ok(value) => {{
+                    if early {{ return value.len() == 48_000; }}
+                    value.len() == 48_000
+                }},
+                Err(_) => false
+            }}
+        }}
         fn main() -> Result<Bool, Error> {{
             let seed := "{literal}";
             var step := 0;
             loop {{
-                if !check(seed.borrow(), step % 2 == 0) {{
+                if !check(seed.borrow(), step % 2 == 0)
+                    || !check_return(seed.borrow(), step % 2 == 0) {{
                     return Err(Error {{ code: 1 }});
                 }}
                 step += 1;
@@ -479,7 +494,7 @@ fn immediately_matched_heap_ok_reuses_the_arm_allocation() {
     ));
     let artifact = compile_application_traced(
         &program,
-        FunctionId(1),
+        FunctionId(3),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();

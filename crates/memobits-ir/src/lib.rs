@@ -2643,6 +2643,13 @@ fn validate_operand_escapes(
                         push(errors, id, block_id,
                             "heap String call result must be assigned directly to a whole String local");
                     }
+                    if facts.returns_heap_ok
+                        && scoped_string::immediate_result_match(program, function, block, position)
+                            .is_none()
+                    {
+                        push(errors, id, block_id,
+                            "heap Result<String, E> requires an immediate consuming match with explicit Ok(value) and Err arms");
+                    }
                     for parameter in &facts.writes_heap {
                         if arguments
                             .get(*parameter)
@@ -2723,7 +2730,7 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::EnumNew { payload, .. } => {
                     if !instruction.output.is_some_and(|value| {
-                        heap_strings[id.0 as usize].matched_ok.contains(&value)
+                        heap_strings[id.0 as usize].approved_ok.contains(&value)
                     }) {
                         for operand in payload {
                             report(block_id, operand, true, false);

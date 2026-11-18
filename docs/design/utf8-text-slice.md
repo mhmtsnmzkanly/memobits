@@ -51,9 +51,11 @@ outcome entry, the runner's existing memory export still exposes linear
 memory to the embedding host. Internal `Result<String, E>` can store a
 static String in its `Ok` payload. A heap-backed `Ok` is supported when a
 local Result binding is immediately followed by a same-function consuming
-match with explicit `Ok(value)` and `Err` arms. Other embedded String
-storage, borrowed String payload matches, and exported String signatures
-remain gated.
+match with explicit `Ok(value)` and `Err` arms. A direct internal call can
+return a heap-backed Result to the same consuming match shape, with or
+without a single intervening binding. Other embedded String storage,
+borrowed String payload matches, and exported String signatures remain
+gated.
 
 ## Byte length
 
@@ -199,9 +201,15 @@ ABI continues to require a primitive success payload.
    the original owner's allocation field. Extraction transfers ownership to
    the arm binding, whose normal-exit cleanup releases or moves it exactly
    once. Tests cover early arm returns and repeated reuse.
-3. Extend ownership across internal Result returns and receiving matches.
-   Unconsumed results, wildcard discards and other escapes stay gated until
-   they have cleanup coverage.
+3. Implemented ownership transfer across direct internal Result returns.
+   The callee packs its String local before lexical cleanup and returns the
+   descriptor in the caller's aggregate result cell. The caller immediately
+   matches it or binds it and then immediately matches it. Any call to a
+   function that can return a heap `Ok` needs explicit `Ok(value)` and
+   `Err` arms, including calls that take a static or error path at runtime.
+   Argument cleanup may run before the match. Unconsumed results, borrowed
+   matches, wildcard discards and forwarding a Result without matching it
+   remain gated.
 4. Add the fixed-buffer constructor. Use the guest validator's cases as
    the contract for a checked validation-and-copy path. Current guest code
    can validate bytes, while publication of a descriptor from dynamic bytes

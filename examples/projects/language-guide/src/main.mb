@@ -300,12 +300,22 @@ fn static_text_result() -> Bool {
     found && missing
 }
 
+fn owned_label() -> Result<String, Error> {
+    let text := "é".concat("!");
+    Ok(text)
+}
+
 fn heap_text_result() -> Bool {
     // A heap Ok must be matched immediately in the same function, with an
     // explicit Err arm and a binding for the owned String.
     let text := "é".concat("!");
     let result: Result<String, Error> = Ok(text);
-    match result {
+    let local_ok := match result {
+        Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
+        Err(_) => false
+    };
+    // A direct internal return can also hand ownership to an immediate match.
+    local_ok && match owned_label() {
         Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
         Err(_) => false
     }
