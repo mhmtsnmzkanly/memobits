@@ -83,9 +83,11 @@ The target memory layout places 16 reserved bytes first, followed by the
 configured stack, static data, and the heap. Address zero is unused.
 `static_data_start(stack_size)` in `crates/memobits-wasm/src/lib.rs` marks the
 first address after the stack. The private [outcome entry adapter](outcome-implementation.md)
-places its caller-owned return cell there. Memory covers the stack and, when
-present, that cell, rounded up to 64 KiB pages. General static data and heap
-allocation remain future work.
+places its caller-owned return cell there. Reachable String literal data
+follows that cell, or starts just after the stack when the cell is absent.
+Memory covers those regions rounded up to 64 KiB pages. The
+[owned heap proposal](owned-heap-foundation.md) places growable storage
+after the literal data.
 
 The stack size is the build setting `[build].stack_size` (bytes, default 1 MiB,
 a multiple of 16 between 4 KiB and 256 MiB), passed to the backend as

@@ -40,7 +40,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
    integer overflow, invalid indexing and other checked operations; UTF-8 string
    primitives starting with [owned literals and byte length](utf8-text-slice.md);
    fixed arrays and dynamic lists; Option/Result/outcome payloads;
-   and normal-exit cleanup. Keep trap cleanup policy at the host/runtime boundary.
+   and [owned heap storage with normal-exit cleanup](owned-heap-foundation.md).
+   Keep trap cleanup policy at the host/runtime boundary.
 9. **Core libraries and package artifacts** — implement reusable APIs on top of
    the runtime, local binary dependency loading, `import` selection,
    `external` packaging, and separate app/library outputs. Remote fetching follows near distribution
@@ -213,6 +214,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `Result` and `Attempt` functions with primitive success payloads.
 - Dynamic lists, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
+  The [owned heap proposal](owned-heap-foundation.md) starts with allocating
+  and releasing an owned String produced by concatenation.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.
