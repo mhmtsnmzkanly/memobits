@@ -827,6 +827,60 @@ fn immediate_string_reads_reuse_memory_after_read_and_early_exit() {
 }
 
 #[test]
+fn repeated_list_discard_reuses_storage_in_one_instance() {
+    let program = lower(
+        r#"
+        fn make(count: u32) -> List<u32> {
+            var result: List<u32> = [];
+            loop {
+                result.push(result.len());
+                if result.len() == count { break; }
+            }
+            result
+        }
+        fn main() -> Result<Bool, Error> {
+            var live: List<u32> = [];
+            live.push(305_419_896);
+            var repeats: u32 = 0;
+            loop {
+                make(10_000);
+                repeats += 1;
+                if repeats == 8 { break; }
+            }
+            match live.get(0) {
+                Some(value) => if value == 305_419_896 { Ok(true) } else { Err(Error { code: 1 }) },
+                None => Err(Error { code: 2 })
+            }
+        }
+        "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(1),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let initial_size = memory.data(&store).len();
+    let (result, _) = main.call(&mut store, ()).unwrap();
+    assert_eq!(memory.data(&store)[result as usize], 0);
+    let warmed_size = memory.data(&store).len();
+    assert!(warmed_size > initial_size);
+    assert!(warmed_size <= 3 * 65_536);
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), warmed_size);
+    }
+}
+
+#[test]
 fn repeated_string_discard_reuses_one_block() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(

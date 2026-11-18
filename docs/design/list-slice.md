@@ -33,8 +33,9 @@ the descriptor before ending its local scopes. The receiving binding owns
 the block and releases it on a normal exit unless it moves onward.
 A direct share parameter or a `var` share handle can also receive a
 replacement List. The original owner retains ownership and cleanup.
-Discarded or temporary results, indirect calls, nesting, subscript syntax,
-and exports remain gated at this checkpoint.
+A standalone direct internal call statement releases its unused List result
+immediately via the same lexical cleanup as a named owner. Other temporary
+uses, indirect calls, nesting, subscript syntax, and exports remain gated.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -141,8 +142,9 @@ and an early exit during RHS evaluation leaves the caller's List intact.
 2. The Wasm test checks both element widths, payload addresses, exact bytes
    after growth, repeated reuse and a forced allocation trap. The CLI
    regressions check copied reads after growth and LIFO removal in source and
-   standalone Wasm, along with clear and refill. Wasm tests check that popping
-   the last element or clearing retains the backing block.
+   standalone Wasm. They also cover clearing, refilling, and discarding call
+   results. Wasm tests check that popping the last element or clearing retains
+   the backing block.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,
@@ -152,6 +154,7 @@ and an early exit during RHS evaluation leaves the caller's List intact.
 4. In one Wasm instance, repeat a fixed workload through fallthrough,
    return, break and continue. Check reuse after the first high-water
    mark, mixed move paths, and preservation of a distinct live list
-   across another list's growth and cleanup. Force growth failure under a
+   across another list's growth and cleanup. Repeat discards of large direct
+   call results in one instance to check storage reuse. Force growth failure under a
    small memory limit and verify the trap. Keep the String reuse and
    allocation-failure tests in the same suite.

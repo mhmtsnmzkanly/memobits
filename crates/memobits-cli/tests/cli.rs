@@ -933,17 +933,76 @@ fn owned_list_returns_run_from_source_and_wasm() {
 }
 
 #[test]
+fn discarded_list_returns_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-discard'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make_bytes(log: share List<u8>, empty: Bool) -> List<u8> {
+            log.push(7);
+            var result: List<u8> = [];
+            if empty { return result; }
+            result.push(255);
+            result
+        }
+        fn make_words() -> List<u32> {
+            var result: List<u32> = [];
+            result.push(4_294_967_295);
+            result
+        }
+        fn forward(items: List<u32>, log: share List<u8>) -> List<u32> {
+            log.push(9);
+            items
+        }
+        fn check_early_exit() -> Bool {
+            let staged := make_words();
+            var log: List<u8> = [];
+            forward(staged, { return log.len() == 0; log.share() });
+            false
+        }
+        fn main() -> Result<Bool, Error> {
+            var log: List<u8> = [];
+            make_bytes(log.share(), true);
+            make_bytes(log.share(), false);
+            let words := make_words();
+            forward(words, log.share());
+            make_words();
+            let last := match log.get(2) { Some(value) => value == 9, None => false };
+            Ok(log.len() == 3 && last && check_early_exit())
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "discard-list.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "discard-list.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
 fn list_returns_keep_temporary_and_abi_gates() {
     let f = Fixture::new();
     for (body, code, message) in [
         (
-            "make();",
+            "{ make() };",
             "TE018",
             "assigned directly to a whole List local",
         ),
         ("make().len();", "TE017", "requires a local binding"),
         (
             "let indirect := make; let result := indirect();",
+            "TE018",
+            "direct internal call",
+        ),
+        (
+            "let indirect := make; indirect();",
             "TE018",
             "direct internal call",
         ),

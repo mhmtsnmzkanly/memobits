@@ -163,6 +163,8 @@ fn primitive_lists() -> Bool {
     bytes.push(42);
     // Bind a direct internal List result to take ownership of its block.
     let words := make_words(1000);
+    // A standalone call releases an ignored List result at the statement.
+    make_words(999);
     var moved := words;
     // An exclusive call can grow the List that the caller owns.
     append_word(moved.share(), 2000);

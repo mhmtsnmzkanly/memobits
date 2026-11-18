@@ -789,9 +789,9 @@ impl<'a> Builder<'a> {
                     return;
                 }
             }
-            if self.ty(expr) == Some(Type::String) {
+            if let Some(ty @ (Type::String | Type::List(_))) = self.ty(expr) {
                 if let Some(result) = self.lower_expr(expr) {
-                    let owner = self.hidden_local("discarded String", Type::String, expr.span);
+                    let owner = self.hidden_local("discarded call result", ty, expr.span);
                     self.initialize_local(owner, consume(result), expr.span);
                     self.end_owned_locals(scope_start, expr.span);
                     self.owned_locals.truncate(scope_start);
