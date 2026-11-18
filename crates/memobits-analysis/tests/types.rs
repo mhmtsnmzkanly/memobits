@@ -44,6 +44,23 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
+fn string_scalar_at_requires_u32_and_returns_owned_option_u32() {
+    assert!(
+        codes(r#"fn f(s: borrow String, n: u32) -> Option<u32> { s.scalar_at(n) }"#).is_empty()
+    );
+    for (source, expected) in [
+        (r#"fn f() -> Option<u8> { "é".scalar_at(0) }"#, "TE002"),
+        (r#"fn f(n: i32) { "é".scalar_at(n); }"#, "TE002"),
+        (r#"fn f() { "é".scalar_at(); }"#, "TE010"),
+    ] {
+        assert!(
+            codes(source).iter().any(|code| code == expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn string_byte_at_returns_owned_option_u8_and_requires_a_u32_offset() {
     assert!(codes(r#"fn f(s: borrow String, n: u32) -> Option<u8> { s.byte_at(n) }"#).is_empty());
     for (source, expected) in [

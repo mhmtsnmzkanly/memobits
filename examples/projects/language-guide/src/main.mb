@@ -167,6 +167,30 @@ fn text_bytes() -> Bool {
         && no_byte("".byte_at(0))
 }
 
+fn scalar_is(scalar: Option<u32>, expected: u32) -> Bool {
+    match scalar { Some(value) => value == expected, None => false }
+}
+
+fn no_scalar(scalar: Option<u32>) -> Bool {
+    match scalar { Some(_) => false, None => true }
+}
+
+fn text_scalars() -> Bool {
+    let value := "aé€😀";
+    let view := value.borrow();
+    // Indices are byte offsets. Successful results are Unicode scalar values.
+    let ascii := value.scalar_at(0);
+    let accent := view.scalar_at(1);
+    let moved := value;
+    scalar_is(ascii, 97) && scalar_is(accent, 233)
+        && scalar_is(moved.scalar_at(3), 8_364) && scalar_is(moved.scalar_at(6), 128_512)
+        && no_scalar(moved.scalar_at(2)) && no_scalar(moved.scalar_at(4))
+        && no_scalar(moved.scalar_at(5)) && no_scalar(moved.scalar_at(7))
+        && no_scalar(moved.scalar_at(8)) && no_scalar(moved.scalar_at(9))
+        && no_scalar(moved.scalar_at(10)) && no_scalar(moved.scalar_at(11))
+        && no_scalar(moved.scalar_at(4_294_967_295)) && no_scalar("".scalar_at(0))
+}
+
 fn text_boundaries() -> Bool {
     let value := "aé€😀";
     let view := value.borrow();
@@ -343,5 +367,6 @@ fn main() -> Result<i32, Error> {
     if !fixed_text() { return Err(Error { code: 7 }); }
     if !text_boundaries() { return Err(Error { code: 8 }); }
     if !text_bytes() { return Err(Error { code: 9 }); }
+    if !text_scalars() { return Err(Error { code: 10 }); }
     Ok(42)
 }

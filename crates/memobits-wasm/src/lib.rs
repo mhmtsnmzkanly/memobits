@@ -316,6 +316,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::StringLen { .. }
         | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::StringByteAt { .. }
+        | InstructionKind::StringScalarAt { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -938,7 +939,8 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
                 InstructionKind::StringIsCharBoundary { source, offset }
-                | InstructionKind::StringByteAt { source, offset } => {
+                | InstructionKind::StringByteAt { source, offset }
+                | InstructionKind::StringScalarAt { source, offset } => {
                     count(source);
                     count(offset);
                 }
@@ -1807,11 +1809,115 @@ fn emit_string_byte(
     layout: &FrameLayout,
     frame: Option<FrameState>,
 ) -> Result<(), String> {
+    emit_string_byte_address(body, function, param_count, source, offset, layout, frame)?;
+    emit_load(body, Primitive::U8);
+    Ok(())
+}
+
+fn emit_string_byte_address(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    source: &Operand,
+    offset: &Operand,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+) -> Result<(), String> {
     emit_operand(body, function, param_count, source, layout, frame)?;
     emit_load(body, Primitive::U32);
     emit_operand(body, function, param_count, offset, layout, frame)?;
     body.instruction(&WasmInstruction::I32Add);
-    emit_load(body, Primitive::U8);
+    Ok(())
+}
+
+// Called only after index < len. Return -1 for a continuation byte or a
+// width that would run past the logical end.
+#[allow(clippy::too_many_arguments)]
+fn emit_string_scalar(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    source: &Operand,
+    offset: &Operand,
+    layout: &FrameLayout,
+    frame: FrameState,
+    lead: u32,
+) -> Result<(), String> {
+    emit_string_byte(
+        body,
+        function,
+        param_count,
+        source,
+        offset,
+        layout,
+        Some(frame),
+    )?;
+    body.instruction(&WasmInstruction::LocalSet(lead));
+    // UTF-8 is already validated. Prefix ranges select the scalar width.
+    // The 0x80..0xbf range is a continuation byte, never a scalar start.
+    let prefixes = [
+        (0x80, 1, 0x7f),
+        (0xc0, 0, 0),
+        (0xe0, 2, 0x1f),
+        (0xf0, 3, 0x0f),
+        (0xf5, 4, 0x07),
+    ];
+    for (limit, width, mask) in prefixes {
+        body.instruction(&WasmInstruction::LocalGet(lead));
+        body.instruction(&WasmInstruction::I32Const(limit));
+        body.instruction(&WasmInstruction::I32LtU);
+        body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
+        match width {
+            0 => {
+                body.instruction(&WasmInstruction::I32Const(-1));
+            }
+            1 => {
+                body.instruction(&WasmInstruction::LocalGet(lead));
+            }
+            _ => {
+                // index < len ensures subtraction cannot wrap. Checking the
+                // remaining width before any tail load bounds all byte offsets.
+                emit_operand(body, function, param_count, source, layout, Some(frame))?;
+                emit_string_length(body);
+                emit_operand(body, function, param_count, offset, layout, Some(frame))?;
+                body.instruction(&WasmInstruction::I32Sub);
+                body.instruction(&WasmInstruction::I32Const(width));
+                body.instruction(&WasmInstruction::I32GeU);
+                body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
+                body.instruction(&WasmInstruction::LocalGet(lead));
+                body.instruction(&WasmInstruction::I32Const(mask));
+                body.instruction(&WasmInstruction::I32And);
+                for delta in 1..width {
+                    body.instruction(&WasmInstruction::I32Const(6));
+                    body.instruction(&WasmInstruction::I32Shl);
+                    emit_string_byte_address(
+                        body,
+                        function,
+                        param_count,
+                        source,
+                        offset,
+                        layout,
+                        Some(frame),
+                    )?;
+                    body.instruction(&WasmInstruction::I32Load8U(MemArg {
+                        offset: delta as u64,
+                        ..memory_arg(Primitive::U8)
+                    }));
+                    body.instruction(&WasmInstruction::I32Const(0x3f));
+                    body.instruction(&WasmInstruction::I32And);
+                    body.instruction(&WasmInstruction::I32Or);
+                }
+                body.instruction(&WasmInstruction::Else);
+                body.instruction(&WasmInstruction::I32Const(-1));
+                body.instruction(&WasmInstruction::End);
+            }
+        }
+        body.instruction(&WasmInstruction::Else);
+    }
+    body.instruction(&WasmInstruction::I32Const(-1));
+    for _ in prefixes {
+        body.instruction(&WasmInstruction::End);
+    }
     Ok(())
 }
 
@@ -2570,12 +2676,15 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::End);
             body.instruction(&WasmInstruction::LocalSet(output));
         }
-        InstructionKind::StringByteAt { source, offset } => {
-            let value = instruction.output.ok_or("StringByteAt lacks an output")?;
+        InstructionKind::StringByteAt { source, offset }
+        | InstructionKind::StringScalarAt { source, offset } => {
+            let scalar = matches!(&instruction.kind, InstructionKind::StringScalarAt { .. });
+            let output = output.ok_or("String read lacks an output")?;
+            let value = instruction.output.ok_or("String read lacks an output")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
-            let frame = frame.ok_or("StringByteAt requires a frame")?;
+            let frame = frame.ok_or("String read requires a frame")?;
             let Type::Enum(type_id) = function.values[value.0 as usize] else {
-                return Err("StringByteAt output must be Option<u8>".into());
+                return Err("String read output must be an Option".into());
             };
             let some_offset = layout
                 .structs
@@ -2583,34 +2692,61 @@ fn compile_instruction(
                 .and_then(|ty| ty.enum_layout.as_ref())
                 .and_then(|ty| ty.variants.first())
                 .and_then(|some| some.offsets.first())
-                .ok_or("missing StringByteAt payload layout")?;
+                .ok_or("missing String read payload layout")?;
             let payload = cell
                 .offset
                 .checked_add(*some_offset)
                 .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
 
-            emit_address(body, frame, cell.offset);
             emit_operand(body, function, param_count, offset, layout, Some(frame))?;
             emit_operand(body, function, param_count, source, layout, Some(frame))?;
             emit_string_length(body);
             body.instruction(&WasmInstruction::I32LtU);
             body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
+            let payload_type = if scalar {
+                // Aggregate operands use the frame cell. Their otherwise unused
+                // Wasm local can hold the lead byte and then the decoded scalar.
+                emit_string_scalar(
+                    body,
+                    function,
+                    param_count,
+                    source,
+                    offset,
+                    layout,
+                    frame,
+                    output,
+                )?;
+                Primitive::U32
+            } else {
+                emit_string_byte(
+                    body,
+                    function,
+                    param_count,
+                    source,
+                    offset,
+                    layout,
+                    Some(frame),
+                )?;
+                Primitive::U8
+            };
+            body.instruction(&WasmInstruction::Else);
+            body.instruction(&WasmInstruction::I32Const(-1));
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::LocalSet(output));
+
+            emit_address(body, frame, cell.offset);
+            body.instruction(&WasmInstruction::LocalGet(output));
+            body.instruction(&WasmInstruction::I32Const(-1));
+            body.instruction(&WasmInstruction::I32Ne);
+            body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
             emit_address(body, frame, payload);
-            emit_string_byte(
-                body,
-                function,
-                param_count,
-                source,
-                offset,
-                layout,
-                Some(frame),
-            )?;
-            emit_store(body, Primitive::U8);
+            body.instruction(&WasmInstruction::LocalGet(output));
+            emit_store(body, payload_type);
             body.instruction(&WasmInstruction::I32Const(0)); // Some
             body.instruction(&WasmInstruction::Else);
             body.instruction(&WasmInstruction::I32Const(1)); // None
             body.instruction(&WasmInstruction::End);
-            // Option<u8> has two variants and therefore a one-byte tag.
+            // Both Option types have two variants and therefore a one-byte tag.
             emit_store(body, Primitive::U8);
         }
         InstructionKind::Copy { source } => {

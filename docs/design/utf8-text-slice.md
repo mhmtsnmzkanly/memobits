@@ -70,6 +70,14 @@ bytes, including continuation bytes. An unsigned bounds check returns
 `None` at or beyond the byte length before any byte load. The receiver
 follows the same loan rules as the boundary check.
 
+`.scalar_at(index: u32)` returns an owned `Option<u32>`. The index is a
+UTF-8 byte offset. `Some` contains the scalar's numeric Unicode value, for
+example 233 for `é`. The existing `u32` type covers the full scalar range
+without introducing a public character type. A continuation byte or an
+offset at or beyond the byte length returns `None`. Strings already contain
+valid immutable UTF-8. After checking the index, Wasm checks the remaining
+length against the lead byte's width before loading any trailing bytes.
+
 The [runnable guide](../../examples/projects/language-guide/src/main.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,

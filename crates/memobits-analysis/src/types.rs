@@ -1218,9 +1218,11 @@ impl Checker {
         match receiver {
             Ty::String if diverges => Ty::Never,
             Ty::String if method == "is_char_boundary" => BOOL,
-            Ty::String if method == "byte_at" => self.table.instantiate_enum(
+            Ty::String if matches!(method, "byte_at" | "scalar_at") => self.table.instantiate_enum(
                 registry::by_id(registry::TemplateId::Option),
-                vec![ResolvedArgument::Type(Ty::Primitive("u8"))],
+                vec![ResolvedArgument::Type(Ty::Primitive(
+                    if method == "byte_at" { "u8" } else { "u32" },
+                ))],
                 expression.span,
             ),
             Ty::String => offset_type,
@@ -2570,7 +2572,10 @@ impl Checker {
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
                     }
-                    if matches!(name.as_str(), "len" | "is_char_boundary" | "byte_at") {
+                    if matches!(
+                        name.as_str(),
+                        "len" | "is_char_boundary" | "byte_at" | "scalar_at"
+                    ) {
                         return self.string_read(expr, base, name, arguments);
                     }
                 }

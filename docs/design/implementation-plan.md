@@ -222,7 +222,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   owned `String` transfers and internal borrows using private Wasm data.
   `.len()` reads the stored UTF-8 byte length as `u32`, and
   `.is_char_boundary(offset)` checks scalar boundaries. `.byte_at(index)`
-  returns a raw byte as `Option<u8>`. Exported String
+  returns a raw byte as `Option<u8>`, and `.scalar_at(index)` decodes a
+  Unicode scalar at a byte offset as `Option<u32>`. Exported String
   signatures, nested storage and scalar iteration remain gated.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.

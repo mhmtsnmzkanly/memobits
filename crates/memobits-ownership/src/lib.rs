@@ -219,7 +219,8 @@ fn transfer_instruction(
             transfer_operand(operand, state, diagnostics, function)
         }
         InstructionKind::StringIsCharBoundary { source, offset }
-        | InstructionKind::StringByteAt { source, offset } => {
+        | InstructionKind::StringByteAt { source, offset }
+        | InstructionKind::StringScalarAt { source, offset } => {
             transfer_operand(source, state, diagnostics.as_deref_mut(), function);
             transfer_operand(offset, state, diagnostics, function);
         }

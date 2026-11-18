@@ -157,7 +157,7 @@ fn string_ownership_uses_last_borrow_use_and_rejects_moves_and_reads() {
 }
 
 #[test]
-fn string_byte_at_respects_receiver_loans() {
+fn string_byte_and_scalar_reads_respect_receiver_loans() {
     let f = Fixture::new();
     for (body, code) in [
         (r#"let s := "é"; let moved := s; s.byte_at(0);"#, "BE001"),
@@ -170,8 +170,11 @@ fn string_byte_at_respects_receiver_loans() {
             "BE005",
         ),
     ] {
-        f.write("text.mb", &format!("fn main() {{ {body} }}"));
-        err(f.run(&["ownership", "text.mb"]), code);
+        for method in ["byte_at", "scalar_at"] {
+            let body = body.replace("byte_at", method);
+            f.write("text.mb", &format!("fn main() {{ {body} }}"));
+            err(f.run(&["ownership", "text.mb"]), code);
+        }
     }
 }
 
