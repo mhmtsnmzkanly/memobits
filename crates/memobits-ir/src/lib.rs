@@ -2638,7 +2638,7 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                "heap String can only be read, borrowed, or moved into a new immutable local or a final owned String parameter",
+                "heap String can only be read, borrowed, or moved into a new immutable local or an internal owned String parameter",
             );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
@@ -2733,11 +2733,10 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::Call { callee, arguments } => {
                     report(block_id, callee, true, false);
-                    let valid_transfer =
-                        scoped_string::owned_call_transfer(program, callee, arguments)
-                            .is_some_and(|(source, _, _)| heap_locals.contains(&source));
                     for (index, argument) in arguments.iter().enumerate() {
-                        if !valid_transfer || index + 1 != arguments.len() {
+                        if scoped_string::owned_call_transfer(program, callee, index, argument)
+                            .is_none()
+                        {
                             report(block_id, argument, true, false);
                         }
                     }

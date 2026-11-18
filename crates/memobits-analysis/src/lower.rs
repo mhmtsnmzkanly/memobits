@@ -1439,34 +1439,57 @@ impl<'a> Builder<'a> {
                 };
                 let callee = self.lower_expr(callee)?;
                 let callee = self.capture(callee)?;
-                let mut args = Vec::new();
-                for (index, (argument, parameter)) in
-                    arguments.iter().zip(&signature.parameters).enumerate()
-                {
-                    let argument = self.lower_expr(argument)?;
-                    if parameter.access == Access::Owned {
-                        if parameter.ty == Type::String && index + 1 == arguments.len() {
-                            // No later argument can exit before this move reaches the call.
-                            args.push(self.owned_to(argument, &parameter.ty)?);
+                let scope_start = self.string_locals.len();
+                let result = (|| {
+                    let mut args = Vec::new();
+                    for (index, (argument, parameter)) in
+                        arguments.iter().zip(&signature.parameters).enumerate()
+                    {
+                        let value = self.lower_expr(argument)?;
+                        let value = if parameter.access != Access::Owned {
+                            // Keep the original pointee and loan.
+                            let mut reference = self.borrow(value, parameter.access)?;
+                            reference.mode = access_mode(parameter.access);
+                            reference
+                        } else if parameter.ty == Type::String
+                            && matches!(callee.source, Source::Function(_))
+                        {
+                            let owned = self.owned_to(value, &parameter.ty)?;
+                            if index + 1 < arguments.len()
+                                && matches!(owned.source, Source::Local(_))
+                            {
+                                // Move now. A later argument can exit, so hold
+                                // the descriptor in a local with lexical cleanup.
+                                let staged = self.hidden_local(
+                                    "call String argument",
+                                    Type::String,
+                                    argument.span,
+                                );
+                                self.function.locals[staged.0 as usize].mutable = false;
+                                self.initialize_local(staged, owned, argument.span);
+                                consume(op(Source::Local(staged), argument.span))
+                            } else {
+                                owned
+                            }
                         } else {
-                            args.push(self.owned_captured(argument, &parameter.ty)?);
-                        }
-                    } else {
-                        // Keep the original pointee and loan. Only the call
-                        // boundary can view an error reference as its ancestor.
-                        let mut argument = self.borrow(argument, parameter.access)?;
-                        argument.mode = access_mode(parameter.access);
-                        args.push(argument);
+                            self.owned_captured(value, &parameter.ty)?
+                        };
+                        args.push(value);
                     }
+                    self.emit(
+                        expr.span,
+                        InstructionKind::Call {
+                            callee: read(callee),
+                            arguments: args,
+                        },
+                        self.ty(expr),
+                    )
+                })();
+                if result.is_some() {
+                    self.end_string_locals(scope_start, expr.span);
                 }
-                self.emit(
-                    expr.span,
-                    InstructionKind::Call {
-                        callee: read(callee),
-                        arguments: args,
-                    },
-                    self.ty(expr),
-                )
+                self.string_locals.truncate(scope_start);
+                result
             }
             ExprKind::Struct { fields, .. } => {
                 let Some(Type::Struct(id)) = self.ty(expr) else {

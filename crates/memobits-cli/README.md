@@ -57,8 +57,8 @@ byte length, `.is_char_boundary(offset)` to test a byte offset, and
 to decode a Unicode scalar at a byte offset as `Option<u32>`.
 `let joined := left.concat(right);` borrows its inputs and allocates owned
 text for that immutable binding. The result can be read, borrowed, or moved
-to another immutable local. A direct internal call can take it in its final
-owned String parameter. Scope exit releases it from the binding that
+to another immutable local. A direct internal call can take multiple owned
+String arguments, evaluated left to right. Scope exit releases it from the binding that
 still owns it. An internal function can return an owning local when the
 direct call initializes a new immutable caller local. Temporary heap results,
 exported String signatures, and nested String storage are gated. Application

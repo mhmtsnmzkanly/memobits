@@ -50,13 +50,15 @@ impl super::Program {
                             }
                         }
                         InstructionKind::Call { callee, arguments } => {
-                            if let Some((source, target, parameter)) =
-                                owned_call_transfer(self, callee, arguments)
-                            {
-                                moves
-                                    .entry(Slot::Local(index, source))
-                                    .or_default()
-                                    .push(Slot::Local(target, parameter));
+                            for (position, argument) in arguments.iter().enumerate() {
+                                if let Some((source, target, parameter)) =
+                                    owned_call_transfer(self, callee, position, argument)
+                                {
+                                    moves
+                                        .entry(Slot::Local(index, source))
+                                        .or_default()
+                                        .push(Slot::Local(target, parameter));
+                                }
                             }
                             if let Some((callee, target)) =
                                 call_binding(function, &block.instructions[position..])
@@ -117,12 +119,12 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
     (instruction.output == Some(result)).then_some((position, source))
 }
 
-/// A heap call result must initialize an immutable local immediately.
+/// A heap call result must initialize an immutable local after argument cleanup.
 pub(super) fn call_binding(
     function: &Function,
     instructions: &[Instruction],
 ) -> Option<(usize, LocalId)> {
-    let [call, binding, ..] = instructions else {
+    let [call, after @ ..] = instructions else {
         return None;
     };
     let InstructionKind::Call {
@@ -139,7 +141,7 @@ pub(super) fn call_binding(
         target,
         value,
         initialize: true,
-    } = &binding.kind
+    } = &after.iter().find(|inst| !is_cleanup(inst))?.kind
     else {
         return None;
     };
@@ -150,23 +152,23 @@ pub(super) fn call_binding(
     .then_some((callee.0 as usize, *target))
 }
 
-/// A direct call may move a local into its final owned String parameter.
+fn is_cleanup(instruction: &Instruction) -> bool {
+    matches!(instruction.kind, InstructionKind::EndStringLocal { .. })
+}
+
+/// A direct call may move a local into an owned String parameter.
 pub(super) fn owned_call_transfer(
     program: &super::Program,
     callee: &Operand,
-    arguments: &[Operand],
+    position: usize,
+    source: &Operand,
 ) -> Option<(LocalId, usize, LocalId)> {
     let Source::Function(target) = callee.source else {
         return None;
     };
     let target = target.0 as usize;
     let function = program.functions.get(target)?;
-    let last = arguments.len().checked_sub(1)?;
-    if arguments.len() != function.signature.parameters.len() {
-        return None;
-    }
-    let parameter = &function.signature.parameters[last];
-    let source = &arguments[last];
+    let parameter = function.signature.parameters.get(position)?;
     let Source::Local(local) = source.source else {
         return None;
     };
@@ -176,7 +178,7 @@ pub(super) fn owned_call_transfer(
     {
         return None;
     }
-    Some((local, target, *function.parameter_locals.get(last)?))
+    Some((local, target, *function.parameter_locals.get(position)?))
 }
 
 /// Only a declaration of a new immutable local can receive a heap owner.
@@ -233,8 +235,9 @@ pub(super) fn validate(
                     value,
                     initialize,
                 } if locals.contains(target) => {
-                    let from_call = position
-                        .checked_sub(1)
+                    let from_call = block.instructions[..position]
+                        .iter()
+                        .rposition(|inst| !is_cleanup(inst))
                         .and_then(|previous| {
                             call_binding(function, &block.instructions[previous..])
                         })

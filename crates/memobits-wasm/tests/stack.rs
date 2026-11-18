@@ -156,7 +156,7 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
             let moved := value;
             moved.len()
         }}
-        fn forward(early: Bool, value: String) -> u32 {{
+        fn forward(value: String, early: Bool) -> u32 {{
             consume(early, value)
         }}
         fn make(left: borrow String, right: borrow String) -> String {{
@@ -168,17 +168,22 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
             loop {{
                 let joined := make(left, right);
                 let len := if steps % 2 == 0 {{
-                    forward(early, joined)
+                    forward(joined, {{
+                        if early {{ return 48_000; }}
+                        if steps == 2 {{ steps += 1; continue; }}
+                        if steps == 4 {{ break; }}
+                        false
+                    }})
                 }} else {{
                     joined.len()
                 }};
                 if early {{ return len; }}
                 steps += 1;
-                if steps < 4 {{ continue; }}
+                if steps <= 4 {{ continue; }}
                 break;
             }}
             let joined := make(left, right);
-            forward(false, joined)
+            forward(joined, false)
         }}
         fn main() -> Result<u32, Error> {{
             let left := "{left}";

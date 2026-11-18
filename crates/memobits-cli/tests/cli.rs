@@ -70,8 +70,8 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
             "must directly initialize a new immutable local",
         ),
         (
-            r#"let joined := "a".concat("b"); earlier(joined, true);"#,
-            "final owned String parameter",
+            r#"let joined := "a".concat("b"); earlier(joined, joined.len());"#,
+            "BE001",
         ),
         (
             r#"let joined := "a".concat("b"); alias(joined.borrow(), joined);"#,
@@ -90,7 +90,7 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
             "src/main.mb",
             &format!(
                 "fn returns(s: String) -> String {{ s }}
-                 fn earlier(s: String, flag: Bool) {{}}
+                 fn earlier(s: String, size: u32) {{}}
                  fn alias(view: borrow String, s: String) {{ view.len(); }}
                  fn main() {{ {body} }}"
             ),
@@ -100,6 +100,43 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
     }
+}
+
+#[test]
+fn multiple_heap_arguments_keep_order_and_can_return_an_owner() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-args'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn select(first: String, order: i32, second: String, last: i32) -> String {
+            if first.len() == 3 && order == 1 && last == 2 { return second; }
+            first
+        }
+        fn main() -> Result<u32, Error> {
+            let first := "é".concat("!");
+            let second := "a".concat("😀");
+            var order := 0;
+            let selected := select(first, { order = 1; order }, second, {
+                let scratch := "x".concat("y");
+                if scratch.len() == 2 { order += 1; }
+                order
+            });
+            Ok(selected.len())
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(5))\n");
+    let build = f.run(&["build", "--output", "arguments.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "arguments.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
 }
 
 #[test]
@@ -1038,7 +1075,11 @@ fn outcome_entry_traps_keep_runtime_diagnostics() {
     f.write(
         "src/main.mb",
         "fn divide(n: i32) -> i32 { 1 / n }
-         fn main() -> Result<i32, Error> { Ok(divide(0)) }",
+         fn consume(text: String, value: i32) -> i32 { value }
+         fn main() -> Result<i32, Error> {
+             let text := \"a\".concat(\"b\");
+             Ok(consume(text, divide(0)))
+         }",
     );
     let source = err(f.run(&["run"]), "RE007");
     assert!(

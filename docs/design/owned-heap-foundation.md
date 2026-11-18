@@ -30,9 +30,12 @@ operations or lent to an internal borrow parameter.
 
 This slice accepts concat as the direct initializer of an immutable local.
 A direct move into another immutable local transfers the owning descriptor.
-A direct internal call can also take the local in its final owned String
-parameter. Earlier heap arguments remain gated because evaluation of a
-later argument could exit and leave an owning temporary to clean up.
+A direct internal call can take multiple owned String arguments in any
+parameter position. Arguments evaluate left to right. An earlier move from
+a local stages the descriptor in a hidden immutable binding, which gets
+lexical cleanup if later evaluation returns, breaks, or continues out of
+the call. Invocation transfers the staged descriptors to callee parameters.
+A trap discards the instance, including any staged allocations.
 A function can return an owning local through a direct internal call whose
 result directly initializes a new immutable caller local. Discarded results,
 result temporaries, sharing for mutation and replacement require broader drop
@@ -63,9 +66,9 @@ states differ. A callee must end all of its heap bindings before returning.
 Heap capability propagates through direct arguments and returns, including
 forwarding calls. A return stages the descriptor and clears the source
 provenance before lexical cleanup. The caller receives the descriptor in its
-private result cell and immediately moves it into the new binding. Calls
-whose results can be heap-backed require this binding even on paths that
-return static text. Static-only results retain ordinary String behavior.
+private result cell and moves it into the new binding after staged argument
+cleanup. Calls that may return heap text require this binding even on paths
+that return static text. Static-only results retain ordinary String behavior.
 The callee copies the incoming descriptor into its owned parameter cell
 and clears the caller slot's provenance before executing the body.
 Release uses the block address, so it preserves other live allocations
@@ -95,9 +98,8 @@ have page-reuse coverage.
 3. Direct return transfers the result before dropping the callee's other
    owners. Tests cover early returns, a static alternative, forwarding and
    repeated reuse in the same Wasm instance.
-4. Cover remaining argument positions and temporary results. Drop discarded
-   temporaries on normal exits. Evaluate a
-   replacement before releasing the previous owner, including whole
+4. Extend normal-exit cleanup to discarded results and general temporaries.
+   Evaluate a replacement before releasing the previous owner, including whole
    replacement through a share. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm
    execution. A trap still discards the whole instance.
