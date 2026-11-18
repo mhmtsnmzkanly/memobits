@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
-    Constant, Edge, ErrorAncestry, FieldDef, Function, Instruction, InstructionKind, LoanId, Local,
-    LocalId, Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef,
-    TypeDefKind, UnaryOp, UseMode, ValueId, VariantDef,
+    Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
+    Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
+    UnaryOp, UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -31,7 +31,7 @@ fn program_types(
         .map(|definition| TypeDef {
             path: CanonicalType {
                 package: package.into(),
-                module: if definition.error_ancestry == Some(ErrorAncestry::Root) {
+                module: if definition.module == "__prelude" {
                     vec![definition.module.clone()]
                 } else {
                     module_of(&definition.module)
@@ -1528,6 +1528,17 @@ impl<'a> Builder<'a> {
                             InstructionKind::Copy {
                                 source: read(source),
                             },
+                            self.ty(expr),
+                        );
+                    }
+                    if name == "validate_utf8" {
+                        let source = self.lower_expr(base)?;
+                        let source = read(self.borrow(source, Access::Borrow)?);
+                        let length = self.lower_expr(&arguments[0])?;
+                        let length = read(self.scalar(length)?);
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::ValidateUtf8 { source, length },
                             self.ty(expr),
                         );
                     }

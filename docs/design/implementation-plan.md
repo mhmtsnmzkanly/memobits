@@ -252,8 +252,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   traversal with an explicit loop.
   [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
   is the next planned consumer of internal heap Result returns. Production
-  concat uses the private byte-range allocator. Strict validation and
-  constructor lowering remain pending.
+  concat uses the private byte-range allocator. `Bytes<N>.validate_utf8`
+  checks the logical prefix without allocating. String constructor lowering
+  remains pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

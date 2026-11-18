@@ -1,69 +1,13 @@
-// UTF-8 validation over an eight-byte buffer. Byte constants are decimal.
-type Utf8Error: Error {
-    offset: Option<i32>,
-}
-
-type Validation = Result<i32, Utf8Error>;
-
-fn validate(bytes: borrow Bytes<8>, length: i32) -> Validation {
-    if length < 0 || length > 8 {
-        return Err(Utf8Error { code: 1, offset: None });
-    }
-
-    var index := 0;
-    var scalars := 0;
-    loop {
-        if index == length { return Ok(scalars); }
-        let lead := bytes[index];
-        if lead <= 127 {
-            index += 1;
-            scalars += 1;
-            continue;
-        }
-        if lead < 194 || lead > 244 {
-            return Err(Utf8Error { code: 2, offset: Some(index) });
-        }
-
-        let width := if lead <= 223 { 2 } else if lead <= 239 { 3 } else { 4 };
-        var low: u8 = 128;
-        var high: u8 = 191;
-        // E0 and F0 exclude overlong encodings. ED excludes surrogates,
-        // and F4 caps the scalar at U+10FFFF.
-        if lead == 224 { low = 160; }
-        if lead == 237 { high = 159; }
-        if lead == 240 { low = 144; }
-        if lead == 244 { high = 143; }
-
-        var checked := 1;
-        loop {
-            if checked == width { break; }
-            let next := index + checked;
-            if next == length {
-                return Err(Utf8Error { code: 3, offset: Some(next) });
-            }
-            let byte := bytes[next];
-            if byte < low || byte > high {
-                return Err(Utf8Error { code: 4, offset: Some(next) });
-            }
-            // Only the first continuation has lead-specific restrictions.
-            low = 128;
-            high = 191;
-            checked += 1;
-        }
-        index += width;
-        scalars += 1;
-    }
-}
-
+// Check strict UTF-8 validation over the logical prefix of fixed byte arrays.
 fn count_is(bytes: Bytes<8>, length: i32, expected: i32) -> Bool {
-    match validate(bytes.borrow(), length) {
+    match bytes.validate_utf8(length) {
         Ok(count) => count == expected,
         Err(_) => false,
     }
 }
 
 fn error_is(bytes: Bytes<8>, length: i32, code: u32, expected: Option<i32>) -> Bool {
-    match validate(bytes.borrow(), length) {
+    match bytes.validate_utf8(length) {
         Ok(_) => false,
         Err(error) => {
             let Utf8Error { code: actual_code, offset } := error;
@@ -122,5 +66,11 @@ fn main() -> Result<i32, Error> {
     if !error_is([0; 8], -1, 1, None) || !error_is([0; 8], 9, 1, None) {
         return Err(Error { code: 7 });
     }
+    let short: Bytes<2> = [195, 169];
+    let inferred_size := match short.borrow().validate_utf8(2) {
+        Ok(count) => count == 1,
+        Err(_) => false
+    };
+    if !inferred_size { return Err(Error { code: 8 }); }
     Ok(0)
 }

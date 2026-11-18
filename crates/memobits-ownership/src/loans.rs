@@ -605,7 +605,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
-        InstructionKind::StringIsCharBoundary { source, offset }
+        InstructionKind::ValidateUtf8 {
+            source,
+            length: offset,
+        }
+        | InstructionKind::StringIsCharBoundary { source, offset }
         | InstructionKind::StringByteAt { source, offset }
         | InstructionKind::StringScalarAt { source, offset } => vec![source, offset],
         InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
@@ -1496,6 +1500,9 @@ fn check_instruction(
             source: reference, ..
         }
         | InstructionKind::StringByteAt {
+            source: reference, ..
+        }
+        | InstructionKind::ValidateUtf8 {
             source: reference, ..
         }
         | InstructionKind::StringScalarAt {

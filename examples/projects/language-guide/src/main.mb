@@ -115,13 +115,17 @@ fn return_bytes(buffer: Array<u8, 2>) -> Bytes<2> {
     buffer
 }
 
-// For strict UTF-8 validation of a logical Bytes prefix, run the
-// examples/projects/utf8-validator project. Construction is still pending.
 fn fixed_bytes() -> Bool {
     var bytes: Bytes<2> = [0; 2];
     set_first_byte(bytes.share());
     let array: Array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
-    first_byte(array.borrow()) == 42
+    // Validation borrows the prefix and returns its Unicode scalar count.
+    // The utf8-validator project checks malformed bytes and error offsets.
+    let valid := match array.validate_utf8(1) {
+        Ok(count) => count == 1,
+        Err(_) => false
+    };
+    valid && first_byte(array.borrow()) == 42
 }
 
 // String literals are owned UTF-8. The empty literal is also a String.

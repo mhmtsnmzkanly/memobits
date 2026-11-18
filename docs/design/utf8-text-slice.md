@@ -127,15 +127,27 @@ whole source is sufficient for a first read-only view. Return types and
 syntax remain open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.html#method.get) ·
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
 
+## Strict validation of fixed bytes
+
+`bytes.validate_utf8(length)` borrows a fixed `Bytes<N>` or its equivalent
+`Array<u8, N>`. It takes an `i32` logical length and returns
+`Result<i32, Utf8Error>`. Success gives the number of Unicode scalars.
+`Utf8Error` derives from `Error` and adds an `offset: Option<i32>` field,
+using the codes and offsets below. The compiler infers the bound from the
+receiver. Wasm checks the length before any byte load and validates without
+allocating or changing the input. The guest validator uses this operation
+for its boundary and malformed-byte fixtures.
+
 ## Fallible construction from fixed bytes
 
-The proposed first consumer constructs an owned String from the logical
-prefix of a `borrow Bytes<8>` and an explicit `i32` length. This matches
+The proposed constructor creates an owned String from the logical prefix
+of a borrowed fixed byte array and an explicit `i32` length. The validator
+already infers the array bound. This matches
 the [guest validator](../../examples/projects/utf8-validator/README.md)
 and keeps the caller's fixed buffer available on either outcome. Success
 copies exactly the validated prefix into private String storage. Padding
 is ignored, embedded NUL is preserved, and a zero-length prefix yields
-empty text. Generalizing to other fixed sizes can follow the first consumer.
+empty text.
 
 Rust's `String::from_utf8` takes ownership of a `Vec<u8>` and can reuse its
 allocation. A Memobits fixed array has a different layout and no transferable
@@ -155,7 +167,7 @@ within the logical prefix.
 | --- | --- |
 | `[195, 169, 0]`, length 3 | `Ok` with exactly these three UTF-8 bytes |
 | Any buffer, length 0 | `Ok` with empty text |
-| Length below 0 or above 8 | Code 1, no offset |
+| Length below 0 or above the fixed bound | Code 1, no offset |
 | `[128]`, length 1 | Code 2, invalid lead at offset 0 |
 | `[195]`, length 1 | Code 3, first missing byte at offset 1 |
 | `[226, 65]`, length 2 | Code 4, invalid continuation at offset 1 |
@@ -214,12 +226,12 @@ outcome ABI continues to require a primitive success payload.
    descriptor. Production concat supplies both ranges from its live
    String inputs. A constructor can supply its logical prefix and an
    empty second range.
-5. Add the compiler-provided validation and construction operation. It
-   must check the length against the input's fixed bound and validate the
-   whole prefix before invoking the allocator. Use the guest validator's
-   cases as the contract and construct the typed error before any
-   allocation on failure. Choose the source spelling and error type
-   binding when this operation is implemented.
+5. Implemented the compiler-provided prefix validator and typed error.
+   It borrows the input, checks the inferred bound, and reports the
+   first malformed or missing byte without allocating.
+6. Add the constructor using the same private validator and byte-range
+   allocator. Return the typed error before allocation on invalid input.
+   Choose the constructor spelling when lowering is implemented.
 
 Run the executable slices from source and as standalone Wasm with a
 primitive self-checking entry. Verify exact bytes and scalar reads, all

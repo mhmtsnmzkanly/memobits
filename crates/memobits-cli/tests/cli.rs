@@ -1291,6 +1291,27 @@ fn enf_lexer_example_checks_byte_fixtures_in_source_and_wasm() {
 }
 
 #[test]
+fn utf8_validation_checks_receiver_type_and_borrows_through_length_evaluation() {
+    let f = Fixture::new();
+    for (source, code, message) in [
+        (
+            "fn main() { let values := [1, 2]; values.validate_utf8(1); }",
+            "TE017",
+            "requires a fixed byte array",
+        ),
+        (
+            "fn main() { var bytes: Bytes<2> = [1, 2]; bytes.validate_utf8({ bytes[0] = 0; 1 }); }",
+            "BE005",
+            "borrowed",
+        ),
+    ] {
+        f.write("utf8.mb", source);
+        let diagnostic = err(f.run(&["ownership", "utf8.mb"]), code);
+        assert!(diagnostic.contains(message), "{diagnostic}");
+    }
+}
+
+#[test]
 fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
     assert_example_runs_in_both_modes("utf8-validator", b"Result: Ok(i32(0))\n");
 }

@@ -17,6 +17,7 @@ pub enum TemplateId {
     Result,
     Attempt,
     Error,
+    Utf8Error,
 }
 
 pub struct VariantTemplate {
@@ -40,6 +41,13 @@ const TEMPLATES: &[Template] = &[
         parameters: &[],
         variants: &[],
         argument_error: "Error does not accept type arguments",
+    },
+    Template {
+        id: TemplateId::Utf8Error,
+        name: "Utf8Error",
+        parameters: &[],
+        variants: &[],
+        argument_error: "Utf8Error does not accept type arguments",
     },
     Template {
         id: TemplateId::Array,

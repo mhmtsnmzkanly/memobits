@@ -141,6 +141,45 @@ impl TypeTable {
         Ty::Struct(id, "Error".into())
     }
 
+    pub(super) fn utf8_error_type(&self, span: Span) -> Ty {
+        let root = self.error_type(span);
+        let offset = self.instantiate_enum(
+            templates::by_id(TemplateId::Option),
+            vec![ResolvedArgument::Type(Ty::Primitive("i32"))],
+            span,
+        );
+        let mut instances = self.instances.borrow_mut();
+        if let Some(index) = instances
+            .iter()
+            .position(|entry| entry.0 == TemplateId::Utf8Error)
+        {
+            return Ty::Struct((self.types.len() + index) as u32, "Utf8Error".into());
+        }
+        let id = (self.types.len() + instances.len()) as u32;
+        instances.push((
+            TemplateId::Utf8Error,
+            vec![ResolvedArgument::Type(root)],
+            StructInfo {
+                name: "Utf8Error".into(),
+                module: "__prelude".into(),
+                span,
+                is_enum: false,
+                fields: [("code", Ty::Primitive("u32")), ("offset", offset)]
+                    .into_iter()
+                    .map(|(name, ty)| FieldInfo {
+                        name: name.into(),
+                        public: true,
+                        module: "__prelude".into(),
+                        ty,
+                        ty_span: span,
+                    })
+                    .collect(),
+                variants: Vec::new(),
+            },
+        ));
+        Ty::Struct(id, "Utf8Error".into())
+    }
+
     pub(super) fn instantiate_enum(
         &self,
         template: &Template,
@@ -202,8 +241,7 @@ impl TypeTable {
     }
 
     fn is_error_type(&self, id: u32) -> bool {
-        self.error_parents.contains_key(&id)
-            || self.instance_template(id) == Some(TemplateId::Error)
+        self.error_ancestry(id).is_some()
     }
 
     pub(super) fn error_ancestry(&self, id: u32) -> Option<ErrorAncestry> {
@@ -211,6 +249,14 @@ impl TypeTable {
             Some(ErrorAncestry::Derived(TypeId(parent)))
         } else if self.instance_template(id) == Some(TemplateId::Error) {
             Some(ErrorAncestry::Root)
+        } else if self.instance_template(id) == Some(TemplateId::Utf8Error) {
+            let index = id as usize - self.types.len();
+            let instances = self.instances.borrow();
+            let [ResolvedArgument::Type(Ty::Struct(parent, _))] = instances[index].1.as_slice()
+            else {
+                unreachable!("Utf8Error has an Error parent");
+            };
+            Some(ErrorAncestry::Derived(TypeId(*parent)))
         } else {
             None
         }
@@ -220,7 +266,7 @@ impl TypeTable {
         let (Ty::Struct(mut child, _), Ty::Struct(ancestor, _)) = (actual, expected) else {
             return false;
         };
-        while let Some(&parent) = self.error_parents.get(&child) {
+        while let Some(ErrorAncestry::Derived(TypeId(parent))) = self.error_ancestry(child) {
             if parent == *ancestor {
                 return true;
             }
@@ -640,7 +686,9 @@ impl TypeTable {
         let mut aliases = HashSet::new();
         loop {
             let template = templates::lookup_type(ty);
-            if template.is_some_and(|template| template.id == TemplateId::Error) {
+            if template.is_some_and(|template| {
+                matches!(template.id, TemplateId::Error | TemplateId::Utf8Error)
+            }) {
                 let Ty::Struct(id, _) = self.resolve(module, ty)? else {
                     unreachable!("Error is a struct");
                 };
@@ -737,6 +785,7 @@ impl TypeTable {
             })?;
             match template.id {
                 TemplateId::Error => return Ok(self.error_type(ty.span)),
+                TemplateId::Utf8Error => return Ok(self.utf8_error_type(ty.span)),
                 TemplateId::Option | TemplateId::Result | TemplateId::Attempt => {
                     return Ok(self.instantiate_enum(template, arguments, ty.span));
                 }

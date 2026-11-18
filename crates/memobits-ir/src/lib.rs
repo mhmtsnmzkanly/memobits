@@ -276,6 +276,11 @@ pub enum InstructionKind {
         local: LocalId,
     },
     /// Read the byte length of an owned String or a reference to one.
+    /// Validate a logical prefix of a fixed byte array without allocating.
+    ValidateUtf8 {
+        source: Operand,
+        length: Operand,
+    },
     StringLen {
         source: Operand,
     },
@@ -695,6 +700,51 @@ impl Program {
 }
 
 impl Program {
+    /// Check the compiler-known error layout consumed by the UTF-8 backend.
+    pub fn utf8_validation_error(&self, ty: &Type) -> Option<TypeId> {
+        let Type::Enum(result) = ty else {
+            return None;
+        };
+        let result = self.types.get(result.0 as usize)?;
+        if result.entry_outcome != Some(EntryOutcome::Result) {
+            return None;
+        }
+        let TypeDefKind::Enum { variants } = &result.kind else {
+            return None;
+        };
+        let [ok, err] = variants.as_slice() else {
+            return None;
+        };
+        let [Type::Struct(error)] = err.payload.as_slice() else {
+            return None;
+        };
+        let def = self.types.get(error.0 as usize)?;
+        let TypeDefKind::Struct { fields } = &def.kind else {
+            return None;
+        };
+        let [code, offset] = fields.as_slice() else {
+            return None;
+        };
+        let Type::Enum(option) = offset.ty else {
+            return None;
+        };
+        let Some(ErrorAncestry::Derived(parent)) = def.error_ancestry else {
+            return None;
+        };
+        (ok.payload == [Type::Primitive(Primitive::I32)]
+            && def.path.module == ["__prelude"]
+            && def.path.name == "Utf8Error"
+            && code.name == "code"
+            && code.ty == Type::Primitive(Primitive::U32)
+            && offset.name == "offset"
+            && self.types.get(parent.0 as usize)?.error_ancestry == Some(ErrorAncestry::Root)
+            && self
+                .types
+                .get(option.0 as usize)?
+                .is_scalar_option("Option<i32>", Primitive::I32))
+        .then_some(*error)
+    }
+
     fn is_borrow_option(&self, ty: &Type) -> bool {
         matches!(ty, Type::Enum(id) if self.types.get(id.0 as usize)
             .and_then(TypeDef::borrow_option_referent).is_some())
@@ -1228,6 +1278,34 @@ fn validate_instruction(
 ) {
     let out = output_type(function, instruction.output);
     match &instruction.kind {
+        InstructionKind::ValidateUtf8 { source, length } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            let len = operand_type(program, function, length, errors, id, block);
+            if !matches!(input, Some(Type::Reference { access: Access::Borrow, inner })
+                if matches!(inner.as_ref(), Type::Array { element, .. } if **element == Type::Primitive(Primitive::U8)))
+                || source.mode != UseMode::Read
+                || length.mode != UseMode::Read
+                || len != Some(Type::Primitive(Primitive::I32))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "UTF-8 validation requires a borrowed byte array and i32 length",
+                );
+            }
+            let valid_result = out
+                .and_then(|ty| program.utf8_validation_error(ty))
+                .is_some();
+            if !valid_result {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "UTF-8 validation requires Result<i32, Utf8Error>",
+                );
+            }
+        }
         InstructionKind::InitConcatString { target, strings } => {
             let valid_local = function
                 .locals
@@ -2750,7 +2828,11 @@ fn validate_operand_escapes(
                         report(block_id, value, true, false);
                     }
                 }
-                InstructionKind::StringIsCharBoundary { source, offset }
+                InstructionKind::ValidateUtf8 {
+                    source,
+                    length: offset,
+                }
+                | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
                 | InstructionKind::StringScalarAt { source, offset } => {
                     report(block_id, source, false, false);

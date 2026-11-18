@@ -96,6 +96,42 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 }
 
 #[test]
+fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
+    let bytes = build(
+        r#"
+        fn main() -> i32 {
+            let input: Bytes<3> = [195, 169, 255];
+            let count := match input.validate_utf8(2) {
+                Ok(count) => count,
+                Err(_) => 0
+            };
+            let invalid := match input.validate_utf8(3) {
+                Ok(_) => false,
+                Err(error) => error.code == 2
+            };
+            if count == 1 && invalid && input[2] == 255 { 1 } else { 0 }
+        }
+        "#,
+        4096,
+    )
+    .unwrap();
+    let memory = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .find_map(|part| match part.unwrap() {
+            wasmparser::Payload::MemorySection(reader) => reader.into_iter().next(),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(memory.maximum, Some(memory.initial));
+    let (mut store, instance) = instantiate(&bytes);
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..8 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}
+
+#[test]
 fn outcome_cell_and_string_data_follow_the_stack_at_a_page_boundary() {
     let program = lower(r#"fn main() -> Result<u32, Error> { Ok("é".len()) }"#);
     let options = CompileOptions { stack_size: 65_520 };

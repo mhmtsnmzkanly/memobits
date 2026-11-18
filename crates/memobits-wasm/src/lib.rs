@@ -23,6 +23,7 @@ use wasm_encoder::{
 mod memory;
 mod string_descriptor;
 mod string_heap;
+mod utf8;
 use memory::{LayoutError, StaticLayout};
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
@@ -316,6 +317,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::StringByteAt { .. }
         | InstructionKind::StringScalarAt { .. }
+        | InstructionKind::ValidateUtf8 { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -953,7 +955,11 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
-                InstructionKind::StringIsCharBoundary { source, offset }
+                InstructionKind::ValidateUtf8 {
+                    source,
+                    length: offset,
+                }
+                | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
                 | InstructionKind::StringScalarAt { source, offset } => {
                     count(source);
@@ -1553,6 +1559,21 @@ fn encode_frames_traced(
             functions.function(signatures.len() as u32 + adapter_count + 1);
             selected.len() as u32 + adapter_count
         });
+    let utf8 = reachable
+        .iter()
+        .any(|id| {
+            program.functions[*id as usize]
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|inst| matches!(inst.kind, InstructionKind::ValidateUtf8 { .. }))
+        })
+        .then(|| {
+            let prior = u32::from(entry.is_some()) + if heap_copy_index.is_some() { 2 } else { 0 };
+            types.ty().function([ValType::I32; 3], [ValType::I64]);
+            functions.function(signatures.len() as u32 + prior);
+            (selected.len() as u32 + prior, program)
+        });
     let has_frames = reachable.iter().any(|id| sizes[*id as usize] != 0);
     if observe && has_frames {
         export_section.export("__test_memory", ExportKind::Memory, 0);
@@ -1582,6 +1603,7 @@ fn encode_frames_traced(
             &strings.offsets,
             &heap_strings[*id as usize].locals,
             heap_copy_index,
+            utf8,
             &mut traps,
         )?);
     }
@@ -1599,6 +1621,9 @@ fn encode_frames_traced(
     if heap_copy_index.is_some() {
         code.function(&string_heap::copy_ranges());
         code.function(&string_heap::releaser());
+    }
+    if utf8.is_some() {
+        code.function(&utf8::validator());
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
@@ -1698,6 +1723,7 @@ fn compile_function(
     strings: &BTreeMap<&str, u32>,
     heap_locals: &HashSet<LocalId>,
     heap_copy_index: Option<u32>,
+    utf8: Option<(u32, &Program)>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
@@ -1802,6 +1828,7 @@ fn compile_function(
                 strings,
                 heap_locals,
                 heap_copy_index,
+                utf8,
                 traps,
             )?;
         }
@@ -2689,6 +2716,7 @@ fn compile_instruction(
     strings: &BTreeMap<&str, u32>,
     heap_locals: &HashSet<LocalId>,
     heap_copy_index: Option<u32>,
+    utf8: Option<(u32, &Program)>,
     traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
@@ -2766,6 +2794,35 @@ fn compile_instruction(
             }
             emit_operand(body, function, param_count, operand, layout, frame)?;
             body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::ValidateUtf8 { source, length } => {
+            let (validator, program) = utf8.ok_or("missing UTF-8 validator")?;
+            let frame = frame.ok_or("UTF-8 result requires a frame")?;
+            let Type::Reference { inner, .. } = value_type(function, source)? else {
+                return Err("UTF-8 input must be a reference".into());
+            };
+            let Type::Array { len, .. } = *inner else {
+                return Err("UTF-8 input must refer to an array".into());
+            };
+            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            emit_operand(body, function, param_count, length, layout, Some(frame))?;
+            body.instructions()
+                .i32_const(len as i32)
+                .call(validator)
+                .local_set(scratch64);
+            let result = instruction
+                .output
+                .ok_or("UTF-8 validation lacks a result")?;
+            let cell = array_cell_of(layout, Slot::Value(result.0))?;
+            utf8::write_outcome(
+                body,
+                program,
+                &layout.structs,
+                frame,
+                cell.offset,
+                &function.values[result.0 as usize],
+                scratch64,
+            )?;
         }
         InstructionKind::StringLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;
