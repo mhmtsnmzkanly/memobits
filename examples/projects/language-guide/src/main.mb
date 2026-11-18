@@ -267,8 +267,9 @@ fn text_concat() -> Bool {
     let moved := joined;
     let suffix_ok := byte_is(with_suffix.byte_at(9), 33) && byte_is(with_suffix.byte_at(10), 63);
     let empty_ok := empty.len() == 0 && no_byte(empty.byte_at(0));
-    // Arguments move in order. The callee owns and releases both Strings.
-    let count := combined_byte_length(with_suffix, empty, moved.len());
+    // An owned argument can be built inline. Arguments move in order and
+    // the callee releases both Strings.
+    let count := combined_byte_length(with_suffix, "".concat(""), moved.len());
     byte_length(moved.borrow()) == 9 && left_moved.len() == 5
         && byte_is(moved.byte_at(4), 169) && scalar_is(moved.scalar_at(5), 128_512)
         && suffix_ok && empty_ok && temporary_reads && temporary_borrows && count == 20

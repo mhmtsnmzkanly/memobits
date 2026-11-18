@@ -742,7 +742,7 @@ impl<'a> Builder<'a> {
         self.lower_expr(expr);
     }
 
-    fn lower_string_receiver(&mut self, base: &Expr) -> Option<Operand> {
+    fn lower_string_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
         if let ExprKind::Call { callee, arguments } = &base.kind {
             if let ExprKind::Field { base: left, name } = &callee.kind {
                 if name == "concat" {
@@ -770,7 +770,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Operand> {
         let scope_start = self.string_locals.len();
         let result = (|| {
-            let receiver = self.lower_string_receiver(base)?;
+            let receiver = self.lower_string_with_temporary_owner(base)?;
             let instruction = if method == "len" {
                 InstructionKind::StringLen {
                     source: read(receiver),
@@ -1531,13 +1531,17 @@ impl<'a> Builder<'a> {
                     for (index, (argument, parameter)) in
                         arguments.iter().zip(&signature.parameters).enumerate()
                     {
+                        let direct_string = parameter.ty == Type::String
+                            && matches!(callee.source, Source::Function(_));
                         let temporary_receiver = match &argument.kind {
+                            ExprKind::Call { .. }
+                                if direct_string && parameter.access == Access::Owned =>
+                            {
+                                Some(argument)
+                            }
                             ExprKind::Call {
                                 callee: conversion, ..
-                            } if parameter.access == Access::Borrow
-                                && parameter.ty == Type::String
-                                && matches!(callee.source, Source::Function(_)) =>
-                            {
+                            } if direct_string && parameter.access == Access::Borrow => {
                                 match &conversion.kind {
                                     ExprKind::Field { base, name }
                                         if name == "borrow"
@@ -1551,7 +1555,7 @@ impl<'a> Builder<'a> {
                             _ => None,
                         };
                         let value = if let Some(base) = temporary_receiver {
-                            self.lower_string_receiver(base)?
+                            self.lower_string_with_temporary_owner(base)?
                         } else {
                             self.lower_expr(argument)?
                         };
@@ -1560,11 +1564,10 @@ impl<'a> Builder<'a> {
                             let mut reference = self.borrow(value, parameter.access)?;
                             reference.mode = access_mode(parameter.access);
                             reference
-                        } else if parameter.ty == Type::String
-                            && matches!(callee.source, Source::Function(_))
-                        {
+                        } else if direct_string {
                             let owned = self.owned_to(value, &parameter.ty)?;
                             if index + 1 < arguments.len()
+                                && temporary_receiver.is_none()
                                 && matches!(owned.source, Source::Local(_))
                             {
                                 // Move now. A later argument can exit, so hold

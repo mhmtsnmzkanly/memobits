@@ -55,7 +55,7 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
     for (body, message) in [
         (
             r#""a".concat("b").borrow();"#,
-            "explicit borrow argument to a direct internal call",
+            "explicit borrow String argument to a direct internal call",
         ),
         (
             r#"var joined := "a".concat("b"); let view := joined.borrow(); joined = "c"; view.len();"#,
@@ -75,6 +75,10 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
         ),
         (
             r#"let joined := "a".concat("b"); alias(joined.borrow(), joined);"#,
+            "while it is borrowed",
+        ),
+        (
+            r#"let joined := "a".concat("b"); alias(joined.borrow(), returns(joined));"#,
             "while it is borrowed",
         ),
         (
@@ -436,9 +440,59 @@ fn temporary_string_borrows_require_an_explicit_direct_argument() {
 }
 
 #[test]
+fn temporary_owned_string_arguments_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-owned-argument'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make(ordered: Bool) -> String {
+            let text := "a".concat("😀");
+            if ordered { return text; }
+            "wrong order"
+        }
+        fn select(first: String, view: borrow String, second: String, last: i32) -> String {
+            if first.len() == 3 && view.len() == 2 && last == 2 { return second; }
+            first
+        }
+        fn early() -> Bool {
+            select(make(true), "v".concat("w").borrow(), "a".concat("b"), {
+                return true;
+                0
+            });
+            false
+        }
+        fn main() -> Result<Bool, Error> {
+            var order := 0;
+            let result := select("é".concat({ order = 1; "!" }),
+                "v".concat("w").borrow(), make(order == 1), {
+                    order += 1;
+                    order
+                });
+            Ok(result.len() == 5 && order == 2 && early())
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "owned-argument.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "owned-argument.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
 fn heap_returns_reject_nested_temporaries() {
     let f = Fixture::new();
-    for body in ["take(make());", "take({ make() });"] {
+    for body in [
+        "take({ make() });",
+        "let indirect := take; indirect(make());",
+    ] {
         f.write(
             "text.mb",
             &format!(

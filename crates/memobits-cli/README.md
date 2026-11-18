@@ -66,9 +66,10 @@ and direct call statements release discarded results. The four read-only
 methods above can also read an immediate concat or direct call result.
 An explicit `.borrow()` on either result can supply a `borrow String`
 argument to a direct internal call. The owner is released after the call
-or on an earlier normal exit during argument evaluation. Other nested heap
-uses, share mutation of heap owners, exported String signatures, and
-nested String storage are gated. Application
+or on an earlier normal exit during argument evaluation. Owned String
+parameters can receive those results directly. The callee takes ownership
+when invoked. Other nested heap uses, share mutation of heap owners,
+exported String signatures, and nested String storage are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

@@ -1224,7 +1224,7 @@ impl Checker {
             self.error(
                 17,
                 expression.span,
-                "concat requires a whole String local, a standalone statement, an immediate read-only method, or an explicit borrow argument to a direct internal call",
+                "concat requires a whole String local, a standalone statement, an immediate read-only method, or an owned or explicit borrow String argument to a direct internal call",
             );
         }
         let expected = usize::from(method != "len");
@@ -2671,17 +2671,23 @@ impl Checker {
                             // call result, `if` or named value moved into the call.
                             self.allow_array_value(arg);
                         }
-                        let previous = self.temporary_string_borrow_argument;
-                        if direct
-                            && params.get(i).is_some_and(|parameter| {
-                                parameter.access == IrAccess::Borrow && parameter.ty == Ty::String
-                            })
+                        let previous_concat = self.concat_destination;
+                        let previous_borrow = self.temporary_string_borrow_argument;
+                        if let Some(parameter) =
+                            params.get(i).filter(|p| direct && p.ty == Ty::String)
                         {
-                            self.temporary_string_borrow_argument =
-                                Some(arg as *const Expr as usize);
+                            let argument = arg as *const Expr as usize;
+                            match parameter.access {
+                                IrAccess::Owned => self.concat_destination = Some(argument),
+                                IrAccess::Borrow => {
+                                    self.temporary_string_borrow_argument = Some(argument)
+                                }
+                                IrAccess::Share => {}
+                            }
                         }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
-                        self.temporary_string_borrow_argument = previous;
+                        self.concat_destination = previous_concat;
+                        self.temporary_string_borrow_argument = previous_borrow;
                         if params
                             .get(i)
                             .is_none_or(|parameter| parameter.access == IrAccess::Owned)

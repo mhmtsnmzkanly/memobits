@@ -54,8 +54,12 @@ internal `borrow String` parameter also accepts an explicit `.borrow()` on
 a concat or owned String call result. The caller keeps that owner live
 through later argument evaluation and the call. Cleanup releases it when
 the call returns or when later argument evaluation exits normally without
-invoking the callee. The existing reference rules prevent escape. Other
-nested heap uses and share mutation require broader drop elaboration.
+invoking the callee. The existing reference rules prevent escape. A direct
+owned String parameter can also take an inline concat or owned String call
+result. The caller stages the owner during argument evaluation. Invocation
+moves it to the callee. A normal exit before invocation releases it in the
+caller. Other nested heap uses and share mutation require broader drop
+elaboration.
 A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
@@ -122,7 +126,9 @@ have page-reuse coverage.
    reuse the same cleanup on fallthrough and early control flow.
 7. Explicit temporary String borrow arguments use the same cleanup for
    direct calls and early exits during argument evaluation.
-8. Extend normal-exit cleanup to general temporaries.
+8. Inline owned String arguments transfer their staged owners at invocation
+   or release them on a normal exit during later argument evaluation.
+9. Extend normal-exit cleanup to general temporaries.
    Whole replacement through a share also needs ownership tracking for the
    pointee. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm

@@ -295,7 +295,7 @@ fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
 }
 
 #[test]
-fn temporary_string_borrow_reuses_blocks_after_call_and_early_exit() {
+fn temporary_string_arguments_reuse_blocks_after_call_and_early_exit() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
@@ -309,6 +309,12 @@ fn temporary_string_borrow_reuses_blocks_after_call_and_early_exit() {
         fn early(seed: borrow String) -> Bool {{
             read(make(seed).borrow(), {{ return true; 0 }})
         }}
+        fn consume(text: String, expected: u32) -> Bool {{
+            text.len() == expected
+        }}
+        fn early_owned(seed: borrow String) -> Bool {{
+            consume(make(seed), {{ return true; 0 }})
+        }}
         fn main() -> Result<Bool, Error> {{
             let seed := "{literal}";
             var step := 0;
@@ -316,6 +322,10 @@ fn temporary_string_borrow_reuses_blocks_after_call_and_early_exit() {
                 if !read(seed.concat("").borrow(), 48_000) || !early(seed.borrow())
                     || !read(make(seed.borrow()).borrow(), 48_000) {{
                     return Err(Error {{ code: 1 }});
+                }}
+                if !consume(seed.concat(""), 48_000) || !early_owned(seed.borrow())
+                    || !consume(make(seed.borrow()), 48_000) {{
+                    return Err(Error {{ code: 2 }});
                 }}
                 step += 1;
                 if step == 8 {{ break; }}
@@ -326,7 +336,7 @@ fn temporary_string_borrow_reuses_blocks_after_call_and_early_exit() {
     ));
     let artifact = compile_application_traced(
         &program,
-        FunctionId(3),
+        FunctionId(5),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();
