@@ -428,7 +428,7 @@ pub(super) fn call_binding(
             (*target, value)
         }
         InstructionKind::Store { reference, value } => {
-            (list_share_parameter(function, reference, result)?, value)
+            (list_share_destination(function, reference, result)?, value)
         }
         _ => return None,
     };
@@ -436,7 +436,7 @@ pub(super) fn call_binding(
         .then_some((callee.0 as usize, target))
 }
 
-pub(super) fn list_share_parameter(
+pub(super) fn list_share_destination(
     function: &Function,
     reference: &Operand,
     referent: &Type,
@@ -444,10 +444,11 @@ pub(super) fn list_share_parameter(
     let Source::Local(local) = reference.source else {
         return None;
     };
+    let binding = function.locals.get(local.0 as usize)?;
     (matches!(referent, Type::List(_))
         && reference.mode == UseMode::Share
-        && function.parameter_locals.contains(&local)
-        && matches!(&function.locals.get(local.0 as usize)?.ty,
+        && (binding.mutable || function.parameter_locals.contains(&local))
+        && matches!(&binding.ty,
             Type::Reference { access: Access::Share, inner } if inner.as_ref() == referent))
     .then_some(local)
 }

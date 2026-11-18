@@ -206,7 +206,12 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
                 refill(items.share());
                 let tail := match items.get(7_999) { Some(value) => value == 7_999, None => false };
                 if !tail { return Err(Error { code: 1 }); }
-                if step % 2 == 0 { clear(items.share()); } else { items = []; }
+                if step % 2 == 0 {
+                    clear(items.share());
+                } else {
+                    var handle := items.share();
+                    handle = [];
+                }
                 if items.len() != 0 { return Err(Error { code: 2 }); }
                 step += 1;
                 if step == 4 { break; }

@@ -30,10 +30,10 @@ function can also return a named whole List local. Assign the call result
 directly to a new local or to an existing mutable local. The callee stages
 the descriptor before ending its local scopes. The receiving binding owns
 the block and releases it on a normal exit unless it moves onward.
-A direct share parameter can also receive a replacement List. The caller
-retains ownership of the updated descriptor. Discarded or temporary
-results, whole replacement through stored share handles, indirect calls,
-nesting, subscript syntax, and exports remain gated at this checkpoint.
+A direct share parameter or a `var` share handle can also receive a
+replacement List. The original owner retains ownership and cleanup.
+Discarded or temporary results, indirect calls, nesting, subscript syntax,
+and exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -72,9 +72,10 @@ exclusive loan rules. Push through a stored share handle remains gated.
 An owned parameter receives its own frame descriptor and takes the
 allocation from the caller's moved slot. A return clears the moved
 callee slot before cleanup and transfers the staged descriptor through
-the caller's private aggregate return cell. A direct share parameter can
-store an empty List, a moved List local, or a direct List call result.
-Defer whole replacement through stored share handles, nested List storage,
+the caller's private aggregate return cell. A direct share parameter or
+a stored `var handle := items.share()` can receive an empty List, a moved
+List local, or a direct List call result. Stored `let` handles remain
+read-only under the existing assignment convention. Defer nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
@@ -118,8 +119,8 @@ releases the old block and installs an empty descriptor. A moved slot has
 zero allocation provenance, so the same assignment handles both paths
 after a conditional move. Self-assignment keeps the descriptor in place,
 with the usual availability and loan checks. Whole replacement through a
-direct share uses the same RHS order. It writes the caller's descriptor
-and releases the previous block. A live child borrow blocks the write,
+direct or stored share uses the same RHS order. It writes the owner's
+descriptor and releases the previous block. A live child borrow blocks the write,
 and an early exit during RHS evaluation leaves the caller's List intact.
 
 ## Implementation and checks

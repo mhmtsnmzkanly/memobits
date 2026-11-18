@@ -176,8 +176,11 @@ fn primitive_lists() -> Bool {
     moved = make_words(3000);
     // A direct share parameter can replace the caller's whole List too.
     replace_words(moved.share(), 4000);
-    let replacement := match moved.get(0) {
-        Some(value) => value == 4000,
+    // Stored share handles need var for a whole replacement.
+    var handle := moved.share();
+    handle = make_words(5000);
+    let replacement := match handle.get(0) {
+        Some(value) => value == 5000,
         None => false
     };
     // An owned parameter takes the whole List and releases it at scope exit.

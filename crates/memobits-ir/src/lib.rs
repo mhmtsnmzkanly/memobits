@@ -2586,14 +2586,14 @@ fn validate_instruction(
                     inner,
                 }) => {
                     if matches!(inner.as_ref(), Type::List(_))
-                        && scoped_string::list_share_parameter(function, reference, &inner)
+                        && scoped_string::list_share_destination(function, reference, &inner)
                             .is_none()
                     {
                         push(
                             errors,
                             id,
                             Some(block),
-                            "whole List replacement requires a direct share List parameter",
+                            "whole List replacement requires a mutable share local or direct share parameter",
                         );
                     }
                     if reference.mode != UseMode::Share {
@@ -2998,7 +2998,7 @@ fn validate_operand_escapes(
                             errors,
                             id,
                             block_id,
-                            "List call result must be assigned directly to a whole List local or direct share parameter",
+                            "List call result must be assigned directly to a whole List local, mutable share local, or direct share parameter",
                         );
                     }
                     if facts.returns_heap

@@ -1152,7 +1152,55 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
 }
 
 #[test]
-fn list_shares_reject_conflicts_and_replacement_through_local_aliases() {
+fn stored_list_share_replacement_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-share-local'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn rebuild(previous: borrow List<u32>) -> List<u32> {
+            var next: List<u32> = [];
+            next.push(0);
+            let old := match previous.get(0) { Some(value) => value, None => 0 };
+            next.push(old + 1);
+            next
+        }
+        fn check(early: Bool) -> Bool {
+            var items: List<u32> = [];
+            items.push(40);
+            var handle := items.share();
+            handle = { if early { return handle.len() == 1; } rebuild(handle.borrow()) };
+            let moved := items;
+            match moved.get(1) { Some(value) => value == 41, None => false }
+        }
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            bytes.push(7);
+            var next: List<u8> = [];
+            next.push(255);
+            var handle := bytes.share();
+            handle = next;
+            let found := match handle.get(0) { Some(value) => value == 255, None => false };
+            handle = [];
+            Ok(found && bytes.len() == 0 && check(false) && check(true))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "stored-share.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "stored-share.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn list_shares_reject_conflicts_and_immutable_handle_replacement() {
     let f = Fixture::new();
     for (source, code) in [
         (
@@ -1182,8 +1230,13 @@ fn list_shares_reject_conflicts_and_replacement_through_local_aliases() {
             "BE005",
         ),
         (
-            r#"fn reset(view: share List<u8>) { var alias := view; alias = []; } fn main() {}"#,
-            "TE017",
+            r#"fn main() { var items: List<u8> = []; var handle := items.share();
+                         let held := handle.borrow(); handle = []; held.len(); }"#,
+            "BE005",
+        ),
+        (
+            r#"fn reset(view: share List<u8>) { let alias := view; alias = []; } fn main() {}"#,
+            "TE004",
         ),
         (
             r#"fn main() { var items: List<u8> = []; var alias := items.share(); alias.push(1); }"#,
