@@ -448,6 +448,51 @@ fn repeated_string_discard_reuses_one_block() {
 }
 
 #[test]
+fn share_string_replacement_reuses_caller_blocks() {
+    let literal = "é".repeat(24_000);
+    let program = lower(&format!(
+        r#"
+        fn replace(text: share String, seed: borrow String) {{
+            text = seed.concat("");
+        }}
+        fn inspect(text: share String) -> u32 {{ text.len() }}
+        fn main() -> Result<Bool, Error> {{
+            let seed := "{literal}";
+            var step := 0;
+            loop {{
+                var text := "";
+                replace(text.share(), seed.borrow());
+                if inspect(text.share()) != 48_000 {{ return Err(Error {{ code: 1 }}); }}
+                replace(text.share(), seed.borrow());
+                if text.len() != 48_000 {{ return Err(Error {{ code: 2 }}); }}
+                step += 1;
+                if step == 8 {{ break; }}
+            }}
+            Ok(true)
+        }}
+        "#
+    ));
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(2),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), 3 * 65_536);
+    }
+}
+
+#[test]
 fn mutable_string_replacement_reuses_blocks_after_mixed_moves() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(

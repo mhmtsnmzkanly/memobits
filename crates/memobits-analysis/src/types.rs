@@ -1080,7 +1080,8 @@ impl Checker {
                     if operator == "="
                         && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
                             && self.lookup(&path[0]).is_some_and(|binding|
-                                binding.mutable && binding.ty == Ty::String))
+                                (binding.mutable && binding.ty == Ty::String)
+                                || (binding.access == IrAccess::Share && target_ty == Ty::String)))
                     {
                         self.concat_destination = Some(value as *const Expr as usize);
                     }

@@ -694,6 +694,24 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn replace_local(&mut self, local: LocalId, value: Operand, target_span: Span, span: Span) {
+        let kind = if matches!(
+            self.function.locals[local.0 as usize].ty,
+            Type::Reference { .. }
+        ) {
+            let mut reference = op(Source::Local(local), target_span);
+            reference.mode = UseMode::Share;
+            InstructionKind::Store { reference, value }
+        } else {
+            InstructionKind::Assign {
+                target: local,
+                value,
+                initialize: false,
+            }
+        };
+        self.emit(span, kind, None);
+    }
+
     fn lower_concat_initializer(
         &mut self,
         target: LocalId,
@@ -895,14 +913,11 @@ impl<'a> Builder<'a> {
                                     )
                                     .is_some()
                                 {
-                                    self.emit(
+                                    self.replace_local(
+                                        local,
+                                        consume(op(Source::Local(staged), value.span)),
+                                        target.span,
                                         statement.span,
-                                        InstructionKind::Assign {
-                                            target: local,
-                                            value: consume(op(Source::Local(staged), value.span)),
-                                            initialize: false,
-                                        },
-                                        None,
                                     );
                                     self.end_string_locals(scope_start, statement.span);
                                     self.string_locals.truncate(scope_start);
@@ -940,24 +955,7 @@ impl<'a> Builder<'a> {
                         let Some(assigned) = self.owned(assigned) else {
                             continue;
                         };
-                        let kind = if matches!(
-                            self.function.locals[local.0 as usize].ty,
-                            Type::Reference { .. }
-                        ) {
-                            let mut reference = op(Source::Local(local), target.span);
-                            reference.mode = UseMode::Share;
-                            InstructionKind::Store {
-                                reference,
-                                value: assigned,
-                            }
-                        } else {
-                            InstructionKind::Assign {
-                                target: local,
-                                value: assigned,
-                                initialize: false,
-                            }
-                        };
-                        self.emit(statement.span, kind, None);
+                        self.replace_local(local, assigned, target.span, statement.span);
                     }
                 }
                 StatementKind::Expression(expr) => {

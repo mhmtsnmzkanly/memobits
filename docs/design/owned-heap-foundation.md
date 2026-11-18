@@ -58,8 +58,15 @@ invoking the callee. The existing reference rules prevent escape. A direct
 owned String parameter can also take an inline concat or owned String call
 result. The caller stages the owner during argument evaluation. Invocation
 moves it to the callee. A normal exit before invocation releases it in the
-caller. Other nested heap uses and share mutation require broader drop
-elaboration.
+caller. A whole mutable caller local can be passed as `text.share()` to a
+direct internal `share String` parameter. The callee can replace it with
+concat, a literal, or an owned local. Use a named local for a heap-producing
+call result on the RHS. Replacement reads the RHS before releasing the old
+allocation, then moves the new descriptor into the caller's existing slot.
+The caller remains responsible for its eventual cleanup. Simply borrowing
+or sharing that slot leaves its descriptor intact. Installing heap text
+through a forwarded share or a share alias remains gated. General nested
+heap uses still require broader drop elaboration.
 A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
@@ -128,9 +135,10 @@ have page-reuse coverage.
    direct calls and early exits during argument evaluation.
 8. Inline owned String arguments transfer their staged owners at invocation
    or release them on a normal exit during later argument evaluation.
-9. Extend normal-exit cleanup to general temporaries.
-   Whole replacement through a share also needs ownership tracking for the
-   pointee. Verify exact returned bytes, mixed ownership
+9. Direct exclusive parameters support whole String replacement with a
+   proven caller-owned destination. Track ownership through forwarded
+   shares and aliases before allowing them to install heap text.
+10. Extend normal-exit cleanup to general temporaries. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm
    execution. A trap still discards the whole instance.
 

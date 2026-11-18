@@ -63,7 +63,7 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
         ),
         (
             r#"var joined := "a"; let view := joined.share(); joined = "b".concat("c"); view.len();"#,
-            "heap String can only be read, borrowed",
+            "while it is shared",
         ),
         (
             r#"let joined := "a".concat("b"); returns(joined).borrow();"#,
@@ -103,6 +103,87 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
         assert!(!result.status.success(), "{body}");
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
+    }
+}
+
+#[test]
+fn share_string_replacement_preserves_caller_owned_storage() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='share-text'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn extend(text: share String, early: Bool) {
+            text = text.concat({ if early { return; } "😀" });
+        }
+        fn read_exclusive(text: share String) -> u32 { text.len() }
+        fn clear(text: share String) { text = "ok"; }
+        fn into_len(text: String) -> u32 { text.len() }
+        fn main() -> Result<Bool, Error> {
+            var text := "é";
+            extend(text.share(), false);
+            extend(text.share(), true);
+            if read_exclusive(text.share()) != 6 { return Ok(false); }
+            let last := match text.scalar_at(2) {
+                Some(value) => value == 128_512, None => false
+            };
+            var other := "".concat("!");
+            clear(other.share());
+            Ok(last && other.len() == 2 && into_len(text) == 6)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "share.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "share.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn share_string_replacement_rejects_aliases_and_conflicting_loans() {
+    let f = Fixture::new();
+    for (body, message) in [
+        (
+            "let view := text.borrow(); replace(text.share()); view.len();",
+            "while it is borrowed",
+        ),
+        ("two(text.share(), text.share());", "already shares it"),
+        (
+            "let view := text.share(); replace(view);",
+            "requires a direct share of a whole mutable caller local",
+        ),
+        (
+            "forward(text.share());",
+            "requires a direct share of a whole mutable caller local",
+        ),
+    ] {
+        let forwarding = if body.starts_with("forward(") {
+            "fn forward(text: share String) { replace(text.share()); }"
+        } else {
+            ""
+        };
+        f.write(
+            "text.mb",
+            &format!(
+                r#"
+            fn replace(text: share String) {{ text = text.concat("!"); }}
+            {forwarding}
+            fn two(left: share String, right: share String) {{ left.len(); right.len(); }}
+            fn main() {{ var text := "a"; {body} }}
+        "#
+            ),
+        );
+        let result = f.run(&["ownership", "text.mb"]);
+        assert!(!result.status.success(), "{body}");
+        let diagnostic = String::from_utf8(result.stderr).unwrap();
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
     }
 }
 

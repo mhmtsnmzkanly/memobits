@@ -2611,18 +2611,33 @@ fn validate_operand_escapes(
         }
     }
 
+    let shares = scoped_string::share_borrows(function);
     for (index, block) in function.blocks.iter().enumerate() {
         for (position, instruction) in block.instructions.iter().enumerate() {
-            if let InstructionKind::Call { callee, .. } = &instruction.kind {
+            if let InstructionKind::Call { callee, arguments } = &instruction.kind {
                 if let Source::Function(target) = callee.source {
-                    if heap_strings
-                        .get(target.0 as usize)
-                        .is_some_and(|fact| fact.returns_heap)
+                    let Some(facts) = heap_strings.get(target.0 as usize) else {
+                        continue;
+                    };
+                    let block_id = Some(BlockId(index as u32));
+                    if facts.returns_heap
                         && scoped_string::call_binding(function, &block.instructions[position..])
                             .is_none()
                     {
-                        push(errors, id, Some(BlockId(index as u32)),
+                        push(errors, id, block_id,
                             "heap String call result must be assigned directly to a whole String local");
+                    }
+                    for parameter in &facts.writes_heap {
+                        if arguments
+                            .get(*parameter)
+                            .and_then(|arg| {
+                                scoped_string::direct_share_owner(function, &shares, arg)
+                            })
+                            .is_none()
+                        {
+                            push(errors, id, block_id,
+                                "heap String replacement requires a direct share of a whole mutable caller local");
+                        }
                     }
                 }
             }
@@ -2638,7 +2653,7 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                "heap String can only be read, borrowed, moved to a whole String local or passed to an internal owned String parameter",
+                "heap String requires a whole String destination for moves and a checked loan for reference access",
             );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
@@ -2664,6 +2679,12 @@ fn validate_operand_escapes(
                         report(block_id, value, false, true);
                     }
                 }
+                InstructionKind::Borrow {
+                    owner,
+                    access: Access::Share,
+                    ..
+                } if matches!(owner.source, Source::Local(local) if heap_locals.contains(&local)) =>
+                    {}
                 InstructionKind::Borrow { owner: value, .. }
                 | InstructionKind::Load { reference: value } => {
                     report(block_id, value, false, false)
@@ -2698,7 +2719,9 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::Store { reference, value } => {
                     report(block_id, reference, false, false);
-                    report(block_id, value, true, false);
+                    if scoped_string::string_share_parameter(function, reference).is_none() {
+                        report(block_id, value, true, false);
+                    }
                 }
                 InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }

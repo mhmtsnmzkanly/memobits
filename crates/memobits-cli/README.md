@@ -68,8 +68,11 @@ An explicit `.borrow()` on either result can supply a `borrow String`
 argument to a direct internal call. The owner is released after the call
 or on an earlier normal exit during argument evaluation. Owned String
 parameters can receive those results directly. The callee takes ownership
-when invoked. Other nested heap uses, share mutation of heap owners,
-exported String signatures, and nested String storage are gated. Application
+when invoked. A direct `share String` parameter can replace a mutable
+caller local passed as `text.share()`. The caller owns the replacement.
+Installing heap text through forwarded shares or share aliases, other
+nested heap uses, exported String signatures, and nested String storage
+are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

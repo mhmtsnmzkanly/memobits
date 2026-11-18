@@ -3226,6 +3226,12 @@ fn compile_instruction(
         InstructionKind::Store { reference, value } => {
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
                 if is_aggregate(&inner) {
+                    if *inner == Type::String {
+                        if let Some(concat) = concat_index {
+                            emit_operand(body, function, param_count, reference, layout, frame)?;
+                            body.instruction(&WasmInstruction::Call(concat + 1));
+                        }
+                    }
                     // An error share can point at a descendant. Replace only the
                     // statically visible fields, keeping the object's identity.
                     let skip = match inner.as_ref() {
@@ -3249,6 +3255,17 @@ fn compile_instruction(
                         src_mem: 0,
                         dst_mem: 0,
                     });
+                    if *inner == Type::String {
+                        clear_moved_heap_source(
+                            body,
+                            function,
+                            param_count,
+                            value,
+                            layout,
+                            frame,
+                            heap_locals,
+                        )?;
+                    }
                     return Ok(());
                 }
             }

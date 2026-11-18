@@ -1,8 +1,8 @@
 //! Validate lexical heap String ownership and cleanup across CFG edges.
 
 use super::{
-    outgoing_edges, push, Block, Function, FunctionId, Instruction, InstructionKind, LocalId,
-    Operand, Source, TerminatorKind, Type, UseMode, ValidationError,
+    outgoing_edges, push, Access, Block, Function, FunctionId, Instruction, InstructionKind,
+    LocalId, Operand, Source, TerminatorKind, Type, UseMode, ValidationError, ValueId,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -10,12 +10,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct HeapStrings {
     pub locals: HashSet<LocalId>,
     pub(super) returns_heap: bool,
+    pub(super) writes_heap: HashSet<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Slot {
     Local(usize, LocalId),
     Return(usize),
+    ShareWrite(usize, usize),
 }
 
 impl super::Program {
@@ -25,6 +27,7 @@ impl super::Program {
         let mut moves: HashMap<Slot, Vec<Slot>> = HashMap::new();
         let mut pending = Vec::new();
         for (index, function) in self.functions.iter().enumerate() {
+            let shares = share_borrows(function);
             for block in &function.blocks {
                 if let Some((_, source)) = return_capture(block) {
                     moves
@@ -51,6 +54,16 @@ impl super::Program {
                                     .push(Slot::Local(index, *target));
                             }
                         }
+                        InstructionKind::Store { reference, value } => {
+                            if let (Some(parameter), Source::Local(source)) =
+                                (string_share_parameter(function, reference), value.source)
+                            {
+                                moves
+                                    .entry(Slot::Local(index, source))
+                                    .or_default()
+                                    .push(Slot::ShareWrite(index, parameter));
+                            }
+                        }
                         InstructionKind::Call { callee, arguments } => {
                             for (position, argument) in arguments.iter().enumerate() {
                                 if let Some((source, target, parameter)) =
@@ -60,6 +73,16 @@ impl super::Program {
                                         .entry(Slot::Local(index, source))
                                         .or_default()
                                         .push(Slot::Local(target, parameter));
+                                }
+                                if let Source::Function(callee) = callee.source {
+                                    if let Some(owner) =
+                                        direct_share_owner(function, &shares, argument)
+                                    {
+                                        moves
+                                            .entry(Slot::ShareWrite(callee.0 as usize, position))
+                                            .or_default()
+                                            .push(Slot::Local(index, owner));
+                                    }
                                 }
                             }
                             if let Some((callee, target)) =
@@ -79,6 +102,9 @@ impl super::Program {
         while let Some(source) = pending.pop() {
             let changed = match source {
                 Slot::Local(function, local) => facts[function].locals.insert(local),
+                Slot::ShareWrite(function, parameter) => {
+                    facts[function].writes_heap.insert(parameter)
+                }
                 Slot::Return(function) => {
                     !std::mem::replace(&mut facts[function].returns_heap, true)
                 }
@@ -91,6 +117,66 @@ impl super::Program {
         }
         facts
     }
+}
+
+/// A heap replacement may write directly through an incoming String share.
+pub(super) fn string_share_parameter(function: &Function, reference: &Operand) -> Option<usize> {
+    let Source::Local(local) = reference.source else {
+        return None;
+    };
+    let position = function
+        .parameter_locals
+        .iter()
+        .position(|id| *id == local)?;
+    let parameter = function.signature.parameters.get(position)?;
+    (reference.mode == UseMode::Share
+        && parameter.access == Access::Share
+        && parameter.ty == Type::String)
+        .then_some(position)
+}
+
+pub(super) fn share_borrows(function: &Function) -> HashMap<ValueId, Source> {
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|inst| match inst.kind {
+            InstructionKind::Borrow {
+                owner,
+                access: Access::Share,
+                ..
+            } => Some((inst.output?, owner.source)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Find the owned caller slot behind an explicit whole-local share. Lowering
+/// emits the explicit share and a reborrow for the parameter.
+pub(super) fn direct_share_owner(
+    function: &Function,
+    shares: &HashMap<ValueId, Source>,
+    argument: &Operand,
+) -> Option<LocalId> {
+    let Source::Value(value) = argument.source else {
+        return None;
+    };
+    if argument.mode != UseMode::Share {
+        return None;
+    }
+    let source = shares.get(&value)?;
+    let owner = match source {
+        Source::Value(base) => shares.get(base)?,
+        source => source,
+    };
+    let Source::Local(local) = owner else {
+        return None;
+    };
+    function
+        .locals
+        .get(local.0 as usize)
+        .is_some_and(|local| local.ty == Type::String && local.mutable)
+        .then_some(*local)
 }
 
 /// Capture the outgoing descriptor before any lexical cleanup runs. This

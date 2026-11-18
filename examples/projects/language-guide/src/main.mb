@@ -240,6 +240,10 @@ fn add_suffix(value: borrow String) -> String {
     text // Ownership moves out before this scope ends.
 }
 
+fn add_question_mark(value: share String) {
+    value = value.concat("?");
+}
+
 fn combined_byte_length(first: String, second: String, extra: u32) -> u32 {
     first.len() + second.len() + extra
 }
@@ -261,8 +265,8 @@ fn text_concat() -> Bool {
     let temporary_borrows := byte_length("é".concat("!").borrow()) == 3
         && byte_length(add_suffix(joined.borrow()).borrow()) == 10;
     var with_suffix := add_suffix(joined.borrow());
-    // The RHS reads the old text before assignment releases its bytes.
-    with_suffix = with_suffix.concat("?");
+    // The exclusive call replaces the caller's String after reading its old bytes.
+    add_question_mark(with_suffix.share());
     let empty := "".concat("");
     let moved := joined;
     let suffix_ok := byte_is(with_suffix.byte_at(9), 33) && byte_is(with_suffix.byte_at(10), 63);
