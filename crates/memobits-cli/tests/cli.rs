@@ -55,7 +55,7 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
     for (body, message) in [
         (
             r#""a".concat("b").borrow();"#,
-            "or an immediate read-only method",
+            "explicit borrow argument to a direct internal call",
         ),
         (
             r#"var joined := "a".concat("b"); let view := joined.borrow(); joined = "c"; view.len();"#,
@@ -360,6 +360,79 @@ fn immediate_heap_string_reads_run_from_source_and_wasm() {
     let artifact = f.run(&["run", "read.wasm"]);
     assert!(artifact.status.success(), "{artifact:?}");
     assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn temporary_string_borrows_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-borrow'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make() -> String {
+            let result := "a".concat("😀");
+            result
+        }
+        fn inspect(first: borrow String, second: borrow String, order: i32) -> Bool {
+            first.len() == 3 && second.len() == 5 && order == 2
+        }
+        fn early() -> Bool {
+            let unused := "unused";
+            inspect(make().borrow(), { return true; unused.borrow() }, 0)
+        }
+        fn main() -> Result<Bool, Error> {
+            var order := 0;
+            let read := inspect("é".concat({ order = 1; "!" }).borrow(),
+                make().borrow(), {
+                    if order != 1 { return Ok(false); }
+                    order = 2;
+                    order
+                });
+            Ok(read && early())
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "borrow.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "borrow.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn temporary_string_borrows_require_an_explicit_direct_argument() {
+    let f = Fixture::new();
+    for (body, message) in [
+        (
+            "let view := make().borrow(); view.len();",
+            "requires a named local",
+        ),
+        ("inspect(make());", "explicit .borrow()"),
+        ("inspect({ make().borrow() });", "requires a named local"),
+        (
+            "let indirect := inspect; indirect(make().borrow());",
+            "requires a named local",
+        ),
+        ("mutate(make().share());", "requires a named local"),
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"fn make() -> String {{ let result := "é".concat("!"); result }}
+                   fn inspect(value: borrow String) {{ value.len(); }}
+                   fn mutate(value: share String) {{ value.len(); }}
+                   fn main() {{ {body} }}"#,
+            ),
+        );
+        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE017");
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
 }
 
 #[test]

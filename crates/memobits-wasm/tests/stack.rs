@@ -295,6 +295,56 @@ fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
 }
 
 #[test]
+fn temporary_string_borrow_reuses_blocks_after_call_and_early_exit() {
+    let literal = "é".repeat(24_000);
+    let program = lower(&format!(
+        r#"
+        fn make(seed: borrow String) -> String {{
+            let result := seed.concat("");
+            result
+        }}
+        fn read(text: borrow String, expected: u32) -> Bool {{
+            text.len() == expected
+        }}
+        fn early(seed: borrow String) -> Bool {{
+            read(make(seed).borrow(), {{ return true; 0 }})
+        }}
+        fn main() -> Result<Bool, Error> {{
+            let seed := "{literal}";
+            var step := 0;
+            loop {{
+                if !read(seed.concat("").borrow(), 48_000) || !early(seed.borrow())
+                    || !read(make(seed.borrow()).borrow(), 48_000) {{
+                    return Err(Error {{ code: 1 }});
+                }}
+                step += 1;
+                if step == 8 {{ break; }}
+            }}
+            Ok(true)
+        }}
+        "#
+    ));
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(3),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), 2 * 65_536);
+    }
+}
+
+#[test]
 fn immediate_string_reads_reuse_memory_after_read_and_early_exit() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(

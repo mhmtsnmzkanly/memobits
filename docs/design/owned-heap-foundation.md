@@ -49,7 +49,12 @@ An early exit during evaluation cleans up only owners already initialized.
 Immediate `.len()`, `.byte_at()`, `.is_char_boundary()` and `.scalar_at()`
 reads can also use concat or direct call results. A hidden local owns the
 receiver before the offset is evaluated. It releases the allocation after
-the read or on an early normal exit while evaluating the offset. Other
+the read or on an early normal exit while evaluating the offset. A direct
+internal `borrow String` parameter also accepts an explicit `.borrow()` on
+a concat or owned String call result. The caller keeps that owner live
+through later argument evaluation and the call. Cleanup releases it when
+the call returns or when later argument evaluation exits normally without
+invoking the callee. The existing reference rules prevent escape. Other
 nested heap uses and share mutation require broader drop elaboration.
 A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
@@ -115,7 +120,9 @@ have page-reuse coverage.
    discards reuse one block within the same Wasm instance.
 6. Immediate read-only receivers stay live through offset evaluation and
    reuse the same cleanup on fallthrough and early control flow.
-7. Extend normal-exit cleanup to general temporaries.
+7. Explicit temporary String borrow arguments use the same cleanup for
+   direct calls and early exits during argument evaluation.
+8. Extend normal-exit cleanup to general temporaries.
    Whole replacement through a share also needs ownership tracking for the
    pointee. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm

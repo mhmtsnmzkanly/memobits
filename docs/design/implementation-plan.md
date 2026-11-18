@@ -225,8 +225,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   local. Standalone concat and direct call statements release discarded
   results. Immediate read-only String methods release their temporary
   receivers after the read or an early exit during offset evaluation.
-  Other nested heap uses, share mutation and general drop insertion remain
-  pending.
+  Direct internal calls can explicitly borrow a temporary String argument
+  through the call. Other nested heap uses, share mutation and general drop
+  insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.

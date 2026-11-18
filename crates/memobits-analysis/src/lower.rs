@@ -742,18 +742,18 @@ impl<'a> Builder<'a> {
         self.lower_expr(expr);
     }
 
-    fn lower_string_read_receiver(&mut self, base: &Expr) -> Option<Operand> {
+    fn lower_string_receiver(&mut self, base: &Expr) -> Option<Operand> {
         if let ExprKind::Call { callee, arguments } = &base.kind {
             if let ExprKind::Field { base: left, name } = &callee.kind {
                 if name == "concat" {
-                    let owner = self.hidden_local("String read receiver", Type::String, base.span);
+                    let owner = self.hidden_local("String temporary", Type::String, base.span);
                     self.lower_concat_initializer(owner, left, &arguments[0], base.span)?;
                     return Some(op(Source::Local(owner), base.span));
                 }
             }
             if self.ty(base) == Some(Type::String) {
                 let result = self.lower_expr(base)?;
-                let owner = self.hidden_local("String read receiver", Type::String, base.span);
+                let owner = self.hidden_local("String temporary", Type::String, base.span);
                 self.initialize_local(owner, consume(result), base.span);
                 return Some(op(Source::Local(owner), base.span));
             }
@@ -770,7 +770,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Operand> {
         let scope_start = self.string_locals.len();
         let result = (|| {
-            let receiver = self.lower_string_read_receiver(base)?;
+            let receiver = self.lower_string_receiver(base)?;
             let instruction = if method == "len" {
                 InstructionKind::StringLen {
                     source: read(receiver),
@@ -1531,7 +1531,30 @@ impl<'a> Builder<'a> {
                     for (index, (argument, parameter)) in
                         arguments.iter().zip(&signature.parameters).enumerate()
                     {
-                        let value = self.lower_expr(argument)?;
+                        let temporary_receiver = match &argument.kind {
+                            ExprKind::Call {
+                                callee: conversion, ..
+                            } if parameter.access == Access::Borrow
+                                && parameter.ty == Type::String
+                                && matches!(callee.source, Source::Function(_)) =>
+                            {
+                                match &conversion.kind {
+                                    ExprKind::Field { base, name }
+                                        if name == "borrow"
+                                            && matches!(base.kind, ExprKind::Call { .. }) =>
+                                    {
+                                        Some(base.as_ref())
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        let value = if let Some(base) = temporary_receiver {
+                            self.lower_string_receiver(base)?
+                        } else {
+                            self.lower_expr(argument)?
+                        };
                         let value = if parameter.access != Access::Owned {
                             // Keep the original pointee and loan.
                             let mut reference = self.borrow(value, parameter.access)?;

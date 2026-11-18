@@ -553,6 +553,7 @@ struct Checker {
     /// such a position.
     allowed_arrays: HashSet<usize>,
     concat_destination: Option<usize>,
+    temporary_string_borrow_argument: Option<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
     /// Address of the path expression currently checked as an index or field base.
@@ -1223,7 +1224,7 @@ impl Checker {
             self.error(
                 17,
                 expression.span,
-                "concat requires a whole String local destination, a standalone expression statement, or an immediate read-only method",
+                "concat requires a whole String local, a standalone statement, an immediate read-only method, or an explicit borrow argument to a direct internal call",
             );
         }
         let expected = usize::from(method != "len");
@@ -1296,6 +1297,33 @@ impl Checker {
                 self.expr(argument, None);
             }
             return Ty::Error;
+        }
+
+        if access == IrAccess::Borrow
+            && self.temporary_string_borrow_argument == Some(expression as *const Expr as usize)
+            && matches!(base.kind, ExprKind::Call { .. })
+        {
+            let previous = self
+                .concat_destination
+                .replace(base as *const Expr as usize);
+            let receiver = self.expr(base, Some(&Ty::String));
+            self.concat_destination = previous;
+            return match receiver {
+                Ty::String => Ty::Reference {
+                    access,
+                    inner: Box::new(Ty::String),
+                    origin: ReferenceOrigin::Temporary,
+                },
+                ty @ (Ty::Never | Ty::Error) => ty,
+                _ => {
+                    self.error(
+                        17,
+                        base.span,
+                        "a temporary borrow argument requires an owned String call result",
+                    );
+                    Ty::Error
+                }
+            };
         }
 
         // `m[i].borrow()`, `l.a.share()`: a projection of a named local.
@@ -2643,7 +2671,17 @@ impl Checker {
                             // call result, `if` or named value moved into the call.
                             self.allow_array_value(arg);
                         }
+                        let previous = self.temporary_string_borrow_argument;
+                        if direct
+                            && params.get(i).is_some_and(|parameter| {
+                                parameter.access == IrAccess::Borrow && parameter.ty == Ty::String
+                            })
+                        {
+                            self.temporary_string_borrow_argument =
+                                Some(arg as *const Expr as usize);
+                        }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
+                        self.temporary_string_borrow_argument = previous;
                         if params
                             .get(i)
                             .is_none_or(|parameter| parameter.access == IrAccess::Owned)
@@ -2891,6 +2929,7 @@ fn check_standalone(
         lowering: capture,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
+        temporary_string_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
@@ -3208,6 +3247,7 @@ fn checker() -> Checker {
         lowering: true,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
+        temporary_string_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
