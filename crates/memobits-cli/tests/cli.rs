@@ -808,6 +808,61 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn list_push_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-push'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn check(move_it: Bool) -> Bool {
+            var bytes: List<u8> = [];
+            var words: List<u32> = [];
+            var calls := 0;
+            loop {
+                bytes.push({ calls += 1; 195 });
+                words.push(words.len() + 1);
+                if calls == 20 { break; }
+            }
+            if move_it {
+                var moved := words;
+                moved.push(99);
+                return moved.len() == 21 && bytes.len() == 20 && calls == 20;
+            }
+            words.len() == 20 && bytes.len() == 20
+        }
+        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true)) }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "lists.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "lists.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn list_push_rejects_invalid_destinations_and_elements() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("let items: List<u8> = []; items.push(1);", "TE017"),
+        ("var items: List<u8> = []; items.push(true);", "TE002"),
+        (
+            "var items: List<u32> = []; items.push({ let moved := items; 1 });",
+            "BE001",
+        ),
+    ] {
+        f.write("list.mb", &format!("fn main() {{ {body} }}"));
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+}
+
+#[test]
 fn empty_lists_and_local_moves_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(

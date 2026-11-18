@@ -392,7 +392,7 @@ struct Builder<'a> {
     variants: HashMap<ExprId, VariantUse>,
     matches: HashMap<ExprId, &'a MatchFact>,
     current: Option<BlockId>,
-    string_locals: Vec<LocalId>,
+    owned_locals: Vec<LocalId>,
     loops: Vec<LoopTargets>,
     next_loan: u32,
     /// Values produced by `Load`: read-only provenance that must be copied
@@ -422,7 +422,7 @@ impl<'a> Builder<'a> {
             .map(|u| (u.expression, *u))
             .collect();
         let matches = facts.matches.iter().map(|m| (m.expression, m)).collect();
-        let string_locals = function
+        let owned_locals = function
             .parameter_locals
             .iter()
             .copied()
@@ -438,7 +438,7 @@ impl<'a> Builder<'a> {
             variants,
             matches,
             current: Some(BlockId(0)),
-            string_locals,
+            owned_locals,
             loops: Vec::new(),
             next_loan: 0,
             loaded: HashSet::new(),
@@ -689,8 +689,11 @@ impl<'a> Builder<'a> {
             },
             None,
         );
-        if self.function.locals[local.0 as usize].ty == Type::String {
-            self.string_locals.push(local);
+        if matches!(
+            self.function.locals[local.0 as usize].ty,
+            Type::String | Type::List(_)
+        ) {
+            self.owned_locals.push(local);
         }
     }
 
@@ -736,7 +739,7 @@ impl<'a> Builder<'a> {
             },
             None,
         );
-        self.string_locals.push(target);
+        self.owned_locals.push(target);
     }
 
     fn lower_string_push_str(
@@ -755,7 +758,7 @@ impl<'a> Builder<'a> {
         let suffix = self.lower_expr(suffix)?;
         let right = self.borrow(suffix, Access::Borrow)?;
         let left = self.borrow(exclusive, Access::Borrow)?;
-        let scope_start = self.string_locals.len();
+        let scope_start = self.owned_locals.len();
         let staged = self.hidden_local("String append result", Type::String, expr.span);
         self.initialize_concat(staged, left, right, expr.span);
         self.replace_local(
@@ -764,20 +767,20 @@ impl<'a> Builder<'a> {
             base.span,
             expr.span,
         );
-        self.end_string_locals(scope_start, expr.span);
-        self.string_locals.truncate(scope_start);
+        self.end_owned_locals(scope_start, expr.span);
+        self.owned_locals.truncate(scope_start);
         self.unit(expr.span)
     }
 
     fn lower_expression_statement(&mut self, expr: &Expr) {
         if let ExprKind::Call { callee, arguments } = &expr.kind {
-            let scope_start = self.string_locals.len();
+            let scope_start = self.owned_locals.len();
             if let ExprKind::Field { base, name } = &callee.kind {
                 if name == "concat" {
                     let owner = self.hidden_local("discarded String", Type::String, expr.span);
                     self.lower_concat_initializer(owner, base, &arguments[0], expr.span);
-                    self.end_string_locals(scope_start, expr.span);
-                    self.string_locals.truncate(scope_start);
+                    self.end_owned_locals(scope_start, expr.span);
+                    self.owned_locals.truncate(scope_start);
                     return;
                 }
             }
@@ -785,8 +788,8 @@ impl<'a> Builder<'a> {
                 if let Some(result) = self.lower_expr(expr) {
                     let owner = self.hidden_local("discarded String", Type::String, expr.span);
                     self.initialize_local(owner, consume(result), expr.span);
-                    self.end_string_locals(scope_start, expr.span);
-                    self.string_locals.truncate(scope_start);
+                    self.end_owned_locals(scope_start, expr.span);
+                    self.owned_locals.truncate(scope_start);
                 }
                 return;
             }
@@ -820,7 +823,7 @@ impl<'a> Builder<'a> {
         method: &str,
         arguments: &[Expr],
     ) -> Option<Operand> {
-        let scope_start = self.string_locals.len();
+        let scope_start = self.owned_locals.len();
         let result = (|| {
             let receiver = self.lower_string_with_temporary_owner(base)?;
             let instruction = if method == "len" {
@@ -847,21 +850,26 @@ impl<'a> Builder<'a> {
             self.emit(expr.span, instruction, self.ty(expr))
         })();
         if result.is_some() {
-            self.end_string_locals(scope_start, expr.span);
+            self.end_owned_locals(scope_start, expr.span);
         }
-        self.string_locals.truncate(scope_start);
+        self.owned_locals.truncate(scope_start);
         result
     }
 
-    fn end_string_locals(&mut self, from: usize, span: Span) {
-        for index in (from..self.string_locals.len()).rev() {
-            let local = self.string_locals[index];
-            self.emit(span, InstructionKind::EndStringLocal { local }, None);
+    fn end_owned_locals(&mut self, from: usize, span: Span) {
+        for index in (from..self.owned_locals.len()).rev() {
+            let local = self.owned_locals[index];
+            let end = if matches!(self.function.locals[local.0 as usize].ty, Type::List(_)) {
+                InstructionKind::EndListLocal { local }
+            } else {
+                InstructionKind::EndStringLocal { local }
+            };
+            self.emit(span, end, None);
         }
     }
 
     fn preserve_scope_result(&mut self, value: Operand, from: usize) -> Option<Operand> {
-        if matches!(value.source, Source::Local(local) if self.string_locals[from..].contains(&local))
+        if matches!(value.source, Source::Local(local) if self.owned_locals[from..].contains(&local))
         {
             self.capture(consume(value))
         } else {
@@ -874,7 +882,7 @@ impl<'a> Builder<'a> {
             let returned = returned
                 .and_then(|value| self.preserve_scope_result(value, 0))
                 .map(consume);
-            self.end_string_locals(0, span);
+            self.end_owned_locals(0, span);
             self.finish(current, TerminatorKind::Return(returned), Some(span));
         }
     }
@@ -891,7 +899,7 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_block(&mut self, block: &Block) -> Option<Operand> {
-        let scope_start = self.string_locals.len();
+        let scope_start = self.owned_locals.len();
         for statement in &block.statements {
             if self.current.is_none() {
                 break;
@@ -943,7 +951,7 @@ impl<'a> Builder<'a> {
                                     Type::String,
                                     value.span,
                                 );
-                                let scope_start = self.string_locals.len();
+                                let scope_start = self.owned_locals.len();
                                 if self
                                     .lower_concat_initializer(
                                         staged,
@@ -959,8 +967,8 @@ impl<'a> Builder<'a> {
                                         target.span,
                                         statement.span,
                                     );
-                                    self.end_string_locals(scope_start, statement.span);
-                                    self.string_locals.truncate(scope_start);
+                                    self.end_owned_locals(scope_start, statement.span);
+                                    self.owned_locals.truncate(scope_start);
                                 }
                                 continue;
                             }
@@ -1017,13 +1025,13 @@ impl<'a> Builder<'a> {
                     let loop_targets = self.loops.last_mut().expect("checked break");
                     loop_targets.had_break = true;
                     let (target, start) = (loop_targets.exit, loop_targets.scope_start);
-                    self.end_string_locals(start, statement.span);
+                    self.end_owned_locals(start, statement.span);
                     self.goto(target, Vec::new(), statement.span);
                 }
                 StatementKind::Continue => {
                     let loop_targets = self.loops.last().expect("checked continue");
                     let (target, start) = (loop_targets.header, loop_targets.scope_start);
-                    self.end_string_locals(start, statement.span);
+                    self.end_owned_locals(start, statement.span);
                     self.goto(target, Vec::new(), statement.span);
                 }
             }
@@ -1038,9 +1046,9 @@ impl<'a> Builder<'a> {
         };
         let value = value.and_then(|value| self.preserve_scope_result(value, scope_start));
         if self.current.is_some() {
-            self.end_string_locals(scope_start, block.span);
+            self.end_owned_locals(scope_start, block.span);
         }
-        self.string_locals.truncate(scope_start);
+        self.owned_locals.truncate(scope_start);
         value
     }
     /// Address one element of an array operand. The bounds check is part of the
@@ -1395,7 +1403,7 @@ impl<'a> Builder<'a> {
             header,
             exit,
             had_break: false,
-            scope_start: self.string_locals.len(),
+            scope_start: self.owned_locals.len(),
         });
         self.lower_block(body);
         if self.current.is_some() {
@@ -1555,6 +1563,15 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
+                    if name == "push" {
+                        let PathTarget::Local(target) = self.path(base) else {
+                            unreachable!("checked List push receiver")
+                        };
+                        let value = self.lower_expr(&arguments[0])?;
+                        let value = read(self.scalar(value)?);
+                        self.emit(expr.span, InstructionKind::ListPush { target, value }, None);
+                        return self.unit(expr.span);
+                    }
                     if name == "push_str" {
                         return self.lower_string_push_str(expr, base, &arguments[0]);
                     }
@@ -1584,7 +1601,7 @@ impl<'a> Builder<'a> {
                 };
                 let callee = self.lower_expr(callee)?;
                 let callee = self.capture(callee)?;
-                let scope_start = self.string_locals.len();
+                let scope_start = self.owned_locals.len();
                 let result = (|| {
                     let mut args = Vec::new();
                     for (index, (argument, parameter)) in
@@ -1657,9 +1674,9 @@ impl<'a> Builder<'a> {
                     )
                 })();
                 if result.is_some() {
-                    self.end_string_locals(scope_start, expr.span);
+                    self.end_owned_locals(scope_start, expr.span);
                 }
-                self.string_locals.truncate(scope_start);
+                self.owned_locals.truncate(scope_start);
                 result
             }
             ExprKind::Struct { fields, .. } => {
@@ -1821,7 +1838,7 @@ impl<'a> Builder<'a> {
         );
         let mut reaches = false;
         for ((arm, arm_fact), block) in arms.iter().zip(&fact.arms).zip(arm_blocks) {
-            let scope_start = self.string_locals.len();
+            let scope_start = self.owned_locals.len();
             self.current = Some(block);
             if let Some(variant) = arm_fact.variant {
                 let payload = &definition.variants[variant as usize].payload;
@@ -1894,12 +1911,12 @@ impl<'a> Builder<'a> {
             }
             if let Some(value) = self.lower_expr(&arm.body) {
                 if let Some(value) = self.preserve_scope_result(value, scope_start) {
-                    self.end_string_locals(scope_start, arm.body.span);
+                    self.end_owned_locals(scope_start, arm.body.span);
                     self.join(join_id, value, arm.body.span);
                     reaches = true;
                 }
             }
-            self.string_locals.truncate(scope_start);
+            self.owned_locals.truncate(scope_start);
         }
         self.current = reaches.then_some(join_id);
         parameter.map(|id| op(Source::Value(id), expr.span))

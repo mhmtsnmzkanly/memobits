@@ -371,7 +371,7 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, inst)| !matches!(inst.kind, InstructionKind::EndStringLocal { .. }))?;
+        .find(|(_, inst)| !is_cleanup(inst))?;
     let InstructionKind::Capture(Operand {
         source: Source::Local(source),
         mode: UseMode::Consume,
@@ -417,7 +417,10 @@ pub(super) fn call_binding(
 }
 
 fn is_cleanup(instruction: &Instruction) -> bool {
-    matches!(instruction.kind, InstructionKind::EndStringLocal { .. })
+    matches!(
+        instruction.kind,
+        InstructionKind::EndStringLocal { .. } | InstructionKind::EndListLocal { .. }
+    )
 }
 
 /// A direct call may move a local into an owned String parameter.
@@ -473,7 +476,22 @@ pub(super) fn validate(
     facts: &[HeapStrings],
     errors: &mut Vec<ValidationError>,
 ) {
-    let locals = &facts[id.0 as usize].locals;
+    let mut locals = facts[id.0 as usize].locals.clone();
+    let list_local = |id: LocalId| {
+        function
+            .locals
+            .get(id.0 as usize)
+            .is_some_and(|local| matches!(local.ty, Type::List(_)))
+    };
+    locals.extend(
+        function
+            .locals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, local)| {
+                matches!(local.ty, Type::List(_)).then_some(LocalId(index as u32))
+            }),
+    );
     if locals.is_empty() || function.entry.0 as usize >= function.blocks.len() {
         return;
     }
@@ -502,21 +520,42 @@ pub(super) fn validate(
                 } if locals.contains(target) => {
                     let source_outside_scope = matches!(value.source, Source::Local(source)
                         if locals.contains(&source) && !in_scope.contains(&source));
-                    if !string_destination(function, *target, *initialize)
+                    if (!list_local(*target) && !string_destination(function, *target, *initialize))
                         || source_outside_scope
                         || (!initialize && !in_scope.contains(target))
                     {
-                        push(errors, id, Some(block_id), "heap String assignment requires a whole local in scope or a new binding");
+                        let message = if list_local(*target) {
+                            "List move requires a source local in scope"
+                        } else {
+                            "heap String assignment requires a whole local in scope or a new binding"
+                        };
+                        push(errors, id, Some(block_id), message);
                     }
                     initialize.then_some(*target)
                 }
-                InstructionKind::EndStringLocal { local } if locals.contains(local) => {
+                InstructionKind::ListPush { target, .. } if !in_scope.contains(target) => {
+                    push(
+                        errors,
+                        id,
+                        Some(block_id),
+                        "List push outside the local's scope",
+                    );
+                    None
+                }
+                InstructionKind::EndStringLocal { local }
+                | InstructionKind::EndListLocal { local }
+                    if locals.contains(local) =>
+                {
                     if !in_scope.remove(local) {
                         push(
                             errors,
                             id,
                             Some(block_id),
-                            "heap String local ends outside its scope",
+                            if list_local(*local) {
+                                "List local ends outside its scope"
+                            } else {
+                                "heap String local ends outside its scope"
+                            },
                         );
                     }
                     None
@@ -528,7 +567,7 @@ pub(super) fn validate(
                     errors,
                     id,
                     Some(block_id),
-                    "heap String local initialized while still in scope",
+                    "owned local initialized while still in scope",
                 );
             }
         }
@@ -537,7 +576,11 @@ pub(super) fn validate(
                 errors,
                 id,
                 Some(block_id),
-                "return leaves a heap String local in scope",
+                if in_scope.iter().any(|local| list_local(*local)) {
+                    "return leaves a List local in scope"
+                } else {
+                    "return leaves a heap String local in scope"
+                },
             );
         }
         for edge in outgoing_edges(&block.terminator.kind) {
@@ -550,7 +593,7 @@ pub(super) fn validate(
                         errors,
                         id,
                         Some(block_id),
-                        "heap String scopes differ at a control-flow join",
+                        "owned local scopes differ at a control-flow join",
                     );
                 }
                 Some(_) => {}

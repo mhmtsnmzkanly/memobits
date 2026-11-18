@@ -1346,6 +1346,32 @@ impl Checker {
         )
     }
 
+    fn list_push(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        self.allow_array_value(base);
+        let receiver = self.expr(base, None);
+        let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
+            && self.lookup(&path[0]).is_some_and(|binding| binding.mutable));
+        let Ty::List(element) = receiver else {
+            self.error(17, base.span, "push() requires a mutable whole List local");
+            return Ty::Error;
+        };
+        if !writable {
+            self.error(17, base.span, "push() requires a mutable whole List local");
+        }
+        if arguments.len() != 1 {
+            self.error(10, expr.span, "push() expects one element");
+            return Ty::Error;
+        }
+        let element = Ty::Primitive(element);
+        let value = read_type(self.expr(&arguments[0], Some(&element)));
+        self.ensure(&value, &element, arguments[0].span);
+        if value == Ty::Never {
+            Ty::Never
+        } else {
+            UNIT
+        }
+    }
+
     fn string_push_str(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
         && self.lookup(&path[0]).is_some_and(|binding| {
@@ -2748,6 +2774,9 @@ impl Checker {
                     }
                     if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
                         return self.byte_utf8(expr, base, name, arguments);
+                    }
+                    if name == "push" {
+                        return self.list_push(expr, base, arguments);
                     }
                     if name == "push_str" {
                         return self.string_push_str(expr, base, arguments);

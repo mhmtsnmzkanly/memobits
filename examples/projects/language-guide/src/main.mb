@@ -133,14 +133,17 @@ fn fixed_bytes() -> Bool {
     valid && copied && first_byte(array.borrow()) == 42
 }
 
-// An annotation selects an empty List instead of a fixed array.
-// This slice supports local moves and len() without allocating a heap block.
-fn empty_lists() -> Bool {
-    let bytes: List<u8> = [];
+// An annotation selects an empty List. push appends to a whole var local.
+// Moving into a new binding transfers ownership of the backing storage.
+fn primitive_lists() -> Bool {
+    var bytes: List<u8> = [];
     var words: List<u32> = [];
     let before := bytes.len() + words.len();
-    let moved := words;
-    before == 0 && bytes.len() == 0 && moved.len() == 0
+    bytes.push(42);
+    words.push(1000);
+    var moved := words;
+    moved.push(2000);
+    before == 0 && bytes.len() == 1 && moved.len() == 2
 }
 
 // String literals are owned UTF-8. The empty literal is also a String.
@@ -508,6 +511,6 @@ fn main() -> Result<i32, Error> {
     if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
     if !text_concat() { return Err(Error { code: 12 }); }
     if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
-    if !empty_lists() { return Err(Error { code: 14 }); }
+    if !primitive_lists() { return Err(Error { code: 14 }); }
     Ok(42)
 }

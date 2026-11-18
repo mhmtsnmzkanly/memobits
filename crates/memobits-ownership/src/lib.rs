@@ -200,8 +200,17 @@ fn transfer_instruction(
             }
             state[target.0 as usize] = Availability::Available;
         }
-        InstructionKind::EndStringLocal { local } => {
+        InstructionKind::EndStringLocal { local } | InstructionKind::EndListLocal { local } => {
             state[local.0 as usize] = Availability::Unavailable
+        }
+        InstructionKind::ListPush { target, value } => {
+            transfer_operand(value, state, diagnostics.as_deref_mut(), function);
+            let receiver = Operand {
+                source: Source::Local(*target),
+                mode: UseMode::Read,
+                span: instruction.span,
+            };
+            transfer_operand(&receiver, state, diagnostics, function);
         }
         InstructionKind::EmptyList | InstructionKind::Constant(_) => {}
         InstructionKind::Capture(operand) => {

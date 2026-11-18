@@ -600,7 +600,9 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
         InstructionKind::EmptyList
         | InstructionKind::Constant(_)
-        | InstructionKind::EndStringLocal { .. } => Vec::new(),
+        | InstructionKind::EndStringLocal { .. }
+        | InstructionKind::EndListLocal { .. } => Vec::new(),
+        InstructionKind::ListPush { value, .. } => vec![value],
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
         | InstructionKind::ListLen { source: operand }

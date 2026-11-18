@@ -212,9 +212,10 @@ the implemented subset; a milestone is not complete merely because its crate exi
   trapped instances. Library exports use scalar signatures. Application
   entries can also use the private `main` outcome adapter for zero-argument
   `Result` and `Attempt` functions with primitive success payloads.
-- Empty `List<u8>` and `List<u32>` values run in local bindings, with owned
-  moves and `.len()`. The [List design](list-slice.md) follows with checked
-  read and append operations using shared heap allocation. General
+- `List<u8>` and `List<u32>` support empty locals, moves, `.len()` and
+  `.push()` on whole mutable locals. Growth uses the same checked allocator
+  as String. The [List design](list-slice.md) follows with checked copied
+  reads. General
   aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
   `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static

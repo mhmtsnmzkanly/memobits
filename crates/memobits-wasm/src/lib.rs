@@ -315,6 +315,8 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
         | InstructionKind::ListLen { .. }
+        | InstructionKind::ListPush { .. }
+        | InstructionKind::EndListLocal { .. }
         | InstructionKind::EmptyList
         | InstructionKind::InitConcatString { .. }
         | InstructionKind::StringIsCharBoundary { .. }
@@ -950,7 +952,9 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
     for block in &function.blocks {
         for instruction in &block.instructions {
             match &instruction.kind {
-                InstructionKind::EmptyList
+                InstructionKind::ListPush { value, .. } => count(value),
+                InstructionKind::EndListLocal { .. }
+                | InstructionKind::EmptyList
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStringLocal { .. } => {}
                 InstructionKind::Capture(operand)
@@ -1564,20 +1568,33 @@ fn encode_frames_traced(
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
     let heap_strings = program.heap_strings();
-    let heap_copy_index = reachable
-        .iter()
-        .any(|id| {
+    let has_list_push = reachable.iter().any(|id| {
+        program.functions[*id as usize]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|inst| matches!(inst.kind, InstructionKind::ListPush { .. }))
+    });
+    let use_heap = has_list_push
+        || reachable.iter().any(|id| {
             let facts = &heap_strings[*id as usize];
             !facts.locals.is_empty() || facts.returns_heap_ok
-        })
-        .then(|| {
-            let adapter_count = u32::from(entry.is_some());
-            types.ty().function([ValType::I32; 5], [ValType::I32]);
-            types.ty().function([ValType::I32], []);
-            functions.function(signatures.len() as u32 + adapter_count);
-            functions.function(signatures.len() as u32 + adapter_count + 1);
-            selected.len() as u32 + adapter_count
         });
+    let heap_copy_index = use_heap.then(|| {
+        let adapter_count = u32::from(entry.is_some());
+        let first = signatures.len() as u32 + adapter_count;
+        types.ty().function([ValType::I32; 5], [ValType::I32]); // String copy
+        types.ty().function([ValType::I32], []); // block release
+        types.ty().function([ValType::I32], [ValType::I32]); // block reservation
+        for offset in 0..3 {
+            functions.function(first + offset);
+        }
+        if has_list_push {
+            types.ty().function([ValType::I32; 3], [ValType::I32]);
+            functions.function(first + 3);
+        }
+        selected.len() as u32 + adapter_count
+    });
     let utf8 = reachable
         .iter()
         .any(|id| {
@@ -1588,7 +1605,12 @@ fn encode_frames_traced(
                 .any(|inst| matches!(inst.kind, InstructionKind::ValidateUtf8 { .. }))
         })
         .then(|| {
-            let prior = u32::from(entry.is_some()) + if heap_copy_index.is_some() { 2 } else { 0 };
+            let prior = u32::from(entry.is_some())
+                + if use_heap {
+                    3 + u32::from(has_list_push)
+                } else {
+                    0
+                };
             types.ty().function([ValType::I32; 3], [ValType::I64]);
             functions.function(signatures.len() as u32 + prior);
             (selected.len() as u32 + prior, program)
@@ -1637,9 +1659,13 @@ fn encode_frames_traced(
         wrapper.instruction(&WasmInstruction::End);
         code.function(&wrapper);
     }
-    if heap_copy_index.is_some() {
-        code.function(&string_heap::copy_ranges());
+    if let Some(copy) = heap_copy_index {
+        code.function(&string_heap::copy_ranges(copy + 2));
         code.function(&string_heap::releaser());
+        code.function(&string_heap::reserve());
+        if has_list_push {
+            code.function(&list_descriptor::push(copy + 2, copy + 1));
+        }
     }
     if utf8.is_some() {
         code.function(&utf8::validator());
@@ -2133,6 +2159,7 @@ fn release_string_local(
         frame.ok_or("String local requires a frame")?,
         cell.offset,
     );
+    string_descriptor::load_allocation(body);
     let releaser = heap_copy_index.ok_or("missing String release helper")? + 1;
     body.instruction(&WasmInstruction::Call(releaser));
     Ok(())
@@ -2872,6 +2899,33 @@ fn compile_instruction(
                 },
             )?;
         }
+        InstructionKind::EndListLocal { local } => {
+            if let Some(copy) = heap_copy_index {
+                let cell = array_cell_of(layout, Slot::Local(local.0))?;
+                emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
+                list_descriptor::load_allocation(body);
+                body.instructions().call(copy + 1);
+            }
+        }
+        InstructionKind::ListPush { target, value } => {
+            let cell = array_cell_of(layout, Slot::Local(target.0))?;
+            let frame = frame.ok_or("List requires a frame")?;
+            let Type::List(element) = function.locals[target.0 as usize].ty else {
+                return Err("List push target is not a List".into());
+            };
+            let (width, _) = storage_layout(element)?;
+            emit_address(body, frame, cell.offset);
+            emit_operand(body, function, param_count, value, layout, Some(frame))?;
+            body.instructions()
+                .i32_const(width as i32)
+                .call(heap_copy_index.ok_or("missing List allocation helper")? + 3)
+                .i32_eqz();
+            trap_if(
+                body,
+                traps.site(instruction.span),
+                TrapReason::HeapAllocation,
+            );
+        }
         InstructionKind::EmptyList => {
             let value = instruction.output.ok_or("empty List lacks a value")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
@@ -3377,6 +3431,7 @@ fn compile_instruction(
                     if *inner == Type::String {
                         if let Some(copy) = heap_copy_index {
                             emit_operand(body, function, param_count, reference, layout, frame)?;
+                            string_descriptor::load_allocation(body);
                             body.instruction(&WasmInstruction::Call(copy + 1));
                         }
                     }
@@ -3435,6 +3490,12 @@ fn compile_instruction(
                     release_string_local(body, *target, layout, frame, heap_copy_index)?;
                 }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
+                if matches!(value.source, Source::Local(_))
+                    && matches!(function.locals[target.0 as usize].ty, Type::List(_))
+                {
+                    emit_operand(body, function, param_count, value, layout, frame)?;
+                    list_descriptor::clear_allocation(body);
+                }
                 clear_moved_heap_source(
                     body,
                     function,

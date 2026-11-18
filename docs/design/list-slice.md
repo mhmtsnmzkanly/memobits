@@ -10,18 +10,16 @@ the equivalence of `Bytes<N>` and `Array<u8, N>`.
 
 ## Executable checkpoint
 
-`List<u8>` and `List<u32>` support contextual empty `[]` in owned local
-bindings, moves into new local bindings, and non-consuming `.len()` as
-`u32`. Both `let` and `var` can hold empty Lists. The Wasm frame contains a
-private empty descriptor, and construction allocates no heap block. The
-applied spelling is built in, and bare `List` can still name a user type.
-Whole-local replacement, operations that change length, element access,
-nesting, borrows, call signatures and exports remain gated at this
-checkpoint. The language guide checks both element types and local moves
-from source and standalone Wasm.
+`List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
+local bindings, non-consuming `.len()` as `u32`, and `.push(value)` on whole
+mutable locals. Empty construction allocates no heap block. A push evaluates
+the element once and returns unit. Moves transfer the block and normal scope
+exits release the owner. The applied spelling is built in, and bare `List`
+can still name a user type. Replacement, element reads, nesting, borrows,
+call signatures and exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
-## Proposed growth slice
+## Source scope
 
 Start with `List<u8>` and `List<u32>`. They exercise one-byte and
 four-byte element storage and fit the current payload alignment. Both
@@ -35,10 +33,11 @@ or a coverage need.
   literals, repetition, and conversion from arrays.
 - Use `items.push(value)` to append one element and return unit. The
   receiver is a whole mutable local. Evaluate the element once, before
-  allocating, growing, or changing the list. Check conflicting access
-  with the existing exclusive loan rules.
-- Use `items.len()` for a non-consuming `u32` element count and
-  `items.get(index)` for a copied `Option<T>` at a `u32` index.
+  allocating, growing, or changing the list. The argument can read the
+  receiver's length. A move of the receiver during argument evaluation
+  makes the subsequent push invalid.
+- Use `items.len()` for a non-consuming `u32` element count. A later slice
+  can add `items.get(index)` for a copied `Option<T>` at a `u32` index.
   Both work on immutable and mutable locals. An out-of-range `get`
   returns `None` before any element load. Subscript syntax can follow
   with the accepted checked-indexing behavior.
@@ -69,9 +68,9 @@ to change.
 The [current heap](owned-heap-foundation.md) has a checked cursor,
 four-byte-aligned whole blocks and a first-fit free list. Its current
 copy helper reads live byte ranges and publishes a String descriptor.
-Extract byte reservation and block release from descriptor publication
-when List becomes the second consumer. Keep String on the same allocator
-and retain its allocation failure and alias tests. The four-byte alignment
+Byte reservation and block release are shared by String and List.
+List uses the byte capacity in the allocated block's header. Both
+consumers keep their allocation-failure and reuse tests. The four-byte alignment
 suffices for the proposed elements. Wider-aligned elements need a separate
 layout decision when they are introduced.
 [Current Wasm allocator](../../crates/memobits-wasm/src/string_heap.rs)
@@ -89,12 +88,11 @@ high-water mark.
 
 ## Implementation and checks
 
-1. The empty local owner path and non-consuming length are executable.
-   Extract shared block reservation and release when implementing the
-   first allocation. Keep unsupported shapes under type and IR validation.
-2. Exercise push through a growth boundary, copied reads, and normal-exit
-   cleanup in a self-checking example. Run it from source and standalone
-   Wasm, and add it to the runnable language guide.
+1. Empty local owners, length, push, growth and normal-exit cleanup are
+   executable. The language guide runs from source and standalone Wasm.
+2. The Wasm test checks both element widths, payload addresses, exact bytes
+   after growth, repeated reuse and a forced allocation trap. Add copied
+   reads in the next executable slice.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,

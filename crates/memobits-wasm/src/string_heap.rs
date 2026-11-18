@@ -1,4 +1,4 @@
-//! Private whole-block free list for scoped String owners.
+//! Private whole-block allocator shared by String and List.
 
 use super::{memory, memory_arg, string_descriptor, Primitive};
 use wasm_encoder::{BlockType, Function, Instruction as I, MemArg, ValType};
@@ -8,40 +8,18 @@ pub(super) const FREE_GLOBAL: u32 = 4;
 pub(super) const BLOCK_ALIGN: u32 = 4;
 const CAPACITY_OFFSET: u64 = 0;
 const NEXT_OFFSET: u64 = 4;
-const HEADER_BYTES: i32 = 8;
+pub(super) const HEADER_BYTES: i32 = 8;
 
-const LEFT: u32 = 0;
-const LEFT_LEN: u32 = 1;
-const RIGHT: u32 = 2;
-const RIGHT_LEN: u32 = 3;
-const DESTINATION: u32 = 4;
-const LEN: u32 = 5;
-const BLOCK: u32 = 6;
-const PREVIOUS: u32 = 7;
-const PAGES: u32 = 8;
-const END: u32 = 9;
+const LEN: u32 = 0;
+const BLOCK: u32 = 1;
+const PREVIOUS: u32 = 2;
+const PAGES: u32 = 3;
+const END: u32 = 4;
 
-/// Allocate and copy two already validated UTF-8 ranges. The caller supplies
-/// in-bounds, live ranges outside free blocks and a private descriptor slot.
-/// Return false on size or growth failure without publishing a descriptor or
-/// changing allocator state.
-pub(super) fn copy_ranges() -> Function {
-    let mut body = Function::new([(4, ValType::I32), (1, ValType::I64)]);
-    body.instructions()
-        .local_get(LEFT_LEN)
-        .i64_extend_i32_u()
-        .local_get(RIGHT_LEN)
-        .i64_extend_i32_u()
-        .i64_add()
-        .local_tee(END)
-        .i64_const((memory::MAX_PAGES * memory::PAGE_BYTES) as i64)
-        .i64_gt_u();
-    failure_if(&mut body);
-    body.instructions()
-        .local_get(END)
-        .i32_wrap_i64()
-        .local_set(LEN);
-
+/// Reserve a whole block by byte capacity. Return zero on failure without
+/// changing the heap cursor or free list.
+pub(super) fn reserve() -> Function {
+    let mut body = Function::new([(3, ValType::I32), (1, ValType::I64)]);
     // Search without changing the list. Every linked block came from this
     // allocator and has an aligned header in already committed memory.
     body.instructions()
@@ -73,6 +51,40 @@ pub(super) fn copy_ranges() -> Function {
     body.instruction(&I::Else);
     unlink_block(&mut body);
     body.instruction(&I::End);
+
+    body.instructions().local_get(BLOCK).end();
+    body
+}
+
+/// Allocate and copy two already validated UTF-8 ranges.
+pub(super) fn copy_ranges(reserve: u32) -> Function {
+    const LEFT: u32 = 0;
+    const LEFT_LEN: u32 = 1;
+    const RIGHT: u32 = 2;
+    const RIGHT_LEN: u32 = 3;
+    const DESTINATION: u32 = 4;
+    const LEN: u32 = 5;
+    const BLOCK: u32 = 6;
+    const END: u32 = 7;
+    let mut body = Function::new([(2, ValType::I32), (1, ValType::I64)]);
+    body.instructions()
+        .local_get(LEFT_LEN)
+        .i64_extend_i32_u()
+        .local_get(RIGHT_LEN)
+        .i64_extend_i32_u()
+        .i64_add()
+        .local_tee(END)
+        .i64_const((memory::MAX_PAGES * memory::PAGE_BYTES) as i64)
+        .i64_gt_u();
+    failure_if(&mut body);
+    body.instructions()
+        .local_get(END)
+        .i32_wrap_i64()
+        .local_tee(LEN)
+        .call(reserve)
+        .local_tee(BLOCK)
+        .i32_eqz();
+    failure_if(&mut body);
 
     for (address, length) in [(LEFT, LEFT_LEN), (RIGHT, RIGHT_LEN)] {
         body.instructions()
@@ -181,22 +193,24 @@ fn failure_if(body: &mut Function) {
         .end();
 }
 
-/// Receives the descriptor address. Zero provenance denotes static storage.
+/// Return a block to the free list. Zero denotes an empty or static owner.
 pub(super) fn releaser() -> Function {
-    let mut body = Function::new([(1, ValType::I32)]);
-    body.instruction(&I::LocalGet(0));
-    string_descriptor::load_allocation(&mut body);
+    let mut body = Function::new([]);
     body.instructions()
-        .local_tee(1)
+        .local_get(0)
         .if_(BlockType::Empty)
-        .local_get(1)
+        .local_get(0)
         .global_get(FREE_GLOBAL)
         .i32_store(header_field(NEXT_OFFSET))
-        .local_get(1)
+        .local_get(0)
         .global_set(FREE_GLOBAL)
         .end()
         .end();
     body
+}
+
+pub(super) fn load_capacity(body: &mut Function) {
+    body.instruction(&I::I32Load(header_field(CAPACITY_OFFSET)));
 }
 
 fn header_field(offset: u64) -> MemArg {

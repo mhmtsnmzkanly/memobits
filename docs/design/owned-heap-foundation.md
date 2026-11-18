@@ -91,9 +91,9 @@ smaller reuse preserves the larger block's capacity. Blocks are reused
 whole, and memory pages remain at their high-water mark. The existing
 lexical gate still verifies scope exits and prevents unsupported escapes.
 
-Once the foundation works, List can reuse the byte allocator and owned
-cleanup. Element initialization, element drops, and capacity changes belong
-to later List work.
+Primitive List push shares block reservation and release with String.
+The [List design](list-slice.md) records its private growth rules and the
+remaining element-access and ownership work.
 
 ## Audit of scoped allocation
 

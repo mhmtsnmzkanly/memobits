@@ -96,6 +96,89 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 }
 
 #[test]
+fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
+    let program = lower(
+        r#"
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            var words: List<u32> = [];
+            var index: u32 = 0;
+            loop {
+                bytes.push(if index % 2 == 0 { 195 } else { 169 });
+                words.push(305_419_896 + index);
+                index += 1;
+                if index == 12_000 { break; }
+            }
+            let moved := words;
+            Ok(bytes.len() == 12_000 && moved.len() == 12_000)
+        }
+    "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(0),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &artifact.bytes).unwrap();
+    let mut limited = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    limited.limiter(|limit| limit);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut limited, &module)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&limited, "main")
+        .unwrap();
+    assert!(main.call(&mut limited, ()).is_err());
+    let trap = instance
+        .get_global(&limited, memobits_wasm::TRAP_EXPORT)
+        .unwrap();
+    assert_eq!(
+        trap.get(&limited).i32().unwrap() & 255,
+        i32::from(memobits_wasm::TrapReason::HeapAllocation.code())
+    );
+
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let expected_bytes = [195, 169].repeat(6_000);
+    let expected_words: Vec<u8> = (305_419_896u32..305_431_896)
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let mut warmed_size = 0;
+    for iteration in 0..6 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        let data = memory.data(&store);
+        assert_eq!(data[result as usize], 0);
+        for expected in [&expected_bytes, &expected_words] {
+            assert!(data[16..4096].windows(12).step_by(4).any(|descriptor| {
+                let address = u32::from_le_bytes(descriptor[0..4].try_into().unwrap()) as usize;
+                let length = u32::from_le_bytes(descriptor[4..8].try_into().unwrap());
+                let block = u32::from_le_bytes(descriptor[8..12].try_into().unwrap()) as usize;
+                length == 12_000
+                    && block >= 4096
+                    && address == block + 8
+                    && address.is_multiple_of(4)
+                    && data.get(address..address + expected.len()) == Some(expected.as_slice())
+            }));
+        }
+        if iteration == 1 {
+            warmed_size = data.len();
+        }
+        if iteration >= 2 {
+            assert_eq!(data.len(), warmed_size);
+        }
+    }
+}
+#[test]
 fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
     let bytes = build(
         r#"

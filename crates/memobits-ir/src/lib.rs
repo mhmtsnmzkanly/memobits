@@ -285,6 +285,13 @@ pub enum InstructionKind {
         construct_string: bool,
     },
     EmptyList,
+    EndListLocal {
+        local: LocalId,
+    },
+    ListPush {
+        target: LocalId,
+        value: Operand,
+    },
     ListLen {
         source: Operand,
     },
@@ -1314,6 +1321,37 @@ fn validate_instruction(
         InstructionKind::EmptyList => {
             if !matches!(out, Some(Type::List(_))) {
                 push(errors, id, Some(block), "empty List requires a List output");
+            }
+        }
+        InstructionKind::EndListLocal { local } => {
+            if instruction.output.is_some()
+                || !function
+                    .locals
+                    .get(local.0 as usize)
+                    .is_some_and(|entry| matches!(entry.ty, Type::List(_)))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List scope exit requires a List local and no output",
+                );
+            }
+        }
+        InstructionKind::ListPush { target, value } => {
+            let actual = operand_type(program, function, value, errors, id, block);
+            if !matches!(function.locals.get(target.0 as usize), Some(Local {
+                ty: Type::List(element), mutable: true, ..
+            }) if actual == Some(Type::Primitive(*element)))
+                || instruction.output.is_some()
+                || value.mode != UseMode::Read
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List push requires a mutable List local and a matching element",
+                );
             }
         }
         InstructionKind::ListLen { source } => {
@@ -2932,6 +2970,7 @@ fn validate_operand_escapes(
                     report(block_id, source, false, false);
                     report(block_id, offset, false, false);
                 }
+                InstructionKind::ListPush { value, .. } => report(block_id, value, false, false),
                 InstructionKind::ListLen { source }
                 | InstructionKind::Copy { source }
                 | InstructionKind::StringLen { source } => {
@@ -2969,6 +3008,7 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::EmptyList
+                | InstructionKind::EndListLocal { .. }
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStringLocal { .. } => {}
             }
