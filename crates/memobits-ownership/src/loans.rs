@@ -598,9 +598,12 @@ fn mark_operand(live: &mut [bool], function: &Function, operand: &Operand) {
 
 fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
-        InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => Vec::new(),
+        InstructionKind::EmptyList
+        | InstructionKind::Constant(_)
+        | InstructionKind::EndStringLocal { .. } => Vec::new(),
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
+        | InstructionKind::ListLen { source: operand }
         | InstructionKind::StringLen { source: operand }
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }

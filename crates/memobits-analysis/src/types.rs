@@ -34,6 +34,7 @@ pub(crate) enum CheckMode {
 enum Ty {
     Primitive(&'static str),
     String,
+    List(&'static str),
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
@@ -162,6 +163,7 @@ fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
         Ty::String => "String".into(),
+        Ty::List(element) => format!("List<{element}>"),
         Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
@@ -522,6 +524,9 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             access: *access,
             inner: Box::new(ir_type(inner)?),
         },
+        Ty::List("u8") => IrType::List(Primitive::U8),
+        Ty::List("u32") => IrType::List(Primitive::U32),
+        Ty::List(_) => return None,
         Ty::Array(element, len) => IrType::Array {
             element: Box::new(ir_type(element)?),
             len: *len,
@@ -589,7 +594,15 @@ impl Checker {
     /// passed owned, `borrow` or `share`, and returned owned. The external ABI
     /// of exported signatures is the backend's concern (LE900).
     fn signature_type(&mut self, ty: &Type, _is_result: bool) -> Ty {
-        self.type_path(ty)
+        let resolved = self.type_path(ty);
+        if matches!(resolved, Ty::List(_)) {
+            self.error(
+                17,
+                ty.span,
+                "List values are currently limited to local bindings",
+            );
+        }
+        resolved
     }
     /// Executable arrays hold non-Unit primitive, struct or nested array elements.
     fn check_element_support(&mut self, element: &Ty, span: Span) {
@@ -1219,6 +1232,20 @@ impl Checker {
         }
         let receiver = read_type(self.expr(base, None));
         self.concat_destination = previous;
+        if matches!(receiver, Ty::List(_)) && method == "len" {
+            if !matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
+                self.error(
+                    17,
+                    base.span,
+                    "List len() currently requires a local binding",
+                );
+            }
+            if !arguments.is_empty() {
+                self.error(10, expression.span, "len() expects 0 arguments");
+                return Ty::Error;
+            }
+            return Ty::Primitive("u32");
+        }
         let offset_type = Ty::Primitive("u32");
         if method == "concat" && self.concat_destination != Some(expression as *const Expr as usize)
         {
@@ -2285,6 +2312,13 @@ impl Checker {
                         expr.span,
                         "array literals must be used as an owned value (binding initializer, assignment, argument, element, result or branch value)",
                     );
+                }
+                if let Some(list @ Ty::List(_)) = expected {
+                    if elements.is_empty() {
+                        return list.clone();
+                    }
+                    self.error(17, expr.span, "only empty List literals are supported");
+                    return Ty::Error;
                 }
                 let mut element_ty = match expected {
                     Some(Ty::Array(element, _)) => Some(element.as_ref().clone()),

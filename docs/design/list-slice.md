@@ -8,7 +8,20 @@ element transfers ownership. Keep the existing fixed-array rules, including
 the equivalence of `Bytes<N>` and `Array<u8, N>`.
 [Fixed arrays](fixed-array-implementation.md)
 
-## Proposed source scope
+## Executable checkpoint
+
+`List<u8>` and `List<u32>` support contextual empty `[]` in owned local
+bindings, moves into new local bindings, and non-consuming `.len()` as
+`u32`. Both `let` and `var` can hold empty Lists. The Wasm frame contains a
+private empty descriptor, and construction allocates no heap block. The
+applied spelling is built in, and bare `List` can still name a user type.
+Whole-local replacement, operations that change length, element access,
+nesting, borrows, call signatures and exports remain gated at this
+checkpoint. The language guide checks both element types and local moves
+from source and standalone Wasm.
+[Runnable guide](../../examples/projects/language-guide/src/main.mb)
+
+## Proposed growth slice
 
 Start with `List<u8>` and `List<u32>`. They exercise one-byte and
 four-byte element storage and fit the current payload alignment. Both
@@ -76,9 +89,9 @@ high-water mark.
 
 ## Implementation and checks
 
-1. Implement the bounded local owner path and the shared block reservation
-   and release needed by its first allocation. Keep empty construction
-   and unsupported shapes under type and IR validation.
+1. The empty local owner path and non-consuming length are executable.
+   Extract shared block reservation and release when implementing the
+   first allocation. Keep unsupported shapes under type and IR validation.
 2. Exercise push through a growth boundary, copied reads, and normal-exit
    cleanup in a self-checking example. Run it from source and standalone
    Wasm, and add it to the runnable language guide.

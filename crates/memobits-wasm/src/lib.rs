@@ -20,6 +20,7 @@ use wasm_encoder::{
     ValType,
 };
 
+mod list_descriptor;
 mod memory;
 mod string_descriptor;
 mod string_heap;
@@ -313,6 +314,8 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
+        | InstructionKind::ListLen { .. }
+        | InstructionKind::EmptyList
         | InstructionKind::InitConcatString { .. }
         | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::StringByteAt { .. }
@@ -377,7 +380,7 @@ fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
         // A struct or enum is an inline frame-cell value, passed internally by address.
-        Type::String | Type::Struct(_) | Type::Enum(_) => true,
+        Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
@@ -688,6 +691,7 @@ fn type_layout<'a>(
     match ty {
         Type::Primitive(kind) => storage_layout(*kind),
         Type::String => Ok((string_descriptor::SIZE, string_descriptor::ALIGN)),
+        Type::List(_) => Ok((list_descriptor::SIZE, list_descriptor::ALIGN)),
         Type::Struct(id) | Type::Enum(id) => struct_layout(id.0)
             .map(|layout| (layout.size, layout.align))
             .ok_or_else(|| "type is out of range".to_string()),
@@ -840,10 +844,7 @@ impl FrameLayout {
         let aliases = construction_aliases(function);
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
-            if !matches!(
-                ty,
-                Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
-            ) {
+            if !is_aggregate(ty) {
                 continue;
             }
             if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
@@ -855,6 +856,8 @@ impl FrameLayout {
             };
             let what = if *ty == Type::String {
                 "String"
+            } else if matches!(ty, Type::List(_)) {
+                "List"
             } else if matches!(ty, Type::Struct(_)) {
                 "struct"
             } else if matches!(ty, Type::Enum(_)) {
@@ -947,9 +950,12 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
     for block in &function.blocks {
         for instruction in &block.instructions {
             match &instruction.kind {
-                InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}
+                InstructionKind::EmptyList
+                | InstructionKind::Constant(_)
+                | InstructionKind::EndStringLocal { .. } => {}
                 InstructionKind::Capture(operand)
                 | InstructionKind::Copy { source: operand }
+                | InstructionKind::ListLen { source: operand }
                 | InstructionKind::StringLen { source: operand }
                 | InstructionKind::Borrow { owner: operand, .. }
                 | InstructionKind::Load { reference: operand }
@@ -1051,14 +1057,21 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             let array = |ty: Option<&Type>| {
                 matches!(
                     ty,
-                    Some(Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+                    Some(
+                        Type::String
+                            | Type::List(_)
+                            | Type::Array { .. }
+                            | Type::Struct(_)
+                            | Type::Enum(_)
+                    )
                 )
             };
             if *assigned == output
                 && uses[output.0 as usize] == 1
                 && matches!(
                     producer.kind,
-                    InstructionKind::ArrayNew { .. }
+                    InstructionKind::EmptyList
+                        | InstructionKind::ArrayNew { .. }
                         | InstructionKind::StructNew { .. }
                         | InstructionKind::EnumNew { .. }
                         | InstructionKind::Capture(_)
@@ -1092,7 +1105,7 @@ const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
 /// owner or reference).
 fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
     match ty {
-        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
             aggregate_layout(structs, ty).map(|(size, _)| size)
         }
         Type::Reference { inner, .. } => aggregate_bytes(structs, inner),
@@ -1105,7 +1118,7 @@ fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
 fn is_aggregate(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
     )
 }
 
@@ -1135,7 +1148,9 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Reference { .. } => ValType::I32,
         // Array slots keep an unused Wasm local; their authoritative storage is
         // a frame cell and operands push the cell address.
-        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => ValType::I32,
+        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+            ValType::I32
+        }
     }
 }
 
@@ -2856,6 +2871,18 @@ fn compile_instruction(
                     Ok(())
                 },
             )?;
+        }
+        InstructionKind::EmptyList => {
+            let value = instruction.output.ok_or("empty List lacks a value")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
+            list_descriptor::initialize_empty(body);
+        }
+        InstructionKind::ListLen { source } => {
+            emit_operand(body, function, param_count, source, layout, frame)?;
+            list_descriptor::load_length(body);
+            body.instructions()
+                .local_set(output.ok_or("List length lacks an output")?);
         }
         InstructionKind::StringLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;

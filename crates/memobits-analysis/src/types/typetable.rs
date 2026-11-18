@@ -797,6 +797,17 @@ impl TypeTable {
                     };
                     return Ok(Ty::Array(Box::new(element.clone()), *count));
                 }
+                TemplateId::List => {
+                    let [ResolvedArgument::Type(Ty::Primitive(element @ ("u8" | "u32")))] =
+                        arguments.as_slice()
+                    else {
+                        return Err(failure(
+                            17,
+                            "this List slice supports u8 and u32 elements".into(),
+                        ));
+                    };
+                    return Ok(Ty::List(element));
+                }
                 TemplateId::Bytes => {
                     let [ResolvedArgument::Integer(count)] = arguments.as_slice() else {
                         unreachable!("template argument contract checked above");

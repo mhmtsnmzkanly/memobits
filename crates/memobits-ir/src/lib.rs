@@ -152,6 +152,8 @@ pub enum Type {
     Primitive(Primitive),
     /// Owned UTF-8 text. Its storage representation is private to the backend.
     String,
+    /// Owned homogeneous list with private descriptor storage.
+    List(Primitive),
     Function(Signature),
     Reference {
         access: Access,
@@ -281,6 +283,10 @@ pub enum InstructionKind {
         source: Operand,
         length: Operand,
         construct_string: bool,
+    },
+    EmptyList,
+    ListLen {
+        source: Operand,
     },
     StringLen {
         source: Operand,
@@ -622,6 +628,14 @@ impl Program {
             for (block_index, block) in function.blocks.iter().enumerate() {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
+                    if matches!(function.values.get(value.0 as usize), Some(Type::List(_))) {
+                        push(
+                            &mut errors,
+                            id,
+                            Some(block_id),
+                            "List cannot be passed across a block edge",
+                        );
+                    }
                     if function
                         .values
                         .get(value.0 as usize)
@@ -1038,6 +1052,14 @@ fn validate_parameter_type(
             format!("{context} type cannot be a reference"),
         );
     }
+    if matches!(ty, Type::List(_)) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} cannot use List in this slice"),
+        );
+    }
     validate_type_shape(type_count, ty, errors, id, context);
 }
 
@@ -1056,6 +1078,14 @@ fn validate_signature_value_type(
             format!("{context} type cannot be a reference"),
         );
     }
+    if matches!(ty, Type::List(_)) {
+        push(
+            errors,
+            id,
+            None,
+            format!("{context} cannot use List in this slice"),
+        );
+    }
     validate_type_shape(type_count, ty, errors, id, context);
 }
 
@@ -1067,6 +1097,8 @@ fn validate_type_shape(
     context: &str,
 ) {
     match ty {
+        Type::List(Primitive::U8 | Primitive::U32) => {}
+        Type::List(_) => push(errors, id, None, "unsupported List element type"),
         Type::Primitive(_) | Type::String => {}
         Type::Struct(type_id) | Type::Enum(type_id) => {
             if type_id.0 as usize >= type_count {
@@ -1279,6 +1311,26 @@ fn validate_instruction(
 ) {
     let out = output_type(function, instruction.output);
     match &instruction.kind {
+        InstructionKind::EmptyList => {
+            if !matches!(out, Some(Type::List(_))) {
+                push(errors, id, Some(block), "empty List requires a List output");
+            }
+        }
+        InstructionKind::ListLen { source } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            if !matches!(input, Some(Type::List(_)))
+                || !matches!(source.source, Source::Local(_))
+                || source.mode != UseMode::Read
+                || out != Some(&Type::Primitive(Primitive::U32))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List length requires a local read and u32 output",
+                );
+            }
+        }
         InstructionKind::ValidateUtf8 {
             source,
             length,
@@ -1395,6 +1447,14 @@ fn validate_instruction(
         }
         InstructionKind::Capture(operand) => {
             let input = operand_type(program, function, operand, errors, id, block);
+            if matches!(input, Some(Type::List(_))) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List moves currently require a new local binding",
+                );
+            }
             if input
                 .as_ref()
                 .is_some_and(|ty| program.is_borrow_option(ty))
@@ -2553,6 +2613,16 @@ fn validate_instruction(
                     "borrow Option assignment requires a consuming initialization",
                 );
             }
+            if matches!(actual, Some(Type::List(_)))
+                && (!initialize || value.mode != UseMode::Consume)
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List assignment currently requires a consuming initialization",
+                );
+            }
             match function.locals.get(target.0 as usize) {
                 None => push(
                     errors,
@@ -2862,7 +2932,9 @@ fn validate_operand_escapes(
                     report(block_id, source, false, false);
                     report(block_id, offset, false, false);
                 }
-                InstructionKind::Copy { source } | InstructionKind::StringLen { source } => {
+                InstructionKind::ListLen { source }
+                | InstructionKind::Copy { source }
+                | InstructionKind::StringLen { source } => {
                     report(block_id, source, false, false);
                 }
                 InstructionKind::Unary { operand, .. } => report(block_id, operand, false, false),
@@ -2896,7 +2968,9 @@ fn validate_operand_escapes(
                         }
                     }
                 }
-                InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}
+                InstructionKind::EmptyList
+                | InstructionKind::Constant(_)
+                | InstructionKind::EndStringLocal { .. } => {}
             }
         }
         match &block.terminator.kind {

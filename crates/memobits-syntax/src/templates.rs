@@ -13,6 +13,7 @@ pub enum ParameterKind {
 pub enum TemplateId {
     Array,
     Bytes,
+    List,
     Option,
     Result,
     Attempt,
@@ -62,6 +63,13 @@ const TEMPLATES: &[Template] = &[
         parameters: &[ParameterKind::Integer],
         variants: &[],
         argument_error: "Bytes requires one integer literal length",
+    },
+    Template {
+        id: TemplateId::List,
+        name: "List",
+        parameters: &[ParameterKind::Type],
+        variants: &[],
+        argument_error: "List requires one element type",
     },
     Template {
         id: TemplateId::Option,
@@ -125,9 +133,10 @@ pub fn by_id(id: TemplateId) -> &'static Template {
 }
 
 pub fn lookup(path: &[String]) -> Option<&'static Template> {
-    // Only the applied spelling Bytes<N> is built in. Bare Bytes can still
-    // name an existing user-defined type or import.
-    lookup_applied(path).filter(|template| template.id != TemplateId::Bytes)
+    // Only the applied spellings Bytes<N> and List<T> are built in.
+    // Bare names can still refer to a user-defined type or import.
+    lookup_applied(path)
+        .filter(|template| !matches!(template.id, TemplateId::Bytes | TemplateId::List))
 }
 
 pub fn lookup_applied(path: &[String]) -> Option<&'static Template> {

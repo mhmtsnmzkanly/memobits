@@ -185,9 +185,12 @@ impl Checker<'_> {
         while head.len() == 1 && seen.insert(head[0].clone()) {
             match self.aliases.get(&head[0]) {
                 Some(target) => {
-                    if templates::lookup_type(target)
-                        .is_some_and(|template| template.id == templates::TemplateId::Bytes)
-                    {
+                    if templates::lookup_type(target).is_some_and(|template| {
+                        matches!(
+                            template.id,
+                            templates::TemplateId::Bytes | templates::TemplateId::List
+                        )
+                    }) {
                         self.error(4, span, format!("unknown variant '{}'", path.join("::")));
                         return;
                     }

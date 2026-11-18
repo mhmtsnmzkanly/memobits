@@ -824,8 +824,14 @@ impl<'a> Builder<'a> {
         let result = (|| {
             let receiver = self.lower_string_with_temporary_owner(base)?;
             let instruction = if method == "len" {
-                InstructionKind::StringLen {
-                    source: read(receiver),
+                if matches!(self.operand_type(receiver), Some(Type::List(_))) {
+                    InstructionKind::ListLen {
+                        source: read(receiver),
+                    }
+                } else {
+                    InstructionKind::StringLen {
+                        source: read(receiver),
+                    }
                 }
             } else {
                 // Keep the receiver loan live while evaluating the offset.
@@ -1402,6 +1408,9 @@ impl<'a> Builder<'a> {
         self.current?;
         match &expr.kind {
             ExprKind::Array(elements) => {
+                if matches!(self.ty(expr), Some(Type::List(_))) {
+                    return self.emit(expr.span, InstructionKind::EmptyList, self.ty(expr));
+                }
                 let Some(Type::Array {
                     element: element_ty,
                     ..

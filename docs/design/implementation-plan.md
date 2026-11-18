@@ -212,10 +212,11 @@ the implemented subset; a milestone is not complete merely because its crate exi
   trapped instances. Library exports use scalar signatures. Application
   entries can also use the private `main` outcome adapter for zero-argument
   `Result` and `Attempt` functions with primitive success payloads.
-- Dynamic lists, general aggregate cleanup and copy, mutable pattern
-  bindings, `defaults`, and `try` are pending. The
-  [first List slice](list-slice.md) proposes scoped primitive list owners,
-  checked read and append operations, and reuse of the String allocator.
+- Empty `List<u8>` and `List<u32>` values run in local bindings, with owned
+  moves and `.len()`. The [List design](list-slice.md) follows with checked
+  read and append operations using shared heap allocation. General
+  aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
+  `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static
   layout planner, three-state move availability and explicit lexical exits for
   String locals. Scoped `String.concat` uses heap provenance and a private

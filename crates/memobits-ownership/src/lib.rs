@@ -203,7 +203,7 @@ fn transfer_instruction(
         InstructionKind::EndStringLocal { local } => {
             state[local.0 as usize] = Availability::Unavailable
         }
-        InstructionKind::Constant(_) => {}
+        InstructionKind::EmptyList | InstructionKind::Constant(_) => {}
         InstructionKind::Capture(operand) => {
             transfer_operand(operand, state, diagnostics, function)
         }
@@ -218,7 +218,9 @@ fn transfer_instruction(
             transfer_operand(source, state, diagnostics.as_deref_mut(), function);
             transfer_operand(offset, state, diagnostics, function);
         }
-        InstructionKind::Copy { source } | InstructionKind::StringLen { source } => {
+        InstructionKind::ListLen { source }
+        | InstructionKind::Copy { source }
+        | InstructionKind::StringLen { source } => {
             transfer_operand(source, state, diagnostics, function);
         }
         InstructionKind::Borrow { owner, .. } => {

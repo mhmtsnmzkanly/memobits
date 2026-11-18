@@ -50,7 +50,10 @@ The ownership commands check owned `String` transfers and internal loans.
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
 application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
-primitive/aggregate references. Ordinary UTF-8 `String` literals execute
+primitive/aggregate references. `List<u8>` and `List<u32>` support
+contextual empty `[]`, local moves, and non-consuming `.len()` without
+heap allocation. List mutation, element access, and call signatures
+remain gated in this slice. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`

@@ -808,6 +808,83 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn empty_lists_and_local_moves_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='empty-lists'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type List { count: u32 }
+        type Words = List<u32>;
+        fn main() -> Result<Bool, Error> {
+            let existing: List = List { count: 7 };
+            let bytes: List<u8> = [];
+            var words: Words = [];
+            let before := bytes.len() + words.len();
+            let moved_bytes := bytes;
+            var moved_words := words;
+            Ok(existing.count == 7 && before == 0 && moved_bytes.len() == 0 && moved_words.len() == 0)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "lists.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "lists.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+
+    let bytes = fs::read(f.0.join("lists.wasm")).unwrap();
+    let memory = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .find_map(|item| match item.unwrap() {
+            wasmparser::Payload::MemorySection(section) => section.into_iter().next(),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(memory.maximum, Some(memory.initial));
+}
+
+#[test]
+fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
+    let f = Fixture::new();
+    for (source, code) in [
+        (
+            "fn main() { let items: List<u8> = []; let moved := items; items.len(); }",
+            "BE001",
+        ),
+        ("fn main() { let items: List<i32> = []; }", "TE017"),
+        ("fn main() { let items: List<u8> = [1]; }", "TE017"),
+        (
+            "fn main() { var items: List<u8> = []; items = []; }",
+            "TE018",
+        ),
+        (
+            "fn main() { let items: List<u8> = []; let array := [items]; }",
+            "TE017",
+        ),
+        (
+            "fn main() { let items: List<u8> = []; items.borrow(); }",
+            "TE017",
+        ),
+        (
+            "pub fn main(items: List<u8>) -> u32 { items.len() }",
+            "TE017",
+        ),
+        ("fn main() -> List<u32> { [] }", "TE017"),
+    ] {
+        f.write("lists.mb", source);
+        err(f.run(&["ownership", "lists.mb"]), code);
+    }
+}
+
+#[test]
 fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
     let f = Fixture::new();
     f.write(
