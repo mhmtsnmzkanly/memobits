@@ -160,6 +160,72 @@ fn branch_move_reaches_join_and_unreachable_block_is_ignored() {
     });
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].span.unwrap().start, 6);
+    assert!(diagnostics[0].message.contains("on some paths"));
+}
+
+#[test]
+fn string_scope_end_kills_a_mixed_owner_without_requiring_a_value() {
+    let mut f = base();
+    f.signature.parameters[0].ty = Type::String;
+    f.locals[0].ty = Type::String;
+    f.locals[1].ty = Type::String;
+    f.values.push(Type::Primitive(Primitive::Bool));
+    f.blocks = vec![
+        block(
+            vec![Instruction {
+                span: Some(span(3)),
+                output: Some(ValueId(0)),
+                kind: InstructionKind::Constant(Constant::Bool(true)),
+            }],
+            TerminatorKind::Branch {
+                condition: value(0, UseMode::Read, 4),
+                then_edge: edge(1),
+                else_edge: edge(2),
+            },
+        ),
+        block(
+            vec![consume(local(0, UseMode::Consume, 5))],
+            TerminatorKind::Goto(edge(2)),
+        ),
+        block(
+            vec![Instruction {
+                span: Some(span(6)),
+                output: None,
+                kind: InstructionKind::EndStringLocal { local: LocalId(0) },
+            }],
+            TerminatorKind::Return(None),
+        ),
+    ];
+    let mut program = Program {
+        functions: vec![f],
+        ..Program::default()
+    };
+    assert!(check_moves(&program).is_empty());
+
+    // Probe the same binding before and after the exit. Length reads leave
+    // the state unchanged, so the first diagnostic identifies the mixed input.
+    let function = &mut program.functions[0];
+    function.values.extend([
+        Type::Primitive(Primitive::U32),
+        Type::Primitive(Primitive::U32),
+    ]);
+    for (position, id) in [(0, 1), (2, 2)] {
+        function.blocks[2].instructions.insert(
+            position,
+            Instruction {
+                span: Some(span(7 + id as usize)),
+                output: Some(ValueId(id)),
+                kind: InstructionKind::StringLen {
+                    source: local(0, UseMode::Read, 7 + id as usize),
+                },
+            },
+        );
+    }
+    let diagnostics = check_moves(&program);
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(diagnostics.iter().all(|d| d.code.to_string() == "BE001"));
+    assert!(diagnostics[0].message.contains("on some paths"));
+    assert!(!diagnostics[1].message.contains("on some paths"));
 }
 
 #[test]

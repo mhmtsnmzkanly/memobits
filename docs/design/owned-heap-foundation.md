@@ -66,18 +66,28 @@ No host allocator imports or new manifest setting are needed for this slice.
 
 ## Ownership and cleanup
 
-Move checking now computes definite block-entry availability separately
+Move checking distinguishes definitely available, definitely unavailable and
+mixed ownership at reachable block entries. It computes those facts separately
 from diagnostic replay. Both run the same block and edge transfers,
 including consumption of return values and parallel binding of successor
 parameters. This gives cleanup elaboration a common starting point.
-An unavailable slot at a join may still own a value on some incoming paths.
+Reads require definite availability. A mixed slot owns a value on some
+incoming paths, and move diagnostics now say so.
 Lowering now emits `EndStringLocal` for owned String bindings and parameters
 at normal lexical exits. A String result moves out before its binding ends.
 The move checker invalidates the local and the loan checker rejects a live
 loan across its exit. The marker accepts a moved local and emits no Wasm
-operation because String bytes remain static. It records the end of storage,
-while future drop elaboration still needs to distinguish paths that retain
-an owner. Other owner types and temporary cleanup are outside this step.
+operation because String bytes remain static. The transfer clears the local
+after its exit regardless of the incoming state.
+
+For a future heap-backed local, elaborate the exit from its incoming state.
+A definitely available local needs a drop, subject to the descriptor's
+static/heap distinction. A definitely unavailable local needs no drop.
+Use an edge-specific cleanup when the mixed paths are already separate.
+Use a runtime flag only for a mixed exit that still shares a cleanup site.
+Such a flag is set on successful initialization or reassignment and cleared
+on a move or drop. No flags or frees are emitted in the current slice.
+Other owner types and temporary cleanup remain separate work.
 
 Extend the private String descriptor so cleanup distinguishes static
 literal storage from an owned allocation. Stack cells still hold descriptors.

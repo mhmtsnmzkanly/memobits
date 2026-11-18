@@ -44,10 +44,11 @@ error. Loops require a fixed point; checking only one traversal of a loop body
 would miss reuse on the next iteration. Reinitialization restores availability
 when permitted by the binding's mutation rules.
 
-Move checking computes definite availability at reachable block entries,
-then replays the same transfers for diagnostics. This information is a
-starting point for normal-exit cleanup. A slot that is unavailable at a
-join can still hold an owner on an individual incoming path.
+Move checking computes available, unavailable or mixed availability at
+reachable block entries, then replays the same transfers for diagnostics.
+Mixed slots are unavailable for reads and moves. Cleanup can use this
+distinction to tell a definitely empty local from one that may still own
+a value on an incoming path.
 
 `EndStringLocal` marks an owned String local's lexical exit. Lowering emits
 it on fallthrough, return, break and continue, using local IDs to distinguish

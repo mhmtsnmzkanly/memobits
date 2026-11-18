@@ -55,35 +55,11 @@ fn diagnostic(number: u16, span: Option<Span>, message: impl Into<String>) -> Di
     diagnostic
 }
 
-fn reachable(function: &Function) -> Vec<bool> {
-    let mut seen = vec![false; function.blocks.len()];
-    let mut queue = VecDeque::from([function.entry]);
-    while let Some(block) = queue.pop_front() {
-        if seen[block.0 as usize] {
-            continue;
-        }
-        seen[block.0 as usize] = true;
-        match &function.blocks[block.0 as usize].terminator.kind {
-            TerminatorKind::Goto(edge) => queue.push_back(edge.target),
-            TerminatorKind::Branch {
-                then_edge,
-                else_edge,
-                ..
-            } => {
-                queue.push_back(then_edge.target);
-                queue.push_back(else_edge.target);
-            }
-            TerminatorKind::Switch {
-                targets, default, ..
-            } => {
-                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
-                    queue.push_back(edge.target);
-                }
-            }
-            TerminatorKind::Return(_) | TerminatorKind::Unreachable => {}
-        }
-    }
-    seen
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Availability {
+    Available,
+    Unavailable,
+    Mixed,
 }
 
 fn check_function(function: &Function) -> Vec<Diagnostic> {
@@ -106,36 +82,46 @@ fn check_function(function: &Function) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Definite availability at each reachable block entry. A false slot may
-/// still be initialized on some incoming paths.
-fn block_entry_availability(function: &Function) -> Vec<Option<Vec<bool>>> {
-    let locals = function.locals.len();
-    let slots = locals + function.values.len();
-    let mut initial = vec![false; slots];
+/// Availability on the incoming paths of each reachable block. Before a
+/// block receives its first incoming state, it has no facts to join.
+fn block_entry_availability(function: &Function) -> Vec<Option<Vec<Availability>>> {
+    let slots = function.locals.len() + function.values.len();
+    let mut initial = vec![Availability::Unavailable; slots];
     for local in &function.parameter_locals {
-        initial[local.0 as usize] = true;
+        initial[local.0 as usize] = Availability::Available;
     }
-    // Availability is a must property. Start reachable non-entry blocks at top
-    // and monotonically intersect incoming states until loops settle.
-    let mut states: Vec<_> = reachable(function)
-        .into_iter()
-        .map(|reachable| reachable.then(|| vec![true; slots]))
-        .collect();
-    states[function.entry.0 as usize] = Some(initial);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (index, block) in function.blocks.iter().enumerate() {
-            let Some(mut state) = states[index].clone() else {
-                continue;
-            };
-            transfer_block(function, block, &mut state, None, |edge, after| {
-                let target = states[edge.target.0 as usize]
-                    .as_mut()
-                    .expect("a successor of a reachable block is reachable");
-                changed |= meet(target, after);
-            });
-        }
+
+    let entry = function.entry.0 as usize;
+    let mut states = vec![None; function.blocks.len()];
+    states[entry] = Some(initial);
+    let mut pending = VecDeque::from([entry]);
+    let mut queued = vec![false; function.blocks.len()];
+    queued[entry] = true;
+    while let Some(index) = pending.pop_front() {
+        queued[index] = false;
+        let mut state = states[index]
+            .clone()
+            .expect("queued block has incoming facts");
+        transfer_block(
+            function,
+            &function.blocks[index],
+            &mut state,
+            None,
+            |edge, after| {
+                let target = edge.target.0 as usize;
+                let changed = match &mut states[target] {
+                    Some(incoming) => join_availability(incoming, after),
+                    empty @ None => {
+                        *empty = Some(after.to_vec());
+                        true
+                    }
+                };
+                if changed && !queued[target] {
+                    pending.push_back(target);
+                    queued[target] = true;
+                }
+            },
+        );
     }
     states
 }
@@ -146,16 +132,16 @@ fn block_entry_availability(function: &Function) -> Vec<Option<Vec<bool>>> {
 fn transfer_block(
     function: &Function,
     block: &Block,
-    state: &mut [bool],
+    state: &mut [Availability],
     mut diagnostics: Option<&mut Vec<Diagnostic>>,
-    mut successor: impl FnMut(&Edge, &[bool]),
+    mut successor: impl FnMut(&Edge, &[Availability]),
 ) {
     for instruction in &block.instructions {
         transfer_instruction(instruction, state, diagnostics.as_deref_mut(), function);
     }
 
     let mut transfer_successor =
-        |edge, state: &mut [bool], diagnostics: &mut Option<&mut Vec<Diagnostic>>| {
+        |edge, state: &mut [Availability], diagnostics: &mut Option<&mut Vec<Diagnostic>>| {
             transfer_edge(edge, state, diagnostics.as_deref_mut(), function);
             successor(edge, state);
         };
@@ -190,11 +176,11 @@ fn transfer_block(
     }
 }
 
-fn meet(current: &mut [bool], incoming: &[bool]) -> bool {
+fn join_availability(current: &mut [Availability], incoming: &[Availability]) -> bool {
     let mut changed = false;
     for (here, there) in current.iter_mut().zip(incoming) {
-        if *here && !there {
-            *here = false;
+        if *here != *there && *here != Availability::Mixed {
+            *here = Availability::Mixed;
             changed = true;
         }
     }
@@ -203,12 +189,14 @@ fn meet(current: &mut [bool], incoming: &[bool]) -> bool {
 
 fn transfer_instruction(
     instruction: &Instruction,
-    state: &mut [bool],
+    state: &mut [Availability],
     mut diagnostics: Option<&mut Vec<Diagnostic>>,
     function: &Function,
 ) {
     match &instruction.kind {
-        InstructionKind::EndStringLocal { local } => state[local.0 as usize] = false,
+        InstructionKind::EndStringLocal { local } => {
+            state[local.0 as usize] = Availability::Unavailable
+        }
         InstructionKind::Constant(_) => {}
         InstructionKind::Capture(operand) => {
             transfer_operand(operand, state, diagnostics, function)
@@ -291,7 +279,7 @@ fn transfer_instruction(
                 }
             }
             transfer_operand(value, state, diagnostics, function);
-            state[target.0 as usize] = true;
+            state[target.0 as usize] = Availability::Available;
         }
         InstructionKind::Call { callee, arguments } => {
             let mut diagnostics = diagnostics;
@@ -302,13 +290,13 @@ fn transfer_instruction(
         }
     }
     if let Some(output) = instruction.output {
-        state[function.locals.len() + output.0 as usize] = true;
+        state[function.locals.len() + output.0 as usize] = Availability::Available;
     }
 }
 
 fn transfer_edge(
     edge: &Edge,
-    state: &mut [bool],
+    state: &mut [Availability],
     diagnostics: Option<&mut Vec<Diagnostic>>,
     function: &Function,
 ) {
@@ -321,7 +309,7 @@ fn transfer_edge(
         incoming.push(match argument.source {
             Source::Local(id) => state[id.0 as usize],
             Source::Value(id) => state[function.locals.len() + id.0 as usize],
-            Source::Function(_) => true,
+            Source::Function(_) => Availability::Available,
         });
         transfer_operand(argument, state, diagnostics.as_deref_mut(), function);
     }
@@ -336,48 +324,54 @@ fn transfer_edge(
 
 fn transfer_operand(
     operand: &Operand,
-    state: &mut [bool],
+    state: &mut [Availability],
     diagnostics: Option<&mut Vec<Diagnostic>>,
     function: &Function,
 ) {
-    if let Source::Local(LocalId(index)) | Source::Value(memobits_ir::ValueId(index)) =
-        operand.source
-    {
-        let (index, label) = match operand.source {
-            Source::Local(_) => (
-                index as usize,
-                format!("local '{}'", function.locals[index as usize].name),
-            ),
-            Source::Value(_) => (
-                function.locals.len() + index as usize,
-                format!("temporary value {}", index),
-            ),
-            Source::Function(_) => unreachable!(),
-        };
-        if !state[index] {
-            if let Some(diagnostics) = diagnostics {
-                diagnostics.push(diagnostic(
-                    1,
-                    operand.span,
-                    format!("{label} is unavailable after a move or before initialization"),
-                ));
+    let index = match operand.source {
+        Source::Local(LocalId(index)) => index as usize,
+        Source::Value(id) => function.locals.len() + id.0 as usize,
+        Source::Function(_) => return,
+    };
+    if let Some(diagnostics) = diagnostics {
+        let message = match state[index] {
+            Availability::Available => None,
+            Availability::Unavailable => {
+                Some("is unavailable after a move or before initialization")
             }
+            Availability::Mixed => {
+                Some("is unavailable after a move or before initialization on some paths")
+            }
+        };
+        if let Some(message) = message {
+            let label = match operand.source {
+                Source::Local(id) => format!("local '{}'", function.locals[id.0 as usize].name),
+                Source::Value(id) => format!("temporary value {}", id.0),
+                Source::Function(_) => unreachable!(),
+            };
+            diagnostics.push(diagnostic(1, operand.span, format!("{label} {message}")));
         }
-        if operand.mode == UseMode::Consume {
-            state[index] = false;
-        }
+    }
+    if operand.mode == UseMode::Consume {
+        state[index] = Availability::Unavailable;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::meet;
+    use super::{join_availability, Availability::*};
 
     #[test]
-    fn availability_join_is_intersection() {
-        let mut current = [true, true, false];
-        assert!(meet(&mut current, &[true, false, true]));
-        assert_eq!(current, [true, false, false]);
-        assert!(!meet(&mut current, &[true, true, true]));
+    fn availability_join_preserves_definite_states_and_marks_disagreement() {
+        let mut current = [Available, Available, Unavailable, Unavailable];
+        assert!(join_availability(
+            &mut current,
+            &[Available, Unavailable, Available, Unavailable]
+        ));
+        assert_eq!(current, [Available, Mixed, Mixed, Unavailable]);
+        assert!(!join_availability(
+            &mut current,
+            &[Available, Available, Unavailable, Unavailable]
+        ));
     }
 }
