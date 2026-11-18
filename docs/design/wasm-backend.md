@@ -85,7 +85,8 @@ configured stack, static data, and the heap. Address zero is unused.
 first address after the stack. The private [outcome entry adapter](outcome-implementation.md)
 places its caller-owned return cell there. Reachable String literal data
 follows that cell, or starts just after the stack when the cell is absent.
-Memory covers those regions rounded up to 64 KiB pages. The
+The checked static layout planner places these regions and rounds the
+final end up to 64 KiB pages. The
 [owned heap proposal](owned-heap-foundation.md) places growable storage
 after the literal data.
 

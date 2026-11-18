@@ -3,7 +3,9 @@ use memobits_analysis::lower_module;
 use memobits_diagnostics::SourceId;
 use memobits_ir::{FunctionId, Program};
 use memobits_syntax::parse;
-use memobits_wasm::{compile_with, CompileOptions, STACK_OVERFLOW_EXPORT};
+use memobits_wasm::{
+    compile_application_traced, compile_with, CompileOptions, STACK_OVERFLOW_EXPORT,
+};
 use std::collections::BTreeMap;
 use wasmi::{Engine, Linker, Module, Store};
 
@@ -91,6 +93,47 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
         assert_eq!(memory.initial, pages, "stack {stack}");
         assert_eq!(memory.maximum, Some(pages));
     }
+}
+
+#[test]
+fn outcome_cell_and_string_data_follow_the_stack_at_a_page_boundary() {
+    let program = lower(r#"fn main() -> Result<u32, Error> { Ok("é".len()) }"#);
+    let options = CompileOptions { stack_size: 65_520 };
+    let artifact = compile_application_traced(&program, FunctionId(0), &options).unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let (cell, size) = main.call(&mut store, ()).unwrap();
+    assert_eq!(cell, 65_536);
+    let literal = (cell + size) as usize;
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let data = memory.data(&store);
+    assert_eq!(data.len(), 2 * 65_536);
+    assert_eq!(
+        u32::from_le_bytes(data[literal..literal + 4].try_into().unwrap()) as usize,
+        literal + 8
+    );
+    assert_eq!(&data[literal + 4..literal + 8], &2u32.to_le_bytes());
+    assert_eq!(&data[literal + 8..literal + 10], "é".as_bytes());
+}
+
+#[test]
+fn static_regions_report_page_limit_failures_before_emission() {
+    let stack_size = 65_535 * 65_536 - 16;
+    let error = build(r#"fn main() -> u32 { "é".len() }"#, stack_size).unwrap_err();
+    assert!(error[0]
+        .message
+        .contains("String literals exceed the supported Wasm memory size"));
+
+    let program = lower("fn main() -> Result<u32, Error> { Ok(1) }");
+    let error = compile_application_traced(&program, FunctionId(0), &CompileOptions { stack_size })
+        .unwrap_err();
+    assert!(error[0]
+        .message
+        .contains("application entry result exceeds the supported memory size"));
 }
 
 #[test]

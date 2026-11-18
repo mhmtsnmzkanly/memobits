@@ -16,6 +16,14 @@ restores the stack pointer. The [typed IR](typed-ir.md) records consuming
 operands, initialization, reassignment, and control-flow edges. It has no
 drop operation or cleanup insertion pass.
 
+The [static layout planner](../../crates/memobits-wasm/src/memory.rs) now
+places the stack, outcome cell and literal regions using one checked cursor.
+It preserves the current memory limit and leaves the cursor unchanged after
+a failed reservation. The final static end is where a later heap layout
+can start its alignment calculation. Allocation and memory growth are
+pending the first guest consumer. Current operations only use stack and
+static storage, so there is no production call that can exercise growth yet.
+
 ## First consumer
 
 Start with an internal operation that concatenates two borrowed Strings into

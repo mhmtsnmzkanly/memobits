@@ -20,6 +20,9 @@ use wasm_encoder::{
     ValType,
 };
 
+mod memory;
+use memory::{LayoutError, StaticLayout};
+
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::new(Category::StaticOperation, 900).expect("static LE code"),
@@ -66,8 +69,6 @@ pub const DEFAULT_STACK_SIZE: u32 = 1024 * 1024;
 /// this offset.
 pub const RESERVED_BYTES: u32 = 16;
 
-const PAGE_SIZE: u64 = 65536;
-
 /// Backend settings. The experimental ABI is not stable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompileOptions {
@@ -87,12 +88,6 @@ impl Default for CompileOptions {
 /// here. `None` when the layout does not fit 32-bit memory.
 pub fn static_data_start(stack_size: u32) -> Option<u32> {
     align_up(RESERVED_BYTES.checked_add(stack_size)?, 16)
-}
-
-/// Memory size in 64 KiB pages covering everything below the heap boundary.
-fn memory_pages(stack_size: u32) -> Option<u64> {
-    let pages = u64::from(static_data_start(stack_size)?).div_ceil(PAGE_SIZE);
-    (pages < PAGE_SIZE).then_some(pages)
 }
 
 /// Like [`compile`], with explicit backend settings.
@@ -142,14 +137,14 @@ fn compile_target(
     application: bool,
 ) -> Result<Compiled, Vec<Diagnostic>> {
     let stack_size = options.stack_size;
-    if stack_size == 0 || !stack_size.is_multiple_of(16) || memory_pages(stack_size).is_none() {
+    let Some(static_layout) = StaticLayout::new(stack_size) else {
         return Err(vec![diagnostic(
             format!(
                 "invalid stack size {stack_size}: it must be a non-zero multiple of 16 bytes that fits a 32-bit memory"
             ),
             None,
         )]);
-    }
+    };
     if let Err(errors) = program.validate() {
         return Err(errors
             .into_iter()
@@ -199,7 +194,7 @@ fn compile_target(
                 continue;
             }
             if application {
-                match outcome_entry(program, function, &structs, stack_size) {
+                match outcome_entry(program, function, &structs, static_layout) {
                     Ok(Some(adapter)) => {
                         entry = Some(adapter);
                         continue;
@@ -1242,13 +1237,14 @@ struct EntryAdapter {
     address: u32,
     size: u32,
     metadata: Vec<u8>,
+    static_layout: StaticLayout,
 }
 
 fn outcome_entry(
     program: &Program,
     function: &Function,
     layouts: &[StructLayout],
-    stack_size: u32,
+    mut static_layout: StaticLayout,
 ) -> Result<Option<EntryAdapter>, String> {
     let Type::Enum(id) = function.signature.result.as_ref() else {
         return Ok(None);
@@ -1325,18 +1321,15 @@ fn outcome_entry(
     .ok_or("application entry outcome does not fit the version 1 metadata format")?;
     // Keep the return cell outside the guest stack so the configured stack
     // budget still belongs entirely to guest calls.
-    let address = static_data_start(stack_size).expect("validated stack size");
-    let end = address
-        .checked_add(size)
-        .ok_or("application entry result exceeds the 32-bit memory")?;
-    let pages = u64::from(end).div_ceil(PAGE_SIZE);
-    if pages >= PAGE_SIZE {
-        return Err("application entry result exceeds the supported memory size".into());
-    }
+    let address = static_layout.reserve(size).map_err(|error| match error {
+        LayoutError::AddressOverflow => "application entry result exceeds the 32-bit memory",
+        LayoutError::PageLimit => "application entry result exceeds the supported memory size",
+    })?;
     Ok(Some(EntryAdapter {
         address,
         size,
         metadata,
+        static_layout,
     }))
 }
 
@@ -1386,17 +1379,15 @@ fn encode_frames(
 /// length) descriptor followed by the UTF-8 bytes. Guest code copies only
 /// the descriptor into its frame; no language operation can write the bytes.
 struct StringData<'a> {
-    start: u32,
-    end: u32,
+    start: Option<u32>,
     offsets: BTreeMap<&'a str, u32>,
     bytes: Vec<u8>,
 }
 
 impl<'a> StringData<'a> {
-    fn collect(functions: &[&'a Function], start: u32) -> Result<Self, String> {
+    fn collect(functions: &[&'a Function], layout: &mut StaticLayout) -> Result<Self, String> {
         let mut data = Self {
-            start,
-            end: start,
+            start: None,
             offsets: BTreeMap::new(),
             bytes: Vec::new(),
         };
@@ -1410,16 +1401,13 @@ impl<'a> StringData<'a> {
                 }
                 let layout_error = "String literals exceed the supported Wasm memory size";
                 let len = u32::try_from(text.len()).map_err(|_| layout_error)?;
-                let address = data
-                    .end
-                    .checked_add(STRING_DESCRIPTOR_SIZE)
+                let size = STRING_DESCRIPTOR_SIZE
+                    .checked_add(len)
                     .ok_or(layout_error)?;
-                let end = address.checked_add(len).ok_or(layout_error)?;
-                if u64::from(end).div_ceil(PAGE_SIZE) >= PAGE_SIZE {
-                    return Err(layout_error.into());
-                }
-                data.offsets.insert(text, data.end);
-                data.end = end;
+                let descriptor = layout.reserve(size).map_err(|_| layout_error)?;
+                let address = descriptor + STRING_DESCRIPTOR_SIZE;
+                data.start.get_or_insert(descriptor);
+                data.offsets.insert(text, descriptor);
                 data.bytes.extend(address.to_le_bytes());
                 data.bytes.extend(len.to_le_bytes());
                 data.bytes.extend(text.as_bytes());
@@ -1468,12 +1456,13 @@ fn encode_frames_traced(
         .iter()
         .map(|id| &program.functions[*id as usize])
         .collect::<Vec<_>>();
-    let string_start = match &entry {
-        Some(adapter) => adapter.address.checked_add(adapter.size),
-        None => static_data_start(stack_size),
-    }
-    .ok_or("String data start does not fit the Wasm address space")?;
-    let strings = StringData::collect(&selected, string_start)?;
+    let mut static_layout = match &entry {
+        Some(adapter) => adapter.static_layout,
+        None => {
+            StaticLayout::new(stack_size).ok_or("stack size does not fit the Wasm address space")?
+        }
+    };
+    let strings = StringData::collect(&selected, &mut static_layout)?;
     let mut signatures = Vec::new();
     let function_types = selected
         .iter()
@@ -1581,9 +1570,9 @@ fn encode_frames_traced(
     }
     let mut memories = MemorySection::new();
     let mut globals = GlobalSection::new();
-    let has_memory = has_frames || entry.is_some() || !strings.bytes.is_empty();
+    let has_memory = has_frames || entry.is_some() || strings.start.is_some();
     if has_memory {
-        let pages = u64::from(strings.end).div_ceil(PAGE_SIZE);
+        let pages = static_layout.pages();
         memories.memory(MemoryType {
             minimum: pages,
             maximum: Some(pages),
@@ -1629,13 +1618,9 @@ fn encode_frames_traced(
         module.section(&globals);
     }
     module.section(&export_section).section(&code);
-    if !strings.bytes.is_empty() {
+    if let Some(start) = strings.start {
         let mut data = DataSection::new();
-        data.active(
-            0,
-            &ConstExpr::i32_const(strings.start as i32),
-            strings.bytes,
-        );
+        data.active(0, &ConstExpr::i32_const(start as i32), strings.bytes);
         module.section(&data);
     }
     if let Some(adapter) = entry {
