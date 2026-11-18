@@ -26,15 +26,36 @@ static storage, so there is no production call that can exercise growth yet.
 
 ## First consumer
 
-Start with an internal operation that concatenates two borrowed Strings into
-one independently owned String. The result has exactly the combined byte
-length, and concatenating valid UTF-8 preserves validity. This exercises
-allocation, ordinary String reads, moves, returns, and cleanup without also
-requiring capacity changes or arbitrary-byte validation. Keep the operation
-spelling open. Use scalar results to verify it through the existing runner.
+Start with concatenation that returns an independently owned String. The
+result has exactly the combined byte length, and concatenating valid UTF-8
+preserves validity. Use existing String reads to inspect the result after
+moving or returning it. Keep the operation spelling and operand access
+contract open until the ownership path is ready. A comparison of concatenated
+bytes can stream the inputs directly.
+
 Once the foundation works, List can reuse the byte allocator and owned
 cleanup. Element initialization, element drops, and capacity changes belong
 to later List work.
+
+## Prerequisites for returning owned text
+
+1. Extend the private descriptor to distinguish literal/static storage from
+   heap storage and identify the allocation to release. Keep length and byte
+   reads valid for both storage classes. Publish a new owner only after
+   checked size calculation, allocation and UTF-8 byte copying succeed.
+2. Add a consuming drop and elaborate `EndStringLocal` from the incoming
+   ownership state. Drop on available paths, skip moved paths and use a
+   runtime flag only when a mixed path cannot be handled on separate edges.
+   Keep a returned value alive after the callee's remaining owners are dropped.
+3. Cover owners outside lexical locals. Drop discarded results and abandoned
+   temporaries on normal exits. Evaluate replacement values first, then
+   release the previous heap value when still owned, including whole
+   replacement through a share. Existing moves must transfer the release
+   obligation across calls, returns and CFG edges exactly once.
+4. Wire checked guest growth and block reuse to the real owned result.
+   Verify repeated short-lived concatenations in one instance, forced growth
+   failure, mixed-path cleanup, and exact bytes after a callee returns text.
+   Exercise the same source through the source runner and standalone Wasm.
 
 ## Allocation and failure
 
