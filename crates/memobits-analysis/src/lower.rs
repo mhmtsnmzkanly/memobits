@@ -743,7 +743,9 @@ impl<'a> Builder<'a> {
 
     fn return_from_body(&mut self, returned: Option<Operand>, span: Span) {
         if let Some(current) = self.current {
-            let returned = returned.and_then(|value| self.preserve_scope_result(value, 0));
+            let returned = returned
+                .and_then(|value| self.preserve_scope_result(value, 0))
+                .map(consume);
             self.end_string_locals(0, span);
             self.finish(current, TerminatorKind::Return(returned), Some(span));
         }

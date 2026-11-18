@@ -4,6 +4,7 @@ use memobits_diagnostics::Span;
 use std::collections::HashSet;
 
 mod scoped_string;
+pub use scoped_string::HeapStrings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
@@ -505,7 +506,7 @@ impl Program {
         let mut paths = HashSet::new();
         self.validate_types(&mut errors);
         let type_count = self.types.len();
-        let heap_strings = self.heap_string_locals();
+        let heap_strings = self.heap_strings();
         for (index, function) in self.functions.iter().enumerate() {
             let id = FunctionId(index as u32);
             if !paths.insert(&function.path) {
@@ -682,9 +683,8 @@ impl Program {
             if defined.len() != function.values.len() {
                 push(&mut errors, id, None, "some value IDs have no definition");
             }
-            let heap_locals = &heap_strings[index];
-            scoped_string::validate(function, id, heap_locals, &mut errors);
-            validate_operand_escapes(self, function, id, heap_locals, &mut errors);
+            scoped_string::validate(function, id, &heap_strings, &mut errors);
+            validate_operand_escapes(self, function, id, &heap_strings, &mut errors);
         }
         if errors.is_empty() {
             Ok(())
@@ -2559,7 +2559,7 @@ fn validate_operand_escapes(
     program: &Program,
     function: &Function,
     id: FunctionId,
-    heap_locals: &HashSet<LocalId>,
+    heap_strings: &[HeapStrings],
     errors: &mut Vec<ValidationError>,
 ) {
     let mut read_only = vec![false; function.values.len()];
@@ -2611,6 +2611,25 @@ fn validate_operand_escapes(
         }
     }
 
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions.iter().enumerate() {
+            if let InstructionKind::Call { callee, .. } = &instruction.kind {
+                if let Source::Function(target) = callee.source {
+                    if heap_strings
+                        .get(target.0 as usize)
+                        .is_some_and(|fact| fact.returns_heap)
+                        && scoped_string::call_binding(function, &block.instructions[position..])
+                            .is_none()
+                    {
+                        push(errors, id, Some(BlockId(index as u32)),
+                            "heap String call result must directly initialize a new immutable local");
+                    }
+                }
+            }
+        }
+    }
+
+    let heap_locals = &heap_strings[id.0 as usize].locals;
     let mut report = |block: BlockId, operand: &Operand, escape: bool, captures: bool| {
         if matches!(operand.source, Source::Local(local) if heap_locals.contains(&local))
             && (escape || captures || !matches!(operand.mode, UseMode::Read | UseMode::Borrow))
@@ -2634,9 +2653,17 @@ fn validate_operand_escapes(
 
     for (index, block) in function.blocks.iter().enumerate() {
         let block_id = BlockId(index as u32);
-        for instruction in &block.instructions {
+        let return_capture = scoped_string::return_capture(block);
+        for (position, instruction) in block.instructions.iter().enumerate() {
             match &instruction.kind {
-                InstructionKind::Capture(value) => report(block_id, value, false, true),
+                InstructionKind::Capture(value) => {
+                    if !return_capture.is_some_and(|(returned, source)| {
+                        returned == position && heap_locals.contains(&source)
+                    }) || *function.signature.result != Type::String
+                    {
+                        report(block_id, value, false, true);
+                    }
+                }
                 InstructionKind::Borrow { owner: value, .. }
                 | InstructionKind::Load { reference: value } => {
                     report(block_id, value, false, false)

@@ -235,6 +235,11 @@ fn text_boundaries() -> Bool {
         && "".is_char_boundary(0) && !"".is_char_boundary(1)
 }
 
+fn add_suffix(value: borrow String) -> String {
+    let text := value.concat("!");
+    text // Ownership moves out before this scope ends.
+}
+
 fn owned_byte_length(value: String) -> u32 {
     value.len()
 }
@@ -246,7 +251,7 @@ fn text_concat() -> Bool {
     // binding leaves scope. Moving to a new let transfers that obligation.
     let joined := left.concat(right.borrow());
     let left_moved := left;
-    let with_suffix := joined.concat("!");
+    let with_suffix := add_suffix(joined.borrow());
     let empty := "".concat("");
     let moved := joined;
     let suffix_ok := byte_is(with_suffix.byte_at(9), 33);

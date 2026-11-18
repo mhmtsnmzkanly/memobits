@@ -1,63 +1,153 @@
 //! Validate lexical heap String ownership and cleanup across CFG edges.
 
 use super::{
-    outgoing_edges, push, Function, FunctionId, InstructionKind, LocalId, Operand, Source,
-    TerminatorKind, Type, UseMode, ValidationError,
+    outgoing_edges, push, Block, Function, FunctionId, Instruction, InstructionKind, LocalId,
+    Operand, Source, TerminatorKind, Type, UseMode, ValidationError,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[derive(Default, Clone)]
+pub struct HeapStrings {
+    pub locals: HashSet<LocalId>,
+    pub(super) returns_heap: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Slot {
+    Local(usize, LocalId),
+    Return(usize),
+}
+
 impl super::Program {
-    /// Heap-capable locals and owned parameters, propagated through immutable
-    /// local moves and direct calls. Literal-only call paths need no cleanup.
-    pub fn heap_string_locals(&self) -> Vec<HashSet<LocalId>> {
-        let mut facts = vec![HashSet::new(); self.functions.len()];
-        let mut moves: HashMap<(usize, LocalId), Vec<(usize, LocalId)>> = HashMap::new();
+    /// Heap ownership propagated through bounded local, call and return edges.
+    pub fn heap_strings(&self) -> Vec<HeapStrings> {
+        let mut facts = vec![HeapStrings::default(); self.functions.len()];
+        let mut moves: HashMap<Slot, Vec<Slot>> = HashMap::new();
         let mut pending = Vec::new();
         for (index, function) in self.functions.iter().enumerate() {
-            for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
-                match &instruction.kind {
-                    InstructionKind::InitConcatString { target, .. } => {
-                        if facts[index].insert(*target) {
-                            pending.push((index, *target));
+            for block in &function.blocks {
+                if let Some((_, source)) = return_capture(block) {
+                    moves
+                        .entry(Slot::Local(index, source))
+                        .or_default()
+                        .push(Slot::Return(index));
+                }
+                for (position, instruction) in block.instructions.iter().enumerate() {
+                    match &instruction.kind {
+                        InstructionKind::InitConcatString { target, .. } => {
+                            pending.push(Slot::Local(index, *target));
                         }
-                    }
-                    InstructionKind::Assign {
-                        target,
-                        value,
-                        initialize: true,
-                    } => {
-                        if let Some(source) = local_move_source(function, *target, value) {
-                            moves
-                                .entry((index, source))
-                                .or_default()
-                                .push((index, *target));
+                        InstructionKind::Assign {
+                            target,
+                            value,
+                            initialize: true,
+                        } => {
+                            if let Some(source) = local_move_source(function, *target, value) {
+                                moves
+                                    .entry(Slot::Local(index, source))
+                                    .or_default()
+                                    .push(Slot::Local(index, *target));
+                            }
                         }
-                    }
-                    InstructionKind::Call { callee, arguments } => {
-                        if let Some((source, target, parameter)) =
-                            owned_call_transfer(self, callee, arguments)
-                        {
-                            moves
-                                .entry((index, source))
-                                .or_default()
-                                .push((target, parameter));
+                        InstructionKind::Call { callee, arguments } => {
+                            if let Some((source, target, parameter)) =
+                                owned_call_transfer(self, callee, arguments)
+                            {
+                                moves
+                                    .entry(Slot::Local(index, source))
+                                    .or_default()
+                                    .push(Slot::Local(target, parameter));
+                            }
+                            if let Some((callee, target)) =
+                                call_binding(function, &block.instructions[position..])
+                            {
+                                moves
+                                    .entry(Slot::Return(callee))
+                                    .or_default()
+                                    .push(Slot::Local(index, target));
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
         while let Some(source) = pending.pop() {
-            if let Some(targets) = moves.get(&source) {
-                for &(function, local) in targets {
-                    if facts[function].insert(local) {
-                        pending.push((function, local));
-                    }
+            let changed = match source {
+                Slot::Local(function, local) => facts[function].locals.insert(local),
+                Slot::Return(function) => {
+                    !std::mem::replace(&mut facts[function].returns_heap, true)
+                }
+            };
+            if changed {
+                if let Some(targets) = moves.get(&source) {
+                    pending.extend(targets);
                 }
             }
         }
         facts
     }
+}
+
+/// Capture the outgoing descriptor before any lexical cleanup runs. This
+/// temporary can only feed the return at the end of the same block.
+pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
+    let TerminatorKind::Return(Some(Operand {
+        source: Source::Value(result),
+        mode: UseMode::Consume,
+        ..
+    })) = block.terminator.kind
+    else {
+        return None;
+    };
+    let (position, instruction) = block
+        .instructions
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, inst)| !matches!(inst.kind, InstructionKind::EndStringLocal { .. }))?;
+    let InstructionKind::Capture(Operand {
+        source: Source::Local(source),
+        mode: UseMode::Consume,
+        ..
+    }) = instruction.kind
+    else {
+        return None;
+    };
+    (instruction.output == Some(result)).then_some((position, source))
+}
+
+/// A heap call result must initialize an immutable local immediately.
+pub(super) fn call_binding(
+    function: &Function,
+    instructions: &[Instruction],
+) -> Option<(usize, LocalId)> {
+    let [call, binding, ..] = instructions else {
+        return None;
+    };
+    let InstructionKind::Call {
+        callee: Operand {
+            source: Source::Function(callee),
+            ..
+        },
+        ..
+    } = call.kind
+    else {
+        return None;
+    };
+    let InstructionKind::Assign {
+        target,
+        value,
+        initialize: true,
+    } = &binding.kind
+    else {
+        return None;
+    };
+    let output = call.output?;
+    (value.source == Source::Value(output)
+        && value.mode == UseMode::Consume
+        && immutable_string_local(function, *target))
+    .then_some((callee.0 as usize, *target))
 }
 
 /// A direct call may move a local into its final owned String parameter.
@@ -98,21 +188,25 @@ pub(super) fn local_move_source(
     let Source::Local(source) = value.source else {
         return None;
     };
-    let local = function.locals.get(target.0 as usize)?;
-    (source != target
-        && value.mode == UseMode::Consume
-        && local.ty == Type::String
-        && !local.mutable
-        && !function.parameter_locals.contains(&target))
-    .then_some(source)
+    (source != target && value.mode == UseMode::Consume && immutable_string_local(function, target))
+        .then_some(source)
+}
+
+fn immutable_string_local(function: &Function, target: LocalId) -> bool {
+    function
+        .locals
+        .get(target.0 as usize)
+        .is_some_and(|local| local.ty == Type::String && !local.mutable)
+        && !function.parameter_locals.contains(&target)
 }
 
 pub(super) fn validate(
     function: &Function,
     id: FunctionId,
-    locals: &HashSet<LocalId>,
+    facts: &[HeapStrings],
     errors: &mut Vec<ValidationError>,
 ) {
+    let locals = &facts[id.0 as usize].locals;
     if locals.is_empty() || function.entry.0 as usize >= function.blocks.len() {
         return;
     }
@@ -131,7 +225,7 @@ pub(super) fn validate(
         // A moved binding remains in lexical scope. The separate move checker
         // tracks availability, and the descriptor tracks who owns the block.
         let mut in_scope = entries[block_id.0 as usize].clone().unwrap();
-        for instruction in &block.instructions {
+        for (position, instruction) in block.instructions.iter().enumerate() {
             let initialized = match &instruction.kind {
                 InstructionKind::InitConcatString { target, .. } => Some(*target),
                 InstructionKind::Assign {
@@ -139,9 +233,19 @@ pub(super) fn validate(
                     value,
                     initialize,
                 } if locals.contains(target) => {
+                    let from_call = position
+                        .checked_sub(1)
+                        .and_then(|previous| {
+                            call_binding(function, &block.instructions[previous..])
+                        })
+                        .is_some_and(|(callee, bound)| {
+                            bound == *target
+                                && facts.get(callee).is_some_and(|fact| fact.returns_heap)
+                        });
                     if *initialize
-                        && local_move_source(function, *target, value)
-                            .is_some_and(|source| in_scope.contains(&source))
+                        && (from_call
+                            || local_move_source(function, *target, value)
+                                .is_some_and(|source| in_scope.contains(&source)))
                     {
                         Some(*target)
                     } else {

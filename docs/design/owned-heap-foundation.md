@@ -33,8 +33,10 @@ A direct move into another immutable local transfers the owning descriptor.
 A direct internal call can also take the local in its final owned String
 parameter. Earlier heap arguments remain gated because evaluation of a
 later argument could exit and leave an owning temporary to clean up.
-Heap returns, other temporary owners, sharing for mutation and replacement
-require broader drop elaboration. A nonzero descriptor
+A function can return an owning local through a direct internal call whose
+result directly initializes a new immutable caller local. Discarded results,
+result temporaries, sharing for mutation and replacement require broader drop
+elaboration. A nonzero descriptor
 provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
@@ -58,9 +60,12 @@ to later List work.
 At each reachable block entry, the IR validator requires every incoming
 edge to agree on the heap bindings still in scope, even when their move
 states differ. A callee must end all of its heap bindings before returning.
-Heap capability propagates through direct calls, including forwarding calls,
-so return and replacement gates also apply to parameters that may receive
-heap text. Calls that only carry static text retain ordinary String behavior.
+Heap capability propagates through direct arguments and returns, including
+forwarding calls. A return stages the descriptor and clears the source
+provenance before lexical cleanup. The caller receives the descriptor in its
+private result cell and immediately moves it into the new binding. Calls
+whose results can be heap-backed require this binding even on paths that
+return static text. Static-only results retain ordinary String behavior.
 The callee copies the incoming descriptor into its owned parameter cell
 and clears the caller slot's provenance before executing the body.
 Release uses the block address, so it preserves other live allocations
@@ -87,9 +92,11 @@ have page-reuse coverage.
    Scope exit consults provenance, so mixed paths need no separate flag.
    Tests cover moving an older allocation while a newer allocation remains
    live, and moving on one branch while retaining the original on another.
-3. Cover remaining argument positions, returns and temporary results before
-   permitting those uses. Transfer the result before dropping the callee's
-   other owners. Drop discarded temporaries on normal exits. Evaluate a
+3. Direct return transfers the result before dropping the callee's other
+   owners. Tests cover early returns, a static alternative, forwarding and
+   repeated reuse in the same Wasm instance.
+4. Cover remaining argument positions and temporary results. Drop discarded
+   temporaries on normal exits. Evaluate a
    replacement before releasing the previous owner, including whole
    replacement through a share. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm

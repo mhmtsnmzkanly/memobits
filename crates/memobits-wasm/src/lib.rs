@@ -1525,10 +1525,10 @@ fn encode_frames_traced(
         functions.function(signatures.len() as u32);
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
-    let heap_strings = program.heap_string_locals();
+    let heap_strings = program.heap_strings();
     let concat_index = reachable
         .iter()
-        .any(|id| !heap_strings[*id as usize].is_empty())
+        .any(|id| !heap_strings[*id as usize].locals.is_empty())
         .then(|| {
             let adapter_count = u32::from(entry.is_some());
             types.ty().function([ValType::I32; 3], [ValType::I32]);
@@ -1564,7 +1564,7 @@ fn encode_frames_traced(
             &structs,
             stack_size,
             &strings.offsets,
-            &heap_strings[*id as usize],
+            &heap_strings[*id as usize].locals,
             concat_index,
             &mut traps,
         )?);
@@ -2055,6 +2055,23 @@ fn emit_array_copy(
         src_mem: 0,
         dst_mem: 0,
     });
+    Ok(())
+}
+
+fn clear_moved_heap_source(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    operand: &Operand,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+    heap_locals: &HashSet<LocalId>,
+) -> Result<(), String> {
+    if matches!(operand.source, Source::Local(source) if heap_locals.contains(&source)) {
+        emit_operand(body, function, param_count, operand, layout, frame)?;
+        body.instruction(&WasmInstruction::I32Const(0));
+        string_descriptor::store_allocation(body);
+    }
     Ok(())
 }
 
@@ -2703,7 +2720,19 @@ fn compile_instruction(
         InstructionKind::Capture(operand) => {
             let output = output.ok_or("capture lacks an output")?;
             if let Ok(cell) = array_cell_of(layout, Slot::Value(instruction.output.unwrap().0)) {
-                return emit_array_copy(body, function, param_count, cell, operand, layout, frame);
+                emit_array_copy(body, function, param_count, cell, operand, layout, frame)?;
+                // A validated heap capture stages the outgoing return value.
+                // Lexical cleanup must see the original binding as moved.
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    operand,
+                    layout,
+                    frame,
+                    heap_locals,
+                )?;
+                return Ok(());
             }
             emit_operand(body, function, param_count, operand, layout, frame)?;
             body.instruction(&WasmInstruction::LocalSet(output));
@@ -3219,15 +3248,15 @@ fn compile_instruction(
         InstructionKind::Assign { target, value, .. } => {
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
-                if let Source::Local(source) = value.source {
-                    if heap_locals.contains(&source) {
-                        // The destination descriptor now owns the block. Zero
-                        // provenance leaves the old binding empty on this path.
-                        emit_operand(body, function, param_count, value, layout, frame)?;
-                        body.instruction(&WasmInstruction::I32Const(0));
-                        string_descriptor::store_allocation(body);
-                    }
-                }
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    value,
+                    layout,
+                    frame,
+                    heap_locals,
+                )?;
                 return Ok(());
             }
             if let Some(slot) = layout.slots.get(&target.0) {

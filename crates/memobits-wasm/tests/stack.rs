@@ -159,10 +159,14 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
         fn forward(early: Bool, value: String) -> u32 {{
             consume(early, value)
         }}
+        fn make(left: borrow String, right: borrow String) -> String {{
+            let result := left.concat(right);
+            result
+        }}
         fn measure(left: borrow String, right: borrow String, early: Bool) -> u32 {{
             var steps := 0;
             loop {{
-                let joined := left.concat(right);
+                let joined := make(left, right);
                 let len := if steps % 2 == 0 {{
                     forward(early, joined)
                 }} else {{
@@ -173,7 +177,7 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
                 if steps < 4 {{ continue; }}
                 break;
             }}
-            let joined := left.concat(right);
+            let joined := make(left, right);
             forward(false, joined)
         }}
         fn main() -> Result<u32, Error> {{
@@ -185,7 +189,7 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
     "#
     ));
     let options = CompileOptions { stack_size: 4096 };
-    let artifact = compile_application_traced(&program, FunctionId(3), &options).unwrap();
+    let artifact = compile_application_traced(&program, FunctionId(4), &options).unwrap();
     let engine = Engine::default();
     let module = Module::new(&engine, &artifact.bytes).unwrap();
     let linker = Linker::new(&engine);

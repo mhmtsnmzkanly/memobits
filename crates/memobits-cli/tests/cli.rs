@@ -67,7 +67,7 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
         ),
         (
             r#"let joined := "a".concat("b"); returns(joined).len();"#,
-            "final owned String parameter",
+            "must directly initialize a new immutable local",
         ),
         (
             r#"let joined := "a".concat("b"); earlier(joined, true);"#,
@@ -99,6 +99,75 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
         assert!(!result.status.success(), "{body}");
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
+    }
+}
+
+#[test]
+fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-returns'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/text.mb",
+        r#"
+        pub fn choose(early: Bool) -> String {
+            let joined := "é".concat("😀");
+            if early { return joined; }
+            "ok"
+        }
+        fn identity(owned: String) -> String { owned }
+        pub fn forward(early: Bool) -> String {
+            let owned := choose(early);
+            let forwarded := identity(owned);
+            forwarded
+        }
+    "#,
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        use self::text::forward;
+        fn byte_is(s: borrow String, index: u32, expected: u8) -> Bool {
+            match s.byte_at(index) { Some(byte) => byte == expected, None => false }
+        }
+        fn main() -> Result<Bool, Error> {
+            let first := forward(true);
+            let literal := forward(false);
+            let another := "a".concat("b");
+            Ok(first.len() == 6 && byte_is(first.borrow(), 5, 128)
+                && literal.len() == 2 && byte_is(literal.borrow(), 0, 111)
+                && byte_is(another.borrow(), 0, 97))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "returns.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "returns.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn heap_returns_require_an_immediate_immutable_binding() {
+    let f = Fixture::new();
+    for body in ["make();", "make().len();", "var result := make();"] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"fn make() -> String {{ let result := "é".concat("!"); result }}
+               fn main() {{ {body} }}"#,
+            ),
+        );
+        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+        assert!(
+            diagnostic.contains("must directly initialize a new immutable local"),
+            "{body}: {diagnostic}"
+        );
     }
 }
 
