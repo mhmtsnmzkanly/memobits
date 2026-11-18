@@ -184,9 +184,9 @@ fn main() -> i32 {
 The static case uses the private String descriptor layout in `Ok` and
 the existing aggregate return and extraction paths. The descriptor's
 allocation field stays zero. Replacing the body with
-`let text := "é".concat("!"); Ok(text)` reports `TE018` because returning
-a heap-backed Result still requires interprocedural ownership tracking. The application outcome
-ABI continues to require a primitive success payload.
+`let text := "é".concat("!"); Ok(text)` transfers a heap owner through
+the same internal ABI to the immediate consuming match. The application
+outcome ABI continues to require a primitive success payload.
 [Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
 [Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
 
@@ -210,12 +210,16 @@ ABI continues to require a primitive success payload.
    Argument cleanup may run before the match. Unconsumed results, borrowed
    matches, wildcard discards and forwarding a Result without matching it
    remain gated.
-4. Add the fixed-buffer constructor. Use the guest validator's cases as
-   the contract for a checked validation-and-copy path. Current guest code
-   can validate bytes, while publication of a descriptor from dynamic bytes
-   requires a compiler-provided operation that validates before allocating
-   and copying. Reuse the checked allocator and String descriptor. Choose
-   the source spelling when that path is implemented.
+4. The private Wasm allocator now copies byte ranges into a new String
+   descriptor. Production concat supplies both ranges from its live
+   String inputs. A constructor can supply its logical prefix and an
+   empty second range.
+5. Add the compiler-provided validation and construction operation. It
+   must check the length against the input's fixed bound and validate the
+   whole prefix before invoking the allocator. Use the guest validator's
+   cases as the contract and construct the typed error before any
+   allocation on failure. Choose the source spelling and error type
+   binding when this operation is implemented.
 
 Run the executable slices from source and as standalone Wasm with a
 primitive self-checking entry. Verify exact bytes and scalar reads, all

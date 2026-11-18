@@ -251,7 +251,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.
   [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
-  is the next planned consumer of internal heap Result returns.
+  is the next planned consumer of internal heap Result returns. Production
+  concat uses the private byte-range allocator. Strict validation and
+  constructor lowering remain pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

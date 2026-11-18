@@ -115,6 +115,8 @@ fn return_bytes(buffer: Array<u8, 2>) -> Bytes<2> {
     buffer
 }
 
+// For strict UTF-8 validation of a logical Bytes prefix, run the
+// examples/projects/utf8-validator project. Construction is still pending.
 fn fixed_bytes() -> Bool {
     var bytes: Bytes<2> = [0; 2];
     set_first_byte(bytes.share());

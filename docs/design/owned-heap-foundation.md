@@ -79,8 +79,10 @@ A nonzero descriptor provenance field points to the owned block's header. A move
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
 
-Guest allocation grows memory only as needed, after checking the widened
-exclusive byte end and its page ceiling. A failed grow traps at the concat
+The private allocator takes two live byte ranges whose contents are
+already valid UTF-8. Concat supplies the addresses and lengths from its
+String descriptors. The allocator grows memory only as needed, after
+checking the widened exclusive byte end and its page ceiling. A failed grow traps at the concat
 call before publishing a descriptor or changing the allocator state.
 Scope exit puts the block on a private free list. Concat tries the first
 fitting block before extending the heap. Headers are four-byte aligned and

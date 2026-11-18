@@ -31,7 +31,13 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
         }
         fn main() -> Result<Bool, Error> {
             let text := "".concat("é");
-            Ok(doubled(text.borrow(), true) && byte_is(text.borrow(), 1, 169))
+            let pair := text.concat("😀");
+            Ok(doubled(text.borrow(), true)
+                && byte_is(text.borrow(), 1, 169)
+                && pair.len() == 6
+                && byte_is(pair.borrow(), 1, 169)
+                && byte_is(pair.borrow(), 2, 240)
+                && byte_is(pair.borrow(), 5, 128))
         }
     "#,
     );

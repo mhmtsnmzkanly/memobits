@@ -1542,12 +1542,12 @@ fn encode_frames_traced(
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
     let heap_strings = program.heap_strings();
-    let concat_index = reachable
+    let heap_copy_index = reachable
         .iter()
         .any(|id| !heap_strings[*id as usize].locals.is_empty())
         .then(|| {
             let adapter_count = u32::from(entry.is_some());
-            types.ty().function([ValType::I32; 3], [ValType::I32]);
+            types.ty().function([ValType::I32; 5], [ValType::I32]);
             types.ty().function([ValType::I32], []);
             functions.function(signatures.len() as u32 + adapter_count);
             functions.function(signatures.len() as u32 + adapter_count + 1);
@@ -1581,7 +1581,7 @@ fn encode_frames_traced(
             stack_size,
             &strings.offsets,
             &heap_strings[*id as usize].locals,
-            concat_index,
+            heap_copy_index,
             &mut traps,
         )?);
     }
@@ -1596,13 +1596,13 @@ fn encode_frames_traced(
         wrapper.instruction(&WasmInstruction::End);
         code.function(&wrapper);
     }
-    if concat_index.is_some() {
-        code.function(&string_heap::initializer());
+    if heap_copy_index.is_some() {
+        code.function(&string_heap::copy_ranges());
         code.function(&string_heap::releaser());
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
-    let has_traps = concat_index.is_some() || !traps.spans.is_empty();
+    let has_traps = heap_copy_index.is_some() || !traps.spans.is_empty();
     if has_traps {
         export_section.export(TRAP_EXPORT, ExportKind::Global, traps.global);
     }
@@ -1613,7 +1613,7 @@ fn encode_frames_traced(
         let pages = static_layout.pages();
         memories.memory(MemoryType {
             minimum: pages,
-            maximum: Some(if concat_index.is_some() {
+            maximum: Some(if heap_copy_index.is_some() {
                 memory::MAX_PAGES
             } else {
                 pages
@@ -1651,7 +1651,7 @@ fn encode_frames_traced(
             &ConstExpr::i32_const(0),
         );
     }
-    if concat_index.is_some() {
+    if heap_copy_index.is_some() {
         // Concat always has a String frame cell and an allocation trap site.
         debug_assert!(has_frames && has_traps);
         let heap_start = align_up(static_layout.end(), string_heap::BLOCK_ALIGN)
@@ -1697,7 +1697,7 @@ fn compile_function(
     stack_size: u32,
     strings: &BTreeMap<&str, u32>,
     heap_locals: &HashSet<LocalId>,
-    concat_index: Option<u32>,
+    heap_copy_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
@@ -1801,7 +1801,7 @@ fn compile_function(
                 frame,
                 strings,
                 heap_locals,
-                concat_index,
+                heap_copy_index,
                 traps,
             )?;
         }
@@ -2079,7 +2079,7 @@ fn release_string_local(
     local: LocalId,
     layout: &FrameLayout,
     frame: Option<FrameState>,
-    concat_index: Option<u32>,
+    heap_copy_index: Option<u32>,
 ) -> Result<(), String> {
     let cell = array_cell_of(layout, Slot::Local(local.0))?;
     emit_address(
@@ -2087,7 +2087,7 @@ fn release_string_local(
         frame.ok_or("String local requires a frame")?,
         cell.offset,
     );
-    let releaser = concat_index.ok_or("missing String release helper")? + 1;
+    let releaser = heap_copy_index.ok_or("missing String release helper")? + 1;
     body.instruction(&WasmInstruction::Call(releaser));
     Ok(())
 }
@@ -2688,7 +2688,7 @@ fn compile_instruction(
     frame: Option<FrameState>,
     strings: &BTreeMap<&str, u32>,
     heap_locals: &HashSet<LocalId>,
-    concat_index: Option<u32>,
+    heap_copy_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
@@ -2697,12 +2697,15 @@ fn compile_instruction(
     match &instruction.kind {
         InstructionKind::EndStringLocal { local } => {
             if heap_locals.contains(local) {
-                release_string_local(body, *local, layout, frame, concat_index)?;
+                release_string_local(body, *local, layout, frame, heap_copy_index)?;
             }
         }
         InstructionKind::InitConcatString { target, strings } => {
             for source in strings {
                 emit_operand(body, function, param_count, source, layout, frame)?;
+                string_descriptor::load_address(body);
+                emit_operand(body, function, param_count, source, layout, frame)?;
+                string_descriptor::load_length(body);
             }
             let cell = array_cell_of(layout, Slot::Local(target.0))?;
             emit_address(
@@ -2711,7 +2714,7 @@ fn compile_instruction(
                 cell.offset,
             );
             body.instruction(&WasmInstruction::Call(
-                concat_index.ok_or("missing concat helper")?,
+                heap_copy_index.ok_or("missing String allocation helper")?,
             ));
             body.instruction(&WasmInstruction::I32Eqz);
             trap_if(
@@ -3255,9 +3258,9 @@ fn compile_instruction(
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
                 if is_aggregate(&inner) {
                     if *inner == Type::String {
-                        if let Some(concat) = concat_index {
+                        if let Some(copy) = heap_copy_index {
                             emit_operand(body, function, param_count, reference, layout, frame)?;
-                            body.instruction(&WasmInstruction::Call(concat + 1));
+                            body.instruction(&WasmInstruction::Call(copy + 1));
                         }
                     }
                     // An error share can point at a descendant. Replace only the
@@ -3312,7 +3315,7 @@ fn compile_instruction(
                     if value.source == Source::Local(*target) {
                         return Ok(());
                     }
-                    release_string_local(body, *target, layout, frame, concat_index)?;
+                    release_string_local(body, *target, layout, frame, heap_copy_index)?;
                 }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
                 clear_moved_heap_source(

@@ -11,25 +11,22 @@ const NEXT_OFFSET: u64 = 4;
 const HEADER_BYTES: i32 = 8;
 
 const LEFT: u32 = 0;
-const RIGHT: u32 = 1;
-const DESTINATION: u32 = 2;
-const LEFT_LEN: u32 = 3;
-const RIGHT_LEN: u32 = 4;
+const LEFT_LEN: u32 = 1;
+const RIGHT: u32 = 2;
+const RIGHT_LEN: u32 = 3;
+const DESTINATION: u32 = 4;
 const LEN: u32 = 5;
 const BLOCK: u32 = 6;
 const PREVIOUS: u32 = 7;
 const PAGES: u32 = 8;
 const END: u32 = 9;
 
-/// Return false on size or growth failure, leaving allocator state and
-/// the destination untouched. Inputs are live, so none can be free blocks.
-pub(super) fn initializer() -> Function {
-    let mut body = Function::new([(6, ValType::I32), (1, ValType::I64)]);
-    for (descriptor, length) in [(LEFT, LEFT_LEN), (RIGHT, RIGHT_LEN)] {
-        body.instruction(&I::LocalGet(descriptor));
-        string_descriptor::load_length(&mut body);
-        body.instruction(&I::LocalSet(length));
-    }
+/// Allocate and copy two already validated UTF-8 ranges. The caller supplies
+/// in-bounds, live ranges outside free blocks and a private descriptor slot.
+/// Return false on size or growth failure without publishing a descriptor or
+/// changing allocator state.
+pub(super) fn copy_ranges() -> Function {
+    let mut body = Function::new([(4, ValType::I32), (1, ValType::I64)]);
     body.instructions()
         .local_get(LEFT_LEN)
         .i64_extend_i32_u()
@@ -77,17 +74,18 @@ pub(super) fn initializer() -> Function {
     unlink_block(&mut body);
     body.instruction(&I::End);
 
-    for (descriptor, length) in [(LEFT, LEFT_LEN), (RIGHT, RIGHT_LEN)] {
+    for (address, length) in [(LEFT, LEFT_LEN), (RIGHT, RIGHT_LEN)] {
         body.instructions()
             .local_get(BLOCK)
             .i32_const(HEADER_BYTES)
             .i32_add();
-        if descriptor == RIGHT {
+        if address == RIGHT {
             body.instructions().local_get(LEFT_LEN).i32_add();
         }
-        body.instruction(&I::LocalGet(descriptor));
-        string_descriptor::load_address(&mut body);
-        body.instructions().local_get(length).memory_copy(0, 0);
+        body.instructions()
+            .local_get(address)
+            .local_get(length)
+            .memory_copy(0, 0);
     }
 
     body.instructions()
