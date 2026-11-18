@@ -54,7 +54,12 @@ fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
         "src/text.mb",
         r#"pub type Text = String;
            pub fn make() -> Text { "é😀" }
-           pub fn inspect(s: borrow Text) -> i32 { 42 }
+           pub fn inspect(s: borrow Text) -> i32 {
+               let byte_ok := match s.byte_at(1) { Some(byte) => byte == 169, None => false };
+               let scalar_ok := match s.scalar_at(2) { Some(scalar) => scalar == 128_512, None => false };
+               if s.len() == 6 && s.is_char_boundary(2) && !s.is_char_boundary(1)
+                   && byte_ok && scalar_ok { 42 } else { 0 }
+           }
            fn unused() -> Text { "unreachable literal" }"#,
     );
     f.write(

@@ -39,7 +39,8 @@ to later List work.
 
 ## Prerequisites for returning owned text
 
-1. Extend the private descriptor to distinguish literal/static storage from
+1. Extend the [shared Wasm descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
+   to distinguish literal/static storage from
    heap storage and identify the allocation to release. Keep length and byte
    reads valid for both storage classes. Publish a new owner only after
    checked size calculation, allocation and UTF-8 byte copying succeed.

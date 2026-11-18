@@ -21,6 +21,7 @@ use wasm_encoder::{
 };
 
 mod memory;
+mod string_descriptor;
 use memory::{LayoutError, StaticLayout};
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
@@ -670,7 +671,7 @@ fn type_layout(
 ) -> Result<(u32, u32), String> {
     match ty {
         Type::Primitive(kind) => storage_layout(*kind),
-        Type::String => Ok((STRING_DESCRIPTOR_SIZE, 4)),
+        Type::String => Ok((string_descriptor::SIZE, string_descriptor::ALIGN)),
         Type::Struct(id) | Type::Enum(id) => {
             struct_layout(id.0).ok_or_else(|| "type is out of range".to_string())
         }
@@ -1057,9 +1058,6 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
     Ok((width, width))
 }
 
-const STRING_LENGTH_OFFSET: u32 = 4;
-const STRING_DESCRIPTOR_SIZE: u32 = 8;
-
 const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
 
 /// Byte size of the pointee of an aggregate operand type (array or struct,
@@ -1402,15 +1400,14 @@ impl<'a> StringData<'a> {
                 }
                 let layout_error = "String literals exceed the supported Wasm memory size";
                 let len = u32::try_from(text.len()).map_err(|_| layout_error)?;
-                let size = STRING_DESCRIPTOR_SIZE
+                let size = string_descriptor::SIZE
                     .checked_add(len)
                     .ok_or(layout_error)?;
                 let descriptor = layout.reserve(size).map_err(|_| layout_error)?;
-                let address = descriptor + STRING_DESCRIPTOR_SIZE;
+                let address = descriptor + string_descriptor::SIZE;
                 data.start.get_or_insert(descriptor);
                 data.offsets.insert(text, descriptor);
-                data.bytes.extend(address.to_le_bytes());
-                data.bytes.extend(len.to_le_bytes());
+                data.bytes.extend(string_descriptor::encode(address, len));
                 data.bytes.extend(text.as_bytes());
             }
         }
@@ -1777,14 +1774,6 @@ fn memory_arg(kind: Primitive) -> MemArg {
     }
 }
 
-fn emit_string_length(body: &mut WasmFunction) {
-    let arg = MemArg {
-        offset: u64::from(STRING_LENGTH_OFFSET),
-        ..memory_arg(Primitive::U32)
-    };
-    body.instruction(&WasmInstruction::I32Load(arg));
-}
-
 // Call only inside the branch where offset is below the descriptor length.
 fn emit_string_byte(
     body: &mut WasmFunction,
@@ -1810,7 +1799,7 @@ fn emit_string_byte_address(
     frame: Option<FrameState>,
 ) -> Result<(), String> {
     emit_operand(body, function, param_count, source, layout, frame)?;
-    emit_load(body, Primitive::U32);
+    string_descriptor::load_address(body);
     emit_operand(body, function, param_count, offset, layout, frame)?;
     body.instruction(&WasmInstruction::I32Add);
     Ok(())
@@ -1864,7 +1853,7 @@ fn emit_string_scalar(
                 // index < len ensures subtraction cannot wrap. Checking the
                 // remaining width before any tail load bounds all byte offsets.
                 emit_operand(body, function, param_count, source, layout, Some(frame))?;
-                emit_string_length(body);
+                string_descriptor::load_length(body);
                 emit_operand(body, function, param_count, offset, layout, Some(frame))?;
                 body.instruction(&WasmInstruction::I32Sub);
                 body.instruction(&WasmInstruction::I32Const(width));
@@ -2611,7 +2600,7 @@ fn compile_instruction(
                 .ok_or("missing String literal data")?;
             emit_address(body, frame, cell.offset);
             body.instruction(&WasmInstruction::I32Const(address as i32));
-            body.instruction(&WasmInstruction::I32Const(STRING_DESCRIPTOR_SIZE as i32));
+            body.instruction(&WasmInstruction::I32Const(string_descriptor::SIZE as i32));
             body.instruction(&WasmInstruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
@@ -2636,7 +2625,7 @@ fn compile_instruction(
         }
         InstructionKind::StringLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;
-            emit_string_length(body);
+            string_descriptor::load_length(body);
             body.instruction(&WasmInstruction::LocalSet(
                 output.ok_or("StringLen lacks an output")?,
             ));
@@ -2644,7 +2633,7 @@ fn compile_instruction(
         InstructionKind::StringIsCharBoundary { source, offset } => {
             let output = output.ok_or("StringIsCharBoundary lacks an output")?;
             emit_operand(body, function, param_count, source, layout, frame)?;
-            emit_string_length(body);
+            string_descriptor::load_length(body);
             body.instruction(&WasmInstruction::LocalSet(output));
             emit_operand(body, function, param_count, offset, layout, frame)?;
             body.instruction(&WasmInstruction::LocalGet(output));
@@ -2687,7 +2676,7 @@ fn compile_instruction(
 
             emit_operand(body, function, param_count, offset, layout, Some(frame))?;
             emit_operand(body, function, param_count, source, layout, Some(frame))?;
-            emit_string_length(body);
+            string_descriptor::load_length(body);
             body.instruction(&WasmInstruction::I32LtU);
             body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
             let payload_type = if scalar {

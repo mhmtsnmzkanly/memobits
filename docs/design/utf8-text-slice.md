@@ -41,9 +41,10 @@ use the existing last-use loan rules. A whole assignment through a
 
 Wasm places reachable literal bytes after the guest stack and any outcome
 entry return cell. Frame cells carry a private 32-bit address and byte
-length. Moving a String copies that descriptor through the aggregate call
-and storage paths. Guest code has no operation that writes to the literal
-bytes. The descriptor and data layout are private to the backend. For an
+length at offsets 0 and 4. Literal encoding, descriptor loads and frame
+layout share one private Wasm layout definition. Moving a String copies the
+descriptor through aggregate call and storage paths. Guest code has no
+operation that writes to the literal bytes. For an
 outcome entry, the runner's existing memory export still exposes linear
 memory to the embedding host. Exported String signatures and embedded
 String storage in arrays, structs, or enum payloads are gated.
