@@ -31,3 +31,18 @@ fn load_field(body: &mut Function, offset: u32) {
         ..memory_arg(Primitive::U32)
     }));
 }
+
+pub(super) fn store_address(body: &mut Function) {
+    store_field(body, ADDRESS_OFFSET);
+}
+
+pub(super) fn store_length(body: &mut Function) {
+    store_field(body, LENGTH_OFFSET);
+}
+
+fn store_field(body: &mut Function, offset: u32) {
+    body.instruction(&Instruction::I32Store(MemArg {
+        offset: u64::from(offset),
+        ..memory_arg(Primitive::U32)
+    }));
+}

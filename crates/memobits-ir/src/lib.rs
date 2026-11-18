@@ -3,6 +3,8 @@
 use memobits_diagnostics::Span;
 use std::collections::HashSet;
 
+mod scoped_string;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -262,6 +264,11 @@ pub enum ArrayInit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstructionKind {
     Constant(Constant),
+    /// Initialize an immutable lexical String owner by concatenating two borrows.
+    InitConcatString {
+        target: LocalId,
+        strings: [Operand; 2],
+    },
     /// End lexical storage for a String local, even if it has been moved.
     /// This invalidates the local without consuming a value or freeing bytes.
     EndStringLocal {
@@ -674,7 +681,8 @@ impl Program {
             if defined.len() != function.values.len() {
                 push(&mut errors, id, None, "some value IDs have no definition");
             }
-            validate_read_only_loaded_values(function, id, &mut errors);
+            let concat_locals = scoped_string::validate(function, id, &mut errors);
+            validate_operand_escapes(function, id, &concat_locals, &mut errors);
         }
         if errors.is_empty() {
             Ok(())
@@ -1218,6 +1226,34 @@ fn validate_instruction(
 ) {
     let out = output_type(function, instruction.output);
     match &instruction.kind {
+        InstructionKind::InitConcatString { target, strings } => {
+            let valid_local = function
+                .locals
+                .get(target.0 as usize)
+                .is_some_and(|local| local.ty == Type::String && !local.mutable)
+                && !function.parameter_locals.contains(target);
+            if !valid_local || instruction.output.is_some() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "concat requires an immutable String local and no output",
+                );
+            }
+            for source in strings {
+                let input = operand_type(program, function, source, errors, id, block);
+                if !matches!(input, Some(Type::Reference { access: Access::Borrow, inner }) if *inner == Type::String)
+                    || source.mode != UseMode::Read
+                {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "concat requires read-only String borrows",
+                    );
+                }
+            }
+        }
         InstructionKind::EndStringLocal { local } => {
             if instruction.output.is_some()
                 || !function
@@ -2517,9 +2553,10 @@ fn validate_instruction(
     }
 }
 
-fn validate_read_only_loaded_values(
+fn validate_operand_escapes(
     function: &Function,
     id: FunctionId,
+    concat_locals: &HashSet<LocalId>,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut read_only = vec![false; function.values.len()];
@@ -2571,7 +2608,12 @@ fn validate_read_only_loaded_values(
         }
     }
 
-    let mut report = |block: BlockId, operand: &Operand, escape: bool| {
+    let mut report = |block: BlockId, operand: &Operand, escape: bool, captures: bool| {
+        if matches!(operand.source, Source::Local(local) if concat_locals.contains(&local))
+            && (escape || captures || !matches!(operand.mode, UseMode::Read | UseMode::Borrow))
+        {
+            push(errors, id, Some(block), "concat result must remain in its original binding and can only be read or borrowed");
+        }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
             push(
                 errors,
@@ -2586,58 +2628,67 @@ fn validate_read_only_loaded_values(
         let block_id = BlockId(index as u32);
         for instruction in &block.instructions {
             match &instruction.kind {
-                InstructionKind::Capture(value)
-                | InstructionKind::Borrow { owner: value, .. }
-                | InstructionKind::Load { reference: value } => report(block_id, value, false),
+                InstructionKind::Capture(value) => report(block_id, value, false, true),
+                InstructionKind::Borrow { owner: value, .. }
+                | InstructionKind::Load { reference: value } => {
+                    report(block_id, value, false, false)
+                }
                 InstructionKind::ElementAddr { base, index, .. } => {
-                    report(block_id, base, false);
-                    report(block_id, index, false);
+                    report(block_id, base, false, false);
+                    report(block_id, index, false, false);
                 }
                 InstructionKind::FieldAddr { base, .. }
                 | InstructionKind::VariantAddr { base, .. }
                 | InstructionKind::Extract { base, .. }
                 | InstructionKind::EnumTag { base }
-                | InstructionKind::VariantExtract { base, .. } => report(block_id, base, false),
+                | InstructionKind::VariantExtract { base, .. } => {
+                    report(block_id, base, false, false)
+                }
                 InstructionKind::StructNew { fields, .. } => {
                     for field in fields {
-                        report(block_id, field, true);
+                        report(block_id, field, true, false);
                     }
                 }
                 InstructionKind::EnumNew { payload, .. } => {
                     for operand in payload {
-                        report(block_id, operand, true);
+                        report(block_id, operand, true, false);
                     }
                 }
                 InstructionKind::ArrayNew { init } => {
                     if let ArrayInit::Elements(elements) = init {
                         for element in elements {
-                            report(block_id, element, true);
+                            report(block_id, element, true, false);
                         }
                     }
                 }
                 InstructionKind::Store { reference, value } => {
-                    report(block_id, reference, false);
-                    report(block_id, value, true);
+                    report(block_id, reference, false, false);
+                    report(block_id, value, true, false);
                 }
                 InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
                 | InstructionKind::StringScalarAt { source, offset } => {
-                    report(block_id, source, false);
-                    report(block_id, offset, false);
+                    report(block_id, source, false, false);
+                    report(block_id, offset, false, false);
                 }
                 InstructionKind::Copy { source } | InstructionKind::StringLen { source } => {
-                    report(block_id, source, false);
+                    report(block_id, source, false, false);
                 }
-                InstructionKind::Unary { operand, .. } => report(block_id, operand, false),
+                InstructionKind::Unary { operand, .. } => report(block_id, operand, false, false),
                 InstructionKind::Binary { left, right, .. } => {
-                    report(block_id, left, false);
-                    report(block_id, right, false);
+                    report(block_id, left, false, false);
+                    report(block_id, right, false, false);
                 }
-                InstructionKind::Assign { value, .. } => report(block_id, value, true),
+                InstructionKind::Assign { value, .. } => report(block_id, value, true, false),
+                InstructionKind::InitConcatString { strings, .. } => {
+                    for source in strings {
+                        report(block_id, source, false, false);
+                    }
+                }
                 InstructionKind::Call { callee, arguments } => {
-                    report(block_id, callee, true);
+                    report(block_id, callee, true, false);
                     for argument in arguments {
-                        report(block_id, argument, true);
+                        report(block_id, argument, true, false);
                     }
                 }
                 InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}
@@ -2646,7 +2697,7 @@ fn validate_read_only_loaded_values(
         match &block.terminator.kind {
             TerminatorKind::Goto(edge) => {
                 for argument in &edge.arguments {
-                    report(block_id, argument, false);
+                    report(block_id, argument, false, true);
                 }
             }
             TerminatorKind::Branch {
@@ -2654,10 +2705,10 @@ fn validate_read_only_loaded_values(
                 then_edge,
                 else_edge,
             } => {
-                report(block_id, condition, false);
+                report(block_id, condition, false, false);
                 for edge in [then_edge, else_edge] {
                     for argument in &edge.arguments {
-                        report(block_id, argument, false);
+                        report(block_id, argument, false, true);
                     }
                 }
             }
@@ -2667,14 +2718,14 @@ fn validate_read_only_loaded_values(
                 default,
                 ..
             } => {
-                report(block_id, tag, false);
+                report(block_id, tag, false, false);
                 for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
                     for argument in &edge.arguments {
-                        report(block_id, argument, false);
+                        report(block_id, argument, false, true);
                     }
                 }
             }
-            TerminatorKind::Return(Some(value)) => report(block_id, value, true),
+            TerminatorKind::Return(Some(value)) => report(block_id, value, true, false),
             TerminatorKind::Return(None) | TerminatorKind::Unreachable => {}
         }
     }

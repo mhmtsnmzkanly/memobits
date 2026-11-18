@@ -235,6 +235,21 @@ fn text_boundaries() -> Bool {
         && "".is_char_boundary(0) && !"".is_char_boundary(1)
 }
 
+fn text_concat() -> Bool {
+    let left := "café";
+    let right := "😀";
+    // concat borrows both inputs. The new String owns its bytes until this
+    // binding leaves scope. This slice keeps it in the original let binding.
+    let joined := left.concat(right.borrow());
+    let left_moved := left;
+    let with_suffix := joined.concat("!");
+    let empty := "".concat("");
+    byte_length(joined.borrow()) == 9 && left_moved.len() == 5
+        && byte_is(joined.byte_at(4), 169) && scalar_is(joined.scalar_at(5), 128_512)
+        && with_suffix.len() == 10 && byte_is(with_suffix.byte_at(9), 33)
+        && empty.len() == 0 && no_byte(empty.byte_at(0))
+}
+
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, Bool) ]
 type Sample = Reading;
@@ -399,5 +414,6 @@ fn main() -> Result<i32, Error> {
     if !text_scalars() { return Err(Error { code: 10 }); }
     let sample := "aé€😀";
     if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
+    if !text_concat() { return Err(Error { code: 12 }); }
     Ok(42)
 }

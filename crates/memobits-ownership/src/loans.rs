@@ -608,6 +608,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::StringIsCharBoundary { source, offset }
         | InstructionKind::StringByteAt { source, offset }
         | InstructionKind::StringScalarAt { source, offset } => vec![source, offset],
+        InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
         InstructionKind::FieldAddr { base, .. }
@@ -1363,6 +1364,30 @@ fn source_provenance(function: &Function, state: &[Provenance], operand: &Operan
 }
 
 #[allow(clippy::too_many_arguments)]
+fn check_reference_read(
+    program: &Program,
+    function: &Function,
+    state: &[Provenance],
+    reference: &Operand,
+    span: Option<Span>,
+    active_before: &HashMap<LoanKey, LoanInfo>,
+    infos: &HashMap<LoanKey, LoanInfo>,
+    diagnostics: &mut Vec<Pending>,
+) {
+    let provenance = operand_provenance(function, state, reference);
+    let own = parent_closure(&provenance.loans, infos);
+    if let Some(conflict) = active_conflict(&provenance.roots, Access::Borrow, active_before, &own)
+    {
+        diagnostics.push(conflict_diagnostic(
+            span,
+            "read",
+            (function, program),
+            conflict,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_instruction(
     program: &Program,
     function: &Function,
@@ -1476,17 +1501,29 @@ fn check_instruction(
         | InstructionKind::StringScalarAt {
             source: reference, ..
         } if type_at(function, reference.source).is_some_and(is_reference) => {
-            let provenance = operand_provenance(function, state, reference);
-            let own = parent_closure(&provenance.loans, infos);
-            if let Some(conflict) =
-                active_conflict(&provenance.roots, Access::Borrow, active_before, &own)
-            {
-                diagnostics.push(conflict_diagnostic(
+            check_reference_read(
+                program,
+                function,
+                state,
+                reference,
+                instruction.span,
+                active_before,
+                infos,
+                diagnostics,
+            );
+        }
+        InstructionKind::InitConcatString { strings, .. } => {
+            for reference in strings {
+                check_reference_read(
+                    program,
+                    function,
+                    state,
+                    reference,
                     instruction.span,
-                    "read",
-                    (function, program),
-                    conflict,
-                ));
+                    active_before,
+                    infos,
+                    diagnostics,
+                );
             }
         }
         InstructionKind::Store { reference, .. } => {

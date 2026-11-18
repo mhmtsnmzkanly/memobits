@@ -2,9 +2,9 @@
 
 use super::static_data_start;
 
-const PAGE_BYTES: u64 = 65_536;
+pub(super) const PAGE_BYTES: u64 = 65_536;
 // Keep the existing backend limit, below a full 4 GiB memory.
-const MAX_PAGES: u64 = 65_535;
+pub(super) const MAX_PAGES: u64 = 65_535;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LayoutError {
@@ -43,6 +43,10 @@ impl StaticLayout {
         let start = self.end;
         *self = next;
         Ok(start)
+    }
+
+    pub(super) fn end(self) -> u32 {
+        self.end
     }
 
     pub(super) fn pages(self) -> u64 {

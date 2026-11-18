@@ -22,6 +22,7 @@ use wasm_encoder::{
 
 mod memory;
 mod string_descriptor;
+mod string_heap;
 use memory::{LayoutError, StaticLayout};
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
@@ -311,6 +312,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
+        | InstructionKind::InitConcatString { .. }
         | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::StringByteAt { .. }
         | InstructionKind::StringScalarAt { .. }
@@ -412,6 +414,7 @@ struct ArrayCell {
 /// Reference locals and values carry the cell address rather than own a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameLayout {
+    concat_locals: std::collections::HashSet<LocalId>,
     slots: BTreeMap<u32, FrameSlot>,
     /// Every array- or struct-typed local and value owns one inline cell.
     arrays: BTreeMap<Slot, ArrayCell>,
@@ -895,6 +898,15 @@ impl FrameLayout {
             slots,
             arrays,
             structs: structs.to_vec(),
+            concat_locals: function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction.kind {
+                    InstructionKind::InitConcatString { target, .. } => Some(target),
+                    _ => None,
+                })
+                .collect(),
             size,
         })
     }
@@ -957,6 +969,9 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::VariantExtract { base, .. } => count(base),
                 InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
                 InstructionKind::EnumNew { payload, .. } => payload.iter().for_each(&mut count),
+                InstructionKind::InitConcatString { strings, .. } => {
+                    strings.iter().for_each(&mut count)
+                }
                 InstructionKind::Store { reference, value } => {
                     count(reference);
                     count(value);
@@ -1148,6 +1163,7 @@ pub enum TrapReason {
     DivisionOverflow = 7,
     IndexOutOfBounds = 8,
     ArgumentRange = 9,
+    HeapAllocation = 10,
 }
 
 impl TrapReason {
@@ -1519,6 +1535,21 @@ fn encode_frames_traced(
         functions.function(signatures.len() as u32);
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
+    let concat_index = selected
+        .iter()
+        .any(|function| {
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|inst| matches!(inst.kind, InstructionKind::InitConcatString { .. }))
+        })
+        .then(|| {
+            let adapter_count = u32::from(entry.is_some());
+            types.ty().function([ValType::I32; 3], [ValType::I32]);
+            functions.function(signatures.len() as u32 + adapter_count);
+            selected.len() as u32 + adapter_count
+        });
     let has_frames = reachable.iter().any(|id| sizes[*id as usize] != 0);
     if observe && has_frames {
         export_section.export("__test_memory", ExportKind::Memory, 0);
@@ -1546,6 +1577,7 @@ fn encode_frames_traced(
             &structs,
             stack_size,
             &strings.offsets,
+            concat_index,
             &mut traps,
         )?);
     }
@@ -1560,9 +1592,12 @@ fn encode_frames_traced(
         wrapper.instruction(&WasmInstruction::End);
         code.function(&wrapper);
     }
+    if concat_index.is_some() {
+        code.function(&string_heap::initializer());
+    }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
-    let has_traps = !traps.spans.is_empty();
+    let has_traps = concat_index.is_some() || !traps.spans.is_empty();
     if has_traps {
         export_section.export(TRAP_EXPORT, ExportKind::Global, traps.global);
     }
@@ -1573,7 +1608,11 @@ fn encode_frames_traced(
         let pages = static_layout.pages();
         memories.memory(MemoryType {
             minimum: pages,
-            maximum: Some(pages),
+            maximum: Some(if concat_index.is_some() {
+                memory::MAX_PAGES
+            } else {
+                pages
+            }),
             memory64: false,
             shared: false,
             page_size_log2: None,
@@ -1605,6 +1644,18 @@ fn encode_frames_traced(
                 shared: false,
             },
             &ConstExpr::i32_const(0),
+        );
+    }
+    if concat_index.is_some() {
+        // Concat always has a String frame cell and an allocation trap site.
+        debug_assert!(has_frames && has_traps);
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(static_layout.end() as i32),
         );
     }
     let mut module = Module::new();
@@ -1639,6 +1690,7 @@ fn compile_function(
     structs: &[StructLayout],
     stack_size: u32,
     strings: &BTreeMap<&str, u32>,
+    concat_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
@@ -1734,6 +1786,7 @@ fn compile_function(
                 &layout,
                 frame,
                 strings,
+                concat_index,
                 traps,
             )?;
         }
@@ -2584,13 +2637,44 @@ fn compile_instruction(
     layout: &FrameLayout,
     frame: Option<FrameState>,
     strings: &BTreeMap<&str, u32>,
+    concat_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
         .output
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
-        InstructionKind::EndStringLocal { .. } => {} // Literal bytes have static storage.
+        InstructionKind::EndStringLocal { local } => {
+            if layout.concat_locals.contains(local) {
+                let cell = array_cell_of(layout, Slot::Local(local.0))?;
+                emit_address(
+                    body,
+                    frame.ok_or("concat local requires a frame")?,
+                    cell.offset,
+                );
+                string_heap::release(body);
+            }
+        }
+        InstructionKind::InitConcatString { target, strings } => {
+            for source in strings {
+                emit_operand(body, function, param_count, source, layout, frame)?;
+            }
+            let cell = array_cell_of(layout, Slot::Local(target.0))?;
+            emit_address(
+                body,
+                frame.ok_or("concat local requires a frame")?,
+                cell.offset,
+            );
+            body.instruction(&WasmInstruction::Call(
+                concat_index.ok_or("missing concat helper")?,
+            ));
+            body.instruction(&WasmInstruction::I32Eqz);
+            trap_if(
+                body,
+                traps.site(instruction.span),
+                TrapReason::HeapAllocation,
+            );
+        }
         InstructionKind::Constant(Constant::String(text)) => {
             let value = instruction.output.ok_or("String literal lacks an output")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;

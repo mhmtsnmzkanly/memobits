@@ -10,34 +10,44 @@ static data and grows at the end of linear memory.
 The [Wasm backend](../../crates/memobits-wasm/src/lib.rs) reserves the first
 16 bytes, then lays out the configured stack, the optional outcome return
 cell, and reachable String literal descriptors and bytes. The initial Wasm32
-memory covers these regions rounded up to 64 KiB pages. Its maximum equals
-its initial size. Frame entry checks the stack bound, and normal return
-restores the stack pointer. The [typed IR](typed-ir.md) records consuming
-operands, initialization, reassignment, and control-flow edges. It has no
-drop operation or cleanup insertion pass.
+memory covers these regions rounded up to 64 KiB pages. Modules without
+reachable concat keep their fixed memory maximum. Frame entry checks the
+stack bound, and normal return restores the stack pointer. The
+[typed IR](typed-ir.md) records consuming operands, initialization,
+reassignment, and control-flow edges. General drop insertion remains pending.
 
 The [static layout planner](../../crates/memobits-wasm/src/memory.rs) now
 places the stack, outcome cell and literal regions using one checked cursor.
 It preserves the current memory limit and leaves the cursor unchanged after
-a failed reservation. The final static end is where a later heap layout
-can start its alignment calculation. Allocation and memory growth are
-pending the first guest consumer. Current operations only use stack and
-static storage, so there is no production call that can exercise growth yet.
+a failed reservation. The byte heap starts at the exclusive end of static data.
 
 ## First consumer
 
-Start with concatenation that returns an independently owned String. The
-result has exactly the combined byte length, and concatenating valid UTF-8
-preserves validity. Use existing String reads to inspect the result after
-moving or returning it. Keep the operation spelling and operand access
-contract open until the ownership path is ready. A comparison of concatenated
-bytes can stream the inputs directly.
+`let joined := left.concat(right);` borrows both inputs and initializes an
+independently owned String. The inputs stay usable after the call. The
+combined bytes remain valid UTF-8 and can be read with the existing String
+operations or lent to an internal borrow parameter.
+
+This slice accepts concat as the direct initializer of an immutable local.
+The owned result stays in that binding until its lexical exit. Moving,
+returning, sharing for mutation or replacing it requires broader drop
+elaboration. Typed IR verifies that the owning descriptor cannot escape and
+that all normal exits release these bindings in reverse initialization
+order. Since only those locals own heap allocations, the initialization
+instruction supplies storage provenance without changing the descriptor.
+
+Guest allocation grows memory only as needed, after checking the widened
+exclusive byte end and its page ceiling. A failed grow traps at the concat
+call before publishing a descriptor or advancing the cursor. On scope
+exit the cursor returns to the released block's start. Verified nesting
+across function calls requires no free list or runtime ownership flag.
+Memory pages remain at their high-water mark and can immediately be reused.
 
 Once the foundation works, List can reuse the byte allocator and owned
 cleanup. Element initialization, element drops, and capacity changes belong
 to later List work.
 
-## Prerequisites for returning owned text
+## Prerequisites for transferring heap Strings
 
 1. Extend the [shared Wasm descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
    to distinguish literal/static storage from
@@ -99,7 +109,8 @@ Lowering now emits `EndStringLocal` for owned String bindings and parameters
 at normal lexical exits. A String result moves out before its binding ends.
 The move checker invalidates the local and the loan checker rejects a live
 loan across its exit. The marker accepts a moved local and emits no Wasm
-operation because String bytes remain static. The transfer clears the local
+operation for static locals. For a verified concat local, the backend instead
+releases the most recent allocation. The move transfer clears the local
 after its exit regardless of the incoming state.
 
 For a future heap-backed local, elaborate the exit from its incoming state.

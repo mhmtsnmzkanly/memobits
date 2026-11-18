@@ -145,6 +145,124 @@ fn invalid_stack_sizes_are_diagnostics() {
 }
 
 #[test]
+fn owned_concat_reuses_memory_after_continue_break_and_return() {
+    let left = "é".repeat(12_000);
+    let right = "😀".repeat(6_000);
+    let program = lower(&format!(
+        r#"
+        fn measure(left: borrow String, right: borrow String, early: Bool) -> u32 {{
+            var steps := 0;
+            loop {{
+                let joined := left.concat(right);
+                if early {{ return joined.len(); }}
+                steps += 1;
+                if steps < 4 {{ continue; }}
+                break;
+            }}
+            let joined := left.concat(right);
+            joined.len()
+        }}
+        fn main() -> Result<u32, Error> {{
+            let left := "{left}";
+            let right := "{right}";
+            Ok(measure(left.borrow(), right.borrow(), false)
+                + measure(left.borrow(), right.borrow(), true))
+        }}
+    "#
+    ));
+    let options = CompileOptions { stack_size: 4096 };
+    let artifact = compile_application_traced(&program, FunctionId(1), &options).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &artifact.bytes).unwrap();
+    let linker = Linker::new(&engine);
+    let mut limited = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    limited.limiter(|limits| limits);
+    let instance = linker.instantiate_and_start(&mut limited, &module).unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&limited, "main")
+        .unwrap();
+    assert!(main.call(&mut limited, ()).is_err());
+    let trap = instance
+        .get_global(&limited, memobits_wasm::TRAP_EXPORT)
+        .unwrap();
+    assert_eq!(
+        trap.get(&limited).i32().unwrap() & 255,
+        i32::from(memobits_wasm::TrapReason::HeapAllocation.code())
+    );
+
+    let (mut fresh, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&fresh, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&fresh, "main")
+        .unwrap();
+    let payload_offset = wasmparser::Parser::new(0)
+        .parse_all(&artifact.bytes)
+        .find_map(|part| match part.unwrap() {
+            wasmparser::Payload::CustomSection(section)
+                if section.name() == memobits_entry_abi::SECTION =>
+            {
+                Some(usize::from(
+                    memobits_entry_abi::Metadata::decode(section.data())
+                        .unwrap()
+                        .payload_offset,
+                ))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(memory.data(&fresh).len(), 65_536);
+    for _ in 0..3 {
+        let (address, _) = main.call(&mut fresh, ()).unwrap();
+        let data = memory.data(&fresh);
+        assert_eq!(data[address as usize], 0);
+        let payload = address as usize + payload_offset;
+        assert_eq!(&data[payload..payload + 4], &96_000u32.to_le_bytes());
+        assert_eq!(data.len(), 2 * 65_536);
+    }
+}
+
+#[test]
+fn concat_ir_rejects_missing_and_out_of_order_cleanup() {
+    use memobits_ir::InstructionKind;
+
+    let source = r#"fn main() -> u32 {
+        let first := "a".concat("b");
+        let second := first.concat("c");
+        second.len()
+    }"#;
+    let mut missing = lower(source);
+    let mut reversed = missing.clone();
+    let instructions = &mut missing.functions[0].blocks[0].instructions;
+    instructions.pop();
+    assert!(missing
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| error.message.contains("return leaves a concat local live")));
+
+    let instructions = &mut reversed.functions[0].blocks[0].instructions;
+    let ends: Vec<_> = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(instruction.kind, InstructionKind::EndStringLocal { .. }).then_some(index)
+        })
+        .collect();
+    assert_eq!(ends.len(), 2);
+    instructions.swap(ends[0], ends[1]);
+    assert!(reversed
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| error.message.contains("reverse initialization order")));
+}
+
+#[test]
 fn deep_recursion_exhausts_the_stack_with_a_flag_and_leaves_fresh_runs_clean() {
     let source = "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
                   if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \

@@ -8,6 +8,46 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat'\nentry='main::main'\n",
+    );
+    for (body, message) in [
+        (
+            r#"var joined := "a".concat("b");"#,
+            "direct immutable local initializer",
+        ),
+        (
+            r#""a".concat("b").len();"#,
+            "direct immutable local initializer",
+        ),
+        (
+            r#"let joined := "a".concat("b"); let moved := joined; moved.len();"#,
+            "original binding",
+        ),
+        (
+            r#"let joined := "a".concat("b"); take(joined);"#,
+            "original binding",
+        ),
+        (
+            r#"var left := "a"; let joined := left.concat({ left = "x"; "b" });"#,
+            "while it is borrowed",
+        ),
+    ] {
+        f.write(
+            "src/main.mb",
+            &format!("fn take(s: String) {{}} fn main() {{ {body} }}"),
+        );
+        let result = f.run(&["run"]);
+        assert!(!result.status.success(), "{body}");
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains(message), "{body}: {stderr}");
+    }
+}
+
+#[test]
 fn string_scope_exits_preserve_values_in_source_and_wasm() {
     let f = Fixture::new();
     f.write(

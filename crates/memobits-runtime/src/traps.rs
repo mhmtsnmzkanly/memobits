@@ -30,6 +30,7 @@ pub enum TrapReason {
     DivisionOverflow,
     IndexOutOfBounds,
     ArgumentRange,
+    HeapAllocation,
 }
 
 impl TrapReason {
@@ -44,6 +45,7 @@ impl TrapReason {
             7 => Self::DivisionOverflow,
             8 => Self::IndexOutOfBounds,
             9 => Self::ArgumentRange,
+            10 => Self::HeapAllocation,
             _ => return None,
         })
     }
@@ -60,6 +62,7 @@ impl TrapReason {
             Self::DivisionOverflow => "integer overflow in division",
             Self::IndexOutOfBounds => "array index out of bounds",
             Self::ArgumentRange => "argument out of range for its parameter type",
+            Self::HeapAllocation => "guest heap allocation failed",
         }
     }
 }

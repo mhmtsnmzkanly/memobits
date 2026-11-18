@@ -552,6 +552,7 @@ struct Checker {
     /// repetitions, named locals, and the tails of `if`/block expressions in
     /// such a position.
     allowed_arrays: HashSet<usize>,
+    concat_initializer: Option<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
     /// Address of the path expression currently checked as an index or field base.
@@ -930,7 +931,10 @@ impl Checker {
                         self.report_type_resolution(ty, self.table.resolve_local(&self.module, ty))
                     });
                     self.allow_array_value(value);
+                    let previous = self.concat_initializer;
+                    self.concat_initializer = (!mutable).then_some(value as *const Expr as usize);
                     let inferred = self.expr(value, annotation.as_ref());
+                    self.concat_initializer = previous;
                     self.reject_extraction(value, &inferred);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
@@ -1197,10 +1201,24 @@ impl Checker {
         self.allow_array_value(base);
         let receiver = read_type(self.expr(base, None));
         let offset_type = Ty::Primitive("u32");
+        if method == "concat" && self.concat_initializer != Some(expression as *const Expr as usize)
+        {
+            self.error(
+                17,
+                expression.span,
+                "concat requires a direct immutable local initializer",
+            );
+        }
         let expected = usize::from(method != "len");
         let mut diverges = receiver == Ty::Never;
         for (index, argument) in arguments.iter().enumerate() {
-            let want = (expected == 1 && index == 0).then_some(&offset_type);
+            let argument_type = if method == "concat" {
+                self.allow_array_value(argument);
+                &Ty::String
+            } else {
+                &offset_type
+            };
+            let want = (expected == 1 && index == 0).then_some(argument_type);
             let actual = read_type(self.expr(argument, want));
             diverges |= actual == Ty::Never;
             if let Some(want) = want {
@@ -1218,6 +1236,7 @@ impl Checker {
         match receiver {
             Ty::String if diverges => Ty::Never,
             Ty::String if method == "is_char_boundary" => BOOL,
+            Ty::String if method == "concat" => Ty::String,
             Ty::String if matches!(method, "byte_at" | "scalar_at") => self.table.instantiate_enum(
                 registry::by_id(registry::TemplateId::Option),
                 vec![ResolvedArgument::Type(Ty::Primitive(
@@ -2574,7 +2593,7 @@ impl Checker {
                     }
                     if matches!(
                         name.as_str(),
-                        "len" | "is_char_boundary" | "byte_at" | "scalar_at"
+                        "len" | "is_char_boundary" | "byte_at" | "scalar_at" | "concat"
                     ) {
                         return self.string_read(expr, base, name, arguments);
                     }
@@ -2854,6 +2873,7 @@ fn check_standalone(
         diagnostics: table_diagnostics,
         lowering: capture,
         allowed_arrays: HashSet::new(),
+        concat_initializer: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
@@ -3170,6 +3190,7 @@ fn checker() -> Checker {
         diagnostics: Vec::new(),
         lowering: true,
         allowed_arrays: HashSet::new(),
+        concat_initializer: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),

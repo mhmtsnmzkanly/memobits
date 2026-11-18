@@ -54,8 +54,11 @@ primitive/aggregate references. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`
-to decode a Unicode scalar at a byte offset as `Option<u32>`. Exported String signatures
-and nested String storage are gated. Application builds export the manifest entry as
+to decode a Unicode scalar at a byte offset as `Option<u32>`.
+`let joined := left.concat(right);` borrows its inputs and allocates owned
+text for that immutable binding. The result can be read or borrowed and is
+released on scope exit. Transfers of concat results, exported String
+signatures, and nested String storage are gated. Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.
 The private adapter applies to `main` and uses the `memobits.entry` custom

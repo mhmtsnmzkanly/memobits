@@ -194,6 +194,12 @@ fn transfer_instruction(
     function: &Function,
 ) {
     match &instruction.kind {
+        InstructionKind::InitConcatString { target, strings } => {
+            for source in strings {
+                transfer_operand(source, state, diagnostics.as_deref_mut(), function);
+            }
+            state[target.0 as usize] = Availability::Available;
+        }
         InstructionKind::EndStringLocal { local } => {
             state[local.0 as usize] = Availability::Unavailable
         }

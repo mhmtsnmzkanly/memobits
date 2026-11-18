@@ -694,6 +694,37 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn lower_concat_initializer(
+        &mut self,
+        binding: &Statement,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+    ) {
+        let Some(left) = self
+            .lower_expr(left)
+            .and_then(|value| self.borrow(value, Access::Borrow))
+        else {
+            return;
+        };
+        let Some(right) = self
+            .lower_expr(right)
+            .and_then(|value| self.borrow(value, Access::Borrow))
+        else {
+            return;
+        };
+        let target = self.local(binding);
+        self.emit(
+            span,
+            InstructionKind::InitConcatString {
+                target,
+                strings: [read(left), read(right)],
+            },
+            None,
+        );
+        self.string_locals.push(target);
+    }
+
     fn end_string_locals(&mut self, from: usize, span: Span) {
         for index in (from..self.string_locals.len()).rev() {
             let local = self.string_locals[index];
@@ -737,6 +768,19 @@ impl<'a> Builder<'a> {
             }
             match &statement.kind {
                 StatementKind::Binding { value, .. } => {
+                    if let ExprKind::Call { callee, arguments } = &value.kind {
+                        if let ExprKind::Field { base, name } = &callee.kind {
+                            if name == "concat" {
+                                self.lower_concat_initializer(
+                                    statement,
+                                    base,
+                                    &arguments[0],
+                                    value.span,
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     let rhs = self.lower_expr(value);
                     if let Some(rhs) = rhs {
                         let target = self.local(statement);

@@ -216,9 +216,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   mutable pattern bindings, `defaults`, and `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static
   layout planner, three-state move availability and explicit lexical exits for
-  String locals. Drop insertion and heap deallocation remain pending.
-  The first allocation and growth consumer remains an owned String produced
-  by concatenation.
+  String locals. Scoped `String.concat` now allocates and releases owned
+  text at lexical exits. Transfers of heap-backed strings and general drop
+  insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.

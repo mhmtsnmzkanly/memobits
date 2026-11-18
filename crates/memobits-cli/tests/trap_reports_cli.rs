@@ -279,6 +279,7 @@ fn the_trap_reasons_agree_between_backend_and_runtime() {
         (Wasm::DivisionOverflow, Runtime::DivisionOverflow),
         (Wasm::IndexOutOfBounds, Runtime::IndexOutOfBounds),
         (Wasm::ArgumentRange, Runtime::ArgumentRange),
+        (Wasm::HeapAllocation, Runtime::HeapAllocation),
     ] {
         assert_eq!(Runtime::from_explicit_code(wasm.code()), Some(runtime));
     }

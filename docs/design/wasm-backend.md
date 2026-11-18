@@ -55,6 +55,7 @@ program order, starting at 1 (at most 2^23 - 1).
 | 7 | DivisionOverflow | integer overflow in division (narrow `MIN / -1`) |
 | 8 | IndexOutOfBounds | array index out of bounds |
 | 9 | ArgumentRange | argument out of range for its parameter type |
+| 10 | HeapAllocation | guest heap allocation failed |
 
 Codes 5 and 6 are stored *before* a native Wasm division, which traps by itself.
 The host refines them by the native trap kind: divide-by-zero gives "division by
