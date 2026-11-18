@@ -585,7 +585,7 @@ impl Program {
             for parameter in &function.signature.parameters {
                 validate_parameter_type(
                     type_count,
-                    parameter,
+                    &parameter.ty,
                     &mut errors,
                     id,
                     "function parameter",
@@ -1054,26 +1054,17 @@ fn parameter_local_type(parameter: &ParameterType) -> Type {
 /// primitives, passed by ownership, `borrow` or `share`.
 fn validate_parameter_type(
     type_count: usize,
-    parameter: &ParameterType,
+    ty: &Type,
     errors: &mut Vec<ValidationError>,
     id: FunctionId,
     context: &str,
 ) {
-    let ty = &parameter.ty;
     if matches!(ty, Type::Reference { .. }) {
         push(
             errors,
             id,
             None,
             format!("{context} type cannot be a reference"),
-        );
-    }
-    if matches!(ty, Type::List(_)) && parameter.access == Access::Owned {
-        push(
-            errors,
-            id,
-            None,
-            format!("{context} cannot use List in this slice"),
         );
     }
     validate_type_shape(type_count, ty, errors, id, context);
@@ -1130,7 +1121,7 @@ fn validate_type_shape(
             for parameter in &signature.parameters {
                 validate_parameter_type(
                     type_count,
-                    parameter,
+                    &parameter.ty,
                     errors,
                     id,
                     "function type parameter",
@@ -2802,7 +2793,18 @@ fn validate_instruction(
                                 errors,
                                 id,
                                 Some(block),
-                                "List references require a direct internal call",
+                                "List arguments require a direct internal call",
+                            );
+                        }
+                        if matches!(parameter.ty, Type::List(_))
+                            && parameter.access == Access::Owned
+                            && !matches!(arg.source, Source::Local(_))
+                        {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "owned List arguments require a named whole local",
                             );
                         }
                         // Internal direct calls pass the original reference address.

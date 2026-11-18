@@ -808,6 +808,85 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn owned_list_arguments_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='owned-list'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn finish(words: List<u32>) -> Bool {
+            match words.get(1) { Some(word) => word == 100, None => false }
+        }
+        fn take(bytes: List<u8>, proceed: Bool, var words: List<u32>) -> Bool {
+            if !proceed { return false; }
+            words.push(100);
+            let valid := match bytes.get(0) { Some(byte) => byte == 255, None => false };
+            valid && finish(words)
+        }
+        fn run(skip: Bool) -> Bool {
+            var bytes: List<u8> = [];
+            bytes.push(255);
+            var words: List<u32> = [];
+            words.push(99);
+            var evaluations := 0;
+            let check := take(bytes, {
+                if skip { return words.len() == 1; }
+                evaluations += 1;
+                true
+            }, words);
+            check && evaluations == 1
+        }
+        fn main() -> Result<Bool, Error> { Ok(run(false) && run(true)) }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "owned.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "owned.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn owned_list_arguments_keep_move_loan_and_abi_gates() {
+    let f = Fixture::new();
+    for (body, code) in [
+        (
+            "let view := items.borrow(); take(items, 0); view.len();",
+            "BE005",
+        ),
+        ("take(items, items.len());", "BE001"),
+        ("let indirect := take; indirect(items, 0);", "TE017"),
+        ("take([], 0);", "TE017"),
+        ("take({ items }, 0);", "TE017"),
+    ] {
+        f.write(
+            "list.mb",
+            &format!("fn take(items: List<u8>, later: u32) {{}} fn main() {{ let items: List<u8> = []; {body} }}"),
+        );
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+    f.write(
+        "project.toml",
+        "[package]\nname='owned-list-abi'\nentry='main::main'\n[export]\ntake='main::take'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "pub fn take(items: List<u8>) { items.len(); } fn main() {}",
+    );
+    let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        diagnostic.contains("external List ABI is not defined"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn shared_list_push_updates_caller_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
@@ -1192,10 +1271,6 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
         ),
         (
             "fn main() { let items: List<u8> = []; items.share(); }",
-            "TE017",
-        ),
-        (
-            "pub fn main(items: List<u8>) -> u32 { items.len() }",
             "TE017",
         ),
         ("fn main() -> List<u32> { [] }", "TE017"),

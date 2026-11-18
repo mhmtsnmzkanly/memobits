@@ -57,8 +57,9 @@ allocates no heap block. `.get(index)` copies an element into `Option<T>`
 and returns `None` when the `u32` index is outside the List. Direct internal
 `borrow List<T>` parameters accept explicit read-only borrows and support
 `.len()` and `.get()`. Direct `share List<T>` parameters also support
-`.push()`, updating the caller's List. Whole replacement, subscript syntax,
-and owned or exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
+`.push()`, updating the caller's List. A direct internal owned List parameter
+takes a named local by move. Whole replacement, subscript syntax, List
+returns, indirect calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`

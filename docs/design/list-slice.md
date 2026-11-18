@@ -22,8 +22,12 @@ blocks pushes, moves and cleanup of the owner until its last use.
 A direct `share List<T>` parameter accepts an explicit `.share()` from
 a mutable owner and supports `push`, `len` and `get`. Growth updates the
 caller descriptor in place, and the caller retains cleanup responsibility.
-Whole-list replacement, subscript syntax, nesting, owned calls, and
-exports remain gated at this checkpoint.
+A direct internal owned parameter takes a named whole List local by move.
+Arguments evaluate left to right. An earlier owned argument is staged
+until invocation, and normal exits before the call release it in the caller.
+Once invoked, the callee owns and cleans up the block. Whole-list
+replacement, List returns, indirect calls, nesting, subscript syntax,
+and exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -59,7 +63,9 @@ Scope the owner to whole local bindings, including moves from one local
 to another. Borrow and share parameters receive the caller's private
 descriptor address for the direct call. A share follows the usual
 exclusive loan rules. Push through a stored share handle remains gated.
-Defer owned call arguments and returns, whole-local replacement, nested List storage,
+An owned parameter receives its own frame descriptor and takes the
+allocation from the caller's moved slot. Defer List returns, whole-local
+replacement, nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
@@ -108,7 +114,8 @@ high-water mark.
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,
    use after move, live-borrow conflicts, successful push and move after
-   last use, unsupported escapes, and rejected ABI shapes.
+   last use, ownership transfer and skipped-call cleanup, unsupported
+   escapes, and rejected ABI shapes.
 4. In one Wasm instance, repeat a fixed workload through fallthrough,
    return, break and continue. Check reuse after the first high-water
    mark, mixed move paths, and preservation of a distinct live list

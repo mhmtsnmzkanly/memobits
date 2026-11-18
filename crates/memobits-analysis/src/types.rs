@@ -590,17 +590,10 @@ impl Checker {
         }
         value
     }
-    /// Types in function signatures: primitives, fixed arrays and structs,
-    /// passed owned, `borrow` or `share`, and returned owned. The external ABI
-    /// of exported signatures is the backend's concern (LE900).
-    fn signature_type(&mut self, ty: &Type, access: IrAccess) -> Ty {
+    fn signature_result(&mut self, ty: &Type) -> Ty {
         let resolved = self.type_path(ty);
-        if matches!(resolved, Ty::List(_)) && access == IrAccess::Owned {
-            self.error(
-                17,
-                ty.span,
-                "List signatures currently support only borrow and share parameters",
-            );
+        if matches!(resolved, Ty::List(_)) {
+            self.error(17, ty.span, "List returns are not supported in this slice");
         }
         resolved
     }
@@ -2865,7 +2858,11 @@ impl Checker {
                             parameter.access == IrAccess::Owned
                                 && matches!(
                                     parameter.ty,
-                                    Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                                    Ty::String
+                                        | Ty::List(_)
+                                        | Ty::Array(..)
+                                        | Ty::Struct(..)
+                                        | Ty::Enum(..)
                                 )
                         }) {
                             // An owned aggregate parameter takes a literal, repetition,
@@ -2889,16 +2886,25 @@ impl Checker {
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
                         self.concat_destination = previous_concat;
                         self.temporary_string_borrow_argument = previous_borrow;
-                        if !direct
-                            && params
-                                .get(i)
-                                .is_some_and(|parameter| matches!(parameter.ty, Ty::List(_)))
+                        if let Some(parameter) = params
+                            .get(i)
+                            .filter(|parameter| matches!(parameter.ty, Ty::List(_)))
                         {
-                            self.error(
-                                17,
-                                arg.span,
-                                "List references require a direct internal call",
-                            );
+                            if !direct {
+                                self.error(
+                                    17,
+                                    arg.span,
+                                    "List arguments require a direct internal call",
+                                );
+                            } else if parameter.access == IrAccess::Owned
+                                && !matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
+                            {
+                                self.error(
+                                    17,
+                                    arg.span,
+                                    "owned List arguments require a named whole local",
+                                );
+                            }
                         }
                         if params
                             .get(i)
@@ -3177,12 +3183,12 @@ fn check_standalone(
                     .iter()
                     .map(|p| FunctionParameter {
                         access: ir_access(p.access),
-                        ty: c.signature_type(&p.ty, ir_access(p.access)),
+                        ty: c.type_path(&p.ty),
                     })
                     .collect();
                 let result = result
                     .as_ref()
-                    .map(|t| c.signature_type(t, IrAccess::Owned))
+                    .map(|t| c.signature_result(t))
                     .unwrap_or(UNIT);
                 if c.functions
                     .insert(name.clone(), Ty::Function(params, Box::new(result)))
@@ -3346,12 +3352,12 @@ pub(crate) fn check_resolved_mode(
                         .iter()
                         .map(|p| FunctionParameter {
                             access: ir_access(p.access),
-                            ty: c.signature_type(&p.ty, ir_access(p.access)),
+                            ty: c.type_path(&p.ty),
                         })
                         .collect();
                     let result = result
                         .as_ref()
-                        .map(|t| c.signature_type(t, IrAccess::Owned))
+                        .map(|t| c.signature_result(t))
                         .unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),

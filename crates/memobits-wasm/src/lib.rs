@@ -373,6 +373,7 @@ fn primitive_signature<'a>(
                 p.ty,
                 Type::Primitive(_)
                     | Type::String
+                    | Type::List(_)
                     | Type::Array { .. }
                     | Type::Struct(_)
                     | Type::Enum(_)
@@ -1886,7 +1887,10 @@ fn compile_function(
                 src_mem: 0,
                 dst_mem: 0,
             });
-            if heap_locals.contains(local) {
+            if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
+                body.instructions().local_get(index as u32);
+                list_descriptor::clear_allocation(body);
+            } else if heap_locals.contains(local) {
                 // The incoming pointer addresses the caller's moved slot.
                 // Clear it only after the callee has received the descriptor.
                 body.instruction(&WasmInstruction::LocalGet(index as u32));

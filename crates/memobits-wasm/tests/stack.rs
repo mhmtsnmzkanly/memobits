@@ -182,6 +182,54 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     }
 }
 #[test]
+fn owned_list_calls_reuse_blocks_after_invocation_and_skipped_calls() {
+    let program = lower(
+        r#"
+        fn consume(items: List<u32>, early: Bool) -> Bool {
+            if early { return items.len() == 12_000; }
+            false
+        }
+        fn check(skip: Bool) -> Bool {
+            var items: List<u32> = [];
+            loop {
+                items.push(23);
+                if items.len() == 12_000 { break; }
+            }
+            consume(items, { if skip { return true; } true })
+        }
+        fn main() -> Result<Bool, Error> {
+            if check(false) && check(true) { Ok(true) } else { Err(Error { code: 1 }) }
+        }
+    "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(2),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let mut settled = 0;
+    for iteration in 0..5 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        let data = memory.data(&store);
+        assert_eq!(data[result as usize], 0);
+        if iteration == 1 {
+            settled = data.len();
+        }
+        if iteration >= 2 {
+            assert_eq!(data.len(), settled);
+        }
+    }
+}
+
+#[test]
 fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
     let bytes = build(
         r#"

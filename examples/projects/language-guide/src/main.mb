@@ -141,6 +141,10 @@ fn append_word(items: share List<u32>, value: u32) {
     items.push(value);
 }
 
+fn owned_list_length(items: List<u32>) -> u32 {
+    items.len()
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -157,7 +161,9 @@ fn primitive_lists() -> Bool {
         Some(value) => value == 2000,
         None => false
     };
-    before == 0 && bytes.len() == 1 && moved.len() == 2 && word
+    // An owned parameter takes the whole List and releases it at scope exit.
+    let final_length := owned_list_length(moved);
+    before == 0 && bytes.len() == 1 && final_length == 2 && word
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

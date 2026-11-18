@@ -426,7 +426,12 @@ impl<'a> Builder<'a> {
             .parameter_locals
             .iter()
             .copied()
-            .filter(|local| function.locals[local.0 as usize].ty == Type::String)
+            .filter(|local| {
+                matches!(
+                    function.locals[local.0 as usize].ty,
+                    Type::String | Type::List(_)
+                )
+            })
             .collect();
         Self {
             function,
@@ -1620,8 +1625,9 @@ impl<'a> Builder<'a> {
                     for (index, (argument, parameter)) in
                         arguments.iter().zip(&signature.parameters).enumerate()
                     {
-                        let direct_string = parameter.ty == Type::String
-                            && matches!(callee.source, Source::Function(_));
+                        let direct = matches!(callee.source, Source::Function(_));
+                        let direct_string = direct && parameter.ty == Type::String;
+                        let direct_list = direct && matches!(parameter.ty, Type::List(_));
                         let temporary_receiver = match &argument.kind {
                             ExprKind::Call { .. }
                                 if direct_string && parameter.access == Access::Owned =>
@@ -1653,7 +1659,7 @@ impl<'a> Builder<'a> {
                             let mut reference = self.borrow(value, parameter.access)?;
                             reference.mode = access_mode(parameter.access);
                             reference
-                        } else if direct_string {
+                        } else if direct_string || direct_list {
                             let owned = self.owned_to(value, &parameter.ty)?;
                             if index + 1 < arguments.len()
                                 && temporary_receiver.is_none()
@@ -1662,8 +1668,8 @@ impl<'a> Builder<'a> {
                                 // Move now. A later argument can exit, so hold
                                 // the descriptor in a local with lexical cleanup.
                                 let staged = self.hidden_local(
-                                    "call String argument",
-                                    Type::String,
+                                    "owned call argument",
+                                    parameter.ty.clone(),
                                     argument.span,
                                 );
                                 self.function.locals[staged.0 as usize].mutable = false;

@@ -217,7 +217,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   as String. The [List design](list-slice.md) records copied `.get(index)`
   reads with checked unsigned bounds. Direct internal borrow parameters
   can read either primitive List type. Share parameters can also push
-  through the caller descriptor. Live conflicting loans block access. General
+  through the caller descriptor. Direct owned parameters take named local
+  moves with cleanup on either side of invocation. Live conflicting loans
+  block access. General
   aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
   `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static
