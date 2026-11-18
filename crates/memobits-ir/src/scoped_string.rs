@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct HeapStrings {
     pub locals: HashSet<LocalId>,
     pub(super) returns_heap: bool,
-    pub(super) returns_heap_ok: bool,
+    pub returns_heap_ok: bool,
     pub(super) writes_heap: HashSet<usize>,
     pub(super) approved_ok: HashSet<ValueId>,
 }
@@ -58,8 +58,19 @@ impl super::Program {
                                     .push(Slot::Local(index, *target));
                             }
                         }
-                        InstructionKind::EnumNew { .. } => {
-                            if let Some((value, source)) = owned_ok(self, function, instruction) {
+                        InstructionKind::ValidateUtf8 {
+                            construct_string: true,
+                            ..
+                        }
+                        | InstructionKind::EnumNew { .. } => {
+                            let (value, source) = match instruction.kind {
+                                InstructionKind::ValidateUtf8 { .. } => (instruction.output, None),
+                                _ => match owned_ok(self, function, instruction) {
+                                    Some((value, source)) => (Some(value), Some(source)),
+                                    None => (None, None),
+                                },
+                            };
+                            if let Some(value) = value {
                                 let destination = if returns_ok(block, position, value) {
                                     Some(Slot::ResultReturn(index))
                                 } else {
@@ -68,10 +79,14 @@ impl super::Program {
                                 };
                                 if let Some(destination) = destination {
                                     facts[index].approved_ok.insert(value);
-                                    moves
-                                        .entry(Slot::Local(index, source))
-                                        .or_default()
-                                        .push(destination);
+                                    if let Some(source) = source {
+                                        moves
+                                            .entry(Slot::Local(index, source))
+                                            .or_default()
+                                            .push(destination);
+                                    } else {
+                                        pending.push(destination);
+                                    }
                                 }
                             }
                         }

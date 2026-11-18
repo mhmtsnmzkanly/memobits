@@ -56,7 +56,10 @@ byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`
 to decode a Unicode scalar at a byte offset as `Option<u32>`.
 `bytes.validate_utf8(length)` borrows a fixed `Bytes<N>` prefix and returns
-a scalar count or a typed error with a byte offset. See the
+a scalar count or a typed error with a byte offset.
+`bytes.to_utf8_string(length)` validates the same prefix and copies it
+into an owned String on success. Its Result uses the immediate consuming
+match rules for heap Strings. See the
 [UTF-8 validator](../../examples/projects/utf8-validator/README.md).
 `let joined := left.concat(right);` borrows its inputs and allocates owned
 text for that binding. The result can be read, borrowed, or moved to

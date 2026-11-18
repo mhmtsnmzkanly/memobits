@@ -125,7 +125,12 @@ fn fixed_bytes() -> Bool {
         Ok(count) => count == 1,
         Err(_) => false
     };
-    valid && first_byte(array.borrow()) == 42
+    // Construction copies just the validated prefix into an owned String.
+    let copied := match array.to_utf8_string(1) {
+        Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
+        Err(_) => false
+    };
+    valid && copied && first_byte(array.borrow()) == 42
 }
 
 // String literals are owned UTF-8. The empty literal is also a String.

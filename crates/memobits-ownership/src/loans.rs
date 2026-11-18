@@ -608,6 +608,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::ValidateUtf8 {
             source,
             length: offset,
+            ..
         }
         | InstructionKind::StringIsCharBoundary { source, offset }
         | InstructionKind::StringByteAt { source, offset }

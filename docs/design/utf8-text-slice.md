@@ -140,9 +140,11 @@ for its boundary and malformed-byte fixtures.
 
 ## Fallible construction from fixed bytes
 
-The proposed constructor creates an owned String from the logical prefix
-of a borrowed fixed byte array and an explicit `i32` length. The validator
-already infers the array bound. This matches
+`bytes.to_utf8_string(length)` returns `Result<String, Utf8Error>` from
+the logical prefix of a fixed byte array. The method sits alongside
+`validate_utf8` on the byte receiver. The `to` spelling reflects that it
+borrows the input and makes an owned copy. The length is an `i32` and the
+receiver supplies the bound. This matches
 the [guest validator](../../examples/projects/utf8-validator/README.md)
 and keeps the caller's fixed buffer available on either outcome. Success
 copies exactly the validated prefix into private String storage. Padding
@@ -229,9 +231,11 @@ outcome ABI continues to require a primitive success payload.
 5. Implemented the compiler-provided prefix validator and typed error.
    It borrows the input, checks the inferred bound, and reports the
    first malformed or missing byte without allocating.
-6. Add the constructor using the same private validator and byte-range
-   allocator. Return the typed error before allocation on invalid input.
-   Choose the constructor spelling when lowering is implemented.
+6. Implemented `to_utf8_string` using the same private validator and
+   byte-range allocator. Invalid prefixes return the typed error before
+   allocation. A valid prefix is copied directly into the `Ok` descriptor.
+   Immediately match the Result with explicit `Ok(value)` and `Err` arms,
+   or return it directly from an internal function whose callers do so.
 
 Run the executable slices from source and as standalone Wasm with a
 primitive self-checking entry. Verify exact bytes and scalar reads, all

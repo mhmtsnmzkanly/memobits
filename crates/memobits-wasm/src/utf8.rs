@@ -169,13 +169,15 @@ pub(super) fn write_outcome(
     body: &mut Function,
     program: &Program,
     layouts: &[StructLayout],
-    frame: FrameState,
-    cell: u32,
-    ty: &Type,
+    destination: (FrameState, u32),
+    types: (&Type, &Type),
     status: u32,
+    write_success: impl FnOnce(&mut Function, u32) -> Result<(), String>,
 ) -> Result<(), String> {
+    let (frame, cell) = destination;
+    let (ty, success) = types;
     let error = program
-        .utf8_validation_error(ty)
+        .utf8_outcome_error(ty, success)
         .ok_or("invalid UTF-8 outcome")?;
     let Type::Enum(result) = ty else {
         unreachable!("checked UTF-8 outcome")
@@ -191,11 +193,6 @@ pub(super) fn write_outcome(
     let option_layout = layouts[option.0 as usize].enum_layout.as_ref().unwrap();
     let error_cell = cell + result.variants[1].offsets[0];
     let offset_cell = error_cell + error_layout.offsets[1];
-
-    emit_address(body, frame, cell);
-    load_code(body, status);
-    body.instructions().i32_const(0).i32_ne();
-    emit_store(body, Primitive::U8);
 
     load_code(body, status);
     body.instructions().if_(BlockType::Empty);
@@ -217,8 +214,12 @@ pub(super) fn write_outcome(
         status,
     );
     body.instructions().else_();
-    emit_word(body, frame, cell + result.variants[0].offsets[0], status);
+    write_success(body, cell + result.variants[0].offsets[0])?;
     body.instructions().end();
+    emit_address(body, frame, cell);
+    load_code(body, status);
+    body.instructions().i32_const(0).i32_ne();
+    emit_store(body, Primitive::U8);
     Ok(())
 }
 
@@ -230,7 +231,7 @@ fn load_code(body: &mut Function, status: u32) {
         .i32_wrap_i64();
 }
 
-fn emit_word(body: &mut Function, frame: FrameState, offset: u32, status: u32) {
+pub(super) fn emit_word(body: &mut Function, frame: FrameState, offset: u32, status: u32) {
     emit_address(body, frame, offset);
     body.instructions().local_get(status).i32_wrap_i64();
     emit_store(body, Primitive::I32);

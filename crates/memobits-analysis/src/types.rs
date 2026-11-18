@@ -1276,12 +1276,16 @@ impl Checker {
         }
     }
 
-    fn validate_utf8(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+    fn byte_utf8(&mut self, expr: &Expr, base: &Expr, method: &str, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let input = read_type(self.expr(base, None));
         let mut diverges = input == Ty::Never;
         if !matches!(input, Ty::Array(element, _) if *element == Ty::Primitive("u8")) && !diverges {
-            self.error(17, base.span, "validate_utf8() requires a fixed byte array");
+            self.error(
+                17,
+                base.span,
+                format!("{method}() requires a fixed byte array"),
+            );
         }
         for argument in arguments {
             let length = read_type(self.expr(argument, Some(&I32)));
@@ -1289,16 +1293,28 @@ impl Checker {
             diverges |= length == Ty::Never;
         }
         if arguments.len() != 1 {
-            self.error(10, expr.span, "validate_utf8() expects one logical length");
+            self.error(
+                10,
+                expr.span,
+                format!("{method}() expects one logical length"),
+            );
             return Ty::Error;
         }
         if diverges {
             return Ty::Never;
         }
         let error = self.table.utf8_error_type(expr.span);
+        let success = if method == "to_utf8_string" {
+            Ty::String
+        } else {
+            I32
+        };
         self.table.instantiate_enum(
             registry::by_id(registry::TemplateId::Result),
-            vec![ResolvedArgument::Type(I32), ResolvedArgument::Type(error)],
+            vec![
+                ResolvedArgument::Type(success),
+                ResolvedArgument::Type(error),
+            ],
             expr.span,
         )
     }
@@ -2696,8 +2712,8 @@ impl Checker {
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
                     }
-                    if name == "validate_utf8" {
-                        return self.validate_utf8(expr, base, arguments);
+                    if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
+                        return self.byte_utf8(expr, base, name, arguments);
                     }
                     if name == "push_str" {
                         return self.string_push_str(expr, base, arguments);

@@ -251,10 +251,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.
   [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
-  is the next planned consumer of internal heap Result returns. Production
-  concat uses the private byte-range allocator. `Bytes<N>.validate_utf8`
-  checks the logical prefix without allocating. String constructor lowering
-  remains pending.
+  uses the same trusted validator as `Bytes<N>.validate_utf8`. The
+  `to_utf8_string(length)` method copies the prefix only after validation
+  and returns an owned String through the internal Result path.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

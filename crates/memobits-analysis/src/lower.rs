@@ -1531,14 +1531,18 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
-                    if name == "validate_utf8" {
+                    if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
                         let source = self.lower_expr(base)?;
                         let source = read(self.borrow(source, Access::Borrow)?);
                         let length = self.lower_expr(&arguments[0])?;
                         let length = read(self.scalar(length)?);
                         return self.emit(
                             expr.span,
-                            InstructionKind::ValidateUtf8 { source, length },
+                            InstructionKind::ValidateUtf8 {
+                                source,
+                                length,
+                                construct_string: name == "to_utf8_string",
+                            },
                             self.ty(expr),
                         );
                     }

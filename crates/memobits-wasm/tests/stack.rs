@@ -132,6 +132,86 @@ fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
 }
 
 #[test]
+fn utf8_construction_validates_before_growth_and_reuses_storage() {
+    let program = lower(
+        r#"
+        fn valid() -> Result<Bool, Error> {
+            let input: Bytes<32_000> = [65; 32_000];
+            match input.to_utf8_string(32_000) {
+                Ok(text) => { return Ok(text.len() == 32_000); },
+                Err(_) => Err(Error { code: 1 })
+            }
+        }
+        fn invalid() -> Result<Bool, Error> {
+            var input: Bytes<32_000> = [65; 32_000];
+            input[31_999] = 255;
+            match input.to_utf8_string(32_000) {
+                Ok(text) => Err(Error { code: 1 }),
+                Err(error) => {
+                    let Utf8Error { code, offset } := error;
+                    let last := match offset { Some(index) => index == 31_999, None => false };
+                    if code != 2 || !last { return Err(Error { code: 2 }); }
+                    Ok(true)
+                }
+            }
+        }
+    "#,
+    );
+    let options = CompileOptions {
+        stack_size: 120_000,
+    };
+    let valid = compile_application_traced(&program, FunctionId(0), &options).unwrap();
+    let invalid = compile_application_traced(&program, FunctionId(1), &options).unwrap();
+    for (artifact, should_trap) in [(&invalid, false), (&valid, true)] {
+        let engine = Engine::default();
+        let module = Module::new(&engine, &artifact.bytes).unwrap();
+        let mut store = Store::new(
+            &engine,
+            wasmi::StoreLimitsBuilder::new()
+                .memory_size(2 * 65_536)
+                .build(),
+        );
+        store.limiter(|limit| limit);
+        let instance = Linker::new(&engine)
+            .instantiate_and_start(&mut store, &module)
+            .unwrap();
+        let main = instance
+            .get_typed_func::<(), (i32, i32)>(&store, "main")
+            .unwrap();
+        let memory = instance
+            .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+            .unwrap();
+        if should_trap {
+            assert!(main.call(&mut store, ()).is_err());
+            let trap = instance
+                .get_global(&store, memobits_wasm::TRAP_EXPORT)
+                .unwrap();
+            assert_eq!(
+                trap.get(&store).i32().unwrap() & 255,
+                i32::from(memobits_wasm::TrapReason::HeapAllocation.code())
+            );
+        } else {
+            let (result, _) = main.call(&mut store, ()).unwrap();
+            assert_eq!(memory.data(&store)[result as usize], 0);
+        }
+        assert_eq!(memory.data(&store).len(), 2 * 65_536);
+    }
+
+    let (mut store, instance) = instantiate(&valid.bytes);
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    for _ in 0..4 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), 3 * 65_536);
+    }
+}
+
+#[test]
 fn outcome_cell_and_string_data_follow_the_stack_at_a_page_boundary() {
     let program = lower(r#"fn main() -> Result<u32, Error> { Ok("é".len()) }"#);
     let options = CompileOptions { stack_size: 65_520 };

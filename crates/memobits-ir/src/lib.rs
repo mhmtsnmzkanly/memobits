@@ -276,10 +276,11 @@ pub enum InstructionKind {
         local: LocalId,
     },
     /// Read the byte length of an owned String or a reference to one.
-    /// Validate a logical prefix of a fixed byte array without allocating.
+    /// Validate a logical byte prefix and optionally copy it into an owned String.
     ValidateUtf8 {
         source: Operand,
         length: Operand,
+        construct_string: bool,
     },
     StringLen {
         source: Operand,
@@ -701,7 +702,7 @@ impl Program {
 
 impl Program {
     /// Check the compiler-known error layout consumed by the UTF-8 backend.
-    pub fn utf8_validation_error(&self, ty: &Type) -> Option<TypeId> {
+    pub fn utf8_outcome_error(&self, ty: &Type, success: &Type) -> Option<TypeId> {
         let Type::Enum(result) = ty else {
             return None;
         };
@@ -731,7 +732,7 @@ impl Program {
         let Some(ErrorAncestry::Derived(parent)) = def.error_ancestry else {
             return None;
         };
-        (ok.payload == [Type::Primitive(Primitive::I32)]
+        (ok.payload.as_slice() == std::slice::from_ref(success)
             && def.path.module == ["__prelude"]
             && def.path.name == "Utf8Error"
             && code.name == "code"
@@ -1278,7 +1279,11 @@ fn validate_instruction(
 ) {
     let out = output_type(function, instruction.output);
     match &instruction.kind {
-        InstructionKind::ValidateUtf8 { source, length } => {
+        InstructionKind::ValidateUtf8 {
+            source,
+            length,
+            construct_string,
+        } => {
             let input = operand_type(program, function, source, errors, id, block);
             let len = operand_type(program, function, length, errors, id, block);
             if !matches!(input, Some(Type::Reference { access: Access::Borrow, inner })
@@ -1294,15 +1299,20 @@ fn validate_instruction(
                     "UTF-8 validation requires a borrowed byte array and i32 length",
                 );
             }
+            let success = if *construct_string {
+                Type::String
+            } else {
+                Type::Primitive(Primitive::I32)
+            };
             let valid_result = out
-                .and_then(|ty| program.utf8_validation_error(ty))
+                .and_then(|ty| program.utf8_outcome_error(ty, &success))
                 .is_some();
             if !valid_result {
                 push(
                     errors,
                     id,
                     Some(block),
-                    "UTF-8 validation requires Result<i32, Utf8Error>",
+                    "invalid result type for UTF-8 operation",
                 );
             }
         }
@@ -2708,6 +2718,19 @@ fn validate_operand_escapes(
     let shares = scoped_string::share_borrows(function);
     for (index, block) in function.blocks.iter().enumerate() {
         for (position, instruction) in block.instructions.iter().enumerate() {
+            if matches!(
+                instruction.kind,
+                InstructionKind::ValidateUtf8 {
+                    construct_string: true,
+                    ..
+                }
+            ) && !instruction
+                .output
+                .is_some_and(|value| heap_strings[id.0 as usize].approved_ok.contains(&value))
+            {
+                push(errors, id, Some(BlockId(index as u32)),
+                    "UTF-8 String result must be returned directly or immediately matched with explicit Ok(value) and Err arms");
+            }
             if let InstructionKind::Call { callee, arguments } = &instruction.kind {
                 if let Source::Function(target) = callee.source {
                     let Some(facts) = heap_strings.get(target.0 as usize) else {
@@ -2831,6 +2854,7 @@ fn validate_operand_escapes(
                 InstructionKind::ValidateUtf8 {
                     source,
                     length: offset,
+                    ..
                 }
                 | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }

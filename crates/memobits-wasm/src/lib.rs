@@ -958,6 +958,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 InstructionKind::ValidateUtf8 {
                     source,
                     length: offset,
+                    ..
                 }
                 | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
@@ -1550,7 +1551,10 @@ fn encode_frames_traced(
     let heap_strings = program.heap_strings();
     let heap_copy_index = reachable
         .iter()
-        .any(|id| !heap_strings[*id as usize].locals.is_empty())
+        .any(|id| {
+            let facts = &heap_strings[*id as usize];
+            !facts.locals.is_empty() || facts.returns_heap_ok
+        })
         .then(|| {
             let adapter_count = u32::from(entry.is_some());
             types.ty().function([ValType::I32; 5], [ValType::I32]);
@@ -2795,7 +2799,11 @@ fn compile_instruction(
             emit_operand(body, function, param_count, operand, layout, frame)?;
             body.instruction(&WasmInstruction::LocalSet(output));
         }
-        InstructionKind::ValidateUtf8 { source, length } => {
+        InstructionKind::ValidateUtf8 {
+            source,
+            length,
+            construct_string,
+        } => {
             let (validator, program) = utf8.ok_or("missing UTF-8 validator")?;
             let frame = frame.ok_or("UTF-8 result requires a frame")?;
             let Type::Reference { inner, .. } = value_type(function, source)? else {
@@ -2814,14 +2822,39 @@ fn compile_instruction(
                 .output
                 .ok_or("UTF-8 validation lacks a result")?;
             let cell = array_cell_of(layout, Slot::Value(result.0))?;
+            let success = if *construct_string {
+                Type::String
+            } else {
+                Type::Primitive(Primitive::I32)
+            };
             utf8::write_outcome(
                 body,
                 program,
                 &layout.structs,
-                frame,
-                cell.offset,
-                &function.values[result.0 as usize],
+                (frame, cell.offset),
+                (&function.values[result.0 as usize], &success),
                 scratch64,
+                |body, destination| {
+                    if *construct_string {
+                        // Validation accepted this exact prefix. The read loan
+                        // keeps the same bytes live through both leaf helpers.
+                        emit_operand(body, function, param_count, source, layout, Some(frame))?;
+                        emit_operand(body, function, param_count, length, layout, Some(frame))?;
+                        body.instructions().i32_const(0).i32_const(0);
+                        emit_address(body, frame, destination);
+                        body.instructions()
+                            .call(heap_copy_index.ok_or("missing String allocation helper")?)
+                            .i32_eqz();
+                        trap_if(
+                            body,
+                            traps.site(instruction.span),
+                            TrapReason::HeapAllocation,
+                        );
+                    } else {
+                        utf8::emit_word(body, frame, destination, scratch64);
+                    }
+                    Ok(())
+                },
             )?;
         }
         InstructionKind::StringLen { source } => {

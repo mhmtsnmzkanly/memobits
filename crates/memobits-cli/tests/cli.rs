@@ -1155,6 +1155,11 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "nested Result<String, E> storage",
         ),
         (
+            r#"pub fn main() -> Result<String, Utf8Error> { let input: Bytes<1> = [65]; input.to_utf8_string(1) }"#,
+            &["build"][..],
+            "primitive success payload",
+        ),
+        (
             r#"fn main() { let result: Result<String, Error> = Ok("é"); let items := [result]; }"#,
             &["build"][..],
             "nested Result<String, E> storage",
@@ -1288,6 +1293,84 @@ fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
 #[test]
 fn enf_lexer_example_checks_byte_fixtures_in_source_and_wasm() {
     assert_example_runs_in_both_modes("enf-lexer", b"Result: Ok(i32(0))\n");
+}
+
+#[test]
+fn strict_utf8_construction_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='utf8-construction'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn convert(input: borrow Bytes<4>, length: i32) -> Result<String, Utf8Error> {
+            input.to_utf8_string(length)
+        }
+        fn byte_is(text: borrow String, offset: u32, expected: u8) -> Bool {
+            match text.byte_at(offset) { Some(byte) => byte == expected, None => false }
+        }
+        fn error_is(input: borrow Bytes<4>, length: i32, code: u32, offset: i32) -> Bool {
+            match input.to_utf8_string(length) {
+                Ok(text) => false,
+                Err(error) => {
+                    let Utf8Error { code: actual, offset: found } := error;
+                    actual == code && match found {
+                        Some(value) => value == offset, None => offset == -1
+                    }
+                }
+            }
+        }
+        fn main() -> Result<Bool, Error> {
+            let input: Bytes<4> = [195, 169, 0, 255];
+            let result := convert(input.borrow(), 3);
+            let exact := match result {
+                Ok(text) => text.len() == 3 && byte_is(text.borrow(), 0, 195)
+                    && byte_is(text.borrow(), 1, 169) && byte_is(text.borrow(), 2, 0),
+                Err(_) => false
+            };
+            let empty_input: Bytes<2> = [255, 255];
+            let empty := match empty_input.to_utf8_string(0) {
+                Ok(text) => text.len() == 0, Err(_) => false
+            };
+            let malformed: Bytes<4> = [65, 237, 160, 128];
+            Ok(exact && empty && input[3] == 255
+                && error_is(input.borrow(), 4, 2, 3)
+                && error_is(input.borrow(), 1, 3, 1)
+                && error_is(input.borrow(), -1, 1, -1)
+                && error_is(input.borrow(), 5, 1, -1)
+                && error_is(malformed.borrow(), 3, 4, 2))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "utf8.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "utf8.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn utf8_constructor_rejects_unclaimed_results() {
+    let f = Fixture::new();
+    for body in [
+        "input.to_utf8_string(1);",
+        "match input.to_utf8_string(1) { Ok(_) => {}, Err(_) => {} };",
+    ] {
+        f.write(
+            "utf8.mb",
+            &format!("fn main() {{ let input: Bytes<1> = [65]; {body} }}"),
+        );
+        let diagnostic = err(f.run(&["ownership", "utf8.mb"]), "TE018");
+        assert!(
+            diagnostic.contains("must be returned directly or immediately matched"),
+            "{diagnostic}"
+        );
+    }
 }
 
 #[test]

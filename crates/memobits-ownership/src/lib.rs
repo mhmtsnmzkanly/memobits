@@ -210,6 +210,7 @@ fn transfer_instruction(
         InstructionKind::ValidateUtf8 {
             source,
             length: offset,
+            ..
         }
         | InstructionKind::StringIsCharBoundary { source, offset }
         | InstructionKind::StringByteAt { source, offset }
