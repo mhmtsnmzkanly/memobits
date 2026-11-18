@@ -10,7 +10,7 @@ use memobits_entry_abi as entry_abi;
 use memobits_ir::{
     ArrayInit, BinaryOp, BlockId, Constant, EntryOutcome, ErrorAncestry, Function, FunctionId,
     Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
-    Type, TypeDef, TypeDefKind, UnaryOp,
+    Type, TypeDef, TypeDefKind, UnaryOp, ValueId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use wasm_encoder::{
@@ -314,6 +314,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
+        | InstructionKind::ListGet { .. }
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
         | InstructionKind::EndListLocal { .. }
@@ -965,7 +966,11 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
-                InstructionKind::ValidateUtf8 {
+                InstructionKind::ListGet {
+                    source,
+                    index: offset,
+                }
+                | InstructionKind::ValidateUtf8 {
                     source,
                     length: offset,
                     ..
@@ -1124,6 +1129,30 @@ fn is_aggregate(ty: &Type) -> bool {
         ty,
         Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
     )
+}
+
+fn scalar_option_offsets(
+    layout: &FrameLayout,
+    function: &Function,
+    value: ValueId,
+) -> Result<(u32, u32), String> {
+    let cell = array_cell_of(layout, Slot::Value(value.0))?;
+    let Type::Enum(type_id) = function.values[value.0 as usize] else {
+        return Err("expected an Option output".into());
+    };
+    let payload = layout
+        .structs
+        .get(type_id.0 as usize)
+        .and_then(|ty| ty.enum_layout.as_ref())
+        .and_then(|ty| ty.variants.first())
+        .and_then(|some| some.offsets.first())
+        .ok_or("missing Option payload layout")?;
+    Ok((
+        cell.offset,
+        cell.offset
+            .checked_add(*payload)
+            .ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+    ))
 }
 
 fn align_up(value: u32, align: u32) -> Option<u32> {
@@ -2932,6 +2961,36 @@ fn compile_instruction(
             emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
             list_descriptor::initialize_empty(body);
         }
+        InstructionKind::ListGet { source, index } => {
+            let frame = frame.ok_or("List get requires a frame")?;
+            let value = instruction.output.ok_or("List get lacks an output")?;
+            let (tag, payload) = scalar_option_offsets(layout, function, value)?;
+            let Type::List(element) = value_type(function, source)? else {
+                return Err("List get source is not a List".into());
+            };
+            let (width, _) = storage_layout(element)?;
+            emit_address(body, frame, tag);
+            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            list_descriptor::load_length(body);
+            body.instructions()
+                .i32_lt_u()
+                .if_(BlockType::Result(ValType::I32));
+
+            // An initialized index is within the checked extent from push.
+            emit_address(body, frame, payload);
+            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            list_descriptor::load_address(body);
+            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            body.instructions()
+                .i32_const(width as i32)
+                .i32_mul()
+                .i32_add();
+            emit_load(body, element);
+            emit_store(body, element);
+            body.instructions().i32_const(0).else_().i32_const(1).end();
+            emit_store(body, Primitive::U8);
+        }
         InstructionKind::ListLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;
             list_descriptor::load_length(body);
@@ -2972,22 +3031,8 @@ fn compile_instruction(
             let scalar = matches!(&instruction.kind, InstructionKind::StringScalarAt { .. });
             let output = output.ok_or("String read lacks an output")?;
             let value = instruction.output.ok_or("String read lacks an output")?;
-            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let (tag, payload) = scalar_option_offsets(layout, function, value)?;
             let frame = frame.ok_or("String read requires a frame")?;
-            let Type::Enum(type_id) = function.values[value.0 as usize] else {
-                return Err("String read output must be an Option".into());
-            };
-            let some_offset = layout
-                .structs
-                .get(type_id.0 as usize)
-                .and_then(|ty| ty.enum_layout.as_ref())
-                .and_then(|ty| ty.variants.first())
-                .and_then(|some| some.offsets.first())
-                .ok_or("missing String read payload layout")?;
-            let payload = cell
-                .offset
-                .checked_add(*some_offset)
-                .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
 
             emit_operand(body, function, param_count, offset, layout, Some(frame))?;
             emit_operand(body, function, param_count, source, layout, Some(frame))?;
@@ -3025,7 +3070,7 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::End);
             body.instruction(&WasmInstruction::LocalSet(output));
 
-            emit_address(body, frame, cell.offset);
+            emit_address(body, frame, tag);
             body.instruction(&WasmInstruction::LocalGet(output));
             body.instruction(&WasmInstruction::I32Const(-1));
             body.instruction(&WasmInstruction::I32Ne);

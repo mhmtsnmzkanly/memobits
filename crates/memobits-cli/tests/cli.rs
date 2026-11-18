@@ -808,6 +808,83 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn list_get_reads_copied_values_after_growth_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-get'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn byte_is(value: Option<u8>, expected: u8) -> Bool {
+            match value { Some(byte) => byte == expected, None => false }
+        }
+        fn word_is(value: Option<u32>, expected: u32) -> Bool {
+            match value { Some(word) => word == expected, None => false }
+        }
+        fn no_word(value: Option<u32>) -> Bool {
+            match value { Some(_) => false, None => true }
+        }
+        fn no_byte(value: Option<u8>) -> Bool {
+            match value { Some(_) => false, None => true }
+        }
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            var words: List<u32> = [];
+            let empty := no_word(words.get(0)) && no_byte(bytes.get(4_294_967_295));
+            var index: u32 = 0;
+            loop {
+                bytes.push(if index % 2 == 0 { 255 } else { 17 });
+                words.push(305_419_896 + index);
+                index += 1;
+                if index == 200 { break; }
+            }
+            var calls := 0;
+            let appended := words.get({
+                calls += 1;
+                words.push(4_294_967_295);
+                words.len() - 1
+            });
+            let last := words.len();
+            let frozen_words := words;
+            let frozen_bytes := bytes;
+            Ok(empty && calls == 1 && last == 201 && word_is(appended, 4_294_967_295)
+                && word_is(frozen_words.get(0), 305_419_896)
+                && word_is(frozen_words.get(199), 305_420_095)
+                && word_is(frozen_words.get(200), 4_294_967_295)
+                && byte_is(frozen_bytes.get(0), 255) && byte_is(frozen_bytes.get(199), 17)
+                && no_byte(frozen_bytes.get(200)) && no_byte(frozen_bytes.get(4_294_967_295))
+                && no_word(frozen_words.get(last)) && no_word(frozen_words.get(4_294_967_295)))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "get.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "get.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn list_get_rejects_invalid_indices_and_moves_during_evaluation() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("let index: i32 = 0; items.get(index);", "TE002"),
+        ("items.get({ let moved := items; 0 });", "BE001"),
+    ] {
+        f.write(
+            "list.mb",
+            &format!("fn main() {{ let items: List<u32> = []; {body} }}"),
+        );
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+}
+
+#[test]
 fn list_push_runs_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(

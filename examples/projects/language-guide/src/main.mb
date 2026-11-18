@@ -143,7 +143,13 @@ fn primitive_lists() -> Bool {
     words.push(1000);
     var moved := words;
     moved.push(2000);
-    before == 0 && bytes.len() == 1 && moved.len() == 2
+    // get copies a primitive element and returns None outside the list.
+    let word := match moved.get(1) {
+        Some(value) => value == 2000,
+        None => false
+    };
+    before == 0 && bytes.len() == 1 && moved.len() == 2 && word
+        && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 
 // String literals are owned UTF-8. The empty literal is also a String.

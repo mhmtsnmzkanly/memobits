@@ -1563,6 +1563,16 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
+                    if name == "get" {
+                        let source = read(self.lower_expr(base)?);
+                        let index = self.lower_expr(&arguments[0])?;
+                        let index = read(self.scalar(index)?);
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::ListGet { source, index },
+                            self.ty(expr),
+                        );
+                    }
                     if name == "push" {
                         let PathTarget::Local(target) = self.path(base) else {
                             unreachable!("checked List push receiver")

@@ -17,6 +17,10 @@ pub(super) fn initialize_empty(body: &mut Function) {
         .memory_fill(0);
 }
 
+pub(super) fn load_address(body: &mut Function) {
+    body.instruction(&Instruction::I32Load(field(DATA_OFFSET)));
+}
+
 pub(super) fn load_length(body: &mut Function) {
     body.instruction(&Instruction::I32Load(field(LENGTH_OFFSET)));
 }

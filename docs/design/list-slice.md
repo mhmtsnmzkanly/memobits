@@ -11,11 +11,11 @@ the equivalence of `Bytes<N>` and `Array<u8, N>`.
 ## Executable checkpoint
 
 `List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
-local bindings, non-consuming `.len()` as `u32`, and `.push(value)` on whole
-mutable locals. Empty construction allocates no heap block. A push evaluates
+local bindings, non-consuming `.len()` and `.get(index)`, and `.push(value)`
+on whole mutable locals. Empty construction allocates no heap block. A push evaluates
 the element once and returns unit. Moves transfer the block and normal scope
 exits release the owner. The applied spelling is built in, and bare `List`
-can still name a user type. Replacement, element reads, nesting, borrows,
+can still name a user type. Replacement, indexing syntax, nesting, borrows,
 call signatures and exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
@@ -36,11 +36,12 @@ or a coverage need.
   allocating, growing, or changing the list. The argument can read the
   receiver's length. A move of the receiver during argument evaluation
   makes the subsequent push invalid.
-- Use `items.len()` for a non-consuming `u32` element count. A later slice
-  can add `items.get(index)` for a copied `Option<T>` at a `u32` index.
-  Both work on immutable and mutable locals. An out-of-range `get`
-  returns `None` before any element load. Subscript syntax can follow
-  with the accepted checked-indexing behavior.
+- Use `items.len()` for a non-consuming `u32` element count and
+  `items.get(index)` for a copied `Option<T>` at a `u32` index. Both work
+  on immutable and mutable locals. The index expression runs once before
+  the read. An out-of-range `get` returns `None` before computing an
+  element address or loading a value. Subscript syntax can follow with
+  the accepted checked-indexing behavior.
 
 These proposed spellings follow the familiar `Vec` operations. The
 first slice keeps the access rules and types already used in Memobits.
@@ -91,8 +92,8 @@ high-water mark.
 1. Empty local owners, length, push, growth and normal-exit cleanup are
    executable. The language guide runs from source and standalone Wasm.
 2. The Wasm test checks both element widths, payload addresses, exact bytes
-   after growth, repeated reuse and a forced allocation trap. Add copied
-   reads in the next executable slice.
+   after growth, repeated reuse and a forced allocation trap. The CLI
+   regression checks copied reads after growth in source and standalone Wasm.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,

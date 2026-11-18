@@ -1346,6 +1346,33 @@ impl Checker {
         )
     }
 
+    fn list_get(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        self.allow_array_value(base);
+        let receiver = self.expr(base, None);
+        let Ty::List(element) = receiver else {
+            self.error(17, base.span, "get() requires a whole List local");
+            return Ty::Error;
+        };
+        if !matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
+            self.error(17, base.span, "get() requires a whole List local");
+        }
+        if arguments.len() != 1 {
+            self.error(10, expr.span, "get() expects one index");
+            return Ty::Error;
+        }
+        let index_type = Ty::Primitive("u32");
+        let index = read_type(self.expr(&arguments[0], Some(&index_type)));
+        self.ensure(&index, &index_type, arguments[0].span);
+        if index == Ty::Never {
+            return Ty::Never;
+        }
+        self.table.instantiate_enum(
+            registry::by_id(registry::TemplateId::Option),
+            vec![ResolvedArgument::Type(Ty::Primitive(element))],
+            expr.span,
+        )
+    }
+
     fn list_push(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
@@ -2774,6 +2801,9 @@ impl Checker {
                     }
                     if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
                         return self.byte_utf8(expr, base, name, arguments);
+                    }
+                    if name == "get" {
+                        return self.list_get(expr, base, arguments);
                     }
                     if name == "push" {
                         return self.list_push(expr, base, arguments);

@@ -216,7 +216,11 @@ fn transfer_instruction(
         InstructionKind::Capture(operand) => {
             transfer_operand(operand, state, diagnostics, function)
         }
-        InstructionKind::ValidateUtf8 {
+        InstructionKind::ListGet {
+            source,
+            index: offset,
+        }
+        | InstructionKind::ValidateUtf8 {
             source,
             length: offset,
             ..

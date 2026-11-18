@@ -610,7 +610,11 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
-        InstructionKind::ValidateUtf8 {
+        InstructionKind::ListGet {
+            source,
+            index: offset,
+        }
+        | InstructionKind::ValidateUtf8 {
             source,
             length: offset,
             ..

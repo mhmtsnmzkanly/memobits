@@ -292,6 +292,10 @@ pub enum InstructionKind {
         target: LocalId,
         value: Operand,
     },
+    ListGet {
+        source: Operand,
+        index: Operand,
+    },
     ListLen {
         source: Operand,
     },
@@ -1351,6 +1355,40 @@ fn validate_instruction(
                     id,
                     Some(block),
                     "List push requires a mutable List local and a matching element",
+                );
+            }
+        }
+        InstructionKind::ListGet { source, index } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            let index_type = operand_type(program, function, index, errors, id, block);
+            let valid_output = match (input, out) {
+                (
+                    Some(Type::List(element @ (Primitive::U8 | Primitive::U32))),
+                    Some(Type::Enum(option)),
+                ) => {
+                    let name = if element == Primitive::U8 {
+                        "Option<u8>"
+                    } else {
+                        "Option<u32>"
+                    };
+                    program
+                        .types
+                        .get(option.0 as usize)
+                        .is_some_and(|definition| definition.is_scalar_option(name, element))
+                }
+                _ => false,
+            };
+            if !matches!(source.source, Source::Local(_))
+                || source.mode != UseMode::Read
+                || index.mode != UseMode::Read
+                || index_type != Some(Type::Primitive(Primitive::U32))
+                || !valid_output
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List get requires a local read, u32 index, and matching Option output",
                 );
             }
         }
@@ -2959,7 +2997,11 @@ fn validate_operand_escapes(
                         report(block_id, value, true, false);
                     }
                 }
-                InstructionKind::ValidateUtf8 {
+                InstructionKind::ListGet {
+                    source,
+                    index: offset,
+                }
+                | InstructionKind::ValidateUtf8 {
                     source,
                     length: offset,
                     ..
