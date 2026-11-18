@@ -589,8 +589,9 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 .collect::<String>());
         }
         if command == "ownership" {
-            let diagnostics = memobits_analysis::check_module_ownership(&parsed.module).map_err(
-                |diagnostics| {
+            let program =
+                memobits_analysis::lower_module(&parsed.module, "standalone", &["source".into()])
+                    .map_err(|diagnostics| {
                     let name = path.display().to_string();
                     let source = SourceFile {
                         id: SourceId(0),
@@ -601,8 +602,8 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                         .iter()
                         .map(|d| render(d, Some(source)))
                         .collect::<String>()
-                },
-            )?;
+                })?;
+            let diagnostics = memobits_ownership::check_ownership(&program);
             if !diagnostics.is_empty() {
                 let name = path.display().to_string();
                 let source = SourceFile {
@@ -733,14 +734,16 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             result.diagnostics.extend(diagnostics);
         }
         if command == "ownership-project" && result.diagnostics.is_empty() {
-            let diagnostics = memobits_analysis::check_project_ownership(&project, &result)
-                .map_err(|diagnostics| {
+            let program =
+                memobits_analysis::lower_resolved(&project, &result).map_err(|diagnostics| {
                     diagnostics
                         .iter()
                         .map(|d| render_in(d, &result))
                         .collect::<String>()
                 })?;
-            result.diagnostics.extend(diagnostics);
+            result
+                .diagnostics
+                .extend(memobits_ownership::check_ownership(&program));
         }
         if command == "build" && result.diagnostics.is_empty() {
             let program = memobits_analysis::lower_resolved(&project, &result)

@@ -44,37 +44,34 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
-fn string_literals_report_execution_is_pending_at_lowering_boundary() {
-    let source = "fn f() { let s := \"é\"; }";
-    let parsed = parse(SourceId(9), source);
-    let diagnostics =
-        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    let diagnostic = &diagnostics[0];
-    assert_eq!(diagnostic.code.to_string(), "TE017");
-    assert!(diagnostic.message.contains("string literal execution"));
-    let span = diagnostic.span.unwrap();
-    assert_eq!(&source[span.start..span.end], "\"é\"");
-}
+fn string_literals_lower_to_owned_ir_with_utf8_payloads() {
+    use memobits_ir::{Constant, InstructionKind, Type};
 
-#[test]
-fn string_types_report_execution_is_pending_even_without_literals() {
-    for source in [
-        "fn f(s: borrow String) {}",
-        "type Text = String; fn f() {}",
-        "type Wrapper [ Text(Array<String, 1>) ] fn f() {}",
-    ] {
-        assert!(check(source).is_empty(), "{source}");
-        let parsed = parse(SourceId(9), source);
-        let diagnostics =
-            memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.code.to_string() == "TE017" && d.message.contains("String execution")),
-            "{source}: {diagnostics:?}"
-        );
-    }
+    let parsed = parse(
+        SourceId(9),
+        r#"fn f() -> String { let empty := ""; "é😀" }"#,
+    );
+    let program =
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap();
+    let function = &program.functions[0];
+    assert_eq!(*function.signature.result, Type::String);
+
+    let literals: Vec<_> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| {
+            let InstructionKind::Constant(Constant::String(text)) = &instruction.kind else {
+                return None;
+            };
+            assert_eq!(
+                function.values[instruction.output.unwrap().0 as usize],
+                Type::String
+            );
+            Some(text.as_bytes())
+        })
+        .collect();
+    assert_eq!(literals, [b"".as_slice(), "é😀".as_bytes()]);
 }
 
 #[test]

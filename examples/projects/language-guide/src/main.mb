@@ -122,6 +122,25 @@ fn fixed_bytes() -> Bool {
     first_byte(array.borrow()) == 42
 }
 
+// String literals are owned UTF-8. The empty literal is also a String.
+fn text() -> String {
+    "café 😀"
+}
+
+fn accepts_text(value: borrow String) -> Bool {
+    // This call demonstrates access. Text inspection APIs are still pending.
+    true
+}
+
+fn fixed_text() -> Bool {
+    let caption := text();
+    let view := caption.borrow();
+    let accepted := accepts_text(view);
+    let moved := caption; // The borrow ended at its last use.
+    let empty := "";
+    accepted && accepts_text(moved.borrow()) && accepts_text(empty.borrow())
+}
+
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, Bool) ]
 type Sample = Reading;
@@ -266,8 +285,9 @@ fn outcomes() -> Bool {
 //   for stack_size, fuel limits, and selecting a Wasm export with --entry.
 //   The runner calls zero-argument exports. Library exports use scalar
 //   signatures. External linking, type exports and mb check are unsupported.
-// - examples/design/language-guide.mb explores target syntax. Strings, lists,
-//   user-defined generics, try, defaults and aggregate .copy() are gated.
+// - examples/design/language-guide.mb explores target syntax. String length,
+//   scalar iteration, lists, user-defined generics, try, defaults and
+//   aggregate .copy() are gated.
 
 // A zero-argument application entry can return Result or Attempt with a
 // primitive success payload. Both runners show the variant and typed value
@@ -279,5 +299,6 @@ fn main() -> Result<i32, Error> {
     if !optional_borrow() { return Err(Error { code: 4 }); }
     if !outcomes() { return Err(Error { code: 5 }); }
     if !fixed_bytes() { return Err(Error { code: 6 }); }
+    if !fixed_text() { return Err(Error { code: 7 }); }
     Ok(42)
 }

@@ -137,6 +137,8 @@ pub enum Primitive {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Primitive(Primitive),
+    /// Owned UTF-8 text. Its storage representation is private to the backend.
+    String,
     Function(Signature),
     Reference {
         access: Access,
@@ -207,6 +209,7 @@ pub struct Local {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Constant {
+    String(String),
     Integer(String),
     Float(String),
     Bool(bool),
@@ -893,6 +896,7 @@ fn collect_struct_ids(ty: &Type, out: &mut Vec<usize>, count: usize) {
 fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
     match ty {
         Type::Primitive(kind) => *kind != Primitive::Unit,
+        Type::String => true,
         Type::Struct(id) | Type::Enum(id) => (id.0 as usize) < type_count,
         Type::Array { element, .. } => field_type_is_valid(element, type_count),
         _ => false,
@@ -968,7 +972,7 @@ fn validate_type_shape(
     context: &str,
 ) {
     match ty {
-        Type::Primitive(_) => {}
+        Type::Primitive(_) | Type::String => {}
         Type::Struct(type_id) | Type::Enum(type_id) => {
             if type_id.0 as usize >= type_count {
                 push(
@@ -1008,7 +1012,11 @@ fn validate_type_shape(
             }
             if !matches!(
                 inner.as_ref(),
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                Type::Primitive(_)
+                    | Type::String
+                    | Type::Array { .. }
+                    | Type::Struct(_)
+                    | Type::Enum(_)
             ) {
                 push(
                     errors,
@@ -1028,6 +1036,7 @@ fn validate_type_shape(
         }
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
+            Type::String => {}
             Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
@@ -1072,10 +1081,12 @@ fn validate_extract_consumption(
     }) else {
         return;
     };
-    let aggregate = function
-        .values
-        .get(output.0 as usize)
-        .is_some_and(|ty| matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_)));
+    let aggregate = function.values.get(output.0 as usize).is_some_and(|ty| {
+        matches!(
+            ty,
+            Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+        )
+    });
     if !aggregate || base.mode == UseMode::Consume {
         return;
     }
@@ -1196,6 +1207,7 @@ fn validate_instruction(
                     Some(Type::Primitive(Primitive::F32 | Primitive::F64))
                 ) | (Constant::Bool(_), Some(Type::Primitive(Primitive::Bool)))
                     | (Constant::Unit, Some(Type::Primitive(Primitive::Unit)))
+                    | (Constant::String(_), Some(Type::String))
             );
             if out.is_some() && !okay {
                 push(
@@ -1314,7 +1326,11 @@ fn validate_instruction(
                     }
                     Some(*inner)
                 }
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                Type::Primitive(_)
+                | Type::String
+                | Type::Array { .. }
+                | Type::Struct(_)
+                | Type::Enum(_)
                     if *access != Access::Owned =>
                 {
                     Some(actual)

@@ -14,7 +14,7 @@ use memobits_ir::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, CustomSection, ExportKind, ExportSection,
+    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ExportKind, ExportSection,
     Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
     Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module, TypeSection,
     ValType,
@@ -185,6 +185,19 @@ fn compile_target(
     let mut entry = None;
     for id in exports.values() {
         if let Some(function) = program.functions.get(id.0 as usize) {
+            if function
+                .signature
+                .parameters
+                .iter()
+                .any(|p| p.ty == Type::String)
+                || *function.signature.result == Type::String
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot use String; the external String ABI is not defined",
+                    Some(function.span),
+                ));
+                continue;
+            }
             if application {
                 match outcome_entry(program, function, &structs, stack_size) {
                     Ok(Some(adapter)) => {
@@ -335,16 +348,23 @@ fn primitive_signature<'a>(
         memobits_ir::Access::Owned => {
             matches!(
                 p.ty,
-                Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                Type::Primitive(_)
+                    | Type::String
+                    | Type::Array { .. }
+                    | Type::Struct(_)
+                    | Type::Enum(_)
             )
         }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
             matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
-                || matches!(p.ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+                || matches!(
+                    p.ty,
+                    Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                )
         }
     }) && matches!(
         result,
-        Type::Primitive(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+        Type::Primitive(_) | Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
     )
 }
 
@@ -352,14 +372,14 @@ fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
         // A struct or enum is an inline frame-cell value, passed internally by address.
-        Type::Struct(_) | Type::Enum(_) => true,
+        Type::String | Type::Struct(_) | Type::Enum(_) => true,
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
         } => match inner.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             array @ Type::Array { .. } => supported_type(array),
-            Type::Struct(_) | Type::Enum(_) => true,
+            Type::String | Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },
         Type::Array { element, .. } => match element.as_ref() {
@@ -468,8 +488,14 @@ fn member_layout(
             let (size, align) = storage_layout(*kind)?;
             Some((size, align, FieldStorage::Primitive(*kind)))
         }
+        Type::Reference { inner, .. } if **inner == Type::String => {
+            return Err("Wasm does not yet support String fields or enum payloads".into());
+        }
         // Validated local borrow Option payloads store a Wasm address.
         Type::Reference { .. } => Some((4, 4, FieldStorage::Primitive(Primitive::U32))),
+        Type::String => {
+            return Err("Wasm does not yet support String fields or enum payloads".into())
+        }
         nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
             nested_struct_layouts(types, nested, done, active)?;
             let (size, align) = type_layout(
@@ -644,10 +670,14 @@ fn type_layout(
 ) -> Result<(u32, u32), String> {
     match ty {
         Type::Primitive(kind) => storage_layout(*kind),
+        Type::String => Ok((STRING_DESCRIPTOR_SIZE, 4)),
         Type::Struct(id) | Type::Enum(id) => {
             struct_layout(id.0).ok_or_else(|| "type is out of range".to_string())
         }
         Type::Array { element, len } => {
+            if **element == Type::String {
+                return Err("Wasm does not yet support String array elements".into());
+            }
             let (size, align) = type_layout(struct_layout, element)?;
             let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
             Ok((bytes, align))
@@ -732,14 +762,14 @@ impl FrameLayout {
                             Type::Primitive(primitive) => {
                                 storage_layout(*primitive).map_err(error)?;
                             }
-                            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                            Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                             _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
                         }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
                     // An array owner already has its cell (one per array local or value).
-                    Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                    Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -789,7 +819,10 @@ impl FrameLayout {
         let aliases = construction_aliases(function);
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
-            if !matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) {
+            if !matches!(
+                ty,
+                Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+            ) {
                 continue;
             }
             if matches!(slot, Slot::Value(value) if aliases.contains_key(&value)) {
@@ -799,7 +832,9 @@ impl FrameLayout {
                 message: message.into(),
                 span: span.or(Some(function.span)),
             };
-            let what = if matches!(ty, Type::Struct(_)) {
+            let what = if *ty == Type::String {
+                "String"
+            } else if matches!(ty, Type::Struct(_)) {
                 "struct"
             } else if matches!(ty, Type::Enum(_)) {
                 "enum"
@@ -980,7 +1015,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             let array = |ty: Option<&Type>| {
                 matches!(
                     ty,
-                    Some(Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+                    Some(Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
                 )
             };
             if *assigned == output
@@ -1015,13 +1050,15 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
     Ok((width, width))
 }
 
+const STRING_DESCRIPTOR_SIZE: u32 = 8;
+
 const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
 
 /// Byte size of the pointee of an aggregate operand type (array or struct,
 /// owner or reference).
 fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
     match ty {
-        Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
             aggregate_layout(structs, ty).map(|(size, _)| size)
         }
         Type::Reference { inner, .. } => aggregate_bytes(structs, inner),
@@ -1032,7 +1069,10 @@ fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
 /// Aggregate values (arrays and structs) live in frame cells and are passed
 /// and returned by address.
 fn is_aggregate(ty: &Type) -> bool {
-    matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+    matches!(
+        ty,
+        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+    )
 }
 
 fn align_up(value: u32, align: u32) -> Option<u32> {
@@ -1061,7 +1101,7 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Reference { .. } => ValType::I32,
         // Array slots keep an unused Wasm local; their authoritative storage is
         // a frame cell and operands push the cell address.
-        Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => ValType::I32,
+        Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => ValType::I32,
     }
 }
 
@@ -1189,7 +1229,6 @@ impl FrameState {
 struct EntryAdapter {
     address: u32,
     size: u32,
-    pages: u64,
     metadata: Vec<u8>,
 }
 
@@ -1285,7 +1324,6 @@ fn outcome_entry(
     Ok(Some(EntryAdapter {
         address,
         size,
-        pages,
         metadata,
     }))
 }
@@ -1332,6 +1370,53 @@ fn encode_frames(
     encode_frames_traced(program, exports, sizes, observe, stack_size, None).map(|(bytes, _)| bytes)
 }
 
+/// A private literal table. Each entry is a little-endian (address, byte
+/// length) descriptor followed by the UTF-8 bytes. Guest code copies only
+/// the descriptor into its frame; no language operation can write the bytes.
+struct StringData<'a> {
+    start: u32,
+    end: u32,
+    offsets: BTreeMap<&'a str, u32>,
+    bytes: Vec<u8>,
+}
+
+impl<'a> StringData<'a> {
+    fn collect(functions: &[&'a Function], start: u32) -> Result<Self, String> {
+        let mut data = Self {
+            start,
+            end: start,
+            offsets: BTreeMap::new(),
+            bytes: Vec::new(),
+        };
+        for function in functions {
+            for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+                let InstructionKind::Constant(Constant::String(text)) = &instruction.kind else {
+                    continue;
+                };
+                if data.offsets.contains_key(text.as_str()) {
+                    continue;
+                }
+                let layout_error = "String literals exceed the supported Wasm memory size";
+                let len = u32::try_from(text.len()).map_err(|_| layout_error)?;
+                let address = data
+                    .end
+                    .checked_add(STRING_DESCRIPTOR_SIZE)
+                    .ok_or(layout_error)?;
+                let end = address.checked_add(len).ok_or(layout_error)?;
+                if u64::from(end).div_ceil(PAGE_SIZE) >= PAGE_SIZE {
+                    return Err(layout_error.into());
+                }
+                data.offsets.insert(text, data.end);
+                data.end = end;
+                data.bytes.extend(address.to_le_bytes());
+                data.bytes.extend(len.to_le_bytes());
+                data.bytes.extend(text.as_bytes());
+            }
+        }
+        Ok(data)
+    }
+}
+
 fn encode_frames_traced(
     program: &Program,
     exports: &BTreeMap<String, FunctionId>,
@@ -1371,6 +1456,12 @@ fn encode_frames_traced(
         .iter()
         .map(|id| &program.functions[*id as usize])
         .collect::<Vec<_>>();
+    let string_start = match &entry {
+        Some(adapter) => adapter.address.checked_add(adapter.size),
+        None => static_data_start(stack_size),
+    }
+    .ok_or("String data start does not fit the Wasm address space")?;
+    let strings = StringData::collect(&selected, string_start)?;
     let mut signatures = Vec::new();
     let function_types = selected
         .iter()
@@ -1455,6 +1546,7 @@ fn encode_frames_traced(
             observe,
             &structs,
             stack_size,
+            &strings.offsets,
             &mut traps,
         )?);
     }
@@ -1477,11 +1569,9 @@ fn encode_frames_traced(
     }
     let mut memories = MemorySection::new();
     let mut globals = GlobalSection::new();
-    if has_frames || entry.is_some() {
-        let pages = match &entry {
-            Some(adapter) => adapter.pages,
-            None => memory_pages(stack_size).ok_or("stack size does not fit a 32-bit memory")?,
-        };
+    let has_memory = has_frames || entry.is_some() || !strings.bytes.is_empty();
+    if has_memory {
+        let pages = u64::from(strings.end).div_ceil(PAGE_SIZE);
         memories.memory(MemoryType {
             minimum: pages,
             maximum: Some(pages),
@@ -1520,13 +1610,22 @@ fn encode_frames_traced(
     }
     let mut module = Module::new();
     module.section(&types).section(&functions);
-    if has_frames || entry.is_some() {
+    if has_memory {
         module.section(&memories);
     }
     if has_frames || has_traps {
         module.section(&globals);
     }
     module.section(&export_section).section(&code);
+    if !strings.bytes.is_empty() {
+        let mut data = DataSection::new();
+        data.active(
+            0,
+            &ConstExpr::i32_const(strings.start as i32),
+            strings.bytes,
+        );
+        module.section(&data);
+    }
     if let Some(adapter) = entry {
         module.section(&CustomSection {
             name: entry_abi::SECTION.into(),
@@ -1536,6 +1635,7 @@ fn encode_frames_traced(
     Ok((module.finish(), traps.spans))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_function(
     function: &Function,
     indices: &BTreeMap<u32, u32>,
@@ -1543,6 +1643,7 @@ fn compile_function(
     observe: bool,
     structs: &[StructLayout],
     stack_size: u32,
+    strings: &BTreeMap<&str, u32>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
@@ -1637,6 +1738,7 @@ fn compile_function(
                 indices,
                 &layout,
                 frame,
+                strings,
                 traps,
             )?;
         }
@@ -2364,12 +2466,28 @@ fn compile_instruction(
     indices: &BTreeMap<u32, u32>,
     layout: &FrameLayout,
     frame: Option<FrameState>,
+    strings: &BTreeMap<&str, u32>,
     traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
         .output
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
+        InstructionKind::Constant(Constant::String(text)) => {
+            let value = instruction.output.ok_or("String literal lacks an output")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let frame = frame.ok_or("String literal requires a frame")?;
+            let address = *strings
+                .get(text.as_str())
+                .ok_or("missing String literal data")?;
+            emit_address(body, frame, cell.offset);
+            body.instruction(&WasmInstruction::I32Const(address as i32));
+            body.instruction(&WasmInstruction::I32Const(STRING_DESCRIPTOR_SIZE as i32));
+            body.instruction(&WasmInstruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+        }
         InstructionKind::Constant(constant) => {
             let output = output.ok_or("constant lacks an output")?;
             emit_constant(

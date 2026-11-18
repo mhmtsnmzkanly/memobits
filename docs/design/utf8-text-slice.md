@@ -27,44 +27,38 @@ from arbitrary bytes must validate before yielding text. Raw bytes can stay
 in byte buffers. The [guest validator](../../examples/projects/utf8-validator/README.md)
 already exercises that distinction.
 
-## Proposed first executable slice
+## Executable literals and ownership
 
-The frontend parses double-quoted literals and preserves their UTF-8 text
-and byte spans. Escapes, LF and CR inside a literal, and unterminated
-literals produce lexical errors. Analysis reports TE017 for literal
-execution on paths that require IR. Type-only analysis accepts owned
-`String` literals, annotations and calls, including internal
-`borrow String` parameters. Borrowed text does not implicitly become owned.
-The `ownership` and `ownership-project` commands check String moves and
-loan liveness with the existing ownership pass. Their private IR models
-each String as a fieldless owned value, which preserves whole-value move
-and loan behavior without assigning it a runtime representation. The
-ownership commands return diagnostics from that IR. Executable checking
-rejects literals and written String types with TE017 before lowering.
+Single-line double-quoted literals carry direct UTF-8 text, including the
+empty literal. The frontend rejects escapes, line breaks (LF and CR), and
+unterminated literals. Raw literals and interpolation remain pending.
 
-- Support single-line, double-quoted literals with direct UTF-8 text,
-  including the empty literal. Keep escape grammar, raw literals, and
-  interpolation outside this first slice. Accepted interpolation semantics
-  remain a separate implementation milestone.
-- Support local owned bindings and moves, plus read-only internal parameters
-  using `borrow String` and explicit `.borrow()` at the call site. A move
-  invalidates the old binding just as it does for other aggregates.
-- Expose a non-consuming byte-length operation on an owner or on a whole
-  string borrow. Propose `.len()` with a `u32` result for this bounded slice.
-  Byte semantics follow Rust, while Memobits uses an existing integer type
-  for a portable scalar result. Reject a literal whose encoded length exceeds
-  that range. [Rust str::len](https://doc.rust-lang.org/std/primitive.str.html#method.len)
-- Immutable Wasm data with a private descriptor is one possible lowering
-  because the slice only creates text from literals. A literal still behaves
-  as an owned value. Defer heap allocation, capacity, growth, cleanup, and
-  representation and ABI commitments. Keep text out of exported signatures.
+String literals retain their UTF-8 payload in typed IR. Ownership checks and
+execution use the same IR. Owned bindings and internal calls transfer the
+whole value, including owned returns. Internal `borrow String` parameters
+use the existing last-use loan rules. A whole assignment through a
+`share String` replaces the descriptor under the usual exclusive access rules.
 
-Verify byte lengths of empty text (0), ASCII `abc` (3), `é` (2), and `😀`
-(4). Include a mixed literal and read one value twice through a borrow.
-Verify that a move preserves its length and that reading the old binding is
-rejected. Cover malformed literals and rejected integer indexing. Run a
-self-checking example with a scalar outcome entry both from source and from
-a standalone Wasm build in a temporary directory, and assert identical output.
+Wasm places reachable literal bytes after the guest stack and any outcome
+entry return cell. Frame cells carry a private 32-bit address and byte
+length. Moving a String copies that descriptor through the aggregate call
+and storage paths. Guest code has no operation that writes to the literal
+bytes. The descriptor and data layout are private to the backend. For an
+outcome entry, the runner's existing memory export still exposes linear
+memory to the embedding host. Exported String signatures and embedded
+String storage in arrays, structs, or enum payloads are gated.
+
+## Next executable slice
+
+Propose a non-consuming `.len()` on an owner or whole-string borrow,
+returning the stored byte length as `u32`. Byte semantics follow Rust.
+Heap allocation, capacity, growth, cleanup, and external text ABI remain
+later work. [Rust str::len](https://doc.rust-lang.org/std/primitive.str.html#method.len)
+
+Check lengths for empty text (0), ASCII `abc` (3), `é` (2), and `😀` (4).
+Include a mixed literal, repeated reads through a borrow, and a move.
+Check rejected integer indexing and use after move. Run a scalar outcome
+entry from source and as standalone Wasm and assert identical output.
 
 ## Later operations
 

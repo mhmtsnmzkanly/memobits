@@ -27,12 +27,8 @@ use typetable::{StructInfo, TypeTable};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckMode {
     Types,
-    Ownership,
     Execution,
 }
-
-// The ownership-only table reserves this definition before user types.
-const OWNERSHIP_STRING: TypeId = TypeId(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
@@ -532,7 +528,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
         },
         Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
         Ty::Enum(id, _) => IrType::Enum(TypeId(*id)),
-        Ty::String => IrType::Struct(OWNERSHIP_STRING),
+        Ty::String => IrType::String,
         Ty::Never | Ty::Error => return None,
     })
 }
@@ -2272,14 +2268,6 @@ impl Checker {
                 }
                 chosen
             }
-            ExprKind::StringLiteral(_) if self.table.mode == CheckMode::Execution => {
-                self.error(
-                    17,
-                    expr.span,
-                    "string literal execution is not supported yet",
-                );
-                Ty::Error
-            }
             ExprKind::StringLiteral(_) => Ty::String,
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {
@@ -2790,14 +2778,7 @@ pub fn check_types(module: &Module) -> Vec<Diagnostic> {
 /// This returns no facts if type or control-flow diagnostics exist.
 /// Array forms outside the executable subset (results, nesting, element references) report TE017.
 pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic>> {
-    check_typed_module_mode(module, CheckMode::Execution)
-}
-
-pub(crate) fn check_typed_module_mode(
-    module: &Module,
-    mode: CheckMode,
-) -> Result<TypedModule, Vec<Diagnostic>> {
-    let (mut diagnostics, functions, types) = check_standalone(module, mode);
+    let (mut diagnostics, functions, types) = check_standalone(module, CheckMode::Execution);
     diagnostics.extend(crate::check_control_flow(module));
     if diagnostics.is_empty() {
         Ok(TypedModule { functions, types })
@@ -2811,7 +2792,7 @@ fn check_standalone(
     mode: CheckMode,
 ) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
     let capture = mode != CheckMode::Types;
-    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new(), mode);
+    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
     let mut c = Checker {
         diagnostics: table_diagnostics,
         lowering: capture,
@@ -2981,7 +2962,7 @@ pub(crate) fn check_resolved_mode(
         .iter()
         .map(|(name, source)| (name.as_str(), &source.syntax))
         .collect();
-    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports, mode);
+    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports);
     let table = Rc::new(table);
     diagnostics.extend(table_diagnostics);
     let mut ids = HashMap::new();

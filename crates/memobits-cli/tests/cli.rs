@@ -8,7 +8,7 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn string_project_checks_ownership_and_keeps_execution_gated() {
+fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -16,32 +16,116 @@ fn string_project_checks_ownership_and_keeps_execution_gated() {
     );
     f.write(
         "src/text.mb",
-        "pub type Text = String; pub fn inspect(s: borrow Text) {}",
+        r#"pub type Text = String;
+           pub fn make() -> Text { "é😀" }
+           pub fn inspect(s: borrow Text) -> i32 { 42 }
+           fn unused() -> Text { "unreachable literal" }"#,
     );
     f.write(
         "src/main.mb",
         r#"use self::text::Text;
+           use self::text::make;
            use self::text::inspect;
            fn consume(s: Text) {}
-           fn main() {
-               let s: Text = "é";
+           fn main() -> Result<i32, Error> {
+               let s := make();
                let view := s.borrow();
-               inspect(view);
+               let checked := inspect(view);
                consume(s);
+               consume("");
+               Ok(checked)
            }"#,
     );
-    let analyzed = f.run(&["analyze-project"]);
-    assert!(analyzed.status.success(), "{analyzed:?}");
-    let owned = f.run(&["ownership-project"]);
-    assert!(owned.status.success(), "{owned:?}");
-    for args in [&["run"][..], &["build"]] {
-        let message = err(f.run(args), "TE017");
-        assert!(
-            message.contains("execution is not supported yet"),
-            "{message}"
-        );
+    let expected = b"Result: Ok(i32(42))\n";
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, expected);
+    let build = f.run(&["build", "--output", "strings.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bytes = fs::read(f.0.join("strings.wasm")).unwrap();
+    wasmparser::Validator::new().validate_all(&bytes).unwrap();
+    let sections = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .map(Result::unwrap)
+        .find_map(|payload| match payload {
+            wasmparser::Payload::DataSection(data) => Some(data),
+            _ => None,
+        })
+        .expect("literal data section");
+    assert_eq!(sections.count(), 1);
+    let segment = sections.into_iter().next().unwrap().unwrap();
+    let wasmparser::DataKind::Active {
+        memory_index: 0,
+        offset_expr,
+    } = segment.kind
+    else {
+        panic!("expected literal data in memory zero");
+    };
+    let wasmparser::Operator::I32Const { value: start } =
+        offset_expr.get_operators_reader().read().unwrap()
+    else {
+        panic!("expected a static literal data address");
+    };
+    let mut data = segment.data;
+    let mut address = start as u32;
+    // The main function's empty literal precedes the reachable make function.
+    for expected in ["", "é😀"] {
+        let pointer = u32::from_le_bytes(data[..4].try_into().unwrap());
+        let length = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        assert_eq!(pointer, address + 8);
+        assert_eq!(length as usize, expected.len());
+        assert_eq!(&data[8..8 + expected.len()], expected.as_bytes());
+        data = &data[8 + expected.len()..];
+        address = pointer + length;
     }
-    assert!(!f.0.join("target/memobits/app.wasm").exists());
+    assert!(data.is_empty(), "unused literals should stay out of Wasm");
+
+    let standalone = Fixture::new();
+    fs::write(standalone.0.join("strings.wasm"), bytes).unwrap();
+    let artifact = standalone.run(&["run", "strings.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, expected);
+}
+
+#[test]
+fn wasm_gates_string_exports_and_nested_storage() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='strings'\nentry='main::main'\n[export]\ncheck='main::main'\n",
+    );
+    for (source, args, message) in [
+        (
+            r#"pub fn main() -> String { "é" }"#,
+            &["build"][..],
+            "exported signatures cannot use String",
+        ),
+        (
+            "pub fn main(s: borrow String) {}",
+            &["build", "--lib"][..],
+            "exported signatures cannot use String",
+        ),
+        (
+            r#"fn main() { let values := ["é"]; }"#,
+            &["build"][..],
+            "String array elements",
+        ),
+        (
+            "type Box { text: String } fn main() {}",
+            &["build"][..],
+            "String fields or enum payloads",
+        ),
+        (
+            r#"fn main() -> Result<String, Error> { Ok("é") }"#,
+            &["build"][..],
+            "String fields or enum payloads",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(args), "LE900");
+        assert!(diagnostic.contains(message), "{diagnostic}");
+        assert!(!f.0.join("target/memobits/app.wasm").exists());
+    }
 }
 
 #[test]

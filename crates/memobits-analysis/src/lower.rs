@@ -15,7 +15,7 @@ use memobits_syntax::{
 };
 
 use crate::types::{
-    check_resolved_mode, check_typed_module_mode, CheckMode, ExprId, FunctionFacts, MatchFact,
+    check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
     PathTarget, TypeFact, VariantUse,
 };
 
@@ -87,16 +87,7 @@ pub fn lower_module(
     package: &str,
     module_path: &[String],
 ) -> Result<Program, Vec<Diagnostic>> {
-    lower_module_mode(module, package, module_path, CheckMode::Execution)
-}
-
-pub(crate) fn lower_module_mode(
-    module: &Module,
-    package: &str,
-    module_path: &[String],
-    mode: CheckMode,
-) -> Result<Program, Vec<Diagnostic>> {
-    let facts = check_typed_module_mode(module, mode)?;
+    let facts = check_typed_module(module)?;
     let constant_errors = crate::constants::check_module(module, &facts.functions);
     if !constant_errors.is_empty() {
         return Err(constant_errors);
@@ -215,15 +206,7 @@ pub fn lower_resolved(
     project: &Project,
     resolution: &Resolution,
 ) -> Result<Program, Vec<Diagnostic>> {
-    lower_resolved_mode(project, resolution, CheckMode::Execution)
-}
-
-pub(crate) fn lower_resolved_mode(
-    project: &Project,
-    resolution: &Resolution,
-    mode: CheckMode,
-) -> Result<Program, Vec<Diagnostic>> {
-    let typed = check_resolved_mode(project, resolution, mode)?;
+    let typed = check_resolved_mode(project, resolution, CheckMode::Execution)?;
     let mut constant_errors = Vec::new();
     let mut fact_start = 0;
     for source in resolution.modules.values() {
@@ -1251,18 +1234,8 @@ impl<'a> Builder<'a> {
                 };
                 self.constant(expr.span, value, ty)
             }
-            ExprKind::StringLiteral(_) => {
-                let Some(Type::Struct(ty)) = self.ty(expr) else {
-                    unreachable!("ownership-only String type")
-                };
-                self.emit(
-                    expr.span,
-                    InstructionKind::StructNew {
-                        ty,
-                        fields: Vec::new(),
-                    },
-                    Some(Type::Struct(ty)),
-                )
+            ExprKind::StringLiteral(text) => {
+                self.constant(expr.span, Constant::String(text.clone()), Type::String)
             }
             ExprKind::Bool(value) => self.constant(
                 expr.span,

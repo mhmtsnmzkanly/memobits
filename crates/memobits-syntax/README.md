@@ -45,7 +45,7 @@ struct literal there is SE002 (parenthesise it). Literal, nested and struct patt
 form. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
 is left to analysis.
 
-Strings, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
+Ordinary single-line UTF-8 string literals parse. String escapes, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
 current accepted subset. The parser is handwritten and uses Pratt precedence.
 
 Fixed-array syntax includes structured `Array<T, N>` (including nested element
