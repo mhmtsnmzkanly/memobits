@@ -157,6 +157,41 @@ fn string_ownership_uses_last_borrow_use_and_rejects_moves_and_reads() {
 }
 
 #[test]
+fn string_boundary_keeps_receiver_loans_live_until_the_read() {
+    let f = Fixture::new();
+    for (body, expected) in [
+        (
+            r#"let s := "é"; let moved := s; s.is_char_boundary(0);"#,
+            Some("BE001"),
+        ),
+        (
+            r#"let s := "é"; let view := s.borrow(); let moved := s; view.is_char_boundary(0);"#,
+            Some("BE005"),
+        ),
+        (
+            r#"var s := "é"; let editor := s.share(); s.is_char_boundary(0); editor.len();"#,
+            Some("BE005"),
+        ),
+        (
+            r#"var s := "é"; s.is_char_boundary({ s = "x"; let offset: u32 = 0; offset });"#,
+            Some("BE005"),
+        ),
+        (
+            r#"let s := "é"; let view := s.borrow(); s.is_char_boundary(0); view.is_char_boundary(2); let moved := s; moved.is_char_boundary(2);"#,
+            None,
+        ),
+    ] {
+        f.write("text.mb", &format!("fn main() {{ {body} }}"));
+        let output = f.run(&["ownership", "text.mb"]);
+        if let Some(code) = expected {
+            err(output, code);
+        } else {
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+}
+
+#[test]
 fn string_length_observes_move_and_loan_rules() {
     let f = Fixture::new();
     for (body, expected) in [

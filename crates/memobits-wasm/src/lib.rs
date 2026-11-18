@@ -314,6 +314,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
+        | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -935,6 +936,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
+                InstructionKind::StringIsCharBoundary { source, offset } => {
+                    count(source);
+                    count(offset);
+                }
                 InstructionKind::ArrayNew { init } => {
                     if let ArrayInit::Elements(elements) = init {
                         elements.iter().for_each(&mut count);
@@ -1782,6 +1787,14 @@ fn memory_arg(kind: Primitive) -> MemArg {
     }
 }
 
+fn emit_string_length(body: &mut WasmFunction) {
+    let arg = MemArg {
+        offset: u64::from(STRING_LENGTH_OFFSET),
+        ..memory_arg(Primitive::U32)
+    };
+    body.instruction(&WasmInstruction::I32Load(arg));
+}
+
 fn emit_load(body: &mut WasmFunction, kind: Primitive) {
     // References are created only from live owner cells and never cross the
     // export ABI. Private memory receives only validated typed stores, so Bool
@@ -2510,14 +2523,36 @@ fn compile_instruction(
         }
         InstructionKind::StringLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;
-            let arg = MemArg {
-                offset: u64::from(STRING_LENGTH_OFFSET),
-                ..memory_arg(Primitive::U32)
-            };
-            body.instruction(&WasmInstruction::I32Load(arg));
+            emit_string_length(body);
             body.instruction(&WasmInstruction::LocalSet(
                 output.ok_or("StringLen lacks an output")?,
             ));
+        }
+        InstructionKind::StringIsCharBoundary { source, offset } => {
+            let output = output.ok_or("StringIsCharBoundary lacks an output")?;
+            emit_operand(body, function, param_count, source, layout, frame)?;
+            emit_string_length(body);
+            body.instruction(&WasmInstruction::LocalSet(output));
+            emit_operand(body, function, param_count, offset, layout, frame)?;
+            body.instruction(&WasmInstruction::LocalGet(output));
+            body.instruction(&WasmInstruction::I32LtU);
+            body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
+            // Only offsets strictly below the byte length can reach the byte load.
+            emit_operand(body, function, param_count, source, layout, frame)?;
+            emit_load(body, Primitive::U32);
+            emit_operand(body, function, param_count, offset, layout, frame)?;
+            body.instruction(&WasmInstruction::I32Add);
+            emit_load(body, Primitive::U8);
+            body.instruction(&WasmInstruction::I32Const(0xc0));
+            body.instruction(&WasmInstruction::I32And);
+            body.instruction(&WasmInstruction::I32Const(0x80));
+            body.instruction(&WasmInstruction::I32Ne);
+            body.instruction(&WasmInstruction::Else);
+            emit_operand(body, function, param_count, offset, layout, frame)?;
+            body.instruction(&WasmInstruction::LocalGet(output));
+            body.instruction(&WasmInstruction::I32Eq);
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::LocalSet(output));
         }
         InstructionKind::Copy { source } => {
             let output = output.ok_or("copy lacks an output")?;

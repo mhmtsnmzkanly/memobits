@@ -1326,6 +1326,21 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
+                    if name == "is_char_boundary" {
+                        let receiver = self.lower_expr(base)?;
+                        // Keep the receiver loan live while evaluating the offset.
+                        let source = self.borrow(receiver, Access::Borrow)?;
+                        let offset = self.lower_expr(&arguments[0])?;
+                        let offset = self.scalar(offset)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::StringIsCharBoundary {
+                                source: read(source),
+                                offset: read(offset),
+                            },
+                            self.ty(expr),
+                        );
+                    }
                     if name == "len" {
                         let source = self.lower_expr(base)?;
                         return self.emit(

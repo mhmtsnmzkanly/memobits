@@ -605,6 +605,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
+        InstructionKind::StringIsCharBoundary { source, offset } => vec![source, offset],
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
         InstructionKind::FieldAddr { base, .. }
@@ -1462,9 +1463,11 @@ fn check_instruction(
                 }
             }
         }
-        InstructionKind::Load { reference } | InstructionKind::StringLen { source: reference }
-            if type_at(function, reference.source).is_some_and(is_reference) =>
-        {
+        InstructionKind::Load { reference }
+        | InstructionKind::StringLen { source: reference }
+        | InstructionKind::StringIsCharBoundary {
+            source: reference, ..
+        } if type_at(function, reference.source).is_some_and(is_reference) => {
             let provenance = operand_provenance(function, state, reference);
             let own = parent_closure(&provenance.loans, infos);
             if let Some(conflict) =

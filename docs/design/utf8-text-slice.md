@@ -57,6 +57,14 @@ Byte semantics follow Rust.
 Heap allocation, capacity, growth, cleanup, and external text ABI remain
 later work. [Rust str::len](https://doc.rust-lang.org/std/primitive.str.html#method.len)
 
+Call `.is_char_boundary(offset)` with a `u32` byte offset on the same
+receivers. It returns `Bool`. Zero and the byte length are boundaries,
+including zero for empty text. Within the string, any byte that starts a
+scalar is a boundary. Continuation bytes and offsets above the length return
+false. The read-only receiver loan stays live while evaluating the offset.
+Wasm checks the unsigned offset before reading a byte.
+[Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
+
 The [runnable guide](../../examples/projects/language-guide/src/main.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,

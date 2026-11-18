@@ -44,6 +44,24 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
+fn string_boundary_requires_a_string_and_one_u32_offset() {
+    assert!(
+        codes(r#"fn f(s: borrow String, n: u32) -> Bool { s.is_char_boundary(n) }"#).is_empty()
+    );
+    for (source, expected) in [
+        (r#"fn f() { "é".is_char_boundary(); }"#, "TE010"),
+        (r#"fn f() { "é".is_char_boundary(0, 1); }"#, "TE010"),
+        (r#"fn f(n: i32) { "é".is_char_boundary(n); }"#, "TE002"),
+        ("fn f() { let n := 1; n.is_char_boundary(0); }", "TE017"),
+    ] {
+        assert!(
+            codes(source).iter().any(|code| code == expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn string_length_requires_a_string_and_no_arguments() {
     assert!(codes(r#"fn f(s: borrow String) -> u32 { s.len() }"#).is_empty());
     for (source, expected) in [

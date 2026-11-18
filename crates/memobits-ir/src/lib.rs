@@ -256,6 +256,11 @@ pub enum InstructionKind {
     StringLen {
         source: Operand,
     },
+    /// Test whether a byte offset is an endpoint or starts a UTF-8 scalar.
+    StringIsCharBoundary {
+        source: Operand,
+        offset: Operand,
+    },
     /// Capture an operand at this point in evaluation order.
     Capture(Operand),
     /// Create a statically checked reference to an owner or existing reference.
@@ -1252,19 +1257,44 @@ fn validate_instruction(
                 );
             }
         }
-        InstructionKind::StringLen { source } => {
+        InstructionKind::StringLen { source }
+        | InstructionKind::StringIsCharBoundary { source, .. } => {
             let input = operand_type(program, function, source, errors, id, block);
             if !input.as_ref().is_some_and(|ty| {
                 matches!(ty, Type::String)
                     || matches!(ty, Type::Reference { inner, .. } if **inner == Type::String)
             }) || source.mode != UseMode::Read
-                || out != Some(&Type::Primitive(Primitive::U32))
             {
                 push(
                     errors,
                     id,
                     Some(block),
-                    "StringLen must read a String or String reference and produce u32",
+                    "String operation must read a String or String reference",
+                );
+            }
+            let result =
+                if let InstructionKind::StringIsCharBoundary { offset, .. } = &instruction.kind {
+                    if operand_type(program, function, offset, errors, id, block)
+                        != Some(Type::Primitive(Primitive::U32))
+                        || offset.mode != UseMode::Read
+                    {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "String boundary offset must be read as u32",
+                        );
+                    }
+                    Primitive::Bool
+                } else {
+                    Primitive::U32
+                };
+            if out != Some(&Type::Primitive(result)) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "String operation has the wrong output type",
                 );
             }
         }
@@ -2536,6 +2566,10 @@ fn validate_read_only_loaded_values(
                 InstructionKind::Store { reference, value } => {
                     report(block_id, reference, false);
                     report(block_id, value, true);
+                }
+                InstructionKind::StringIsCharBoundary { source, offset } => {
+                    report(block_id, source, false);
+                    report(block_id, offset, false);
                 }
                 InstructionKind::Copy { source } | InstructionKind::StringLen { source } => {
                     report(block_id, source, false);

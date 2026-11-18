@@ -1187,21 +1187,45 @@ impl Checker {
             }
         }
     }
-    fn string_length(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+    fn string_read(
+        &mut self,
+        expression: &Expr,
+        base: &Expr,
+        method: &str,
+        arguments: &[Expr],
+    ) -> Ty {
         self.allow_array_value(base);
         let receiver = read_type(self.expr(base, None));
-        if !arguments.is_empty() {
-            self.error(10, expression.span, "len() takes no arguments");
-            for argument in arguments {
-                self.expr(argument, None);
+        let offset_type = Ty::Primitive("u32");
+        let expected = usize::from(method == "is_char_boundary");
+        let mut diverges = receiver == Ty::Never;
+        for (index, argument) in arguments.iter().enumerate() {
+            let want = (expected == 1 && index == 0).then_some(&offset_type);
+            let actual = read_type(self.expr(argument, want));
+            diverges |= actual == Ty::Never;
+            if let Some(want) = want {
+                self.ensure(&actual, want, argument.span);
             }
+        }
+        if arguments.len() != expected {
+            self.error(
+                10,
+                expression.span,
+                format!("{method}() expects {expected} arguments"),
+            );
             return Ty::Error;
         }
         match receiver {
-            Ty::String => Ty::Primitive("u32"),
+            Ty::String if diverges => Ty::Never,
+            Ty::String if expected == 1 => BOOL,
+            Ty::String => offset_type,
             ty @ (Ty::Error | Ty::Never) => ty,
             _ => {
-                self.error(17, base.span, "len() requires a String receiver");
+                self.error(
+                    17,
+                    base.span,
+                    format!("{method}() requires a String receiver"),
+                );
                 Ty::Error
             }
         }
@@ -2541,8 +2565,8 @@ impl Checker {
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
                     }
-                    if name == "len" {
-                        return self.string_length(expr, base, arguments);
+                    if matches!(name.as_str(), "len" | "is_char_boundary") {
+                        return self.string_read(expr, base, name, arguments);
                     }
                 }
                 let ty = self.expr(callee, None);
