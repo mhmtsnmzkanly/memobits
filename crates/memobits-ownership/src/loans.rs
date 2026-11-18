@@ -605,7 +605,10 @@ fn mark_instruction_uses(live: &mut [bool], function: &Function, kind: &Instruct
         mark_operand(live, function, operand);
     }
     // List mutations address the receiver directly by local slot.
-    if let InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target } = kind {
+    if let InstructionKind::ListPush { target, .. }
+    | InstructionKind::ListPop { target }
+    | InstructionKind::ListClear { target } = kind
+    {
         mark_source(live, function, Source::Local(*target));
     }
 }
@@ -616,7 +619,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::Constant(_)
         | InstructionKind::EndStringLocal { .. }
         | InstructionKind::EndListLocal { .. }
-        | InstructionKind::ListPop { .. } => Vec::new(),
+        | InstructionKind::ListPop { .. }
+        | InstructionKind::ListClear { .. } => Vec::new(),
         InstructionKind::ListPush { value, .. } => vec![value],
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
@@ -1603,7 +1607,9 @@ fn check_instruction(
                 ));
             }
         }
-        InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target } => {
+        InstructionKind::ListPush { target, .. }
+        | InstructionKind::ListPop { target }
+        | InstructionKind::ListClear { target } => {
             let receiver = Operand {
                 source: Source::Local(*target),
                 mode: UseMode::Share,
@@ -1616,10 +1622,10 @@ fn check_instruction(
             {
                 diagnostics.push(conflict_diagnostic(
                     instruction.span,
-                    if matches!(instruction.kind, InstructionKind::ListPop { .. }) {
-                        "pop from"
-                    } else {
-                        "push to"
+                    match instruction.kind {
+                        InstructionKind::ListPop { .. } => "pop from",
+                        InstructionKind::ListClear { .. } => "clear",
+                        _ => "push to",
                     },
                     (function, program),
                     conflict,

@@ -203,7 +203,9 @@ fn transfer_instruction(
         InstructionKind::EndStringLocal { local } | InstructionKind::EndListLocal { local } => {
             state[local.0 as usize] = Availability::Unavailable
         }
-        InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target } => {
+        InstructionKind::ListPush { target, .. }
+        | InstructionKind::ListPop { target }
+        | InstructionKind::ListClear { target } => {
             if let InstructionKind::ListPush { value, .. } = &instruction.kind {
                 transfer_operand(value, state, diagnostics.as_deref_mut(), function);
             }

@@ -11,17 +11,18 @@ the equivalence of `Bytes<N>` and `Array<u8, N>`.
 ## Executable checkpoint
 
 `List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
-local bindings, non-consuming `.len()` and `.get(index)`, plus `.push(value)` and
-`.pop()` on whole mutable locals. Empty construction allocates no heap block. A push evaluates
-the element once and returns unit. Moves transfer the block and normal scope
-exits release the owner. The applied spelling is built in, and bare `List`
+local bindings, non-consuming `.len()` and `.get(index)`, plus `.push(value)`,
+`.pop()`, and `.clear()` on whole mutable locals. Empty construction
+allocates no heap block. A push evaluates the element once and returns unit.
+Moves transfer the block and normal scope exits release the owner. The applied spelling is built in, and bare `List`
 can still name a user type. Direct internal calls accept `borrow List<T>`
 for these element types. Use `.borrow()` on a whole local to create the
 read-only handle. The callee can use `.len()` and `.get()`. A live loan
 blocks mutation, moves and cleanup of the owner until its last use.
 A direct `share List<T>` parameter accepts an explicit `.share()` from
-a mutable owner and supports `push`, `pop`, `len` and `get`. Growth updates the
-caller descriptor in place, and the caller retains cleanup responsibility.
+a mutable owner and supports `push`, `pop`, `clear`, `len` and `get`. Growth
+updates the caller descriptor in place, and the caller retains cleanup
+responsibility.
 A direct internal owned parameter takes a named whole List local by move.
 Arguments evaluate left to right. An earlier owned argument is staged
 until invocation, and normal exits before the call release it in the caller.
@@ -59,6 +60,9 @@ or a coverage need.
   `None` when empty. It accepts the same receivers and follows the same loan
   rules as `push`. It keeps the backing block and capacity even when the List
   becomes empty.
+- Use `items.clear()` to set the length to zero and return unit, including
+  when the List is already empty. It follows the same receiver and loan rules
+  as `pop` and retains capacity for subsequent pushes.
 - Use `items.len()` for a non-consuming `u32` element count and
   `items.get(index)` for a copied `Option<T>` at a `u32` index. Both work
   on immutable and mutable locals. The index expression runs once before
@@ -73,8 +77,8 @@ first slice keeps the access rules and types already used in Memobits.
 Scope the owner to whole local bindings, including moves from one local
 to another. Borrow and share parameters receive the caller's private
 descriptor address for the direct call. A share follows the usual
-exclusive loan rules. A stored `var` share handle also supports `push` and `pop`.
-A live child borrow blocks mutation until its last use, and a stored
+exclusive loan rules. A stored `var` share handle also supports `push`,
+`pop`, and `clear`. A live child borrow blocks mutation until its last use, and a stored
 `let` handle remains read-only.
 An owned parameter receives its own frame descriptor and takes the
 allocation from the caller's moved slot. A return clears the moved
@@ -132,13 +136,13 @@ and an early exit during RHS evaluation leaves the caller's List intact.
 
 ## Implementation and checks
 
-1. Empty local owners, length, push, pop, growth and normal-exit cleanup are
+1. Empty local owners, length, push, pop, clear, growth and normal-exit cleanup are
    executable. The language guide runs from source and standalone Wasm.
 2. The Wasm test checks both element widths, payload addresses, exact bytes
    after growth, repeated reuse and a forced allocation trap. The CLI
    regressions check copied reads after growth and LIFO removal in source and
-   standalone Wasm. A Wasm test checks that popping the last element retains
-   the backing block.
+   standalone Wasm, along with clear and refill. Wasm tests check that popping
+   the last element or clearing retains the backing block.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,

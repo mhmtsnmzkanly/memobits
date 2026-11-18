@@ -570,7 +570,9 @@ pub(super) fn validate(
                     }
                     initialize.then_some(*target)
                 }
-                InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target }
+                InstructionKind::ListPush { target, .. }
+                | InstructionKind::ListPop { target }
+                | InstructionKind::ListClear { target }
                     if list_local(*target) && !in_scope.contains(target) =>
                 {
                     push(

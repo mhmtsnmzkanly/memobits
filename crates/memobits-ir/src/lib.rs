@@ -292,6 +292,9 @@ pub enum InstructionKind {
     EndListLocal {
         local: LocalId,
     },
+    ListClear {
+        target: LocalId,
+    },
     ListPop {
         target: LocalId,
     },
@@ -1381,6 +1384,20 @@ fn validate_instruction(
                     id,
                     Some(block),
                     "List scope exit requires a List local and no output",
+                );
+            }
+        }
+        InstructionKind::ListClear { target } => {
+            if !matches!(
+                mutable_list_element(function, *target),
+                Some(Primitive::U8 | Primitive::U32)
+            ) || instruction.output.is_some()
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List clear requires a mutable owner or share and no output",
                 );
             }
         }
@@ -3159,7 +3176,7 @@ fn validate_operand_escapes(
                     report(block_id, source, false, false);
                     report(block_id, offset, false, false);
                 }
-                InstructionKind::ListPop { .. } => {}
+                InstructionKind::ListClear { .. } | InstructionKind::ListPop { .. } => {}
                 InstructionKind::ListPush { value, .. } => report(block_id, value, false, false),
                 InstructionKind::ListLen { source }
                 | InstructionKind::Copy { source }

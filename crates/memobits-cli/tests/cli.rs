@@ -1152,6 +1152,79 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
 }
 
 #[test]
+fn list_clear_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-clear'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn reset(words: share List<u32>) { words.clear() }
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            bytes.clear();
+            bytes.push(255);
+            bytes.push(42);
+            var handle := bytes.share();
+            let preview := handle.borrow();
+            let before := preview.len();
+            handle.clear();
+            let empty := match bytes.get(0) { None => true, Some(_) => false };
+            bytes.push(7);
+            let new_byte := match bytes.pop() { Some(value) => value == 7, None => false };
+            var words: List<u32> = [];
+            words.push(4_294_967_295);
+            reset(words.share());
+            let word_empty := words.len() == 0;
+            words.push(17);
+            words.clear();
+            Ok(before == 2 && empty && new_byte && word_empty && words.len() == 0)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "clear.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "clear.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_clear_rejects_read_only_and_conflicting_receivers() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("let frozen: List<u8> = []; frozen.clear();", "TE017"),
+        ("let handle := items.share(); handle.clear();", "TE017"),
+        ("var handle := items.borrow(); handle.clear();", "TE017"),
+        ("items.clear(1);", "TE010"),
+        ("let moved := items; items.clear();", "BE001"),
+        (
+            "let held := items.borrow(); items.clear(); held.len();",
+            "BE005",
+        ),
+        (
+            "var handle := items.share(); let held := handle.borrow(); handle.clear(); held.len();",
+            "BE005",
+        ),
+        (
+            "var handle := items.share(); let moved := items; handle.clear();",
+            "BE005",
+        ),
+    ] {
+        f.write(
+            "list.mb",
+            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+        );
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+}
+
+#[test]
 fn list_pop_runs_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(

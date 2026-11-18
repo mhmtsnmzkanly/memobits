@@ -190,9 +190,13 @@ fn primitive_lists() -> Bool {
         Some(value) => value == 5000,
         None => false
     };
+    // Clear removes every element and keeps the storage for subsequent pushes.
+    handle.clear();
+    let cleared := moved.len() == 0;
+    moved.push(7000);
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
-    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped
+    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

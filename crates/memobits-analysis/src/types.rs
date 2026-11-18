@@ -1388,11 +1388,11 @@ impl Checker {
             );
         }
         let pop = method == "pop";
-        if arguments.len() != usize::from(!pop) {
-            let message = if pop {
-                "pop() takes no arguments"
-            } else {
-                "push() expects one element"
+        if arguments.len() != usize::from(method == "push") {
+            let message = match method {
+                "pop" => "pop() takes no arguments",
+                "clear" => "clear() takes no arguments",
+                _ => "push() expects one element",
             };
             self.error(10, expr.span, message);
             return Ty::Error;
@@ -1403,6 +1403,9 @@ impl Checker {
                 vec![ResolvedArgument::Type(Ty::Primitive(element))],
                 expr.span,
             );
+        }
+        if method == "clear" {
+            return UNIT;
         }
         let element = Ty::Primitive(element);
         let value = read_type(self.expr(&arguments[0], Some(&element)));
@@ -2826,7 +2829,7 @@ impl Checker {
                     if name == "get" {
                         return self.list_get(expr, base, arguments);
                     }
-                    if matches!(name.as_str(), "push" | "pop") {
+                    if matches!(name.as_str(), "push" | "pop" | "clear") {
                         return self.list_mutation(expr, base, name, arguments);
                     }
                     if name == "push_str" {

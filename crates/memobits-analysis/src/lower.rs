@@ -1581,6 +1581,13 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
+                    if name == "clear" {
+                        let PathTarget::Local(target) = self.path(base) else {
+                            unreachable!("checked List clear receiver")
+                        };
+                        self.emit(expr.span, InstructionKind::ListClear { target }, None);
+                        return self.unit(expr.span);
+                    }
                     if name == "pop" {
                         let PathTarget::Local(target) = self.path(base) else {
                             unreachable!("checked List pop receiver")

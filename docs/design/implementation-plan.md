@@ -212,14 +212,15 @@ the implemented subset; a milestone is not complete merely because its crate exi
   trapped instances. Library exports use scalar signatures. Application
   entries can also use the private `main` outcome adapter for zero-argument
   `Result` and `Attempt` functions with primitive success payloads.
-- `List<u8>` and `List<u32>` support empty locals, moves, `.len()` and
-  `.push()` and `.pop()` on whole mutable locals. Pop returns the last element
-  as an Option and keeps capacity. Growth uses the same checked allocator
-  as String. The [List design](list-slice.md) records copied `.get(index)`
+- `List<u8>` and `List<u32>` support empty locals, moves, and `.len()`.
+  Whole mutable locals support `.push()`, `.pop()`, and `.clear()`. Pop
+  returns the last element as an Option. Pop and clear retain capacity.
+  Growth uses the same checked allocator as String. The [List design](list-slice.md) records copied `.get(index)`
   reads with checked unsigned bounds. Direct internal borrow parameters
   can read either primitive List type. Share parameters and stored `var`
-  shares can also push and pop through the owner's descriptor. Direct owned parameters take named local
-  moves with cleanup on either side of invocation. Direct returns move a
+  shares can push, pop, and clear through the owner's descriptor. Direct
+  owned parameters take named local moves with cleanup on either side of
+  invocation. Direct returns move a
   named List local into a caller binding. Whole mutable local replacement
   and replacement through a share parameter or a stored `var` share evaluate the RHS before
   releasing the previous block. A share preserves caller ownership. Live

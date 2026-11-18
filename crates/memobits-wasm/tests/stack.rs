@@ -127,17 +127,66 @@ fn list_pop_keeps_the_backing_block_when_empty() {
         let data = memory.data(&store);
         assert_eq!(data[result as usize], 0);
         assert_eq!(data.len(), 65_536);
-        assert!(data[16..4096].windows(12).step_by(4).any(|descriptor| {
-            let address = u32::from_le_bytes(descriptor[0..4].try_into().unwrap()) as usize;
-            let length = u32::from_le_bytes(descriptor[4..8].try_into().unwrap());
-            let block = u32::from_le_bytes(descriptor[8..12].try_into().unwrap()) as usize;
-            length == 0
-                && block >= 4096
-                && block.checked_add(8) == Some(address)
-                && data.get(address..address.saturating_add(4))
-                    == Some(&305_419_896u32.to_le_bytes())
-        }));
+        assert_empty_backed_list(data, 305_419_896);
     }
+}
+
+#[test]
+fn list_clear_retains_backing_storage_for_repeated_refills() {
+    let program = lower(
+        r#"
+        fn main() -> Result<Bool, Error> {
+            var items: List<u32> = [];
+            items.push(305_419_896);
+            var round: u32 = 0;
+            loop {
+                items.clear();
+                if items.len() != 0 { return Err(Error { code: 1 }); }
+                items.push(305_419_896);
+                round += 1;
+                if round == 1000 { break; }
+            }
+            items.clear();
+            if items.len() == 0 { Ok(true) } else { Err(Error { code: 2 }) }
+        }
+    "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(0),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    for _ in 0..4 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        let data = memory.data(&store);
+        assert_eq!(data[result as usize], 0);
+        assert_eq!(data.len(), 65_536);
+        let marker = 305_419_896u32.to_le_bytes();
+        let mut payloads = data[4096..].chunks_exact(4).filter(|word| *word == marker);
+        assert_eq!(payloads.next(), Some(marker.as_slice()));
+        assert_eq!(payloads.next(), None, "refills should use the same block");
+        assert_empty_backed_list(data, 305_419_896);
+    }
+}
+
+fn assert_empty_backed_list(data: &[u8], word: u32) {
+    assert!(data[16..4096].windows(12).step_by(4).any(|descriptor| {
+        let address = u32::from_le_bytes(descriptor[0..4].try_into().unwrap()) as usize;
+        let length = u32::from_le_bytes(descriptor[4..8].try_into().unwrap());
+        let block = u32::from_le_bytes(descriptor[8..12].try_into().unwrap()) as usize;
+        length == 0
+            && block >= 4096
+            && block.checked_add(8) == Some(address)
+            && data.get(address..address.saturating_add(4)) == Some(word.to_le_bytes().as_slice())
+    }));
 }
 
 #[test]

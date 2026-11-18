@@ -331,6 +331,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
         | InstructionKind::ListPop { .. }
+        | InstructionKind::ListClear { .. }
         | InstructionKind::EndListLocal { .. }
         | InstructionKind::EmptyList
         | InstructionKind::InitConcatString { .. }
@@ -979,7 +980,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
         for instruction in &block.instructions {
             match &instruction.kind {
                 InstructionKind::ListPush { value, .. } => count(value),
-                InstructionKind::ListPop { .. } => {}
+                InstructionKind::ListClear { .. } | InstructionKind::ListPop { .. } => {}
                 InstructionKind::EndListLocal { .. }
                 | InstructionKind::EmptyList
                 | InstructionKind::Constant(_)
@@ -3015,6 +3016,16 @@ fn compile_instruction(
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
             emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
             list_descriptor::initialize_empty(body);
+        }
+        InstructionKind::ListClear { target } => {
+            let receiver = Operand {
+                source: Source::Local(*target),
+                mode: memobits_ir::UseMode::Read,
+                span: instruction.span,
+            };
+            emit_operand(body, function, param_count, &receiver, layout, frame)?;
+            body.instructions().i32_const(0);
+            list_descriptor::store_length(body);
         }
         InstructionKind::ListPop { target } => {
             let frame = frame.ok_or("List pop requires a frame")?;
