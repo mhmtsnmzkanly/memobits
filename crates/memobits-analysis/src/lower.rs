@@ -15,8 +15,8 @@ use memobits_syntax::{
 };
 
 use crate::types::{
-    check_resolved_typed, check_typed_module, ExprId, FunctionFacts, MatchFact, PathTarget,
-    TypeFact, VariantUse,
+    check_resolved_mode, check_typed_module_mode, CheckMode, ExprId, FunctionFacts, MatchFact,
+    PathTarget, TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -87,7 +87,16 @@ pub fn lower_module(
     package: &str,
     module_path: &[String],
 ) -> Result<Program, Vec<Diagnostic>> {
-    let facts = check_typed_module(module)?;
+    lower_module_mode(module, package, module_path, CheckMode::Execution)
+}
+
+pub(crate) fn lower_module_mode(
+    module: &Module,
+    package: &str,
+    module_path: &[String],
+    mode: CheckMode,
+) -> Result<Program, Vec<Diagnostic>> {
+    let facts = check_typed_module_mode(module, mode)?;
     let constant_errors = crate::constants::check_module(module, &facts.functions);
     if !constant_errors.is_empty() {
         return Err(constant_errors);
@@ -206,7 +215,15 @@ pub fn lower_resolved(
     project: &Project,
     resolution: &Resolution,
 ) -> Result<Program, Vec<Diagnostic>> {
-    let typed = check_resolved_typed(project, resolution)?;
+    lower_resolved_mode(project, resolution, CheckMode::Execution)
+}
+
+pub(crate) fn lower_resolved_mode(
+    project: &Project,
+    resolution: &Resolution,
+    mode: CheckMode,
+) -> Result<Program, Vec<Diagnostic>> {
+    let typed = check_resolved_mode(project, resolution, mode)?;
     let mut constant_errors = Vec::new();
     let mut fact_start = 0;
     for source in resolution.modules.values() {
@@ -1234,7 +1251,19 @@ impl<'a> Builder<'a> {
                 };
                 self.constant(expr.span, value, ty)
             }
-            ExprKind::StringLiteral(_) => unreachable!("string literals fail type checking"),
+            ExprKind::StringLiteral(_) => {
+                let Some(Type::Struct(ty)) = self.ty(expr) else {
+                    unreachable!("ownership-only String type")
+                };
+                self.emit(
+                    expr.span,
+                    InstructionKind::StructNew {
+                        ty,
+                        fields: Vec::new(),
+                    },
+                    Some(Type::Struct(ty)),
+                )
+            }
             ExprKind::Bool(value) => self.constant(
                 expr.span,
                 Constant::Bool(*value),

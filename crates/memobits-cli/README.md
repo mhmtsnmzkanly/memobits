@@ -45,6 +45,8 @@ file. `mb analyze-project` and `mb ownership-project` apply the corresponding
 checks across reachable local modules after project resolution. These commands
 report successful completion of their implemented subset, not a proof of safety
 for every possible language feature.
+The ownership commands check owned `String` transfers and internal loans.
+Build and run report TE017 for String until executable lowering is available.
 
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
 application entry or library exports to WebAssembly. The implemented subset

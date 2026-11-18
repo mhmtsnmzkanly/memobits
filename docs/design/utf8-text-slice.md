@@ -35,9 +35,12 @@ literals produce lexical errors. Analysis reports TE017 for literal
 execution on paths that require IR. Type-only analysis accepts owned
 `String` literals, annotations and calls, including internal
 `borrow String` parameters. Borrowed text does not implicitly become owned.
-Move and loan liveness checking still requires IR. The existing executable
-checking mode rejects both literals and written String types with TE017
-before lowering.
+The `ownership` and `ownership-project` commands check String moves and
+loan liveness with the existing ownership pass. Their private IR models
+each String as a fieldless owned value, which preserves whole-value move
+and loan behavior without assigning it a runtime representation. The
+ownership commands return diagnostics from that IR. Executable checking
+rejects literals and written String types with TE017 before lowering.
 
 - Support single-line, double-quoted literals with direct UTF-8 text,
   including the empty literal. Keep escape grammar, raw literals, and

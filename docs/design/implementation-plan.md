@@ -219,8 +219,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - The [guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
   validates fixed byte buffers with explicit lengths and byte-offset errors.
   The [first text slice](utf8-text-slice.md) parses ordinary UTF-8 literals
-  and supports owned `String` and internal borrows in type-only analysis.
-  IR lowering, execution, byte length and scalar iteration remain pending.
+  and checks owned `String` moves and internal loans in the ownership
+  commands. Executable lowering, byte length and scalar iteration remain pending.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

@@ -141,3 +141,23 @@ pub use types::{
 
 mod lower;
 pub use lower::{lower_module, lower_resolved};
+
+/// Check ownership without exposing the analysis-only IR to code generation.
+pub fn check_module_ownership(module: &Module) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+    let program = lower::lower_module_mode(
+        module,
+        "standalone",
+        &["source".into()],
+        types::CheckMode::Ownership,
+    )?;
+    Ok(memobits_ownership::check_ownership(&program))
+}
+
+/// Check ownership in the modules loaded by project resolution.
+pub fn check_project_ownership(
+    project: &memobits_project::Project,
+    resolution: &memobits_resolve::Resolution,
+) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+    let program = lower::lower_resolved_mode(project, resolution, types::CheckMode::Ownership)?;
+    Ok(memobits_ownership::check_ownership(&program))
+}

@@ -9,6 +9,4 @@ memobits-syntax = { path = "../memobits-syntax" }
 memobits-project = { path = "../memobits-project" }
 memobits-resolve = { path = "../memobits-resolve" }
 memobits-ir = { path = "../memobits-ir" }
-
-[dev-dependencies]
 memobits-ownership = { path = "../memobits-ownership" }

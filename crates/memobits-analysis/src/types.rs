@@ -24,6 +24,16 @@ use memobits_syntax::templates::{self as registry, Template};
 use templates::ResolvedArgument;
 use typetable::{StructInfo, TypeTable};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckMode {
+    Types,
+    Ownership,
+    Execution,
+}
+
+// The ownership-only table reserves this definition before user types.
+const OWNERSHIP_STRING: TypeId = TypeId(0);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Primitive(&'static str),
@@ -522,7 +532,8 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
         },
         Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
         Ty::Enum(id, _) => IrType::Enum(TypeId(*id)),
-        Ty::String | Ty::Never | Ty::Error => return None,
+        Ty::String => IrType::Struct(OWNERSHIP_STRING),
+        Ty::Never | Ty::Error => return None,
     })
 }
 
@@ -538,7 +549,7 @@ struct Binding {
 }
 struct Checker {
     diagnostics: Vec<Diagnostic>,
-    executable: bool,
+    lowering: bool,
     /// Addresses of expressions in an owned-value position (binding initialiser,
     /// `=` right-hand side, return/tail value, owned aggregate argument, array
     /// element) that may be a whole aggregate: array and struct literals,
@@ -586,10 +597,10 @@ impl Checker {
     fn check_element_support(&mut self, element: &Ty, span: Span) {
         if self.table.is_borrow_option(element) {
             self.error(17, span, "Option<borrow T> cannot be stored in an array");
-        } else if self.executable
+        } else if self.lowering
             && !matches!(
                 element,
-                Ty::Error | Ty::Never | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                Ty::Error | Ty::Never | Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
             )
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
         {
@@ -644,7 +655,7 @@ impl Checker {
     /// not feed a binding, assignment, return, call argument, array element or
     /// block result. Primitive reads are copied implicitly and are allowed.
     fn reject_extraction(&mut self, expr: &Expr, ty: &Ty) {
-        if self.executable
+        if self.lowering
             && !matches!(ty, Ty::Primitive(_))
             && !self.failed_fields.contains(&(expr as *const Expr as usize))
             && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
@@ -1093,7 +1104,10 @@ impl Checker {
                 }
                 StatementKind::Expression(expr) => {
                     let ty = self.expr(expr, None);
-                    if matches!(ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) {
+                    if matches!(
+                        ty,
+                        Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                    ) {
                         self.reject_extraction(expr, &ty);
                     }
                 }
@@ -1367,7 +1381,7 @@ impl Checker {
 
     /// `base.field`: a read of one field of a named local struct.
     fn field_read(&mut self, base: &Expr, field_name: &str, expr: &Expr) -> Ty {
-        if self.executable {
+        if self.lowering {
             match &base.kind {
                         ExprKind::Path(path) if path.len() == 1 => {
                             self.index_base = base as *const Expr as usize;
@@ -1656,7 +1670,7 @@ impl Checker {
             );
             return Ty::Error;
         }
-        if self.executable && !self.array_allowed(expr) {
+        if self.lowering && !self.array_allowed(expr) {
             self.error(
                 17,
                 expr.span,
@@ -1733,7 +1747,12 @@ impl Checker {
         let mut diverges = false;
         for (index, argument) in arguments.iter().enumerate() {
             let want = declared.payload.get(index);
-            if want.is_some_and(|ty| matches!(ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))) {
+            if want.is_some_and(|ty| {
+                matches!(
+                    ty,
+                    Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                )
+            }) {
                 self.allow_array_value(argument);
             }
             let actual = self.expr(argument, want);
@@ -1946,8 +1965,10 @@ impl Checker {
                         // A borrowing match binds primitives by copy and every
                         // aggregate payload as a read-only reference to it.
                         let slot_ty = if borrowed
-                            && matches!(slot_ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))
-                        {
+                            && matches!(
+                                slot_ty,
+                                Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                            ) {
                             Ty::Reference {
                                 access: IrAccess::Borrow,
                                 inner: Box::new(slot_ty),
@@ -2071,7 +2092,7 @@ impl Checker {
                 self.variant_call(expr, id, arguments, enum_ty, variant)
             }
             ExprKind::Array(elements) => {
-                if self.executable && !self.array_allowed(expr) {
+                if self.lowering && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
@@ -2117,7 +2138,7 @@ impl Checker {
                 }
             }
             ExprKind::RepeatArray { value, count } => {
-                if self.executable && !self.array_allowed(expr) {
+                if self.lowering && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
@@ -2136,7 +2157,7 @@ impl Checker {
                 if matches!(element, Ty::Reference { .. }) {
                     self.error(17, value.span, "array elements cannot be references yet");
                 }
-                if self.executable && matches!(element, Ty::Never) && context.is_none() {
+                if self.lowering && matches!(element, Ty::Never) && context.is_none() {
                     self.error(
                         2,
                         expr.span,
@@ -2163,7 +2184,7 @@ impl Checker {
                 }
             }
             ExprKind::Index { base, index } => {
-                if self.executable {
+                if self.lowering {
                     match &base.kind {
                         ExprKind::Path(path) if path.len() == 1 => {
                             self.index_base = base.as_ref() as *const Expr as usize;
@@ -2251,7 +2272,7 @@ impl Checker {
                 }
                 chosen
             }
-            ExprKind::StringLiteral(_) if self.executable => {
+            ExprKind::StringLiteral(_) if self.table.mode == CheckMode::Execution => {
                 self.error(
                     17,
                     expr.span,
@@ -2309,8 +2330,11 @@ impl Checker {
                             access: Some(binding.access),
                         });
                     }
-                    if self.executable
-                        && matches!(binding.ty, Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..))
+                    if self.lowering
+                        && matches!(
+                            binding.ty,
+                            Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                        )
                         && self.index_base != expr as *const Expr as usize
                         && !self.array_allowed(expr)
                     {
@@ -2531,7 +2555,7 @@ impl Checker {
                             parameter.access == IrAccess::Owned
                                 && matches!(
                                     parameter.ty,
-                                    Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                                    Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
                                 )
                         }) {
                             // An owned aggregate parameter takes a literal, repetition,
@@ -2601,7 +2625,7 @@ impl Checker {
                 ty
             }
             ExprKind::Struct { path, fields } => {
-                if self.executable && !self.array_allowed(expr) {
+                if self.lowering && !self.array_allowed(expr) {
                     self.error(
                         17,
                         expr.span,
@@ -2759,14 +2783,21 @@ impl Checker {
 /// TE020 and TE021 belong to `check_control_flow`; ownership is not checked here.
 /// A function with a non-Unit result must have a tail value or provable returns.
 pub fn check_types(module: &Module) -> Vec<Diagnostic> {
-    check_standalone(module, false).0
+    check_standalone(module, CheckMode::Types).0
 }
 
 /// Check a standalone module and retain canonical local and expression facts.
 /// This returns no facts if type or control-flow diagnostics exist.
 /// Array forms outside the executable subset (results, nesting, element references) report TE017.
 pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic>> {
-    let (mut diagnostics, functions, types) = check_standalone(module, true);
+    check_typed_module_mode(module, CheckMode::Execution)
+}
+
+pub(crate) fn check_typed_module_mode(
+    module: &Module,
+    mode: CheckMode,
+) -> Result<TypedModule, Vec<Diagnostic>> {
+    let (mut diagnostics, functions, types) = check_standalone(module, mode);
     diagnostics.extend(crate::check_control_flow(module));
     if diagnostics.is_empty() {
         Ok(TypedModule { functions, types })
@@ -2777,12 +2808,13 @@ pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic
 
 fn check_standalone(
     module: &Module,
-    capture: bool,
+    mode: CheckMode,
 ) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
-    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new(), capture);
+    let capture = mode != CheckMode::Types;
+    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new(), mode);
     let mut c = Checker {
         diagnostics: table_diagnostics,
-        executable: capture,
+        lowering: capture,
         allowed_arrays: HashSet::new(),
         failed_fields: HashSet::new(),
         index_base: 0,
@@ -2912,7 +2944,7 @@ pub fn check_resolved_types(project: &Project, resolution: &Resolution) -> Vec<D
     if !resolution.diagnostics.is_empty() {
         return Vec::new();
     }
-    check_resolved_mode(project, resolution, false)
+    check_resolved_mode(project, resolution, CheckMode::Types)
         .err()
         .unwrap_or_default()
         .into_iter()
@@ -2920,18 +2952,12 @@ pub fn check_resolved_types(project: &Project, resolution: &Resolution) -> Vec<D
         .collect()
 }
 
-pub(crate) fn check_resolved_typed(
+pub(crate) fn check_resolved_mode(
     project: &Project,
     resolution: &Resolution,
+    mode: CheckMode,
 ) -> Result<TypedModule, Vec<Diagnostic>> {
-    check_resolved_mode(project, resolution, true)
-}
-
-fn check_resolved_mode(
-    project: &Project,
-    resolution: &Resolution,
-    executable: bool,
-) -> Result<TypedModule, Vec<Diagnostic>> {
+    let lowering = mode != CheckMode::Types;
     if !resolution.diagnostics.is_empty() {
         return Err(resolution.diagnostics.clone());
     }
@@ -2955,7 +2981,7 @@ fn check_resolved_mode(
         .iter()
         .map(|(name, source)| (name.as_str(), &source.syntax))
         .collect();
-    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports, executable);
+    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports, mode);
     let table = Rc::new(table);
     diagnostics.extend(table_diagnostics);
     let mut ids = HashMap::new();
@@ -2971,7 +2997,7 @@ fn check_resolved_mode(
     let mut signatures = HashMap::new();
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
-            executable,
+            lowering,
             module: module_name.clone(),
             table: Rc::clone(&table),
             ..checker()
@@ -3010,7 +3036,7 @@ fn check_resolved_mode(
     let mut all_facts = Vec::with_capacity(next_id as usize);
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
-            executable,
+            lowering,
             module: module_name.clone(),
             table: Rc::clone(&table),
             qualified_functions: signatures.clone(),
@@ -3060,7 +3086,7 @@ fn check_resolved_mode(
                 if let (Some(Ty::Function(params, result)), Some(id)) =
                     (signatures.get(&key), ids.get(&key))
                 {
-                    let ir_signature = if executable {
+                    let ir_signature = if lowering {
                         ir_type(&Ty::Function(params.clone(), result.clone()))
                     } else {
                         None
@@ -3090,7 +3116,7 @@ fn check_resolved_mode(
     if diagnostics.is_empty() {
         Ok(TypedModule {
             functions: all_facts,
-            types: if executable {
+            types: if lowering {
                 type_facts(&table)
             } else {
                 Vec::new()
@@ -3104,7 +3130,7 @@ fn check_resolved_mode(
 fn checker() -> Checker {
     Checker {
         diagnostics: Vec::new(),
-        executable: true,
+        lowering: true,
         allowed_arrays: HashSet::new(),
         failed_fields: HashSet::new(),
         index_base: 0,

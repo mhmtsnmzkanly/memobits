@@ -11,7 +11,7 @@ use memobits_syntax::{Field, ItemKind, Module, Type, TypeDefinition};
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
 
 use super::templates::{resolve_arguments, ResolvedArgument};
-use super::{diagnostic, Ty};
+use super::{diagnostic, CheckMode, Ty};
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldInfo {
@@ -72,7 +72,7 @@ enum AliasState {
 }
 
 pub(super) struct TypeTable {
-    executable: bool,
+    pub(super) mode: CheckMode,
     types: Vec<StructInfo>,
     instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
@@ -322,7 +322,7 @@ impl TypeTable {
 
     pub fn empty() -> Self {
         Self {
-            executable: false,
+            mode: CheckMode::Types,
             types: Vec::new(),
             instances: RefCell::new(Vec::new()),
             defs: HashMap::new(),
@@ -340,15 +340,40 @@ impl TypeTable {
     pub fn build(
         modules: &[(&str, &Module)],
         imports: HashMap<String, HashMap<String, String>>,
-        executable: bool,
+        mode: CheckMode,
     ) -> (Self, Vec<Diagnostic>) {
         let mut table = Self {
-            executable,
+            mode,
             imports,
             ..Self::empty()
         };
         let mut diagnostics = Vec::new();
         let mut field_types: Vec<Option<&[Field]>> = Vec::new();
+        if mode == CheckMode::Ownership {
+            // A fieldless owned value has the move and loan behavior needed
+            // here. This definition never reaches executable lowering.
+            let module = modules.first().map_or("", |(module, _)| *module);
+            let span = modules
+                .first()
+                .and_then(|(_, syntax)| syntax.items.first())
+                .map_or(
+                    Span {
+                        source: memobits_diagnostics::SourceId(0),
+                        start: 0,
+                        end: 0,
+                    },
+                    |item| item.span,
+                );
+            table.types.push(StructInfo {
+                name: "String".into(),
+                module: module.into(),
+                span,
+                is_enum: false,
+                fields: Vec::new(),
+                variants: Vec::new(),
+            });
+            field_types.push(None);
+        }
         let mut bases = HashMap::new();
         let mut variant_types: Vec<(usize, &[memobits_syntax::Variant], String)> = Vec::new();
         let mut alias_items = Vec::new();
@@ -765,7 +790,7 @@ impl TypeTable {
         }
         if let [name] = ty.path.as_slice() {
             if name == "String" {
-                if self.executable {
+                if self.mode == CheckMode::Execution {
                     return Err(failure(17, "String execution is not supported yet".into()));
                 }
                 return Ok(Ty::String);
@@ -854,7 +879,8 @@ mod outcome_tests {
         let parsed = memobits_syntax::parse(SourceId(0),
             "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;");
         assert!(parsed.diagnostics.is_empty());
-        let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new(), false);
+        let (table, diagnostics) =
+            TypeTable::build(&[("", &parsed.module)], HashMap::new(), CheckMode::Types);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let a = table.resolve_alias("::A").unwrap();
         assert_eq!(a, table.resolve_alias("::B").unwrap());
@@ -873,7 +899,8 @@ mod outcome_tests {
     fn option_does_not_hide_recursive_value_layouts() {
         let parsed = memobits_syntax::parse(SourceId(0), "type Node { next: Option<Node> }");
         assert!(parsed.diagnostics.is_empty());
-        let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new(), false);
+        let (_, diagnostics) =
+            TypeTable::build(&[("", &parsed.module)], HashMap::new(), CheckMode::Types);
         assert!(!diagnostics.is_empty());
     }
 }

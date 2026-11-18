@@ -8,7 +8,7 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn string_project_analyzes_and_stops_before_lowering() {
+fn string_project_checks_ownership_and_keeps_execution_gated() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -22,11 +22,19 @@ fn string_project_analyzes_and_stops_before_lowering() {
         "src/main.mb",
         r#"use self::text::Text;
            use self::text::inspect;
-           fn main() { let s: Text = "é"; inspect(s.borrow()); }"#,
+           fn consume(s: Text) {}
+           fn main() {
+               let s: Text = "é";
+               let view := s.borrow();
+               inspect(view);
+               consume(s);
+           }"#,
     );
     let analyzed = f.run(&["analyze-project"]);
     assert!(analyzed.status.success(), "{analyzed:?}");
-    for args in [&["ownership-project"][..], &["run"], &["build"]] {
+    let owned = f.run(&["ownership-project"]);
+    assert!(owned.status.success(), "{owned:?}");
+    for args in [&["run"][..], &["build"]] {
         let message = err(f.run(args), "TE017");
         assert!(
             message.contains("execution is not supported yet"),
@@ -34,6 +42,34 @@ fn string_project_analyzes_and_stops_before_lowering() {
         );
     }
     assert!(!f.0.join("target/memobits/app.wasm").exists());
+}
+
+#[test]
+fn string_ownership_uses_last_borrow_use_and_rejects_moves_and_reads() {
+    let f = Fixture::new();
+    let helpers = "fn inspect(s: borrow String) {} fn consume(s: String) {}";
+    for (body, expected) in [
+        (
+            r#"let s := "é"; consume(s); inspect(s.borrow());"#,
+            Some("BE001"),
+        ),
+        (
+            r#"let s := "é"; let view := s.borrow(); consume(s); inspect(view);"#,
+            Some("BE005"),
+        ),
+        (
+            r#"let s := "é"; let view := s.borrow(); inspect(view); consume(s);"#,
+            None,
+        ),
+    ] {
+        f.write("text.mb", &format!("{helpers} fn main() {{ {body} }}"));
+        let output = f.run(&["ownership", "text.mb"]);
+        if let Some(code) = expected {
+            err(output, code);
+        } else {
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 }
 
 #[test]
