@@ -72,6 +72,7 @@ enum AliasState {
 }
 
 pub(super) struct TypeTable {
+    executable: bool,
     types: Vec<StructInfo>,
     instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
@@ -321,6 +322,7 @@ impl TypeTable {
 
     pub fn empty() -> Self {
         Self {
+            executable: false,
             types: Vec::new(),
             instances: RefCell::new(Vec::new()),
             defs: HashMap::new(),
@@ -338,9 +340,13 @@ impl TypeTable {
     pub fn build(
         modules: &[(&str, &Module)],
         imports: HashMap<String, HashMap<String, String>>,
+        executable: bool,
     ) -> (Self, Vec<Diagnostic>) {
-        let mut table = Self::empty();
-        table.imports = imports;
+        let mut table = Self {
+            executable,
+            imports,
+            ..Self::empty()
+        };
         let mut diagnostics = Vec::new();
         let mut field_types: Vec<Option<&[Field]>> = Vec::new();
         let mut bases = HashMap::new();
@@ -357,7 +363,7 @@ impl TypeTable {
                 else {
                     continue;
                 };
-                if templates::lookup(std::slice::from_ref(name)).is_some() {
+                if name == "String" || templates::lookup(std::slice::from_ref(name)).is_some() {
                     diagnostics.push(diagnostic(
                         3,
                         item.span,
@@ -758,6 +764,12 @@ impl TypeTable {
             return Err(failure(1, "unsupported type arguments".into()));
         }
         if let [name] = ty.path.as_slice() {
+            if name == "String" {
+                if self.executable {
+                    return Err(failure(17, "String execution is not supported yet".into()));
+                }
+                return Ok(Ty::String);
+            }
             if let Some(primitive) = primitive(name) {
                 return Ok(primitive);
             }
@@ -842,7 +854,7 @@ mod outcome_tests {
         let parsed = memobits_syntax::parse(SourceId(0),
             "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;");
         assert!(parsed.diagnostics.is_empty());
-        let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
+        let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new(), false);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let a = table.resolve_alias("::A").unwrap();
         assert_eq!(a, table.resolve_alias("::B").unwrap());
@@ -861,7 +873,7 @@ mod outcome_tests {
     fn option_does_not_hide_recursive_value_layouts() {
         let parsed = memobits_syntax::parse(SourceId(0), "type Node { next: Option<Node> }");
         assert!(parsed.diagnostics.is_empty());
-        let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
+        let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new(), false);
         assert!(!diagnostics.is_empty());
     }
 }

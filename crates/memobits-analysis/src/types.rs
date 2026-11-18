@@ -27,6 +27,7 @@ use typetable::{StructInfo, TypeTable};
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Primitive(&'static str),
+    String,
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
@@ -154,6 +155,7 @@ fn reference_access_matches(actual: &Ty, access: IrAccess) -> bool {
 fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
+        Ty::String => "String".into(),
         Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
@@ -520,7 +522,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
         },
         Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
         Ty::Enum(id, _) => IrType::Enum(TypeId(*id)),
-        Ty::Never | Ty::Error => return None,
+        Ty::String | Ty::Never | Ty::Error => return None,
     })
 }
 
@@ -1232,7 +1234,7 @@ impl Checker {
         if is_row
             && !matches!(
                 base_ty,
-                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) | Ty::Error | Ty::Never
+                Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) | Ty::Error | Ty::Never
             )
         {
             self.error(
@@ -1243,7 +1245,7 @@ impl Checker {
             return Ty::Error;
         }
         let (inner, origin, current_access) = match base_ty {
-            Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) if is_row => {
+            Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) if is_row => {
                 let binding = owner_binding.as_ref().expect("row root checked above");
                 let access = match &binding.ty {
                     Ty::Reference { access, .. } => *access,
@@ -1260,14 +1262,18 @@ impl Checker {
                 inner,
                 origin,
             } => (inner, origin, Some(access)),
-            primitive @ (Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) => {
+            owner @ (Ty::Primitive(_)
+            | Ty::String
+            | Ty::Array(..)
+            | Ty::Struct(..)
+            | Ty::Enum(..)) => {
                 let origin = owner_binding
                     .as_ref()
                     .map_or(ReferenceOrigin::Temporary, |binding| {
                         ReferenceOrigin::Binding(binding.origin)
                     });
                 let current_access = owner_binding.as_ref().map(|binding| binding.access);
-                (Box::new(primitive), origin, current_access)
+                (Box::new(owner), origin, current_access)
             }
             ty @ (Ty::Never | Ty::Error) => return ty,
             _ => {
@@ -1282,7 +1288,7 @@ impl Checker {
 
         if !matches!(
             inner.as_ref(),
-            Ty::Primitive(_) | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+            Ty::Primitive(_) | Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
         ) {
             self.error(
                 17,
@@ -2245,7 +2251,7 @@ impl Checker {
                 }
                 chosen
             }
-            ExprKind::StringLiteral(_) => {
+            ExprKind::StringLiteral(_) if self.executable => {
                 self.error(
                     17,
                     expr.span,
@@ -2253,6 +2259,7 @@ impl Checker {
                 );
                 Ty::Error
             }
+            ExprKind::StringLiteral(_) => Ty::String,
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {
                 if let Some((template, variant)) = self.prelude_variant(path) {
@@ -2772,7 +2779,7 @@ fn check_standalone(
     module: &Module,
     capture: bool,
 ) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
-    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
+    let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new(), capture);
     let mut c = Checker {
         diagnostics: table_diagnostics,
         executable: capture,
@@ -2861,7 +2868,11 @@ fn check_standalone(
             }
         }
     }
-    let types = type_facts(&c.table);
+    let types = if capture {
+        type_facts(&c.table)
+    } else {
+        Vec::new()
+    };
     (c.diagnostics, functions, types)
 }
 fn check_function_body(
@@ -2944,7 +2955,7 @@ fn check_resolved_mode(
         .iter()
         .map(|(name, source)| (name.as_str(), &source.syntax))
         .collect();
-    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports);
+    let (table, table_diagnostics) = TypeTable::build(&modules, module_imports, executable);
     let table = Rc::new(table);
     diagnostics.extend(table_diagnostics);
     let mut ids = HashMap::new();
@@ -3049,30 +3060,24 @@ fn check_resolved_mode(
                 if let (Some(Ty::Function(params, result)), Some(id)) =
                     (signatures.get(&key), ids.get(&key))
                 {
-                    let Some(ty) = ir_type(&Ty::Function(params.clone(), result.clone())) else {
-                        check_function_body(
-                            &mut c,
-                            parameters,
-                            body,
-                            params.clone(),
-                            *result.clone(),
-                        );
-                        continue;
+                    let ir_signature = if executable {
+                        ir_type(&Ty::Function(params.clone(), result.clone()))
+                    } else {
+                        None
                     };
-                    let IrType::Function(signature) = ty else {
-                        unreachable!()
-                    };
-                    c.facts = Some(FunctionFacts {
-                        id: *id,
-                        span: item.span,
-                        signature,
-                        locals: Vec::new(),
-                        expressions: Vec::new(),
-                        path_uses: Vec::new(),
-                        variant_uses: Vec::new(),
-                        matches: Vec::new(),
-                        next_expr: 0,
-                    });
+                    if let Some(IrType::Function(signature)) = ir_signature {
+                        c.facts = Some(FunctionFacts {
+                            id: *id,
+                            span: item.span,
+                            signature,
+                            locals: Vec::new(),
+                            expressions: Vec::new(),
+                            path_uses: Vec::new(),
+                            variant_uses: Vec::new(),
+                            matches: Vec::new(),
+                            next_expr: 0,
+                        });
+                    }
                     check_function_body(&mut c, parameters, body, params.clone(), *result.clone());
                     if let Some(facts) = c.facts.take() {
                         all_facts.push(facts);
@@ -3085,7 +3090,11 @@ fn check_resolved_mode(
     if diagnostics.is_empty() {
         Ok(TypedModule {
             functions: all_facts,
-            types: type_facts(&table),
+            types: if executable {
+                type_facts(&table)
+            } else {
+                Vec::new()
+            },
         })
     } else {
         Err(diagnostics)

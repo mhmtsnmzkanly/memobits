@@ -8,6 +8,35 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn string_project_analyzes_and_stops_before_lowering() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='strings'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/text.mb",
+        "pub type Text = String; pub fn inspect(s: borrow Text) {}",
+    );
+    f.write(
+        "src/main.mb",
+        r#"use self::text::Text;
+           use self::text::inspect;
+           fn main() { let s: Text = "é"; inspect(s.borrow()); }"#,
+    );
+    let analyzed = f.run(&["analyze-project"]);
+    assert!(analyzed.status.success(), "{analyzed:?}");
+    for args in [&["ownership-project"][..], &["run"], &["build"]] {
+        let message = err(f.run(args), "TE017");
+        assert!(
+            message.contains("execution is not supported yet"),
+            "{message}"
+        );
+    }
+    assert!(!f.0.join("target/memobits/app.wasm").exists());
+}
+
+#[test]
 fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
     assert_example_runs_in_both_modes("astar", b"Result: Ok(i32(12))\n");
 }

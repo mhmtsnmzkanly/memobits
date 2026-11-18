@@ -32,7 +32,12 @@ already exercises that distinction.
 The frontend parses double-quoted literals and preserves their UTF-8 text
 and byte spans. Escapes, LF and CR inside a literal, and unterminated
 literals produce lexical errors. Analysis reports TE017 for literal
-execution until String typing and lowering land.
+execution on paths that require IR. Type-only analysis accepts owned
+`String` literals, annotations and calls, including internal
+`borrow String` parameters. Borrowed text does not implicitly become owned.
+Move and loan liveness checking still requires IR. The existing executable
+checking mode rejects both literals and written String types with TE017
+before lowering.
 
 - Support single-line, double-quoted literals with direct UTF-8 text,
   including the empty literal. Keep escape grammar, raw literals, and

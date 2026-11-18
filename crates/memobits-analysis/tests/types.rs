@@ -12,15 +12,69 @@ fn codes(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn string_literals_report_execution_is_pending() {
-    let source = "fn f() { let s := \"é\"; }";
+fn string_literals_are_owned_in_type_analysis() {
+    let source = r#"
+        type Text = String;
+        fn inspect(s: borrow Text) {}
+        fn take(s: String) -> String { s }
+        fn f() {
+            let text: Text = "é";
+            inspect(text.borrow());
+            let moved := take(text);
+            inspect(moved.borrow());
+            let empty := "";
+            inspect(empty.borrow());
+        }
+    "#;
     let diagnostics = check(source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for (source, expected) in [
+        (r#"fn f() { let s: String = 1; }"#, "TE002"),
+        (
+            r#"fn take(s: String) {} fn f(s: borrow String) { take(s); }"#,
+            "TE002",
+        ),
+        (r#"fn f() { let s := "é"; s.copy(); }"#, "TE017"),
+    ] {
+        assert!(
+            codes(source).iter().any(|code| code == expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn string_literals_report_execution_is_pending_at_lowering_boundary() {
+    let source = "fn f() { let s := \"é\"; }";
+    let parsed = parse(SourceId(9), source);
+    let diagnostics =
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let diagnostic = &diagnostics[0];
     assert_eq!(diagnostic.code.to_string(), "TE017");
     assert!(diagnostic.message.contains("string literal execution"));
     let span = diagnostic.span.unwrap();
     assert_eq!(&source[span.start..span.end], "\"é\"");
+}
+
+#[test]
+fn string_types_report_execution_is_pending_even_without_literals() {
+    for source in [
+        "fn f(s: borrow String) {}",
+        "type Text = String; fn f() {}",
+        "type Wrapper [ Text(Array<String, 1>) ] fn f() {}",
+    ] {
+        assert!(check(source).is_empty(), "{source}");
+        let parsed = parse(SourceId(9), source);
+        let diagnostics =
+            memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code.to_string() == "TE017" && d.message.contains("String execution")),
+            "{source}: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]
