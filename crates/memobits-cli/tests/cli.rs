@@ -191,10 +191,11 @@ fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
     for expected in ["", "é😀"] {
         let pointer = u32::from_le_bytes(data[..4].try_into().unwrap());
         let length = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        assert_eq!(pointer, address + 8);
+        assert_eq!(pointer, address + 12);
         assert_eq!(length as usize, expected.len());
-        assert_eq!(&data[8..8 + expected.len()], expected.as_bytes());
-        data = &data[8 + expected.len()..];
+        assert_eq!(&data[8..12], &0u32.to_le_bytes());
+        assert_eq!(&data[12..12 + expected.len()], expected.as_bytes());
+        data = &data[12 + expected.len()..];
         address = pointer + length;
     }
     assert!(data.is_empty(), "unused literals should stay out of Wasm");

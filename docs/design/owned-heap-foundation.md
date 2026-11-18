@@ -33,15 +33,18 @@ The owned result stays in that binding until its lexical exit. Moving,
 returning, sharing for mutation or replacing it requires broader drop
 elaboration. Typed IR verifies that the owning descriptor cannot escape and
 that all normal exits release these bindings in reverse initialization
-order. Since only those locals own heap allocations, the initialization
-instruction supplies storage provenance without changing the descriptor.
+order. Descriptors now carry allocation provenance. Zero denotes static
+bytes, and a nonzero value points to the owned heap block's header.
 
 Guest allocation grows memory only as needed, after checking the widened
 exclusive byte end and its page ceiling. A failed grow traps at the concat
-call before publishing a descriptor or advancing the cursor. On scope
-exit the cursor returns to the released block's start. Verified nesting
-across function calls requires no free list or runtime ownership flag.
-Memory pages remain at their high-water mark and can immediately be reused.
+call before publishing a descriptor or changing the allocator state.
+Scope exit puts the block on a private free list. Concat tries the first
+fitting block before extending the heap. Headers are four-byte aligned and
+store capacity independently of the String's current byte length, so a
+smaller reuse preserves the larger block's capacity. Blocks are reused
+whole, and memory pages remain at their high-water mark. The existing
+lexical gate still verifies release order and prevents escaping owners.
 
 Once the foundation works, List can reuse the byte allocator and owned
 cleanup. Element initialization, element drops, and capacity changes belong
@@ -56,8 +59,8 @@ allocation stack empty, so its cleanup preserves the caller's allocations.
 The move and loan checks run before Wasm emission. They prevent descriptor
 transfer and reject a live borrow across release, even when release order is
 otherwise valid. Two inputs may borrow the same String. Both reads finish
-before the result is published, and both copies target new space above all
-live allocations. These guarantees assume the generated guest controls its
+before the result is published. Copies target a freed block or a new extent
+disjoint from both live inputs. These guarantees assume the generated guest controls its
 memory. A host with access to the private outcome memory export must preserve
 the guest's descriptors and bytes.
 
@@ -68,15 +71,11 @@ have page-reuse coverage.
 
 ## Progression to arbitrary ownership
 
-1. Keep the lexical gate and change the existing concat allocator and
-   release together. The [shared descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
-   should distinguish static storage from heap storage and locate the
-   allocation record. The record needs the reserved block extent, which
-   remains valid when a smaller request reuses it. This lets release put a
-   whole block on a private free list without rewinding past live data.
-   Check reuse before growing the heap. Publish the descriptor only after
-   allocation and copying succeed. Test reuse of a larger free block and
-   out-of-order frees alongside the production lexical consumer.
+1. The lexical consumer now uses the
+   [shared descriptor layout](../../crates/memobits-wasm/src/string_descriptor.rs)
+   to locate an allocation record and reuse freed blocks. Tests cover a
+   larger block reused for a smaller request, then reused at full size.
+   The lexical gate still prevents out-of-order releases in source.
 2. Extend cleanup to the next ownership context before admitting its
    transfers. For local moves, transfer the release obligation with the
    descriptor and elaborate each exit from its incoming ownership state.
@@ -101,7 +100,7 @@ for the page calculation and keep allocation ranges within the supported
 Wasm32 address space. A zero-byte result can use the empty static
 representation.
 
-A private guest allocator can start with an end cursor and a free list of
+The private guest allocator uses an end cursor and a free list of
 whole blocks. Reuse a fitting aligned block when available and extend the
 cursor when necessary. Grow memory only when the requested end lies past
 the current page boundary. Preserve live addresses. Check the Wasm

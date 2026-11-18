@@ -41,7 +41,9 @@ use the existing last-use loan rules. A whole assignment through a
 
 Wasm places reachable literal bytes after the guest stack and any outcome
 entry return cell. Frame cells carry a private 32-bit address and byte
-length at offsets 0 and 4. Literal encoding, descriptor loads and frame
+length at offsets 0 and 4, and a heap block header address at offset 8.
+Static literal descriptors use zero for the header address.
+Literal encoding, descriptor loads and frame
 layout share one private Wasm layout definition. Moving a String copies the
 descriptor through aggregate call and storage paths. Guest code has no
 operation that writes to the literal bytes. For an

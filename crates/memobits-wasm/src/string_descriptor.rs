@@ -5,7 +5,9 @@ use wasm_encoder::{Function, Instruction, MemArg};
 
 const ADDRESS_OFFSET: u32 = 0;
 const LENGTH_OFFSET: u32 = 4;
-pub(super) const SIZE: u32 = 8;
+// Zero is static storage. Otherwise this is the owned block's header address.
+const ALLOCATION_OFFSET: u32 = 8;
+pub(super) const SIZE: u32 = 12;
 pub(super) const ALIGN: u32 = 4;
 
 pub(super) fn encode(address: u32, byte_length: u32) -> [u8; SIZE as usize] {
@@ -25,6 +27,10 @@ pub(super) fn load_length(body: &mut Function) {
     load_field(body, LENGTH_OFFSET);
 }
 
+pub(super) fn load_allocation(body: &mut Function) {
+    load_field(body, ALLOCATION_OFFSET);
+}
+
 fn load_field(body: &mut Function, offset: u32) {
     body.instruction(&Instruction::I32Load(MemArg {
         offset: u64::from(offset),
@@ -38,6 +44,10 @@ pub(super) fn store_address(body: &mut Function) {
 
 pub(super) fn store_length(body: &mut Function) {
     store_field(body, LENGTH_OFFSET);
+}
+
+pub(super) fn store_allocation(body: &mut Function) {
+    store_field(body, ALLOCATION_OFFSET);
 }
 
 fn store_field(body: &mut Function, offset: u32) {

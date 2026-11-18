@@ -1390,8 +1390,8 @@ fn encode_frames(
     encode_frames_traced(program, exports, sizes, observe, stack_size, None).map(|(bytes, _)| bytes)
 }
 
-/// A private literal table. Each entry is a little-endian (address, byte
-/// length) descriptor followed by the UTF-8 bytes. Guest code copies only
+/// A private literal table. Each entry is a String descriptor with static
+/// provenance, followed by the UTF-8 bytes. Guest code copies only
 /// the descriptor into its frame; no language operation can write the bytes.
 struct StringData<'a> {
     start: Option<u32>,
@@ -1547,7 +1547,9 @@ fn encode_frames_traced(
         .then(|| {
             let adapter_count = u32::from(entry.is_some());
             types.ty().function([ValType::I32; 3], [ValType::I32]);
+            types.ty().function([ValType::I32], []);
             functions.function(signatures.len() as u32 + adapter_count);
+            functions.function(signatures.len() as u32 + adapter_count + 1);
             selected.len() as u32 + adapter_count
         });
     let has_frames = reachable.iter().any(|id| sizes[*id as usize] != 0);
@@ -1594,6 +1596,7 @@ fn encode_frames_traced(
     }
     if concat_index.is_some() {
         code.function(&string_heap::initializer());
+        code.function(&string_heap::releaser());
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
@@ -1649,14 +1652,15 @@ fn encode_frames_traced(
     if concat_index.is_some() {
         // Concat always has a String frame cell and an allocation trap site.
         debug_assert!(has_frames && has_traps);
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(static_layout.end() as i32),
-        );
+        let heap_start = align_up(static_layout.end(), string_heap::BLOCK_ALIGN)
+            .ok_or("heap start exceeds Wasm32 address space")?;
+        let heap_global = GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        };
+        globals.global(heap_global, &ConstExpr::i32_const(heap_start as i32));
+        globals.global(heap_global, &ConstExpr::i32_const(0));
     }
     let mut module = Module::new();
     module.section(&types).section(&functions);
@@ -2652,7 +2656,8 @@ fn compile_instruction(
                     frame.ok_or("concat local requires a frame")?,
                     cell.offset,
                 );
-                string_heap::release(body);
+                let releaser = concat_index.ok_or("missing String release helper")? + 1;
+                body.instruction(&WasmInstruction::Call(releaser));
             }
         }
         InstructionKind::InitConcatString { target, strings } => {

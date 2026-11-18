@@ -216,8 +216,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   mutable pattern bindings, `defaults`, and `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static
   layout planner, three-state move availability and explicit lexical exits for
-  String locals. Scoped `String.concat` now allocates and releases owned
-  text at lexical exits. Transfers of heap-backed strings and general drop
+  String locals. Scoped `String.concat` uses heap provenance and a private
+  whole-block free list to reuse storage released at lexical exits.
+  Transfers of heap-backed strings and general drop
   insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,

@@ -114,10 +114,11 @@ fn outcome_cell_and_string_data_follow_the_stack_at_a_page_boundary() {
     assert_eq!(data.len(), 2 * 65_536);
     assert_eq!(
         u32::from_le_bytes(data[literal..literal + 4].try_into().unwrap()) as usize,
-        literal + 8
+        literal + 12
     );
     assert_eq!(&data[literal + 4..literal + 8], &2u32.to_le_bytes());
-    assert_eq!(&data[literal + 8..literal + 10], "é".as_bytes());
+    assert_eq!(&data[literal + 8..literal + 12], &0u32.to_le_bytes());
+    assert_eq!(&data[literal + 12..literal + 14], "é".as_bytes());
 }
 
 #[test]
@@ -224,6 +225,51 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
         assert_eq!(&data[payload..payload + 4], &96_000u32.to_le_bytes());
         assert_eq!(data.len(), 2 * 65_536);
     }
+}
+
+#[test]
+fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
+    let left = "é".repeat(12_000);
+    let right = "😀".repeat(6_000);
+    let program = lower(&format!(
+        r#"
+        fn main() -> Result<Bool, Error> {{
+            let left := "{left}";
+            let right := "{right}";
+            {{
+                let tiny := "".concat("x");
+                let full := left.concat(right);
+                if tiny.len() != 1 || full.len() != 48_000 {{ return Err(Error {{ code: 1 }}); }}
+            }}
+            // The tiny block is at the head. The larger block must remain
+            // reusable at full size after satisfying this smaller request.
+            {{
+                let shorter := left.concat("");
+                if shorter.len() != 24_000 {{ return Err(Error {{ code: 2 }}); }}
+            }}
+            let full := left.concat(right);
+            if full.len() != 48_000 {{ return Err(Error {{ code: 3 }}); }}
+            Ok(true)
+        }}
+    "#
+    ));
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(0),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    assert_eq!(memory.data(&store).len(), 65_536);
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let (result, _) = main.call(&mut store, ()).unwrap();
+    assert_eq!(memory.data(&store)[result as usize], 0);
+    assert_eq!(memory.data(&store).len(), 2 * 65_536);
 }
 
 #[test]
