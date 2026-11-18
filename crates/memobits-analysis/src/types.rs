@@ -1187,6 +1187,26 @@ impl Checker {
             }
         }
     }
+    fn string_length(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        self.allow_array_value(base);
+        let receiver = read_type(self.expr(base, None));
+        if !arguments.is_empty() {
+            self.error(10, expression.span, "len() takes no arguments");
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        }
+        match receiver {
+            Ty::String => Ty::Primitive("u32"),
+            ty @ (Ty::Error | Ty::Never) => ty,
+            _ => {
+                self.error(17, base.span, "len() requires a String receiver");
+                Ty::Error
+            }
+        }
+    }
+
     fn reference_conversion(
         &mut self,
         expression: &Expr,
@@ -2520,6 +2540,9 @@ impl Checker {
                     }
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
+                    }
+                    if name == "len" {
+                        return self.string_length(expr, base, arguments);
                     }
                 }
                 let ty = self.expr(callee, None);

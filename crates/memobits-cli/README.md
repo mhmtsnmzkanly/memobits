@@ -51,7 +51,8 @@ The ownership commands check owned `String` transfers and internal loans.
 application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. Ordinary UTF-8 `String` literals execute
-with owned transfers and internal references. Exported String signatures
+with owned transfers, internal references, and `.len()` for the UTF-8 byte
+length as `u32`. Exported String signatures
 and nested String storage are gated. Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

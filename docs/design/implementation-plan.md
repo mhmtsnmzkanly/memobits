@@ -220,8 +220,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   validates fixed byte buffers with explicit lengths and byte-offset errors.
   The [executable text slice](utf8-text-slice.md) runs ordinary UTF-8 literals,
   owned `String` transfers and internal borrows using private Wasm data.
-  Exported String signatures, nested storage, byte length and scalar iteration
-  remain gated.
+  `.len()` reads the stored UTF-8 byte length as `u32`. Exported String
+  signatures, nested storage and scalar iteration remain gated.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

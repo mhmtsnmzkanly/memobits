@@ -252,6 +252,10 @@ pub enum ArrayInit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstructionKind {
     Constant(Constant),
+    /// Read the byte length of an owned String or a reference to one.
+    StringLen {
+        source: Operand,
+    },
     /// Capture an operand at this point in evaluation order.
     Capture(Operand),
     /// Create a statically checked reference to an owner or existing reference.
@@ -1245,6 +1249,22 @@ fn validate_instruction(
                     id,
                     Some(block),
                     "capture output type differs from operand type",
+                );
+            }
+        }
+        InstructionKind::StringLen { source } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            if !input.as_ref().is_some_and(|ty| {
+                matches!(ty, Type::String)
+                    || matches!(ty, Type::Reference { inner, .. } if **inner == Type::String)
+            }) || source.mode != UseMode::Read
+                || out != Some(&Type::Primitive(Primitive::U32))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "StringLen must read a String or String reference and produce u32",
                 );
             }
         }
@@ -2517,7 +2537,9 @@ fn validate_read_only_loaded_values(
                     report(block_id, reference, false);
                     report(block_id, value, true);
                 }
-                InstructionKind::Copy { source } => report(block_id, source, false),
+                InstructionKind::Copy { source } | InstructionKind::StringLen { source } => {
+                    report(block_id, source, false);
+                }
                 InstructionKind::Unary { operand, .. } => report(block_id, operand, false),
                 InstructionKind::Binary { left, right, .. } => {
                     report(block_id, left, false);

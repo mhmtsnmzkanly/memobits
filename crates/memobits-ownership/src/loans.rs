@@ -601,6 +601,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::Constant(_) => Vec::new(),
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
+        | InstructionKind::StringLen { source: operand }
         | InstructionKind::Unary { operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
@@ -1461,7 +1462,9 @@ fn check_instruction(
                 }
             }
         }
-        InstructionKind::Load { reference } => {
+        InstructionKind::Load { reference } | InstructionKind::StringLen { source: reference }
+            if type_at(function, reference.source).is_some_and(is_reference) =>
+        {
             let provenance = operand_provenance(function, state, reference);
             let own = parent_closure(&provenance.loans, infos);
             if let Some(conflict) =

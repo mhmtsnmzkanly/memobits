@@ -1326,6 +1326,16 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
+                    if name == "len" {
+                        let source = self.lower_expr(base)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::StringLen {
+                                source: read(source),
+                            },
+                            self.ty(expr),
+                        );
+                    }
                     let access = match name.as_str() {
                         "borrow" => Access::Borrow,
                         "share" => Access::Share,

@@ -127,18 +127,22 @@ fn text() -> String {
     "café 😀"
 }
 
-fn accepts_text(value: borrow String) -> Bool {
-    // This call demonstrates access. Text inspection APIs are still pending.
-    true
+fn byte_length(value: borrow String) -> u32 {
+    value.len()
 }
 
 fn fixed_text() -> Bool {
     let caption := text();
     let view := caption.borrow();
-    let accepted := accepts_text(view);
+    // A shared read-only loan allows the owner to be read too.
+    let while_borrowed := caption.len();
+    let borrowed := byte_length(view);
     let moved := caption; // The borrow ended at its last use.
-    let empty := "";
-    accepted && accepts_text(moved.borrow()) && accepts_text(empty.borrow())
+    // Length counts UTF-8 bytes. The accented letter takes two and the
+    // emoji takes four. Reading the length does not consume the String.
+    while_borrowed == 10 && borrowed == 10 && moved.len() == 10
+        && moved.len() == text().len()
+        && "".len() == 0 && "abc".len() == 3 && "é".len() == 2 && "😀".len() == 4
 }
 
 // Enums and exhaustive matching. An alias can also qualify variants.
@@ -285,7 +289,7 @@ fn outcomes() -> Bool {
 //   for stack_size, fuel limits, and selecting a Wasm export with --entry.
 //   The runner calls zero-argument exports. Library exports use scalar
 //   signatures. External linking, type exports and mb check are unsupported.
-// - examples/design/language-guide.mb explores target syntax. String length,
+// - examples/design/language-guide.mb explores target syntax. String slicing,
 //   scalar iteration, lists, user-defined generics, try, defaults and
 //   aggregate .copy() are gated.
 

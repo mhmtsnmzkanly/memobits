@@ -48,17 +48,19 @@ outcome entry, the runner's existing memory export still exposes linear
 memory to the embedding host. Exported String signatures and embedded
 String storage in arrays, structs, or enum payloads are gated.
 
-## Next executable slice
+## Byte length
 
-Propose a non-consuming `.len()` on an owner or whole-string borrow,
-returning the stored byte length as `u32`. Byte semantics follow Rust.
+Call `.len()` on a String expression, an owned binding, or a whole-string
+reference to read its descriptor's UTF-8 byte length as `u32`. The read
+obeys move and loan rules and leaves the receiver available after the call.
+Byte semantics follow Rust.
 Heap allocation, capacity, growth, cleanup, and external text ABI remain
 later work. [Rust str::len](https://doc.rust-lang.org/std/primitive.str.html#method.len)
 
-Check lengths for empty text (0), ASCII `abc` (3), `é` (2), and `😀` (4).
-Include a mixed literal, repeated reads through a borrow, and a move.
-Check rejected integer indexing and use after move. Run a scalar outcome
-entry from source and as standalone Wasm and assert identical output.
+The [runnable guide](../../examples/projects/language-guide/src/main.mb)
+checks empty, ASCII, and multibyte text from source and standalone Wasm.
+CLI tests cover owner reads during a read-only loan, last-use release,
+and rejected reads after a move or during a live exclusive loan.
 
 ## Later operations
 

@@ -313,6 +313,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         InstructionKind::Constant(_)
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
+        | InstructionKind::StringLen { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -929,6 +930,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 InstructionKind::Constant(_) => {}
                 InstructionKind::Capture(operand)
                 | InstructionKind::Copy { source: operand }
+                | InstructionKind::StringLen { source: operand }
                 | InstructionKind::Borrow { owner: operand, .. }
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
@@ -1050,6 +1052,7 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
     Ok((width, width))
 }
 
+const STRING_LENGTH_OFFSET: u32 = 4;
 const STRING_DESCRIPTOR_SIZE: u32 = 8;
 
 const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
@@ -2504,6 +2507,17 @@ fn compile_instruction(
             }
             emit_operand(body, function, param_count, operand, layout, frame)?;
             body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::StringLen { source } => {
+            emit_operand(body, function, param_count, source, layout, frame)?;
+            let arg = MemArg {
+                offset: u64::from(STRING_LENGTH_OFFSET),
+                ..memory_arg(Primitive::U32)
+            };
+            body.instruction(&WasmInstruction::I32Load(arg));
+            body.instruction(&WasmInstruction::LocalSet(
+                output.ok_or("StringLen lacks an output")?,
+            ));
         }
         InstructionKind::Copy { source } => {
             let output = output.ok_or("copy lacks an output")?;

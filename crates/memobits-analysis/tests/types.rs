@@ -44,6 +44,21 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
+fn string_length_requires_a_string_and_no_arguments() {
+    assert!(codes(r#"fn f(s: borrow String) -> u32 { s.len() }"#).is_empty());
+    for (source, expected) in [
+        (r#"fn f() -> i32 { "é".len() }"#, "TE002"),
+        (r#"fn f() { "é".len(1); }"#, "TE010"),
+        ("fn f() { let n := 1; n.len(); }", "TE017"),
+    ] {
+        assert!(
+            codes(source).iter().any(|code| code == expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn string_literals_lower_to_owned_ir_with_utf8_payloads() {
     use memobits_ir::{Constant, InstructionKind, Type};
 

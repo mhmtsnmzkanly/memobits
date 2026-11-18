@@ -157,6 +157,34 @@ fn string_ownership_uses_last_borrow_use_and_rejects_moves_and_reads() {
 }
 
 #[test]
+fn string_length_observes_move_and_loan_rules() {
+    let f = Fixture::new();
+    for (body, expected) in [
+        (r#"let s := "é"; let moved := s; s.len();"#, Some("BE001")),
+        (
+            r#"let s := "é"; let view := s.borrow(); let moved := s; view.len();"#,
+            Some("BE005"),
+        ),
+        (
+            r#"var s := "é"; let editor := s.share(); s.len(); editor.len();"#,
+            Some("BE005"),
+        ),
+        (
+            r#"let s := "é"; let view := s.borrow(); let n := s.len(); view.len(); let moved := s; moved.len();"#,
+            None,
+        ),
+    ] {
+        f.write("text.mb", &format!("fn main() {{ {body} }}"));
+        let output = f.run(&["ownership", "text.mb"]);
+        if let Some(code) = expected {
+            err(output, code);
+        } else {
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+}
+
+#[test]
 fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
     assert_example_runs_in_both_modes("astar", b"Result: Ok(i32(12))\n");
 }
