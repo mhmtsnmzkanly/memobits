@@ -595,11 +595,11 @@ impl Checker {
     /// of exported signatures is the backend's concern (LE900).
     fn signature_type(&mut self, ty: &Type, access: IrAccess) -> Ty {
         let resolved = self.type_path(ty);
-        if matches!(resolved, Ty::List(_)) && access != IrAccess::Borrow {
+        if matches!(resolved, Ty::List(_)) && access == IrAccess::Owned {
             self.error(
                 17,
                 ty.span,
-                "List signatures currently support only borrow parameters",
+                "List signatures currently support only borrow and share parameters",
             );
         }
         resolved
@@ -1089,6 +1089,17 @@ impl Checker {
                     if operator == "=" {
                         self.allow_array_value(value);
                     }
+                    if matches!(target_ty, Ty::List(_))
+                        && matches!(&target.kind, ExprKind::Path(path)
+                        if path.len() == 1 && self.lookup(&path[0]).is_some_and(|binding|
+                            matches!(binding.ty, Ty::Reference { .. })))
+                    {
+                        self.error(
+                            17,
+                            target.span,
+                            "whole List replacement through a share is not supported",
+                        );
+                    }
                     let previous = self.concat_destination;
                     if operator == "="
                         && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
@@ -1376,14 +1387,23 @@ impl Checker {
     fn list_push(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
+        let owner = matches!(receiver, Ty::List(_));
         let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
-            && self.lookup(&path[0]).is_some_and(|binding| binding.mutable));
-        let Ty::List(element) = receiver else {
-            self.error(17, base.span, "push() requires a mutable whole List local");
+            && self.lookup(&path[0]).is_some_and(|binding| (owner && binding.mutable) || binding.access == IrAccess::Share));
+        let Ty::List(element) = read_type(receiver) else {
+            self.error(
+                17,
+                base.span,
+                "push() requires a mutable whole List local or direct share List parameter",
+            );
             return Ty::Error;
         };
         if !writable {
-            self.error(17, base.span, "push() requires a mutable whole List local");
+            self.error(
+                17,
+                base.span,
+                "push() requires a mutable whole List local or direct share List parameter",
+            );
         }
         if arguments.len() != 1 {
             self.error(10, expr.span, "push() expects one element");
@@ -1567,15 +1587,6 @@ impl Checker {
                 return Ty::Error;
             }
         };
-
-        if matches!(inner.as_ref(), Ty::List(_)) && access != IrAccess::Borrow {
-            self.error(
-                17,
-                expression.span,
-                "List only supports read-only borrows in this slice",
-            );
-            return Ty::Error;
-        }
 
         if !matches!(
             inner.as_ref(),
@@ -2883,7 +2894,11 @@ impl Checker {
                                 .get(i)
                                 .is_some_and(|parameter| matches!(parameter.ty, Ty::List(_)))
                         {
-                            self.error(17, arg.span, "List borrows require a direct internal call");
+                            self.error(
+                                17,
+                                arg.span,
+                                "List references require a direct internal call",
+                            );
                         }
                         if params
                             .get(i)

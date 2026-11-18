@@ -1593,9 +1593,15 @@ fn check_instruction(
             }
         }
         InstructionKind::ListPush { target, .. } => {
-            let roots = BTreeSet::from([Place::whole(Root::Local(target.0))]);
+            let receiver = Operand {
+                source: Source::Local(*target),
+                mode: UseMode::Share,
+                span: instruction.span,
+            };
+            let provenance = source_provenance(function, state, &receiver);
+            let own = parent_closure(&provenance.loans, infos);
             if let Some(conflict) =
-                active_conflict(&roots, Access::Share, active_before, &BTreeSet::new())
+                active_conflict(&provenance.roots, Access::Share, active_before, &own)
             {
                 diagnostics.push(conflict_diagnostic(
                     instruction.span,

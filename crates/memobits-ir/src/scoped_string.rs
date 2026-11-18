@@ -533,7 +533,9 @@ pub(super) fn validate(
                     }
                     initialize.then_some(*target)
                 }
-                InstructionKind::ListPush { target, .. } if !in_scope.contains(target) => {
+                InstructionKind::ListPush { target, .. }
+                    if list_local(*target) && !in_scope.contains(target) =>
+                {
                     push(
                         errors,
                         id,

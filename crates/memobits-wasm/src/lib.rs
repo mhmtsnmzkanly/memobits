@@ -379,7 +379,7 @@ fn primitive_signature<'a>(
             )
         }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
-            (p.access == memobits_ir::Access::Borrow && matches!(p.ty, Type::List(_)))
+            matches!(p.ty, Type::List(_))
                 || matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
                 || matches!(
                     p.ty,
@@ -398,7 +398,7 @@ fn supported_type(ty: &Type) -> bool {
         // A struct or enum is an inline frame-cell value, passed internally by address.
         Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) => true,
         Type::Reference {
-            access: memobits_ir::Access::Borrow,
+            access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
         } if matches!(inner.as_ref(), Type::List(_)) => true,
         Type::Reference {
@@ -2954,14 +2954,21 @@ fn compile_instruction(
             }
         }
         InstructionKind::ListPush { target, value } => {
-            let cell = array_cell_of(layout, Slot::Local(target.0))?;
-            let frame = frame.ok_or("List requires a frame")?;
-            let Type::List(element) = function.locals[target.0 as usize].ty else {
+            let list = match &function.locals[target.0 as usize].ty {
+                Type::Reference { inner, .. } => inner.as_ref(),
+                owner => owner,
+            };
+            let Type::List(element) = *list else {
                 return Err("List push target is not a List".into());
             };
             let (width, _) = storage_layout(element)?;
-            emit_address(body, frame, cell.offset);
-            emit_operand(body, function, param_count, value, layout, Some(frame))?;
+            let receiver = Operand {
+                source: Source::Local(*target),
+                mode: memobits_ir::UseMode::Read,
+                span: instruction.span,
+            };
+            emit_operand(body, function, param_count, &receiver, layout, frame)?;
+            emit_operand(body, function, param_count, value, layout, frame)?;
             body.instructions()
                 .i32_const(width as i32)
                 .call(heap_copy_index.ok_or("missing List allocation helper")? + 3)

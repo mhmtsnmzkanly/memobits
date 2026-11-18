@@ -216,7 +216,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `.push()` on whole mutable locals. Growth uses the same checked allocator
   as String. The [List design](list-slice.md) records copied `.get(index)`
   reads with checked unsigned bounds. Direct internal borrow parameters
-  can read either primitive List type. Live List loans block moves and pushes. General
+  can read either primitive List type. Share parameters can also push
+  through the caller descriptor. Live conflicting loans block access. General
   aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
   `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static

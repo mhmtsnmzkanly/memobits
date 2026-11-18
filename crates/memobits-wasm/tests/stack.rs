@@ -99,13 +99,16 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     let program = lower(
         r#"
+        fn append(bytes: share List<u8>, words: share List<u32>, index: u32) {
+            bytes.push(if index % 2 == 0 { 195 } else { 169 });
+            words.push(305_419_896 + index);
+        }
         fn main() -> Result<Bool, Error> {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             var index: u32 = 0;
             loop {
-                bytes.push(if index % 2 == 0 { 195 } else { 169 });
-                words.push(305_419_896 + index);
+                append(bytes.share(), words.share(), index);
                 index += 1;
                 if index == 12_000 { break; }
             }
@@ -116,7 +119,7 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     );
     let artifact = compile_application_traced(
         &program,
-        FunctionId(0),
+        FunctionId(1),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();

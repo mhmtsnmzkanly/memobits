@@ -1068,7 +1068,7 @@ fn validate_parameter_type(
             format!("{context} type cannot be a reference"),
         );
     }
-    if matches!(ty, Type::List(_)) && parameter.access != Access::Borrow {
+    if matches!(ty, Type::List(_)) && parameter.access == Access::Owned {
         push(
             errors,
             id,
@@ -1171,14 +1171,6 @@ fn validate_type_shape(
                     ),
                 );
             }
-            if matches!(inner.as_ref(), Type::List(_)) && *access != Access::Borrow {
-                push(
-                    errors,
-                    id,
-                    None,
-                    "List references must be read-only borrows",
-                );
-            }
             if matches!(
                 inner.as_ref(),
                 Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
@@ -1209,7 +1201,7 @@ fn list_read_element(ty: &Type) -> Option<Primitive> {
     match ty {
         Type::List(element) => Some(*element),
         Type::Reference {
-            access: Access::Borrow,
+            access: Access::Borrow | Access::Share,
             inner,
         } => match inner.as_ref() {
             Type::List(element) => Some(*element),
@@ -1373,9 +1365,20 @@ fn validate_instruction(
         }
         InstructionKind::ListPush { target, value } => {
             let actual = operand_type(program, function, value, errors, id, block);
-            if !matches!(function.locals.get(target.0 as usize), Some(Local {
-                ty: Type::List(element), mutable: true, ..
-            }) if actual == Some(Type::Primitive(*element)))
+            let receiver =
+                function
+                    .locals
+                    .get(target.0 as usize)
+                    .and_then(|local| match &local.ty {
+                        Type::List(element) if local.mutable => Some(*element),
+                        Type::Reference {
+                            access: Access::Share,
+                            inner,
+                        } if function.parameter_locals.contains(target) => list_read_element(inner),
+                        _ => None,
+                    });
+            if receiver.map(Type::Primitive) != actual
+                || receiver.is_none()
                 || instruction.output.is_some()
                 || value.mode != UseMode::Read
             {
@@ -1383,7 +1386,7 @@ fn validate_instruction(
                     errors,
                     id,
                     Some(block),
-                    "List push requires a mutable List local and a matching element",
+                    "List push requires a mutable List local or share parameter and a matching element",
                 );
             }
         }
@@ -1717,7 +1720,8 @@ fn validate_instruction(
                     Some(*inner)
                 }
                 Type::List(_)
-                    if *access == Access::Borrow && matches!(owner.source, Source::Local(_)) =>
+                    if matches!(access, Access::Borrow | Access::Share)
+                        && matches!(owner.source, Source::Local(_)) =>
                 {
                     Some(actual)
                 }
@@ -2606,6 +2610,14 @@ fn validate_instruction(
                     access: Access::Share,
                     inner,
                 }) => {
+                    if matches!(inner.as_ref(), Type::List(_)) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "whole List replacement through a share is not supported",
+                        );
+                    }
                     if reference.mode != UseMode::Share {
                         push(errors, id, Some(block), "store requires Share operand mode");
                     }
@@ -2790,7 +2802,7 @@ fn validate_instruction(
                                 errors,
                                 id,
                                 Some(block),
-                                "List borrows require a direct internal call",
+                                "List references require a direct internal call",
                             );
                         }
                         // Internal direct calls pass the original reference address.

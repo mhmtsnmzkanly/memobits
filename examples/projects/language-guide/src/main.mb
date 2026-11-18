@@ -137,6 +137,10 @@ fn list_word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
     items.get(index)
 }
 
+fn append_word(items: share List<u32>, value: u32) {
+    items.push(value);
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -146,7 +150,8 @@ fn primitive_lists() -> Bool {
     bytes.push(42);
     words.push(1000);
     var moved := words;
-    moved.push(2000);
+    // An exclusive call can grow the List that the caller owns.
+    append_word(moved.share(), 2000);
     // A direct call borrows the List. get copies the element out.
     let word := match list_word_at(moved.borrow(), 1) {
         Some(value) => value == 2000,

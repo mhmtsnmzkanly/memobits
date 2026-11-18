@@ -808,6 +808,104 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
 }
 
 #[test]
+fn shared_list_push_updates_caller_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-share'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn add(bytes: share List<u8>, words: share List<u32>) {
+            bytes.push(255);
+            let held := words.borrow();
+            let value := held.len() + 1000;
+            words.push(value);
+        }
+        fn last(words: share List<u32>) -> Option<u32> {
+            words.get(words.len() - 1)
+        }
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            var words: List<u32> = [];
+            var index: u32 = 0;
+            loop {
+                add(bytes.share(), words.share());
+                index += 1;
+                if index == 150 { break; }
+            }
+            let word := match last(words.share()) { Some(value) => value == 1149, None => false };
+            let moved := words;
+            let first := match moved.get(0) { Some(value) => value == 1000, None => false };
+            let byte := match bytes.get(149) { Some(value) => value == 255, None => false };
+            Ok(word && first && byte && bytes.len() == 150 && moved.len() == 150)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "shared.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "shared.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_shares_reject_aliases_and_whole_replacement() {
+    let f = Fixture::new();
+    for (source, code) in [
+        (
+            r#"fn add(view: share List<u8>) { view.push(1); }
+             fn main() { var items: List<u8> = []; let view := items.borrow();
+                         add(items.share()); view.len(); }"#,
+            "BE005",
+        ),
+        (
+            r#"fn both(left: share List<u8>, right: share List<u8>) {
+                  left.push(1); right.push(2);
+             }
+             fn main() { var items: List<u8> = []; both(items.share(), items.share()); }"#,
+            "BE005",
+        ),
+        (
+            r#"fn add(view: share List<u8>) {
+                  let held := view.borrow(); view.push(1); held.len();
+             }
+             fn main() {}"#,
+            "BE005",
+        ),
+        (
+            r#"fn reset(view: share List<u8>) { view = []; } fn main() {}"#,
+            "TE017",
+        ),
+        (
+            r#"fn main() { var items: List<u8> = []; var alias := items.share(); alias.push(1); }"#,
+            "TE017",
+        ),
+    ] {
+        f.write("list.mb", source);
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+
+    f.write(
+        "project.toml",
+        "[package]\nname='list-share-abi'\nentry='main::main'\n[export]\nadd='main::add'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "pub fn add(items: share List<u8>) { items.push(1); } fn main() {}",
+    );
+    let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        diagnostic.contains("external List ABI is not defined"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn borrowed_list_reads_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
@@ -872,7 +970,7 @@ fn list_borrow_conflicts_and_call_boundaries_are_checked() {
         ("let held := items.borrow(); let moved := items; held.get(0);", "BE005", "while it is borrowed"),
         ("inspect(items);", "TE017", "explicit .borrow()"),
         ("let indirect := inspect; indirect(items.borrow());", "TE017", "direct internal call"),
-        ("items.share();", "TE017", "read-only borrows"),
+        ("let fixed: List<u8> = []; fixed.share();", "TE017", "requires a mutable local owner"),
         ("let view: Option<borrow List<u8>> = Some(items.borrow());", "TE017", "cannot be stored in Option"),
         ("let dangling := { var inner: List<u8> = []; inner.push(5); inner.borrow() }; dangling.len();", "TE017", "reference-valued block results"),
     ] {
@@ -1093,7 +1191,7 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
             "TE017",
         ),
         (
-            "fn main() { var items: List<u8> = []; items.share(); }",
+            "fn main() { let items: List<u8> = []; items.share(); }",
             "TE017",
         ),
         (

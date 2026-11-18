@@ -19,8 +19,11 @@ can still name a user type. Direct internal calls accept `borrow List<T>`
 for these element types. Use `.borrow()` on a whole local to create the
 read-only handle. The callee can use `.len()` and `.get()`. A live loan
 blocks pushes, moves and cleanup of the owner until its last use.
-Replacement, subscript syntax, nesting, shares, owned calls, and exports
-remain gated at this checkpoint.
+A direct `share List<T>` parameter accepts an explicit `.share()` from
+a mutable owner and supports `push`, `len` and `get`. Growth updates the
+caller descriptor in place, and the caller retains cleanup responsibility.
+Whole-list replacement, subscript syntax, nesting, owned calls, and
+exports remain gated at this checkpoint.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -36,7 +39,8 @@ or a coverage need.
   existing array contexts continue to select Array. Defer nonempty List
   literals, repetition, and conversion from arrays.
 - Use `items.push(value)` to append one element and return unit. The
-  receiver is a whole mutable local. Evaluate the element once, before
+  receiver is a whole mutable local or a direct exclusive parameter.
+  Evaluate the element once, before
   allocating, growing, or changing the list. The argument can read the
   receiver's length. A move of the receiver during argument evaluation
   makes the subsequent push invalid.
@@ -52,9 +56,10 @@ first slice keeps the access rules and types already used in Memobits.
 [Rust Vec](https://doc.rust-lang.org/std/vec/struct.Vec.html)
 
 Scope the owner to whole local bindings, including moves from one local
-to another. Borrow parameters receive the caller's private descriptor
-address for the direct call. Defer owned call arguments and returns,
-exclusive parameters and shares, whole-local replacement, nested List storage,
+to another. Borrow and share parameters receive the caller's private
+descriptor address for the direct call. A share follows the usual
+exclusive loan rules. Push through a stored share handle remains gated.
+Defer owned call arguments and returns, whole-local replacement, nested List storage,
 aggregate elements, removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
