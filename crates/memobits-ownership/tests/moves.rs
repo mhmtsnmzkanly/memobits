@@ -163,6 +163,52 @@ fn branch_move_reaches_join_and_unreachable_block_is_ignored() {
 }
 
 #[test]
+fn branch_edges_transfer_the_same_owner_independently() {
+    let mut f = base();
+    f.signature.parameters[0].ty = Type::String;
+    f.locals[0].ty = Type::String;
+    f.locals[1].ty = Type::String;
+    f.values = vec![Type::Primitive(Primitive::Bool), Type::String];
+    f.blocks = vec![
+        block(
+            vec![Instruction {
+                span: Some(span(3)),
+                output: Some(ValueId(0)),
+                kind: InstructionKind::Constant(Constant::Bool(true)),
+            }],
+            TerminatorKind::Branch {
+                condition: value(0, UseMode::Read, 4),
+                then_edge: Edge {
+                    target: BlockId(1),
+                    arguments: vec![local(0, UseMode::Consume, 5)],
+                },
+                else_edge: Edge {
+                    target: BlockId(1),
+                    arguments: vec![local(0, UseMode::Consume, 6)],
+                },
+            },
+        ),
+        Block {
+            parameters: vec![ValueId(1)],
+            ..block(
+                vec![
+                    consume(value(1, UseMode::Consume, 7)),
+                    consume(local(0, UseMode::Consume, 8)),
+                ],
+                TerminatorKind::Return(None),
+            )
+        },
+    ];
+    let diagnostics = check_moves(&Program {
+        functions: vec![f],
+        ..Program::default()
+    });
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code.to_string(), "BE001");
+    assert_eq!(diagnostics[0].span.unwrap().start, 8);
+}
+
+#[test]
 fn loop_backedge_reaches_fixed_point() {
     let mut f = base();
     f.values.push(Type::Primitive(Primitive::Bool));

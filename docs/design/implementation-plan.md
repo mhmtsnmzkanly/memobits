@@ -215,8 +215,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - Dynamic lists, heap-backed cleanup, general aggregate copy,
   mutable pattern bindings, `defaults`, and `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static
-  layout planner in use. The first allocation and growth consumer remains
-  an owned String produced by concatenation.
+  layout planner and shared move-state transfers for cleanup preparation.
+  The first allocation and growth consumer remains an owned String produced
+  by concatenation.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.

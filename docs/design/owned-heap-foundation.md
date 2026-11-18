@@ -66,6 +66,15 @@ No host allocator imports or new manifest setting are needed for this slice.
 
 ## Ownership and cleanup
 
+Move checking now computes definite block-entry availability separately
+from diagnostic replay. Both run the same block and edge transfers,
+including consumption of return values and parallel binding of successor
+parameters. This gives cleanup elaboration a common starting point.
+An unavailable slot at a join may still own a value on some incoming paths.
+Cleanup still needs lexical exit information and a way to distinguish those
+paths, such as cleanup on predecessor edges or a conditional drop flag.
+Static String values need no cleanup instruction today.
+
 Extend the private String descriptor so cleanup distinguishes static
 literal storage from an owned allocation. Stack cells still hold descriptors.
 Moves transfer the obligation to free dynamic storage, while a borrow leaves

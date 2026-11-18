@@ -1,8 +1,8 @@
 //! Move and reference-handle availability over typed IR control flow.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_ir::{
-    ArrayInit, Edge, Function, Instruction, InstructionKind, LocalId, Operand, Program, Source,
-    TerminatorKind, UseMode,
+    ArrayInit, Block, Edge, Function, Instruction, InstructionKind, LocalId, Operand, Program,
+    Source, TerminatorKind, UseMode,
 };
 use std::collections::VecDeque;
 
@@ -88,7 +88,27 @@ fn reachable(function: &Function) -> Vec<bool> {
 
 fn check_function(function: &Function) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let reachable = reachable(function);
+    for (block, state) in function
+        .blocks
+        .iter()
+        .zip(block_entry_availability(function))
+    {
+        if let Some(mut state) = state {
+            transfer_block(
+                function,
+                block,
+                &mut state,
+                Some(&mut diagnostics),
+                |_, _| {},
+            );
+        }
+    }
+    diagnostics
+}
+
+/// Definite availability at each reachable block entry. A false slot may
+/// still be initialized on some incoming paths.
+fn block_entry_availability(function: &Function) -> Vec<Option<Vec<bool>>> {
     let locals = function.locals.len();
     let slots = locals + function.values.len();
     let mut initial = vec![false; slots];
@@ -97,103 +117,77 @@ fn check_function(function: &Function) -> Vec<Diagnostic> {
     }
     // Availability is a must property. Start reachable non-entry blocks at top
     // and monotonically intersect incoming states until loops settle.
-    let mut states = vec![vec![true; slots]; function.blocks.len()];
-    states[function.entry.0 as usize] = initial;
+    let mut states: Vec<_> = reachable(function)
+        .into_iter()
+        .map(|reachable| reachable.then(|| vec![true; slots]))
+        .collect();
+    states[function.entry.0 as usize] = Some(initial);
     let mut changed = true;
     while changed {
         changed = false;
         for (index, block) in function.blocks.iter().enumerate() {
-            if !reachable[index] {
+            let Some(mut state) = states[index].clone() else {
                 continue;
-            }
-            let mut after = states[index].clone();
-            for instruction in &block.instructions {
-                transfer_instruction(instruction, &mut after, None, function);
-            }
-            match &block.terminator.kind {
-                TerminatorKind::Goto(edge) => {
-                    let mut edge_state = after;
-                    transfer_edge(edge, &mut edge_state, None, function);
-                    changed |= meet(&mut states[edge.target.0 as usize], &edge_state);
-                }
-                TerminatorKind::Branch {
-                    condition,
-                    then_edge,
-                    else_edge,
-                } => {
-                    transfer_operand(condition, &mut after, None, function);
-                    for edge in [then_edge, else_edge] {
-                        let mut edge_state = after.clone();
-                        transfer_edge(edge, &mut edge_state, None, function);
-                        changed |= meet(&mut states[edge.target.0 as usize], &edge_state);
-                    }
-                }
-                TerminatorKind::Switch {
-                    tag,
-                    targets,
-                    default,
-                    ..
-                } => {
-                    transfer_operand(tag, &mut after, None, function);
-                    for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
-                        let mut edge_state = after.clone();
-                        transfer_edge(edge, &mut edge_state, None, function);
-                        changed |= meet(&mut states[edge.target.0 as usize], &edge_state);
-                    }
-                }
-                TerminatorKind::Return(value) => {
-                    if let Some(value) = value {
-                        transfer_operand(value, &mut after, None, function);
-                    }
-                }
-                TerminatorKind::Unreachable => {}
-            }
+            };
+            transfer_block(function, block, &mut state, None, |edge, after| {
+                let target = states[edge.target.0 as usize]
+                    .as_mut()
+                    .expect("a successor of a reachable block is reachable");
+                changed |= meet(target, after);
+            });
         }
+    }
+    states
+}
+
+/// Apply the same transfers during convergence and diagnostic replay.
+/// Each successor gets its own state after consuming its edge operands and
+/// binding its parameters. A return consumes its result in the supplied state.
+fn transfer_block(
+    function: &Function,
+    block: &Block,
+    state: &mut [bool],
+    mut diagnostics: Option<&mut Vec<Diagnostic>>,
+    mut successor: impl FnMut(&Edge, &[bool]),
+) {
+    for instruction in &block.instructions {
+        transfer_instruction(instruction, state, diagnostics.as_deref_mut(), function);
     }
 
-    for (index, block) in function.blocks.iter().enumerate() {
-        if !reachable[index] {
-            continue;
+    let mut transfer_successor =
+        |edge, state: &mut [bool], diagnostics: &mut Option<&mut Vec<Diagnostic>>| {
+            transfer_edge(edge, state, diagnostics.as_deref_mut(), function);
+            successor(edge, state);
+        };
+    match &block.terminator.kind {
+        TerminatorKind::Goto(edge) => transfer_successor(edge, state, &mut diagnostics),
+        TerminatorKind::Branch {
+            condition,
+            then_edge,
+            else_edge,
+        } => {
+            transfer_operand(condition, state, diagnostics.as_deref_mut(), function);
+            let mut then_state = state.to_vec();
+            transfer_successor(then_edge, &mut then_state, &mut diagnostics);
+            transfer_successor(else_edge, state, &mut diagnostics);
         }
-        let mut state = states[index].clone();
-        for instruction in &block.instructions {
-            transfer_instruction(instruction, &mut state, Some(&mut diagnostics), function);
+        TerminatorKind::Switch {
+            tag,
+            targets,
+            default,
+            ..
+        } => {
+            transfer_operand(tag, state, diagnostics.as_deref_mut(), function);
+            for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
+                let mut edge_state = state.to_vec();
+                transfer_successor(edge, &mut edge_state, &mut diagnostics);
+            }
         }
-        match &block.terminator.kind {
-            TerminatorKind::Goto(edge) => {
-                transfer_edge(edge, &mut state, Some(&mut diagnostics), function)
-            }
-            TerminatorKind::Branch {
-                condition,
-                then_edge,
-                else_edge,
-            } => {
-                transfer_operand(condition, &mut state, Some(&mut diagnostics), function);
-                let mut then_state = state.clone();
-                transfer_edge(then_edge, &mut then_state, Some(&mut diagnostics), function);
-                transfer_edge(else_edge, &mut state, Some(&mut diagnostics), function);
-            }
-            TerminatorKind::Switch {
-                tag,
-                targets,
-                default,
-                ..
-            } => {
-                transfer_operand(tag, &mut state, Some(&mut diagnostics), function);
-                for edge in targets.iter().map(|(_, edge)| edge).chain(default) {
-                    let mut edge_state = state.clone();
-                    transfer_edge(edge, &mut edge_state, Some(&mut diagnostics), function);
-                }
-            }
-            TerminatorKind::Return(value) => {
-                if let Some(value) = value {
-                    transfer_operand(value, &mut state, Some(&mut diagnostics), function);
-                }
-            }
-            TerminatorKind::Unreachable => {}
+        TerminatorKind::Return(Some(value)) => {
+            transfer_operand(value, state, diagnostics, function);
         }
+        TerminatorKind::Return(None) | TerminatorKind::Unreachable => {}
     }
-    diagnostics
 }
 
 fn meet(current: &mut [bool], incoming: &[bool]) -> bool {

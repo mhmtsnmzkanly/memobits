@@ -44,6 +44,11 @@ error. Loops require a fixed point; checking only one traversal of a loop body
 would miss reuse on the next iteration. Reinitialization restores availability
 when permitted by the binding's mutation rules.
 
+Move checking computes definite availability at reachable block entries,
+then replays the same transfers for diagnostics. This information is a
+starting point for normal-exit cleanup. A slot that is unavailable at a
+join can still hold an owner on an individual incoming path.
+
 ## Verification targets
 
 - Repeated arithmetic reads of one scalar remain valid.
