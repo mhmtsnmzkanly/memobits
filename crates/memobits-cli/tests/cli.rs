@@ -66,8 +66,16 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
             "new immutable local",
         ),
         (
-            r#"let joined := "a".concat("b"); take(joined);"#,
-            "new immutable local",
+            r#"let joined := "a".concat("b"); returns(joined).len();"#,
+            "final owned String parameter",
+        ),
+        (
+            r#"let joined := "a".concat("b"); earlier(joined, true);"#,
+            "final owned String parameter",
+        ),
+        (
+            r#"let joined := "a".concat("b"); alias(joined.borrow(), joined);"#,
+            "while it is borrowed",
         ),
         (
             r#"let joined := "a".concat("b"); let view := joined.borrow(); let moved := joined; view.len();"#,
@@ -80,13 +88,61 @@ fn concat_results_cannot_escape_or_mutate_their_lexical_binding() {
     ] {
         f.write(
             "src/main.mb",
-            &format!("fn take(s: String) {{}} fn main() {{ {body} }}"),
+            &format!(
+                "fn returns(s: String) -> String {{ s }}
+                 fn earlier(s: String, flag: Bool) {{}}
+                 fn alias(view: borrow String, s: String) {{ view.len(); }}
+                 fn main() {{ {body} }}"
+            ),
         );
         let result = f.run(&["run"]);
         assert!(!result.status.success(), "{body}");
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains(message), "{body}: {stderr}");
     }
+}
+
+#[test]
+fn owned_heap_arguments_forward_and_leave_literal_only_calls_available() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-calls'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/text.mb",
+        r#"
+        pub fn consume(early: Bool, value: String) -> u32 {
+            if early { return value.len(); }
+            let moved := value;
+            moved.len()
+        }
+        pub fn forward(early: Bool, value: String) -> u32 {
+            consume(early, value)
+        }
+    "#,
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        use self::text::forward;
+        fn literal_echo(value: String, extra: u32) -> String { value }
+        fn main() -> Result<u32, Error> {
+            let first := "é".concat("!");
+            let second := "a".concat("😀");
+            let echoed := literal_echo("ok", 0);
+            Ok(forward(true, first) + forward(false, second) + forward(false, echoed))
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(10))\n");
+    let build = f.run(&["build", "--output", "calls.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "calls.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
 }
 
 #[test]

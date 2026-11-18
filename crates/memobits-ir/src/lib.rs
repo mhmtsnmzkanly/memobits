@@ -505,6 +505,7 @@ impl Program {
         let mut paths = HashSet::new();
         self.validate_types(&mut errors);
         let type_count = self.types.len();
+        let heap_strings = self.heap_string_locals();
         for (index, function) in self.functions.iter().enumerate() {
             let id = FunctionId(index as u32);
             if !paths.insert(&function.path) {
@@ -681,8 +682,9 @@ impl Program {
             if defined.len() != function.values.len() {
                 push(&mut errors, id, None, "some value IDs have no definition");
             }
-            let concat_locals = scoped_string::validate(function, id, &mut errors);
-            validate_operand_escapes(function, id, &concat_locals, &mut errors);
+            let heap_locals = &heap_strings[index];
+            scoped_string::validate(function, id, heap_locals, &mut errors);
+            validate_operand_escapes(self, function, id, heap_locals, &mut errors);
         }
         if errors.is_empty() {
             Ok(())
@@ -2554,9 +2556,10 @@ fn validate_instruction(
 }
 
 fn validate_operand_escapes(
+    program: &Program,
     function: &Function,
     id: FunctionId,
-    concat_locals: &HashSet<LocalId>,
+    heap_locals: &HashSet<LocalId>,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut read_only = vec![false; function.values.len()];
@@ -2609,14 +2612,14 @@ fn validate_operand_escapes(
     }
 
     let mut report = |block: BlockId, operand: &Operand, escape: bool, captures: bool| {
-        if matches!(operand.source, Source::Local(local) if concat_locals.contains(&local))
+        if matches!(operand.source, Source::Local(local) if heap_locals.contains(&local))
             && (escape || captures || !matches!(operand.mode, UseMode::Read | UseMode::Borrow))
         {
             push(
                 errors,
                 id,
                 Some(block),
-                "heap String can only be read, borrowed, or moved into a new immutable local",
+                "heap String can only be read, borrowed, or moved into a new immutable local or a final owned String parameter",
             );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
@@ -2691,7 +2694,7 @@ fn validate_operand_escapes(
                 } => {
                     if !*initialize
                         || !scoped_string::local_move_source(function, *target, value)
-                            .is_some_and(|source| concat_locals.contains(&source))
+                            .is_some_and(|source| heap_locals.contains(&source))
                     {
                         report(block_id, value, true, false);
                     }
@@ -2703,8 +2706,13 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::Call { callee, arguments } => {
                     report(block_id, callee, true, false);
-                    for argument in arguments {
-                        report(block_id, argument, true, false);
+                    let valid_transfer =
+                        scoped_string::owned_call_transfer(program, callee, arguments)
+                            .is_some_and(|(source, _, _)| heap_locals.contains(&source));
+                    for (index, argument) in arguments.iter().enumerate() {
+                        if !valid_transfer || index + 1 != arguments.len() {
+                            report(block_id, argument, true, false);
+                        }
                     }
                 }
                 InstructionKind::Constant(_) | InstructionKind::EndStringLocal { .. } => {}

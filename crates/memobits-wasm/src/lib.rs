@@ -12,7 +12,7 @@ use memobits_ir::{
     Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
     Type, TypeDef, TypeDefKind, UnaryOp,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ExportKind, ExportSection,
     Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
@@ -414,7 +414,6 @@ struct ArrayCell {
 /// Reference locals and values carry the cell address rather than own a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameLayout {
-    concat_locals: std::collections::HashSet<LocalId>,
     slots: BTreeMap<u32, FrameSlot>,
     /// Every array- or struct-typed local and value owns one inline cell.
     arrays: BTreeMap<Slot, ArrayCell>,
@@ -898,7 +897,6 @@ impl FrameLayout {
             slots,
             arrays,
             structs: structs.to_vec(),
-            concat_locals: function.scoped_string_locals(),
             size,
         })
     }
@@ -1527,15 +1525,10 @@ fn encode_frames_traced(
         functions.function(signatures.len() as u32);
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
-    let concat_index = selected
+    let heap_strings = program.heap_string_locals();
+    let concat_index = reachable
         .iter()
-        .any(|function| {
-            function
-                .blocks
-                .iter()
-                .flat_map(|block| &block.instructions)
-                .any(|inst| matches!(inst.kind, InstructionKind::InitConcatString { .. }))
-        })
+        .any(|id| !heap_strings[*id as usize].is_empty())
         .then(|| {
             let adapter_count = u32::from(entry.is_some());
             types.ty().function([ValType::I32; 3], [ValType::I32]);
@@ -1571,6 +1564,7 @@ fn encode_frames_traced(
             &structs,
             stack_size,
             &strings.offsets,
+            &heap_strings[*id as usize],
             concat_index,
             &mut traps,
         )?);
@@ -1686,6 +1680,7 @@ fn compile_function(
     structs: &[StructLayout],
     stack_size: u32,
     strings: &BTreeMap<&str, u32>,
+    heap_locals: &HashSet<LocalId>,
     concat_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
@@ -1758,6 +1753,13 @@ fn compile_function(
                 src_mem: 0,
                 dst_mem: 0,
             });
+            if heap_locals.contains(local) {
+                // The incoming pointer addresses the caller's moved slot.
+                // Clear it only after the callee has received the descriptor.
+                body.instruction(&WasmInstruction::LocalGet(index as u32));
+                body.instruction(&WasmInstruction::I32Const(0));
+                string_descriptor::store_allocation(body);
+            }
             continue;
         }
         body.instruction(&WasmInstruction::LocalGet(index as u32));
@@ -1782,6 +1784,7 @@ fn compile_function(
                 &layout,
                 frame,
                 strings,
+                heap_locals,
                 concat_index,
                 traps,
             )?;
@@ -2633,6 +2636,7 @@ fn compile_instruction(
     layout: &FrameLayout,
     frame: Option<FrameState>,
     strings: &BTreeMap<&str, u32>,
+    heap_locals: &HashSet<LocalId>,
     concat_index: Option<u32>,
     traps: &mut Traps,
 ) -> Result<(), String> {
@@ -2641,7 +2645,7 @@ fn compile_instruction(
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
         InstructionKind::EndStringLocal { local } => {
-            if layout.concat_locals.contains(local) {
+            if heap_locals.contains(local) {
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
                 emit_address(
                     body,
@@ -3216,7 +3220,7 @@ fn compile_instruction(
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
                 if let Source::Local(source) = value.source {
-                    if layout.concat_locals.contains(&source) {
+                    if heap_locals.contains(&source) {
                         // The destination descriptor now owns the block. Zero
                         // provenance leaves the old binding empty on this path.
                         emit_operand(body, function, param_count, value, layout, frame)?;

@@ -30,8 +30,11 @@ operations or lent to an internal borrow parameter.
 
 This slice accepts concat as the direct initializer of an immutable local.
 A direct move into another immutable local transfers the owning descriptor.
-Owned call arguments, returned or temporary owners, sharing for mutation
-and replacement require broader drop elaboration. A nonzero descriptor
+A direct internal call can also take the local in its final owned String
+parameter. Earlier heap arguments remain gated because evaluation of a
+later argument could exit and leave an owning temporary to clean up.
+Heap returns, other temporary owners, sharing for mutation and replacement
+require broader drop elaboration. A nonzero descriptor
 provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
@@ -55,6 +58,11 @@ to later List work.
 At each reachable block entry, the IR validator requires every incoming
 edge to agree on the heap bindings still in scope, even when their move
 states differ. A callee must end all of its heap bindings before returning.
+Heap capability propagates through direct calls, including forwarding calls,
+so return and replacement gates also apply to parameters that may receive
+heap text. Calls that only carry static text retain ordinary String behavior.
+The callee copies the incoming descriptor into its owned parameter cell
+and clears the caller slot's provenance before executing the body.
 Release uses the block address, so it preserves other live allocations
 regardless of their order. The move and loan checks run before Wasm emission
 and reject a move or release while a borrow remains live. Two inputs may
@@ -79,7 +87,7 @@ have page-reuse coverage.
    Scope exit consults provenance, so mixed paths need no separate flag.
    Tests cover moving an older allocation while a newer allocation remains
    live, and moving on one branch while retaining the original on another.
-3. Cover ownership across calls, returns and temporary results before
+3. Cover remaining argument positions, returns and temporary results before
    permitting those uses. Transfer the result before dropping the callee's
    other owners. Drop discarded temporaries on normal exits. Evaluate a
    replacement before releasing the previous owner, including whole

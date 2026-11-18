@@ -219,7 +219,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   String locals. Scoped `String.concat` uses heap provenance and a private
   whole-block free list to reuse storage released at lexical exits.
   Moves between immutable local bindings transfer ownership and release
-  the block once on either branch. Owned calls, returns and general drop
+  the block once on either branch. Direct calls can transfer a heap local
+  into their final owned String parameter. Heap returns and general drop
   insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,

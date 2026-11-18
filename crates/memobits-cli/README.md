@@ -57,8 +57,9 @@ byte length, `.is_char_boundary(offset)` to test a byte offset, and
 to decode a Unicode scalar at a byte offset as `Option<u32>`.
 `let joined := left.concat(right);` borrows its inputs and allocates owned
 text for that immutable binding. The result can be read, borrowed, or moved
-to another immutable local. Scope exit releases it from the binding that
-still owns it. Owned calls and returns of concat results, exported String
+to another immutable local. A direct internal call can take it in its final
+owned String parameter. Scope exit releases it from the binding that
+still owns it. Returning heap Strings, exported String
 signatures, and nested String storage are gated. Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

@@ -6,41 +6,87 @@ use super::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
-impl Function {
-    /// Heap String locals introduced by concat or by a direct immutable move
-    /// from a previously classified local.
-    pub fn scoped_string_locals(&self) -> HashSet<LocalId> {
-        let mut locals = HashSet::new();
-        let mut moves: HashMap<LocalId, Vec<LocalId>> = HashMap::new();
-        for instruction in self.blocks.iter().flat_map(|block| &block.instructions) {
-            match &instruction.kind {
-                InstructionKind::InitConcatString { target, .. } => {
-                    locals.insert(*target);
-                }
-                InstructionKind::Assign {
-                    target,
-                    value,
-                    initialize: true,
-                } => {
-                    if let Some(source) = local_move_source(self, *target, value) {
-                        moves.entry(source).or_default().push(*target);
+impl super::Program {
+    /// Heap-capable locals and owned parameters, propagated through immutable
+    /// local moves and direct calls. Literal-only call paths need no cleanup.
+    pub fn heap_string_locals(&self) -> Vec<HashSet<LocalId>> {
+        let mut facts = vec![HashSet::new(); self.functions.len()];
+        let mut moves: HashMap<(usize, LocalId), Vec<(usize, LocalId)>> = HashMap::new();
+        let mut pending = Vec::new();
+        for (index, function) in self.functions.iter().enumerate() {
+            for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+                match &instruction.kind {
+                    InstructionKind::InitConcatString { target, .. } => {
+                        if facts[index].insert(*target) {
+                            pending.push((index, *target));
+                        }
                     }
+                    InstructionKind::Assign {
+                        target,
+                        value,
+                        initialize: true,
+                    } => {
+                        if let Some(source) = local_move_source(function, *target, value) {
+                            moves
+                                .entry((index, source))
+                                .or_default()
+                                .push((index, *target));
+                        }
+                    }
+                    InstructionKind::Call { callee, arguments } => {
+                        if let Some((source, target, parameter)) =
+                            owned_call_transfer(self, callee, arguments)
+                        {
+                            moves
+                                .entry((index, source))
+                                .or_default()
+                                .push((target, parameter));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-        let mut pending: Vec<_> = locals.iter().copied().collect();
         while let Some(source) = pending.pop() {
             if let Some(targets) = moves.get(&source) {
-                for &target in targets {
-                    if locals.insert(target) {
-                        pending.push(target);
+                for &(function, local) in targets {
+                    if facts[function].insert(local) {
+                        pending.push((function, local));
                     }
                 }
             }
         }
-        locals
+        facts
     }
+}
+
+/// A direct call may move a local into its final owned String parameter.
+pub(super) fn owned_call_transfer(
+    program: &super::Program,
+    callee: &Operand,
+    arguments: &[Operand],
+) -> Option<(LocalId, usize, LocalId)> {
+    let Source::Function(target) = callee.source else {
+        return None;
+    };
+    let target = target.0 as usize;
+    let function = program.functions.get(target)?;
+    let last = arguments.len().checked_sub(1)?;
+    if arguments.len() != function.signature.parameters.len() {
+        return None;
+    }
+    let parameter = &function.signature.parameters[last];
+    let source = &arguments[last];
+    let Source::Local(local) = source.source else {
+        return None;
+    };
+    if parameter.access != super::Access::Owned
+        || parameter.ty != Type::String
+        || source.mode != UseMode::Consume
+    {
+        return None;
+    }
+    Some((local, target, *function.parameter_locals.get(last)?))
 }
 
 /// Only a declaration of a new immutable local can receive a heap owner.
@@ -64,14 +110,21 @@ pub(super) fn local_move_source(
 pub(super) fn validate(
     function: &Function,
     id: FunctionId,
+    locals: &HashSet<LocalId>,
     errors: &mut Vec<ValidationError>,
-) -> HashSet<LocalId> {
-    let locals = function.scoped_string_locals();
+) {
     if locals.is_empty() || function.entry.0 as usize >= function.blocks.len() {
-        return locals;
+        return;
     }
-    let mut entries = vec![None; function.blocks.len()];
-    entries[function.entry.0 as usize] = Some(HashSet::new());
+    let mut entries: Vec<Option<HashSet<LocalId>>> = vec![None; function.blocks.len()];
+    entries[function.entry.0 as usize] = Some(
+        function
+            .parameter_locals
+            .iter()
+            .copied()
+            .filter(|local| locals.contains(local))
+            .collect(),
+    );
     let mut pending = VecDeque::from([function.entry]);
     while let Some(block_id) = pending.pop_front() {
         let block = &function.blocks[block_id.0 as usize];
@@ -147,5 +200,4 @@ pub(super) fn validate(
             }
         }
     }
-    locals
 }

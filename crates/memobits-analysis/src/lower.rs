@@ -1438,10 +1438,17 @@ impl<'a> Builder<'a> {
                 let callee = self.lower_expr(callee)?;
                 let callee = self.capture(callee)?;
                 let mut args = Vec::new();
-                for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+                for (index, (argument, parameter)) in
+                    arguments.iter().zip(&signature.parameters).enumerate()
+                {
                     let argument = self.lower_expr(argument)?;
                     if parameter.access == Access::Owned {
-                        args.push(self.owned_captured(argument, &parameter.ty)?);
+                        if parameter.ty == Type::String && index + 1 == arguments.len() {
+                            // No later argument can exit before this move reaches the call.
+                            args.push(self.owned_to(argument, &parameter.ty)?);
+                        } else {
+                            args.push(self.owned_captured(argument, &parameter.ty)?);
+                        }
                     } else {
                         // Keep the original pointee and loan. Only the call
                         // boundary can view an error reference as its ancestor.
