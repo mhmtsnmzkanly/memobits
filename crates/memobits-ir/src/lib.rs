@@ -2722,8 +2722,12 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::EnumNew { payload, .. } => {
-                    for operand in payload {
-                        report(block_id, operand, true, false);
+                    if !instruction.output.is_some_and(|value| {
+                        heap_strings[id.0 as usize].matched_ok.contains(&value)
+                    }) {
+                        for operand in payload {
+                            report(block_id, operand, true, false);
+                        }
                     }
                 }
                 InstructionKind::ArrayNew { init } => {

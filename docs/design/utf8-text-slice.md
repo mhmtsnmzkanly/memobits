@@ -49,9 +49,11 @@ descriptor through aggregate call and storage paths. Guest code has no
 operation that writes to the literal bytes. For an
 outcome entry, the runner's existing memory export still exposes linear
 memory to the embedding host. Internal `Result<String, E>` can store a
-static String in its `Ok` payload. A consuming match moves it into a
-String local. Other embedded String storage, borrowed String payload
-matches, and exported String signatures remain gated.
+static String in its `Ok` payload. A heap-backed `Ok` is supported when a
+local Result binding is immediately followed by a same-function consuming
+match with explicit `Ok(value)` and `Err` arms. Other embedded String
+storage, borrowed String payload matches, and exported String signatures
+remain gated.
 
 ## Byte length
 
@@ -180,8 +182,8 @@ fn main() -> i32 {
 The static case uses the private String descriptor layout in `Ok` and
 the existing aggregate return and extraction paths. The descriptor's
 allocation field stays zero. Replacing the body with
-`let text := "é".concat("!"); Ok(text)` reports `TE018` because heap
-ownership is still gated at enum construction. The application outcome
+`let text := "é".concat("!"); Ok(text)` reports `TE018` because returning
+a heap-backed Result still requires interprocedural ownership tracking. The application outcome
 ABI continues to require a primitive success payload.
 [Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
 [Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
@@ -190,15 +192,17 @@ ABI continues to require a primitive success payload.
    including construction, return, receipt and consuming match. A String
    local or internal call result can be used when heap provenance is absent.
    Containers of these results and external signatures remain gated.
-2. Extend that exact path to heap owners. Move the descriptor into
-   `Ok`, clear the source allocation field, and transfer the result across
-   the internal return. In the caller, consume the result in an owned
-   match and transfer `Ok(text)` into the arm's String local. The `Err`
-   arm has no String owner. Gate unconsumed results, wildcard discards of
-   heap success payloads and unsupported moves until those paths have drop
-   coverage. Prove that early arm exits free once and repeated matches reuse
-   blocks.
-3. Add the fixed-buffer constructor. Use the guest validator's cases as
+2. Implemented same-function heap `Ok` with an immediate consuming match.
+   The IR validator requires a named String moved into `Ok`, a Result
+   binding, and the very next operation to match that binding. Both arms
+   must be explicit and the success arm must bind the String. Packing clears
+   the original owner's allocation field. Extraction transfers ownership to
+   the arm binding, whose normal-exit cleanup releases or moves it exactly
+   once. Tests cover early arm returns and repeated reuse.
+3. Extend ownership across internal Result returns and receiving matches.
+   Unconsumed results, wildcard discards and other escapes stay gated until
+   they have cleanup coverage.
+4. Add the fixed-buffer constructor. Use the guest validator's cases as
    the contract for a checked validation-and-copy path. Current guest code
    can validate bytes, while publication of a descriptor from dynamic bytes
    requires a compiler-provided operation that validates before allocating

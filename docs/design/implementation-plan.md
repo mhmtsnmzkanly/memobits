@@ -244,11 +244,13 @@ the implemented subset; a milestone is not complete merely because its crate exi
   returns a raw byte as `Option<u8>`, and `.scalar_at(index)` decodes a
   Unicode scalar at a byte offset as `Option<u32>`. Internal
   `Result<String, E>` supports static success payloads and consuming matches.
+  A heap `Ok` supports immediate same-function consuming matches with an
+  explicit success binding. Heap Result returns and other escapes stay gated.
   Exported String signatures, other nested String storage, and a public
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.
   [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
-  is planned after heap success-payload ownership is supported.
+  is planned after heap success-payload ownership crosses internal returns.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.
 

@@ -932,9 +932,50 @@ fn internal_static_string_results_run_from_source_and_wasm() {
 }
 
 #[test]
-fn internal_string_results_reject_heap_success_payloads() {
+fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='heap-string-result'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn into_len(value: String) -> u32 { value.len() }
+        fn check(early: Bool) -> Bool {
+            let text := "é".concat("😀");
+            let result: Result<String, Error> = Ok(text);
+            match result {
+                Ok(value) => {
+                    if early { return value.len() == 6; }
+                    let scalar := match value.scalar_at(2) {
+                        Some(code) => code == 128_512, None => false
+                    };
+                    scalar && into_len(value) == 6
+                },
+                Err(_) => false
+            }
+        }
+        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true)) }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "owned-result.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "owned-result.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn heap_string_results_reject_escape_and_ignore_paths() {
     let f = Fixture::new();
     for body in [
+        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
+        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); match result { Err(_) => {}, _ => {} };"#,
+        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); 1 + 1; match result { Ok(text) => { text.len(); }, Err(_) => {} };"#,
         r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text);"#,
         r#"let result := wrap("é".concat("!"));"#,
         r#"let result: Result<String, Error> = Ok(heap());"#,

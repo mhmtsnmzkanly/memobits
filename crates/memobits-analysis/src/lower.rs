@@ -1898,7 +1898,17 @@ impl<'a> Builder<'a> {
         let mut payload = Vec::with_capacity(arguments.len());
         for (argument, ty) in arguments.iter().zip(&declared.payload) {
             let value = self.lower_expr(argument)?;
-            payload.push(self.owned_captured(value, ty)?);
+            // String is the only Ok payload, so it can move at construction
+            // without an intervening capture for argument evaluation order.
+            let value = if ty == &Type::String
+                && types[id.0 as usize].entry_outcome == Some(memobits_ir::EntryOutcome::Result)
+                && variant == 0
+            {
+                self.owned_to(value, ty)?
+            } else {
+                self.owned_captured(value, ty)?
+            };
+            payload.push(value);
         }
         self.emit(
             expr.span,

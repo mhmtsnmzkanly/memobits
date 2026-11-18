@@ -1,8 +1,9 @@
 //! Validate lexical heap String ownership and cleanup across CFG edges.
 
 use super::{
-    outgoing_edges, push, Access, Block, Function, FunctionId, Instruction, InstructionKind,
-    LocalId, Operand, Source, TerminatorKind, Type, UseMode, ValidationError, ValueId,
+    outgoing_edges, push, Access, Block, EntryOutcome, Function, FunctionId, Instruction,
+    InstructionKind, LocalId, Operand, Source, TerminatorKind, Type, UseMode, ValidationError,
+    ValueId,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -11,6 +12,7 @@ pub struct HeapStrings {
     pub locals: HashSet<LocalId>,
     pub(super) returns_heap: bool,
     pub(super) writes_heap: HashSet<usize>,
+    pub(super) matched_ok: HashSet<ValueId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +54,17 @@ impl super::Program {
                                     .entry(Slot::Local(index, source))
                                     .or_default()
                                     .push(Slot::Local(index, *target));
+                            }
+                        }
+                        InstructionKind::EnumNew { .. } => {
+                            if let Some((value, source, target)) =
+                                immediately_matched_ok(self, function, block, position)
+                            {
+                                facts[index].matched_ok.insert(value);
+                                moves
+                                    .entry(Slot::Local(index, source))
+                                    .or_default()
+                                    .push(Slot::Local(index, target));
                             }
                         }
                         InstructionKind::Store { reference, value } => {
@@ -116,6 +129,98 @@ impl super::Program {
             }
         }
         facts
+    }
+}
+
+/// A heap Ok may cross only the operations that place it in the consuming
+/// match cell, select its arm, and move the unwrapped owner into a local.
+fn immediately_matched_ok(
+    program: &super::Program,
+    function: &Function,
+    block: &Block,
+    position: usize,
+) -> Option<(ValueId, LocalId, LocalId)> {
+    let [pack, bind, scrutinee, tag] = &block.instructions[position..] else {
+        return None;
+    };
+    let InstructionKind::EnumNew {
+        ty,
+        variant: 0,
+        payload,
+    } = &pack.kind
+    else {
+        return None;
+    };
+    if program.types.get(ty.0 as usize)?.entry_outcome != Some(EntryOutcome::Result) {
+        return None;
+    }
+    let [Operand {
+        source: Source::Local(source),
+        mode: UseMode::Consume,
+        ..
+    }] = payload.as_slice()
+    else {
+        return None;
+    };
+    if function.locals.get(source.0 as usize)?.ty != Type::String {
+        return None;
+    }
+    let result = pack.output?;
+    let binding = move_initialization(bind, Source::Value(result))?;
+    let cell = move_initialization(scrutinee, Source::Local(binding))?;
+    if binding == cell
+        || !matches!(&tag.kind, InstructionKind::EnumTag { base }
+        if base.source == Source::Local(cell) && base.mode == UseMode::Read)
+    {
+        return None;
+    }
+    let TerminatorKind::Switch {
+        tag: selector,
+        ty: switched,
+        targets,
+        default: None,
+    } = &block.terminator.kind
+    else {
+        return None;
+    };
+    if switched != ty || selector.source != Source::Value(tag.output?) {
+        return None;
+    }
+    let [(first, first_edge), (second, second_edge)] = targets.as_slice() else {
+        return None;
+    };
+    if first_edge.target == second_edge.target
+        || !first_edge.arguments.is_empty()
+        || !second_edge.arguments.is_empty()
+    {
+        return None;
+    }
+    let success = match (*first, *second) {
+        (0, 1) => first_edge,
+        (1, 0) => second_edge,
+        _ => return None,
+    };
+    let arm = function.blocks.get(success.target.0 as usize)?;
+    let [extract, init, ..] = arm.instructions.as_slice() else {
+        return None;
+    };
+    if !matches!(&extract.kind, InstructionKind::VariantExtract { base, variant: 0, field: 0 }
+        if base.source == Source::Local(cell) && base.mode == UseMode::Consume)
+    {
+        return None;
+    }
+    let target = move_initialization(init, Source::Value(extract.output?))?;
+    string_destination(function, target, true).then_some((result, *source, target))
+}
+
+fn move_initialization(instruction: &Instruction, source: Source) -> Option<LocalId> {
+    match &instruction.kind {
+        InstructionKind::Assign {
+            target,
+            value,
+            initialize: true,
+        } if value.source == source && value.mode == UseMode::Consume => Some(*target),
+        _ => None,
     }
 }
 

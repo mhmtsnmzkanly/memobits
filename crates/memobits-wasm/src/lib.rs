@@ -457,7 +457,7 @@ struct StructLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnumLayout {
     tag_size: u32,
-    static_string_success: bool,
+    string_success: bool,
     variants: Vec<VariantLayout>,
 }
 
@@ -585,7 +585,7 @@ fn struct_layout_at(
                 257..=65536 => 2,
                 _ => 4,
             };
-            let static_string_success = definition.entry_outcome == Some(EntryOutcome::Result)
+            let string_success = definition.entry_outcome == Some(EntryOutcome::Result)
                 && variants
                     .first()
                     .is_some_and(|variant| variant.payload == [Type::String]);
@@ -595,7 +595,7 @@ fn struct_layout_at(
             for (index, variant) in variants.iter().enumerate() {
                 let mut members = Vec::with_capacity(variant.payload.len());
                 for ty in &variant.payload {
-                    let member = if static_string_success && index == 0 {
+                    let member = if string_success && index == 0 {
                         Some((
                             string_descriptor::SIZE,
                             string_descriptor::ALIGN,
@@ -640,7 +640,7 @@ fn struct_layout_at(
                 error_identity: None,
                 enum_layout: Some(EnumLayout {
                     tag_size,
-                    static_string_success,
+                    string_success,
                     variants: laid_out,
                 }),
             }
@@ -676,7 +676,7 @@ fn has_string_success(layout: &StructLayout) -> bool {
     layout
         .enum_layout
         .as_ref()
-        .is_some_and(|layout| layout.static_string_success)
+        .is_some_and(|layout| layout.string_success)
 }
 
 fn type_layout<'a>(
@@ -3001,6 +3001,18 @@ fn compile_instruction(
                         });
                     }
                 }
+            }
+            if enum_layout.string_success && *variant == 0 {
+                // Validated heap Ok construction immediately reaches a consuming match.
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    &payload[0],
+                    layout,
+                    Some(frame),
+                    heap_locals,
+                )?;
             }
             emit_address(body, frame, cell.offset);
             body.instruction(&WasmInstruction::I32Const(*variant as i32));

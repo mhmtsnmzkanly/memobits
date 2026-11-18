@@ -281,8 +281,8 @@ fn text_concat() -> Bool {
         && suffix_ok && empty_ok && temporary_reads && temporary_borrows && count == 21
 }
 
-// Internal Results can carry static text. The match moves the String out
-// of Ok. Heap-backed text and exported String results are still gated.
+// Internal Results can return static text. The match moves the String out
+// of Ok. Exported String results remain gated.
 fn static_label(found: Bool) -> Result<String, Error> {
     if found { return Ok("é"); }
     Err(Error { code: 7 })
@@ -298,6 +298,17 @@ fn static_text_result() -> Bool {
         Err(error) => error.code == 7
     };
     found && missing
+}
+
+fn heap_text_result() -> Bool {
+    // A heap Ok must be matched immediately in the same function, with an
+    // explicit Err arm and a binding for the owned String.
+    let text := "é".concat("!");
+    let result: Result<String, Error> = Ok(text);
+    match result {
+        Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
+        Err(_) => false
+    }
 }
 
 // Enums and exhaustive matching. An alias can also qualify variants.
@@ -465,6 +476,6 @@ fn main() -> Result<i32, Error> {
     let sample := "aé€😀";
     if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
     if !text_concat() { return Err(Error { code: 12 }); }
-    if !static_text_result() { return Err(Error { code: 13 }); }
+    if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
     Ok(42)
 }
