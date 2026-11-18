@@ -315,6 +315,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
         | InstructionKind::StringIsCharBoundary { .. }
+        | InstructionKind::StringByteAt { .. }
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
@@ -936,7 +937,8 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
-                InstructionKind::StringIsCharBoundary { source, offset } => {
+                InstructionKind::StringIsCharBoundary { source, offset }
+                | InstructionKind::StringByteAt { source, offset } => {
                     count(source);
                     count(offset);
                 }
@@ -1795,6 +1797,24 @@ fn emit_string_length(body: &mut WasmFunction) {
     body.instruction(&WasmInstruction::I32Load(arg));
 }
 
+// Call only inside the branch where offset is below the descriptor length.
+fn emit_string_byte(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    source: &Operand,
+    offset: &Operand,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+) -> Result<(), String> {
+    emit_operand(body, function, param_count, source, layout, frame)?;
+    emit_load(body, Primitive::U32);
+    emit_operand(body, function, param_count, offset, layout, frame)?;
+    body.instruction(&WasmInstruction::I32Add);
+    emit_load(body, Primitive::U8);
+    Ok(())
+}
+
 fn emit_load(body: &mut WasmFunction, kind: Primitive) {
     // References are created only from live owner cells and never cross the
     // export ABI. Private memory receives only validated typed stores, so Bool
@@ -2538,11 +2558,7 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::I32LtU);
             body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
             // Only offsets strictly below the byte length can reach the byte load.
-            emit_operand(body, function, param_count, source, layout, frame)?;
-            emit_load(body, Primitive::U32);
-            emit_operand(body, function, param_count, offset, layout, frame)?;
-            body.instruction(&WasmInstruction::I32Add);
-            emit_load(body, Primitive::U8);
+            emit_string_byte(body, function, param_count, source, offset, layout, frame)?;
             body.instruction(&WasmInstruction::I32Const(0xc0));
             body.instruction(&WasmInstruction::I32And);
             body.instruction(&WasmInstruction::I32Const(0x80));
@@ -2553,6 +2569,49 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::I32Eq);
             body.instruction(&WasmInstruction::End);
             body.instruction(&WasmInstruction::LocalSet(output));
+        }
+        InstructionKind::StringByteAt { source, offset } => {
+            let value = instruction.output.ok_or("StringByteAt lacks an output")?;
+            let cell = array_cell_of(layout, Slot::Value(value.0))?;
+            let frame = frame.ok_or("StringByteAt requires a frame")?;
+            let Type::Enum(type_id) = function.values[value.0 as usize] else {
+                return Err("StringByteAt output must be Option<u8>".into());
+            };
+            let some_offset = layout
+                .structs
+                .get(type_id.0 as usize)
+                .and_then(|ty| ty.enum_layout.as_ref())
+                .and_then(|ty| ty.variants.first())
+                .and_then(|some| some.offsets.first())
+                .ok_or("missing StringByteAt payload layout")?;
+            let payload = cell
+                .offset
+                .checked_add(*some_offset)
+                .ok_or(STRUCT_LAYOUT_OVERFLOW)?;
+
+            emit_address(body, frame, cell.offset);
+            emit_operand(body, function, param_count, offset, layout, Some(frame))?;
+            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            emit_string_length(body);
+            body.instruction(&WasmInstruction::I32LtU);
+            body.instruction(&WasmInstruction::If(BlockType::Result(ValType::I32)));
+            emit_address(body, frame, payload);
+            emit_string_byte(
+                body,
+                function,
+                param_count,
+                source,
+                offset,
+                layout,
+                Some(frame),
+            )?;
+            emit_store(body, Primitive::U8);
+            body.instruction(&WasmInstruction::I32Const(0)); // Some
+            body.instruction(&WasmInstruction::Else);
+            body.instruction(&WasmInstruction::I32Const(1)); // None
+            body.instruction(&WasmInstruction::End);
+            // Option<u8> has two variants and therefore a one-byte tag.
+            emit_store(body, Primitive::U8);
         }
         InstructionKind::Copy { source } => {
             let output = output.ok_or("copy lacks an output")?;

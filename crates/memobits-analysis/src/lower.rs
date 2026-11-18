@@ -1326,20 +1326,19 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
-                    if name == "is_char_boundary" {
+                    if matches!(name.as_str(), "is_char_boundary" | "byte_at") {
                         let receiver = self.lower_expr(base)?;
                         // Keep the receiver loan live while evaluating the offset.
                         let source = self.borrow(receiver, Access::Borrow)?;
                         let offset = self.lower_expr(&arguments[0])?;
-                        let offset = self.scalar(offset)?;
-                        return self.emit(
-                            expr.span,
-                            InstructionKind::StringIsCharBoundary {
-                                source: read(source),
-                                offset: read(offset),
-                            },
-                            self.ty(expr),
-                        );
+                        let offset = read(self.scalar(offset)?);
+                        let source = read(source);
+                        let instruction = if name == "byte_at" {
+                            InstructionKind::StringByteAt { source, offset }
+                        } else {
+                            InstructionKind::StringIsCharBoundary { source, offset }
+                        };
+                        return self.emit(expr.span, instruction, self.ty(expr));
                     }
                     if name == "len" {
                         let source = self.lower_expr(base)?;

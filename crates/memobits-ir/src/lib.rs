@@ -93,6 +93,16 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
+    fn is_byte_option(&self) -> bool {
+        self.path.name == "Option<u8>"
+            && self.error_ancestry.is_none()
+            && self.entry_outcome.is_none()
+            && matches!(&self.kind, TypeDefKind::Enum { variants }
+                if matches!(&variants[..], [some, none]
+                    if some.name == "Some" && some.payload == [Type::Primitive(Primitive::U8)]
+                        && none.name == "None" && none.payload.is_empty()))
+    }
+
     fn borrow_option_referent(&self) -> Option<&Type> {
         if !self.path.name.starts_with("Option<borrow ")
             || self.error_ancestry.is_some()
@@ -258,6 +268,11 @@ pub enum InstructionKind {
     },
     /// Test whether a byte offset is an endpoint or starts a UTF-8 scalar.
     StringIsCharBoundary {
+        source: Operand,
+        offset: Operand,
+    },
+    /// Read a byte at an unsigned offset, producing an owned Option<u8>.
+    StringByteAt {
         source: Operand,
         offset: Operand,
     },
@@ -1258,7 +1273,8 @@ fn validate_instruction(
             }
         }
         InstructionKind::StringLen { source }
-        | InstructionKind::StringIsCharBoundary { source, .. } => {
+        | InstructionKind::StringIsCharBoundary { source, .. }
+        | InstructionKind::StringByteAt { source, .. } => {
             let input = operand_type(program, function, source, errors, id, block);
             if !input.as_ref().is_some_and(|ty| {
                 matches!(ty, Type::String)
@@ -1272,24 +1288,25 @@ fn validate_instruction(
                     "String operation must read a String or String reference",
                 );
             }
-            let result =
-                if let InstructionKind::StringIsCharBoundary { offset, .. } = &instruction.kind {
-                    if operand_type(program, function, offset, errors, id, block)
-                        != Some(Type::Primitive(Primitive::U32))
-                        || offset.mode != UseMode::Read
-                    {
-                        push(
-                            errors,
-                            id,
-                            Some(block),
-                            "String boundary offset must be read as u32",
-                        );
-                    }
-                    Primitive::Bool
-                } else {
-                    Primitive::U32
-                };
-            if out != Some(&Type::Primitive(result)) {
+            if let InstructionKind::StringIsCharBoundary { offset, .. }
+            | InstructionKind::StringByteAt { offset, .. } = &instruction.kind
+            {
+                if operand_type(program, function, offset, errors, id, block)
+                    != Some(Type::Primitive(Primitive::U32))
+                    || offset.mode != UseMode::Read
+                {
+                    push(errors, id, Some(block), "String offset must be read as u32");
+                }
+            }
+            let valid_result = match &instruction.kind {
+                InstructionKind::StringByteAt { .. } => matches!(out, Some(Type::Enum(id))
+                    if program.types.get(id.0 as usize).is_some_and(TypeDef::is_byte_option)),
+                InstructionKind::StringIsCharBoundary { .. } => {
+                    out == Some(&Type::Primitive(Primitive::Bool))
+                }
+                _ => out == Some(&Type::Primitive(Primitive::U32)),
+            };
+            if !valid_result {
                 push(
                     errors,
                     id,
@@ -2567,7 +2584,8 @@ fn validate_read_only_loaded_values(
                     report(block_id, reference, false);
                     report(block_id, value, true);
                 }
-                InstructionKind::StringIsCharBoundary { source, offset } => {
+                InstructionKind::StringIsCharBoundary { source, offset }
+                | InstructionKind::StringByteAt { source, offset } => {
                     report(block_id, source, false);
                     report(block_id, offset, false);
                 }

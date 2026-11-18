@@ -1197,7 +1197,7 @@ impl Checker {
         self.allow_array_value(base);
         let receiver = read_type(self.expr(base, None));
         let offset_type = Ty::Primitive("u32");
-        let expected = usize::from(method == "is_char_boundary");
+        let expected = usize::from(method != "len");
         let mut diverges = receiver == Ty::Never;
         for (index, argument) in arguments.iter().enumerate() {
             let want = (expected == 1 && index == 0).then_some(&offset_type);
@@ -1217,7 +1217,12 @@ impl Checker {
         }
         match receiver {
             Ty::String if diverges => Ty::Never,
-            Ty::String if expected == 1 => BOOL,
+            Ty::String if method == "is_char_boundary" => BOOL,
+            Ty::String if method == "byte_at" => self.table.instantiate_enum(
+                registry::by_id(registry::TemplateId::Option),
+                vec![ResolvedArgument::Type(Ty::Primitive("u8"))],
+                expression.span,
+            ),
             Ty::String => offset_type,
             ty @ (Ty::Error | Ty::Never) => ty,
             _ => {
@@ -2565,7 +2570,7 @@ impl Checker {
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
                     }
-                    if matches!(name.as_str(), "len" | "is_char_boundary") {
+                    if matches!(name.as_str(), "len" | "is_char_boundary" | "byte_at") {
                         return self.string_read(expr, base, name, arguments);
                     }
                 }

@@ -52,7 +52,8 @@ application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
-byte length and `.is_char_boundary(offset)` to test a byte offset. Exported String signatures
+byte length, `.is_char_boundary(offset)` to test a byte offset, and
+`.byte_at(index)` to read a raw byte as `Option<u8>`. Exported String signatures
 and nested String storage are gated. Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

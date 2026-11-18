@@ -221,7 +221,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   The [executable text slice](utf8-text-slice.md) runs ordinary UTF-8 literals,
   owned `String` transfers and internal borrows using private Wasm data.
   `.len()` reads the stored UTF-8 byte length as `u32`, and
-  `.is_char_boundary(offset)` checks scalar boundaries. Exported String
+  `.is_char_boundary(offset)` checks scalar boundaries. `.byte_at(index)`
+  returns a raw byte as `Option<u8>`. Exported String
   signatures, nested storage and scalar iteration remain gated.
 - Local and remote package dependencies,
   optimization, and a stable external ABI remain later milestones.

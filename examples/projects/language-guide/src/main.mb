@@ -145,6 +145,28 @@ fn fixed_text() -> Bool {
         && "".len() == 0 && "abc".len() == 3 && "é".len() == 2 && "😀".len() == 4
 }
 
+fn byte_is(byte: Option<u8>, expected: u8) -> Bool {
+    match byte { Some(value) => value == expected, None => false }
+}
+
+fn no_byte(byte: Option<u8>) -> Bool {
+    match byte { Some(_) => false, None => true }
+}
+
+fn text_bytes() -> Bool {
+    let value := "é😀";
+    let view := value.borrow();
+    // byte_at reads raw UTF-8, including continuation bytes.
+    let lead := value.byte_at(0);
+    let continuation := view.byte_at(1);
+    let moved := value; // The last byte read through view released its loan.
+    byte_is(lead, 195) && byte_is(continuation, 169)
+        && byte_is(moved.byte_at(2), 240) && byte_is(moved.byte_at(3), 159)
+        && byte_is(moved.byte_at(4), 152) && byte_is(moved.byte_at(5), 128)
+        && no_byte(moved.byte_at(6)) && no_byte(moved.byte_at(4_294_967_295))
+        && no_byte("".byte_at(0))
+}
+
 fn text_boundaries() -> Bool {
     let value := "aé€😀";
     let view := value.borrow();
@@ -320,5 +342,6 @@ fn main() -> Result<i32, Error> {
     if !fixed_bytes() { return Err(Error { code: 6 }); }
     if !fixed_text() { return Err(Error { code: 7 }); }
     if !text_boundaries() { return Err(Error { code: 8 }); }
+    if !text_bytes() { return Err(Error { code: 9 }); }
     Ok(42)
 }

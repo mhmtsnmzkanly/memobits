@@ -44,6 +44,41 @@ fn string_literals_are_owned_in_type_analysis() {
 }
 
 #[test]
+fn string_byte_at_returns_owned_option_u8_and_requires_a_u32_offset() {
+    assert!(codes(r#"fn f(s: borrow String, n: u32) -> Option<u8> { s.byte_at(n) }"#).is_empty());
+    for (source, expected) in [
+        (r#"fn f() -> Option<i8> { "é".byte_at(1) }"#, "TE002"),
+        (r#"fn f(n: i32) { "é".byte_at(n); }"#, "TE002"),
+        (r#"fn f() { "é".byte_at(); }"#, "TE010"),
+    ] {
+        assert!(
+            codes(source).iter().any(|code| code == expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn string_byte_at_ir_rejects_an_incompatible_option_layout() {
+    use memobits_ir::{Primitive, Type, TypeDefKind};
+
+    let parsed = parse(SourceId(9), r#"fn f() -> Option<u8> { "é".byte_at(1) }"#);
+    let mut program =
+        memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap();
+    let Type::Enum(id) = *program.functions[0].signature.result else {
+        panic!("expected an enum result");
+    };
+    let TypeDefKind::Enum { variants } = &mut program.types[id.0 as usize].kind else {
+        panic!("expected an Option definition");
+    };
+    variants[0].payload[0] = Type::Primitive(Primitive::U16);
+    let errors = program.validate().unwrap_err();
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("String operation has the wrong output type")));
+}
+
+#[test]
 fn string_boundary_requires_a_string_and_one_u32_offset() {
     assert!(
         codes(r#"fn f(s: borrow String, n: u32) -> Bool { s.is_char_boundary(n) }"#).is_empty()

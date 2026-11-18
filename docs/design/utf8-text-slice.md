@@ -65,6 +65,11 @@ false. The read-only receiver loan stays live while evaluating the offset.
 Wasm checks the unsigned offset before reading a byte.
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
 
+`.byte_at(index: u32)` returns an owned `Option<u8>`. It reads raw UTF-8
+bytes, including continuation bytes. An unsigned bounds check returns
+`None` at or beyond the byte length before any byte load. The receiver
+follows the same loan rules as the boundary check.
+
 The [runnable guide](../../examples/projects/language-guide/src/main.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,
