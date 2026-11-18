@@ -404,28 +404,52 @@ pub(super) fn call_binding(
     else {
         return None;
     };
-    let InstructionKind::Assign {
-        target,
-        value,
-        initialize,
-    } = &after.iter().find(|inst| !is_cleanup(inst))?.kind
-    else {
+    let output = call.output?;
+    let destination = &after.iter().find(|inst| !is_cleanup(inst))?.kind;
+    let (target, value) = match destination {
+        InstructionKind::Assign {
+            target,
+            value,
+            initialize,
+        } => {
+            let permitted = match result {
+                Type::String => string_destination(function, *target, *initialize),
+                Type::List(_) => {
+                    (!initialize || !function.parameter_locals.contains(target))
+                        && function.locals.get(target.0 as usize).is_some_and(|local| {
+                            &local.ty == result && (*initialize || local.mutable)
+                        })
+                }
+                _ => false,
+            };
+            if !permitted {
+                return None;
+            }
+            (*target, value)
+        }
+        InstructionKind::Store { reference, value } => {
+            (list_share_parameter(function, reference, result)?, value)
+        }
+        _ => return None,
+    };
+    (value.source == Source::Value(output) && value.mode == UseMode::Consume)
+        .then_some((callee.0 as usize, target))
+}
+
+pub(super) fn list_share_parameter(
+    function: &Function,
+    reference: &Operand,
+    referent: &Type,
+) -> Option<LocalId> {
+    let Source::Local(local) = reference.source else {
         return None;
     };
-    let output = call.output?;
-    let destination = match result {
-        Type::String => string_destination(function, *target, *initialize),
-        Type::List(_) => {
-            (!initialize || !function.parameter_locals.contains(target))
-                && function
-                    .locals
-                    .get(target.0 as usize)
-                    .is_some_and(|local| &local.ty == result && (*initialize || local.mutable))
-        }
-        _ => false,
-    };
-    (value.source == Source::Value(output) && value.mode == UseMode::Consume && destination)
-        .then_some((callee.0 as usize, *target))
+    (matches!(referent, Type::List(_))
+        && reference.mode == UseMode::Share
+        && function.parameter_locals.contains(&local)
+        && matches!(&function.locals.get(local.0 as usize)?.ty,
+            Type::Reference { access: Access::Share, inner } if inner.as_ref() == referent))
+    .then_some(local)
 }
 
 fn is_cleanup(instruction: &Instruction) -> bool {

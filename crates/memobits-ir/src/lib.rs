@@ -2585,12 +2585,15 @@ fn validate_instruction(
                     access: Access::Share,
                     inner,
                 }) => {
-                    if matches!(inner.as_ref(), Type::List(_)) {
+                    if matches!(inner.as_ref(), Type::List(_))
+                        && scoped_string::list_share_parameter(function, reference, &inner)
+                            .is_none()
+                    {
                         push(
                             errors,
                             id,
                             Some(block),
-                            "whole List replacement through a share is not supported",
+                            "whole List replacement requires a direct share List parameter",
                         );
                     }
                     if reference.mode != UseMode::Share {
@@ -2995,7 +2998,7 @@ fn validate_operand_escapes(
                             errors,
                             id,
                             block_id,
-                            "List call result must be assigned directly to a whole List local",
+                            "List call result must be assigned directly to a whole List local or direct share parameter",
                         );
                     }
                     if facts.returns_heap

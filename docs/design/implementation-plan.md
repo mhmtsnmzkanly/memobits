@@ -220,8 +220,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   through the caller descriptor. Direct owned parameters take named local
   moves with cleanup on either side of invocation. Direct returns move a
   named List local into a caller binding. Whole mutable local replacement
-  evaluates the RHS before releasing the previous block. Live conflicting
-  loans block access. General
+  and replacement through a direct share parameter evaluate the RHS before
+  releasing the previous block. A share preserves caller ownership. Live
+  conflicting loans block access. General
   aggregate cleanup and copy, mutable pattern bindings, `defaults`, and
   `try` are pending.
   The [owned heap proposal](owned-heap-foundation.md) has a checked static

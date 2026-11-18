@@ -3531,10 +3531,16 @@ fn compile_instruction(
         InstructionKind::Store { reference, value } => {
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
                 if is_aggregate(&inner) {
-                    if *inner == Type::String {
+                    let list = matches!(inner.as_ref(), Type::List(_));
+                    let owns_heap = list || *inner == Type::String;
+                    if owns_heap {
                         if let Some(copy) = heap_copy_index {
                             emit_operand(body, function, param_count, reference, layout, frame)?;
-                            string_descriptor::load_allocation(body);
+                            if list {
+                                list_descriptor::load_allocation(body);
+                            } else {
+                                string_descriptor::load_allocation(body);
+                            }
                             body.instruction(&WasmInstruction::Call(copy + 1));
                         }
                     }
@@ -3561,7 +3567,7 @@ fn compile_instruction(
                         src_mem: 0,
                         dst_mem: 0,
                     });
-                    if *inner == Type::String {
+                    if owns_heap {
                         clear_moved_heap_source(
                             body,
                             function,

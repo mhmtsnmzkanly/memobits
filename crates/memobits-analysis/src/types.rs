@@ -1078,12 +1078,13 @@ impl Checker {
                     if matches!(target_ty, Ty::List(_))
                         && matches!(&target.kind, ExprKind::Path(path)
                         if path.len() == 1 && self.lookup(&path[0]).is_some_and(|binding|
-                            matches!(binding.ty, Ty::Reference { .. })))
+                            matches!(binding.ty, Ty::Reference { access: IrAccess::Share, .. })
+                                && binding.access != IrAccess::Share))
                     {
                         self.error(
                             17,
                             target.span,
-                            "whole List replacement through a share is not supported",
+                            "whole List replacement requires a direct share List parameter",
                         );
                     }
                     let previous = self.concat_destination;

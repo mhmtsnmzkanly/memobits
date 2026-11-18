@@ -1101,7 +1101,58 @@ fn shared_list_push_updates_caller_from_source_and_wasm() {
 }
 
 #[test]
-fn list_shares_reject_aliases_and_whole_replacement() {
+fn shared_list_replacement_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='share-list-replacement'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn fresh(previous: borrow List<u32>) -> List<u32> {
+            var result: List<u32> = [];
+            result.push(0);
+            let old := match previous.get(0) { Some(value) => value, None => 0 };
+            result.push(old + 1);
+            result
+        }
+        fn rebuild(items: share List<u32>, early: Bool) {
+            items = { if early { return; } fresh(items.borrow()) };
+        }
+        fn install(items: share List<u8>, replacement: List<u8>) { items = replacement; }
+        fn clear(items: share List<u8>) { items = []; }
+        fn main() -> Result<Bool, Error> {
+            var words: List<u32> = [];
+            words.push(40);
+            rebuild(words.share(), true);
+            let untouched := words.len() == 1;
+            rebuild(words.share(), false);
+            let moved := words;
+            let last := match moved.get(1) { Some(value) => value == 41, None => false };
+            var bytes: List<u8> = [];
+            bytes.push(7);
+            var next: List<u8> = [];
+            next.push(255);
+            install(bytes.share(), next);
+            let byte := match bytes.get(0) { Some(value) => value == 255, None => false };
+            clear(bytes.share());
+            Ok(untouched && last && byte && bytes.len() == 0)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "replace-share.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "replace-share.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_shares_reject_conflicts_and_replacement_through_local_aliases() {
     let f = Fixture::new();
     for (source, code) in [
         (
@@ -1125,7 +1176,13 @@ fn list_shares_reject_aliases_and_whole_replacement() {
             "BE005",
         ),
         (
-            r#"fn reset(view: share List<u8>) { view = []; } fn main() {}"#,
+            r#"fn reset(view: share List<u8>) {
+                  let held := view.borrow(); view = []; held.len();
+               } fn main() {}"#,
+            "BE005",
+        ),
+        (
+            r#"fn reset(view: share List<u8>) { var alias := view; alias = []; } fn main() {}"#,
             "TE017",
         ),
         (

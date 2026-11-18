@@ -61,7 +61,8 @@ and returns `None` when the `u32` index is outside the List. Direct internal
 takes a named local by move. A direct internal List return moves a named
 callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.
-Replacement through shares, temporary List results, subscript syntax,
+A direct share parameter can also replace the caller's List. Replacement
+through stored share handles, temporary List results, subscript syntax,
 indirect calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and

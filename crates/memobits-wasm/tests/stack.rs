@@ -194,6 +194,8 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
             items
         }
         fn discard(items: List<u32>) {}
+        fn refill(items: share List<u32>) { items = fill(); }
+        fn clear(items: share List<u32>) { items = []; }
         fn main() -> Result<Bool, Error> {
             var items := fill();
             var step := 0;
@@ -201,9 +203,10 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
                 if step % 2 == 0 { discard(items); }
                 items = fill();
                 items = items;
+                refill(items.share());
                 let tail := match items.get(7_999) { Some(value) => value == 7_999, None => false };
                 if !tail { return Err(Error { code: 1 }); }
-                items = [];
+                if step % 2 == 0 { clear(items.share()); } else { items = []; }
                 if items.len() != 0 { return Err(Error { code: 2 }); }
                 step += 1;
                 if step == 4 { break; }
@@ -215,7 +218,7 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
     );
     let artifact = compile_application_traced(
         &program,
-        FunctionId(2),
+        FunctionId(4),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();

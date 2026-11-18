@@ -151,6 +151,10 @@ fn make_words(first: u32) -> List<u32> {
     words
 }
 
+fn replace_words(items: share List<u32>, value: u32) {
+    items = make_words(value);
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -170,9 +174,15 @@ fn primitive_lists() -> Bool {
     let old_length := moved.len();
     // Replacement releases the old block after the RHS finishes.
     moved = make_words(3000);
+    // A direct share parameter can replace the caller's whole List too.
+    replace_words(moved.share(), 4000);
+    let replacement := match moved.get(0) {
+        Some(value) => value == 4000,
+        None => false
+    };
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
-    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word
+    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 
