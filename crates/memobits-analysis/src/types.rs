@@ -1359,7 +1359,7 @@ impl Checker {
         )
     }
 
-    fn list_push(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+    fn list_mutation(&mut self, expr: &Expr, base: &Expr, method: &str, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
         let mutable_receiver = matches!(
@@ -1376,7 +1376,7 @@ impl Checker {
             self.error(
                 17,
                 base.span,
-                "push() requires a mutable List local, mutable share handle, or share parameter",
+                format!("{method}() requires a mutable List local, mutable share handle, or share parameter"),
             );
             return Ty::Error;
         };
@@ -1384,12 +1384,25 @@ impl Checker {
             self.error(
                 17,
                 base.span,
-                "push() requires a mutable List local, mutable share handle, or share parameter",
+                format!("{method}() requires a mutable List local, mutable share handle, or share parameter"),
             );
         }
-        if arguments.len() != 1 {
-            self.error(10, expr.span, "push() expects one element");
+        let pop = method == "pop";
+        if arguments.len() != usize::from(!pop) {
+            let message = if pop {
+                "pop() takes no arguments"
+            } else {
+                "push() expects one element"
+            };
+            self.error(10, expr.span, message);
             return Ty::Error;
+        }
+        if pop {
+            return self.table.instantiate_enum(
+                registry::by_id(registry::TemplateId::Option),
+                vec![ResolvedArgument::Type(Ty::Primitive(element))],
+                expr.span,
+            );
         }
         let element = Ty::Primitive(element);
         let value = read_type(self.expr(&arguments[0], Some(&element)));
@@ -2813,8 +2826,8 @@ impl Checker {
                     if name == "get" {
                         return self.list_get(expr, base, arguments);
                     }
-                    if name == "push" {
-                        return self.list_push(expr, base, arguments);
+                    if matches!(name.as_str(), "push" | "pop") {
+                        return self.list_mutation(expr, base, name, arguments);
                     }
                     if name == "push_str" {
                         return self.string_push_str(expr, base, arguments);

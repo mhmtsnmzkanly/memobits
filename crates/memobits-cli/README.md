@@ -57,7 +57,9 @@ allocates no heap block. `.get(index)` copies an element into `Option<T>`
 and returns `None` when the `u32` index is outside the List. Direct internal
 `borrow List<T>` parameters accept explicit read-only borrows and support
 `.len()` and `.get()`. Direct `share List<T>` parameters and stored `var`
-share handles also support `.push()`, updating the owner's List. A direct internal owned List parameter
+share handles also support `.push()` and `.pop()`, updating the owner's List.
+`.pop()` returns the last element as `Some(value)` or `None` if empty, and
+retains the backing storage. A direct internal owned List parameter
 takes a named local by move. A direct internal List return moves a named
 callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.

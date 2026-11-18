@@ -96,6 +96,51 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 }
 
 #[test]
+fn list_pop_keeps_the_backing_block_when_empty() {
+    let program = lower(
+        r#"
+        fn main() -> Result<Bool, Error> {
+            var items: List<u32> = [];
+            items.push(305_419_896);
+            let removed := match items.pop() {
+                Some(value) => value == 305_419_896, None => false
+            };
+            if removed && items.len() == 0 { Ok(true) } else { Err(Error { code: 1 }) }
+        }
+    "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(0),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    for _ in 0..4 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        let data = memory.data(&store);
+        assert_eq!(data[result as usize], 0);
+        assert_eq!(data.len(), 65_536);
+        assert!(data[16..4096].windows(12).step_by(4).any(|descriptor| {
+            let address = u32::from_le_bytes(descriptor[0..4].try_into().unwrap()) as usize;
+            let length = u32::from_le_bytes(descriptor[4..8].try_into().unwrap());
+            let block = u32::from_le_bytes(descriptor[8..12].try_into().unwrap()) as usize;
+            length == 0
+                && block >= 4096
+                && block.checked_add(8) == Some(address)
+                && data.get(address..address.saturating_add(4))
+                    == Some(&305_419_896u32.to_le_bytes())
+        }));
+    }
+}
+
+#[test]
 fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     let program = lower(
         r#"

@@ -292,6 +292,9 @@ pub enum InstructionKind {
     EndListLocal {
         local: LocalId,
     },
+    ListPop {
+        target: LocalId,
+    },
     ListPush {
         target: LocalId,
         value: Operand,
@@ -1194,6 +1197,41 @@ fn list_read_element(ty: &Type) -> Option<Primitive> {
     }
 }
 
+fn mutable_list_element(function: &Function, target: LocalId) -> Option<Primitive> {
+    let local = function.locals.get(target.0 as usize)?;
+    match &local.ty {
+        Type::List(element) if local.mutable => Some(*element),
+        Type::Reference {
+            access: Access::Share,
+            inner,
+        } if local.mutable || function.parameter_locals.contains(&target) => {
+            list_read_element(inner)
+        }
+        _ => None,
+    }
+}
+
+fn list_option_matches(
+    program: &Program,
+    element: Option<Primitive>,
+    output: Option<&Type>,
+) -> bool {
+    match (element, output) {
+        (Some(element @ (Primitive::U8 | Primitive::U32)), Some(Type::Enum(option))) => {
+            let name = if element == Primitive::U8 {
+                "Option<u8>"
+            } else {
+                "Option<u32>"
+            };
+            program
+                .types
+                .get(option.0 as usize)
+                .is_some_and(|definition| definition.is_scalar_option(name, element))
+        }
+        _ => false,
+    }
+}
+
 fn use_mode_for_access(access: Access) -> Option<UseMode> {
     match access {
         Access::Owned => None,
@@ -1346,22 +1384,19 @@ fn validate_instruction(
                 );
             }
         }
+        InstructionKind::ListPop { target } => {
+            if !list_option_matches(program, mutable_list_element(function, *target), out) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List pop requires a mutable owner or share and matching Option output",
+                );
+            }
+        }
         InstructionKind::ListPush { target, value } => {
             let actual = operand_type(program, function, value, errors, id, block);
-            let receiver =
-                function
-                    .locals
-                    .get(target.0 as usize)
-                    .and_then(|local| match &local.ty {
-                        Type::List(element) if local.mutable => Some(*element),
-                        Type::Reference {
-                            access: Access::Share,
-                            inner,
-                        } if local.mutable || function.parameter_locals.contains(target) => {
-                            list_read_element(inner)
-                        }
-                        _ => None,
-                    });
+            let receiver = mutable_list_element(function, *target);
             if receiver.map(Type::Primitive) != actual
                 || receiver.is_none()
                 || instruction.output.is_some()
@@ -1378,20 +1413,8 @@ fn validate_instruction(
         InstructionKind::ListGet { source, index } => {
             let input = operand_type(program, function, source, errors, id, block);
             let index_type = operand_type(program, function, index, errors, id, block);
-            let valid_output = match (input.as_ref().and_then(list_read_element), out) {
-                (Some(element @ (Primitive::U8 | Primitive::U32)), Some(Type::Enum(option))) => {
-                    let name = if element == Primitive::U8 {
-                        "Option<u8>"
-                    } else {
-                        "Option<u32>"
-                    };
-                    program
-                        .types
-                        .get(option.0 as usize)
-                        .is_some_and(|definition| definition.is_scalar_option(name, element))
-                }
-                _ => false,
-            };
+            let valid_output =
+                list_option_matches(program, input.as_ref().and_then(list_read_element), out);
             if !matches!(source.source, Source::Local(_))
                 || source.mode != UseMode::Read
                 || index.mode != UseMode::Read
@@ -3136,6 +3159,7 @@ fn validate_operand_escapes(
                     report(block_id, source, false, false);
                     report(block_id, offset, false, false);
                 }
+                InstructionKind::ListPop { .. } => {}
                 InstructionKind::ListPush { value, .. } => report(block_id, value, false, false),
                 InstructionKind::ListLen { source }
                 | InstructionKind::Copy { source }

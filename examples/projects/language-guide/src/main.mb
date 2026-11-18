@@ -181,13 +181,18 @@ fn primitive_lists() -> Bool {
     handle = make_words(5000);
     // Push through the same handle updates the owner's length and storage.
     handle.push(6000);
+    // Pop removes the last element and keeps the backing storage for reuse.
+    let popped := match handle.pop() {
+        Some(value) => value == 6000,
+        None => false
+    };
     let replacement := match handle.get(0) {
         Some(value) => value == 5000,
         None => false
     };
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
-    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 2 && word && replacement
+    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

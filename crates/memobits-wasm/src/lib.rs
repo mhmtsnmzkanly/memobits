@@ -330,6 +330,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::ListGet { .. }
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
+        | InstructionKind::ListPop { .. }
         | InstructionKind::EndListLocal { .. }
         | InstructionKind::EmptyList
         | InstructionKind::InitConcatString { .. }
@@ -978,6 +979,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
         for instruction in &block.instructions {
             match &instruction.kind {
                 InstructionKind::ListPush { value, .. } => count(value),
+                InstructionKind::ListPop { .. } => {}
                 InstructionKind::EndListLocal { .. }
                 | InstructionKind::EmptyList
                 | InstructionKind::Constant(_)
@@ -3013,6 +3015,53 @@ fn compile_instruction(
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
             emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
             list_descriptor::initialize_empty(body);
+        }
+        InstructionKind::ListPop { target } => {
+            let frame = frame.ok_or("List pop requires a frame")?;
+            let value = instruction.output.ok_or("List pop lacks an output")?;
+            let scratch = output.ok_or("List pop lacks a scratch local")?;
+            let (tag, payload) = scalar_option_offsets(layout, function, value)?;
+            let receiver = Operand {
+                source: Source::Local(*target),
+                mode: memobits_ir::UseMode::Read,
+                span: instruction.span,
+            };
+            let owner = &function.locals[target.0 as usize].ty;
+            let list = match owner {
+                Type::Reference { inner, .. } => inner.as_ref(),
+                owner => owner,
+            };
+            let Type::List(element) = *list else {
+                return Err("List pop target is not a List".into());
+            };
+            let (width, _) = storage_layout(element)?;
+            emit_address(body, frame, tag);
+            emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
+            list_descriptor::load_length(body);
+            body.instructions()
+                .local_tee(scratch)
+                .if_(BlockType::Result(ValType::I32));
+            body.instructions()
+                .local_get(scratch)
+                .i32_const(1)
+                .i32_sub()
+                .local_set(scratch);
+            // The last initialized index is within the checked extent from push.
+            emit_address(body, frame, payload);
+            emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
+            list_descriptor::load_address(body);
+            body.instructions()
+                .local_get(scratch)
+                .i32_const(width as i32)
+                .i32_mul()
+                .i32_add();
+            emit_load(body, element);
+            emit_store(body, element);
+            emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
+            body.instructions().local_get(scratch);
+            list_descriptor::store_length(body);
+            body.instructions().i32_const(0).else_().i32_const(1).end();
+            emit_store(body, Primitive::U8);
         }
         InstructionKind::ListGet { source, index } => {
             let frame = frame.ok_or("List get requires a frame")?;

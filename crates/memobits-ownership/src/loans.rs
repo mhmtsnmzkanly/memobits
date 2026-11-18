@@ -589,10 +589,24 @@ fn is_reference(ty: &Type) -> bool {
 }
 
 fn mark_operand(live: &mut [bool], function: &Function, operand: &Operand) {
-    if let Some(index) = slot(operand.source, function) {
+    mark_source(live, function, operand.source);
+}
+
+fn mark_source(live: &mut [bool], function: &Function, source: Source) {
+    if let Some(index) = slot(source, function) {
         if let Some(mark) = live.get_mut(index) {
             *mark = true;
         }
+    }
+}
+
+fn mark_instruction_uses(live: &mut [bool], function: &Function, kind: &InstructionKind) {
+    for operand in instruction_operands(kind) {
+        mark_operand(live, function, operand);
+    }
+    // List mutations address the receiver directly by local slot.
+    if let InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target } = kind {
+        mark_source(live, function, Source::Local(*target));
     }
 }
 
@@ -601,7 +615,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::EmptyList
         | InstructionKind::Constant(_)
         | InstructionKind::EndStringLocal { .. }
-        | InstructionKind::EndListLocal { .. } => Vec::new(),
+        | InstructionKind::EndListLocal { .. }
+        | InstructionKind::ListPop { .. } => Vec::new(),
         InstructionKind::ListPush { value, .. } => vec![value],
         InstructionKind::Capture(operand)
         | InstructionKind::Copy { source: operand }
@@ -712,9 +727,7 @@ fn compute_block_entry(function: &Function, block: &Block, mut live: Vec<bool>) 
     }
     for instruction in block.instructions.iter().rev() {
         kill_instruction_def(function, instruction, &mut live);
-        for operand in instruction_operands(&instruction.kind) {
-            mark_operand(&mut live, function, operand);
-        }
+        mark_instruction_uses(&mut live, function, &instruction.kind);
     }
     live
 }
@@ -809,9 +822,7 @@ fn liveness(function: &Function, reachable: &[bool]) -> Liveness {
             let instruction = &block.instructions[instruction_index];
             after[index][instruction_index] = live.clone();
             kill_instruction_def(function, instruction, &mut live);
-            for operand in instruction_operands(&instruction.kind) {
-                mark_operand(&mut live, function, operand);
-            }
+            mark_instruction_uses(&mut live, function, &instruction.kind);
             before[index][instruction_index] = live.clone();
         }
     }
@@ -1592,7 +1603,7 @@ fn check_instruction(
                 ));
             }
         }
-        InstructionKind::ListPush { target, .. } => {
+        InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target } => {
             let receiver = Operand {
                 source: Source::Local(*target),
                 mode: UseMode::Share,
@@ -1605,7 +1616,11 @@ fn check_instruction(
             {
                 diagnostics.push(conflict_diagnostic(
                     instruction.span,
-                    "push to",
+                    if matches!(instruction.kind, InstructionKind::ListPop { .. }) {
+                        "pop from"
+                    } else {
+                        "push to"
+                    },
                     (function, program),
                     conflict,
                 ));

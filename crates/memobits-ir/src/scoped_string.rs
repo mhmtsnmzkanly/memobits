@@ -570,14 +570,14 @@ pub(super) fn validate(
                     }
                     initialize.then_some(*target)
                 }
-                InstructionKind::ListPush { target, .. }
+                InstructionKind::ListPush { target, .. } | InstructionKind::ListPop { target }
                     if list_local(*target) && !in_scope.contains(target) =>
                 {
                     push(
                         errors,
                         id,
                         Some(block_id),
-                        "List push outside the local's scope",
+                        "List mutation outside the local's scope",
                     );
                     None
                 }

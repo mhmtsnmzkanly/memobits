@@ -11,16 +11,16 @@ the equivalence of `Bytes<N>` and `Array<u8, N>`.
 ## Executable checkpoint
 
 `List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
-local bindings, non-consuming `.len()` and `.get(index)`, and `.push(value)`
-on whole mutable locals. Empty construction allocates no heap block. A push evaluates
+local bindings, non-consuming `.len()` and `.get(index)`, plus `.push(value)` and
+`.pop()` on whole mutable locals. Empty construction allocates no heap block. A push evaluates
 the element once and returns unit. Moves transfer the block and normal scope
 exits release the owner. The applied spelling is built in, and bare `List`
 can still name a user type. Direct internal calls accept `borrow List<T>`
 for these element types. Use `.borrow()` on a whole local to create the
 read-only handle. The callee can use `.len()` and `.get()`. A live loan
-blocks pushes, moves and cleanup of the owner until its last use.
+blocks mutation, moves and cleanup of the owner until its last use.
 A direct `share List<T>` parameter accepts an explicit `.share()` from
-a mutable owner and supports `push`, `len` and `get`. Growth updates the
+a mutable owner and supports `push`, `pop`, `len` and `get`. Growth updates the
 caller descriptor in place, and the caller retains cleanup responsibility.
 A direct internal owned parameter takes a named whole List local by move.
 Arguments evaluate left to right. An earlier owned argument is staged
@@ -55,6 +55,10 @@ or a coverage need.
   allocating, growing, or changing the list. The argument can read the
   receiver's length. A move of the receiver during argument evaluation
   makes the subsequent push invalid.
+- Use `items.pop()` to remove the last element as `Some(value)` or return
+  `None` when empty. It accepts the same receivers and follows the same loan
+  rules as `push`. It keeps the backing block and capacity even when the List
+  becomes empty.
 - Use `items.len()` for a non-consuming `u32` element count and
   `items.get(index)` for a copied `Option<T>` at a `u32` index. Both work
   on immutable and mutable locals. The index expression runs once before
@@ -69,7 +73,7 @@ first slice keeps the access rules and types already used in Memobits.
 Scope the owner to whole local bindings, including moves from one local
 to another. Borrow and share parameters receive the caller's private
 descriptor address for the direct call. A share follows the usual
-exclusive loan rules. A stored `var` share handle also supports `push`.
+exclusive loan rules. A stored `var` share handle also supports `push` and `pop`.
 A live child borrow blocks mutation until its last use, and a stored
 `let` handle remains read-only.
 An owned parameter receives its own frame descriptor and takes the
@@ -79,7 +83,7 @@ the caller's private aggregate return cell. A direct share parameter or
 a stored `var handle := items.share()` can receive an empty List, a moved
 List local, or a direct List call result. Stored `let` handles remain
 read-only under the existing assignment convention. Defer nested List storage,
-aggregate elements, removal, element references, slices, iterators,
+aggregate elements, indexed removal, element references, slices, iterators,
 capacity controls, and exports. Keep those forms gated until their
 ownership or ABI paths are covered. The first consumer can build a list
 in a loop and check inserted values, order, and the first absent index
@@ -128,11 +132,13 @@ and an early exit during RHS evaluation leaves the caller's List intact.
 
 ## Implementation and checks
 
-1. Empty local owners, length, push, growth and normal-exit cleanup are
+1. Empty local owners, length, push, pop, growth and normal-exit cleanup are
    executable. The language guide runs from source and standalone Wasm.
 2. The Wasm test checks both element widths, payload addresses, exact bytes
    after growth, repeated reuse and a forced allocation trap. The CLI
-   regression checks copied reads after growth in source and standalone Wasm.
+   regressions check copied reads after growth and LIFO removal in source and
+   standalone Wasm. A Wasm test checks that popping the last element retains
+   the backing block.
 3. Cover empty reads, both element widths, insertion order, exact values
    after growth, and `get` at length and at a high unsigned index. Check
    single evaluation of push arguments, mutation through a `let`,

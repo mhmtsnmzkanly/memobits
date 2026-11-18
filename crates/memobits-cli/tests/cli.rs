@@ -1152,6 +1152,78 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
 }
 
 #[test]
+fn list_pop_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-pop'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn take(items: share List<u32>) -> Option<u32> { items.pop() }
+        fn main() -> Result<Bool, Error> {
+            var bytes: List<u8> = [];
+            let empty := match bytes.pop() { None => true, Some(_) => false };
+            bytes.push(255);
+            bytes.push(42);
+            var handle := bytes.share();
+            let last := match handle.pop() { Some(v) => v == 42, None => false };
+            let first := match bytes.pop() { Some(v) => v == 255, None => false };
+            var words: List<u32> = [];
+            words.push(9);
+            words.push(4_294_967_295);
+            let high := match take(words.share()) { Some(v) => v == 4_294_967_295, None => false };
+            let remaining := match words.get(0) { Some(v) => v == 9, None => false };
+            let removed := match words.get(1) { None => true, Some(_) => false };
+            Ok(empty && last && first && bytes.len() == 0 && high && remaining && removed)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "pop.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "pop.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn list_pop_rejects_read_only_and_borrowed_receivers() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("let frozen: List<u8> = []; frozen.pop();", "TE017"),
+        ("let handle := items.share(); handle.pop();", "TE017"),
+        ("var handle := items.borrow(); handle.pop();", "TE017"),
+        (
+            "let held := items.borrow(); items.pop(); held.len();",
+            "BE005",
+        ),
+        (
+            "var handle := items.share(); let held := handle.borrow(); handle.pop(); held.len();",
+            "BE005",
+        ),
+        ("let moved := items; items.pop();", "BE001"),
+        (
+            "var handle := items.share(); let moved := items; handle.pop();",
+            "BE005",
+        ),
+        (
+            "var handle := items.share(); let moved := items; handle.push(1);",
+            "BE005",
+        ),
+    ] {
+        f.write(
+            "list.mb",
+            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+        );
+        err(f.run(&["ownership", "list.mb"]), code);
+    }
+}
+
+#[test]
 fn stored_list_share_updates_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
