@@ -67,6 +67,14 @@ The caller remains responsible for its eventual cleanup. Simply borrowing
 or sharing that slot leaves its descriptor intact. Installing heap text
 through a forwarded share or a share alias remains gated. General nested
 heap uses still require broader drop elaboration.
+
+`text.push_str(suffix)` appends a read-only String suffix and returns unit.
+The receiver must be a named mutable String local or a direct `share String`
+parameter. The exclusive loan covers suffix evaluation, so the suffix
+cannot alias the receiver. Early exit during suffix evaluation leaves the
+append unperformed. The implementation allocates through checked concat and
+then replaces the descriptor. This slice makes no in-place growth or
+capacity guarantees.
 A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.

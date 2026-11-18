@@ -70,6 +70,9 @@ or on an earlier normal exit during argument evaluation. Owned String
 parameters can receive those results directly. The callee takes ownership
 when invoked. A direct `share String` parameter can replace a mutable
 caller local passed as `text.share()`. The caller owns the replacement.
+`text.push_str(suffix)` borrows a String suffix, appends it to a mutable
+whole local or direct `share String` parameter, and returns unit. It uses
+checked concat followed by replacement.
 Installing heap text through forwarded shares or share aliases, other
 nested heap uses, exported String signatures, and nested String storage
 are gated. Application

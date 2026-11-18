@@ -1276,6 +1276,38 @@ impl Checker {
         }
     }
 
+    fn string_push_str(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
+        && self.lookup(&path[0]).is_some_and(|binding| {
+            (binding.mutable && binding.ty == Ty::String)
+                || (binding.access == IrAccess::Share
+                    && matches!(&binding.ty, Ty::Reference { inner, .. } if **inner == Ty::String))
+        }));
+        self.allow_array_value(base);
+        self.expr(base, None);
+        if !writable {
+            self.error(
+                17,
+                base.span,
+                "push_str() requires a mutable whole String local or a direct share String parameter",
+            );
+        }
+        if arguments.len() != 1 {
+            self.error(10, expression.span, "push_str() expects 1 argument");
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        }
+        self.allow_array_value(&arguments[0]);
+        let suffix = read_type(self.expr(&arguments[0], Some(&Ty::String)));
+        self.ensure(&suffix, &Ty::String, arguments[0].span);
+        match suffix {
+            Ty::Error | Ty::Never => suffix,
+            _ => UNIT,
+        }
+    }
+
     fn reference_conversion(
         &mut self,
         expression: &Expr,
@@ -2636,6 +2668,9 @@ impl Checker {
                     }
                     if name == "copy" {
                         return self.copy_conversion(expr, base, arguments);
+                    }
+                    if name == "push_str" {
+                        return self.string_push_str(expr, base, arguments);
                     }
                     if matches!(
                         name.as_str(),

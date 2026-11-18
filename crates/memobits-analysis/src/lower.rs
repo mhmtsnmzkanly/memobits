@@ -723,6 +723,11 @@ impl<'a> Builder<'a> {
         let left = self.borrow(left, Access::Borrow)?;
         let right = self.lower_expr(right)?;
         let right = self.borrow(right, Access::Borrow)?;
+        self.initialize_concat(target, left, right, span);
+        Some(())
+    }
+
+    fn initialize_concat(&mut self, target: LocalId, left: Operand, right: Operand, span: Span) {
         self.emit(
             span,
             InstructionKind::InitConcatString {
@@ -732,7 +737,36 @@ impl<'a> Builder<'a> {
             None,
         );
         self.string_locals.push(target);
-        Some(())
+    }
+
+    fn lower_string_push_str(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        suffix: &Expr,
+    ) -> Option<Operand> {
+        let PathTarget::Local(target) = self.path(base) else {
+            unreachable!("checked push_str receiver")
+        };
+        let receiver = self.lower_expr(base)?;
+        // Keep the exclusive loan live across suffix evaluation. Reborrow
+        // read-only for concat, then end both loans before replacing the slot.
+        let exclusive = self.borrow(receiver, Access::Share)?;
+        let suffix = self.lower_expr(suffix)?;
+        let right = self.borrow(suffix, Access::Borrow)?;
+        let left = self.borrow(exclusive, Access::Borrow)?;
+        let scope_start = self.string_locals.len();
+        let staged = self.hidden_local("String append result", Type::String, expr.span);
+        self.initialize_concat(staged, left, right, expr.span);
+        self.replace_local(
+            target,
+            consume(op(Source::Local(staged), expr.span)),
+            base.span,
+            expr.span,
+        );
+        self.end_string_locals(scope_start, expr.span);
+        self.string_locals.truncate(scope_start);
+        self.unit(expr.span)
     }
 
     fn lower_expression_statement(&mut self, expr: &Expr) {
@@ -1496,6 +1530,9 @@ impl<'a> Builder<'a> {
                             },
                             self.ty(expr),
                         );
+                    }
+                    if name == "push_str" {
+                        return self.lower_string_push_str(expr, base, &arguments[0]);
                     }
                     if matches!(
                         name.as_str(),

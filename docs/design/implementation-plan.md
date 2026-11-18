@@ -228,7 +228,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   Direct internal calls can borrow an explicit temporary String argument
   through the call or receive ownership of an inline concat or String call
   result. A direct `share String` parameter can replace a whole caller
-  local while preserving caller ownership. Heap replacement through
+  local while preserving caller ownership. `String.push_str` uses checked
+  concat and replacement to append a read-only suffix. Heap replacement through
   forwarded share handles, other nested heap uses, and general drop
   insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal

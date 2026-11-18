@@ -107,6 +107,83 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
 }
 
 #[test]
+fn string_push_str_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='push-str'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn append(text: share String, suffix: borrow String) {
+            text.push_str(suffix)
+        }
+        fn early(text: share String, stop: Bool) {
+            text.push_str({ if stop { return; } "wrong" });
+        }
+        fn main() -> Result<Bool, Error> {
+            let suffix := "😀".concat("!");
+            let view := suffix.borrow();
+            var text := "";
+            text.push_str("é");
+            text.push_str("");
+            append(text.share(), view);
+            early(text.share(), true);
+            let scalar := match text.scalar_at(2) {
+                Some(value) => value == 128_512, None => false
+            };
+            Ok(text.len() == 7 && scalar && view.len() == 5)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "append.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "append.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn string_push_str_rejects_aliases_and_read_only_receivers() {
+    let f = Fixture::new();
+    for (body, code, message) in [
+        (
+            r#"let text := "a"; text.push_str("b");"#,
+            "TE017",
+            "requires a mutable whole String",
+        ),
+        (
+            r#"var text := "a"; let view := text.borrow(); view.push_str("b");"#,
+            "TE017",
+            "requires a mutable whole String",
+        ),
+        (
+            r#"var text := "a"; text.push_str(text.borrow());"#,
+            "BE005",
+            "shared",
+        ),
+        (
+            r#"var text := "a"; let view := text.borrow(); text.push_str("b"); view.len();"#,
+            "BE005",
+            "borrowed",
+        ),
+        (
+            r#"var text := "a"; let view := text.share(); view.push_str("b");"#,
+            "TE017",
+            "direct share String parameter",
+        ),
+    ] {
+        f.write("text.mb", &format!("fn main() {{ {body} }}"));
+        let diagnostic = err(f.run(&["ownership", "text.mb"]), code);
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
+}
+
+#[test]
 fn share_string_replacement_preserves_caller_owned_storage() {
     let f = Fixture::new();
     f.write(
