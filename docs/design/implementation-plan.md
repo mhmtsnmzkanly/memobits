@@ -222,8 +222,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   evaluates the RHS before releasing the previous block, even across mixed
   move paths. Direct calls can transfer heap locals into multiple owned
   String parameters in argument order and return an owner to a whole caller
-  local. Unbound heap results, share mutation and general drop insertion
-  remain pending.
+  local. Standalone concat and direct call statements release discarded
+  results. Nested heap temporaries, share mutation and general drop
+  insertion remain pending.
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.

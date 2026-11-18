@@ -717,6 +717,31 @@ impl<'a> Builder<'a> {
         Some(())
     }
 
+    fn lower_expression_statement(&mut self, expr: &Expr) {
+        if let ExprKind::Call { callee, arguments } = &expr.kind {
+            let scope_start = self.string_locals.len();
+            if let ExprKind::Field { base, name } = &callee.kind {
+                if name == "concat" {
+                    let owner = self.hidden_local("discarded String", Type::String, expr.span);
+                    self.lower_concat_initializer(owner, base, &arguments[0], expr.span);
+                    self.end_string_locals(scope_start, expr.span);
+                    self.string_locals.truncate(scope_start);
+                    return;
+                }
+            }
+            if self.ty(expr) == Some(Type::String) {
+                if let Some(result) = self.lower_expr(expr) {
+                    let owner = self.hidden_local("discarded String", Type::String, expr.span);
+                    self.initialize_local(owner, consume(result), expr.span);
+                    self.end_string_locals(scope_start, expr.span);
+                    self.string_locals.truncate(scope_start);
+                }
+                return;
+            }
+        }
+        self.lower_expr(expr);
+    }
+
     fn end_string_locals(&mut self, from: usize, span: Span) {
         for index in (from..self.string_locals.len()).rev() {
             let local = self.string_locals[index];
@@ -883,7 +908,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 StatementKind::Expression(expr) => {
-                    self.lower_expr(expr);
+                    self.lower_expression_statement(expr);
                 }
                 StatementKind::Return(value) => {
                     let returned = match value {

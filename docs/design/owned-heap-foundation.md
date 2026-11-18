@@ -42,10 +42,12 @@ lexical cleanup if later evaluation returns, breaks, or continues out of
 the call. Invocation transfers the staged descriptors to callee parameters.
 A trap discards the instance, including any staged allocations.
 A function can return an owning local through a direct internal call whose
-result directly initializes or replaces a whole caller local. Discarded
-results, unbound heap temporaries, and share mutation require broader drop
-elaboration. A nonzero descriptor
-provenance field points to the owned block's header. A move clears that
+result directly initializes or replaces a whole caller local. A standalone
+concat or direct String-returning call can also discard its result. The
+statement binds the result to a hidden owner and ends its scope immediately.
+An early exit during evaluation cleans up only owners already initialized.
+Nested heap temporaries and share mutation require broader drop elaboration.
+A nonzero descriptor provenance field points to the owned block's header. A move clears that
 field in the source. Zero provenance covers static bytes and moved slots,
 and cleanup skips either.
 
@@ -105,7 +107,9 @@ have page-reuse coverage.
    repeated reuse in the same Wasm instance.
 4. Whole-local replacement releases the previous block after RHS evaluation.
    Tests cover live loans, moves on one branch, and repeated reuse.
-5. Extend normal-exit cleanup to discarded results and general temporaries.
+5. Standalone discard reuses lexical cleanup. Repeated concat and call
+   discards reuse one block within the same Wasm instance.
+6. Extend normal-exit cleanup to general temporaries.
    Whole replacement through a share also needs ownership tracking for the
    pointee. Verify exact returned bytes, mixed ownership
    joins, and bounded memory use under repeated source and standalone Wasm

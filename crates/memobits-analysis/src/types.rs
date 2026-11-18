@@ -552,7 +552,7 @@ struct Checker {
     /// repetitions, named locals, and the tails of `if`/block expressions in
     /// such a position.
     allowed_arrays: HashSet<usize>,
-    concat_initializer: Option<usize>,
+    concat_destination: Option<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
     /// Address of the path expression currently checked as an index or field base.
@@ -931,10 +931,10 @@ impl Checker {
                         self.report_type_resolution(ty, self.table.resolve_local(&self.module, ty))
                     });
                     self.allow_array_value(value);
-                    let previous = self.concat_initializer;
-                    self.concat_initializer = Some(value as *const Expr as usize);
+                    let previous = self.concat_destination;
+                    self.concat_destination = Some(value as *const Expr as usize);
                     let inferred = self.expr(value, annotation.as_ref());
-                    self.concat_initializer = previous;
+                    self.concat_destination = previous;
                     self.reject_extraction(value, &inferred);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
@@ -1075,16 +1075,16 @@ impl Checker {
                     if operator == "=" {
                         self.allow_array_value(value);
                     }
-                    let previous = self.concat_initializer;
+                    let previous = self.concat_destination;
                     if operator == "="
                         && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
                             && self.lookup(&path[0]).is_some_and(|binding|
                                 binding.mutable && binding.ty == Ty::String))
                     {
-                        self.concat_initializer = Some(value as *const Expr as usize);
+                        self.concat_destination = Some(value as *const Expr as usize);
                     }
                     let value_ty = self.expr(value, Some(&target_ty));
-                    self.concat_initializer = previous;
+                    self.concat_destination = previous;
                     if operator == "=" {
                         self.reject_extraction(value, &value_ty);
                     }
@@ -1112,7 +1112,10 @@ impl Checker {
                     }
                 }
                 StatementKind::Expression(expr) => {
+                    let previous = self.concat_destination;
+                    self.concat_destination = Some(expr as *const Expr as usize);
                     let ty = self.expr(expr, None);
+                    self.concat_destination = previous;
                     if matches!(
                         ty,
                         Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
@@ -1210,12 +1213,12 @@ impl Checker {
         self.allow_array_value(base);
         let receiver = read_type(self.expr(base, None));
         let offset_type = Ty::Primitive("u32");
-        if method == "concat" && self.concat_initializer != Some(expression as *const Expr as usize)
+        if method == "concat" && self.concat_destination != Some(expression as *const Expr as usize)
         {
             self.error(
                 17,
                 expression.span,
-                "concat requires a direct whole String local initializer or assignment",
+                "concat requires a whole String local destination or a standalone expression statement",
             );
         }
         let expected = usize::from(method != "len");
@@ -2882,7 +2885,7 @@ fn check_standalone(
         diagnostics: table_diagnostics,
         lowering: capture,
         allowed_arrays: HashSet::new(),
-        concat_initializer: None,
+        concat_destination: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
@@ -3199,7 +3202,7 @@ fn checker() -> Checker {
         diagnostics: Vec::new(),
         lowering: true,
         allowed_arrays: HashSet::new(),
-        concat_initializer: None,
+        concat_destination: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),

@@ -295,6 +295,49 @@ fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
 }
 
 #[test]
+fn repeated_string_discard_reuses_one_block() {
+    let literal = "é".repeat(24_000);
+    let program = lower(&format!(
+        r#"
+        fn make(seed: borrow String) -> String {{
+            let result := seed.concat("");
+            result
+        }}
+        fn main() -> Result<Bool, Error> {{
+            let seed := "{literal}";
+            var step := 0;
+            loop {{
+                seed.concat("");
+                make(seed.borrow());
+                step += 1;
+                if step == 8 {{ break; }}
+            }}
+            Ok(true)
+        }}
+        "#
+    ));
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(1),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    assert_eq!(memory.data(&store).len(), 65_536);
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), 2 * 65_536);
+    }
+}
+
+#[test]
 fn mutable_string_replacement_reuses_blocks_after_mixed_moves() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(

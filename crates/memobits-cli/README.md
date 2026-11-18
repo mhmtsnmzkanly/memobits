@@ -61,9 +61,10 @@ another local. A whole mutable String local can be replaced. The RHS runs
 before the previous allocation is released. A direct internal call can take multiple owned
 String arguments, evaluated left to right. Scope exit releases it from the binding that
 still owns it. An internal function can return an owning local when the
-direct call initializes or replaces a whole caller local. Unbound heap
-results, share mutation of heap owners, exported String signatures, and
-nested String storage are gated. Application
+direct call initializes or replaces a whole caller local. Standalone concat
+and direct call statements release discarded results. Nested heap
+temporaries, share mutation of heap owners, exported String signatures,
+and nested String storage are gated. Application
 builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.

@@ -55,7 +55,7 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
     for (body, message) in [
         (
             r#""a".concat("b").len();"#,
-            "direct whole String local initializer or assignment",
+            "whole String local destination or a standalone expression statement",
         ),
         (
             r#"var joined := "a".concat("b"); let view := joined.borrow(); joined = "c"; view.len();"#,
@@ -241,13 +241,82 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
 }
 
 #[test]
-fn heap_returns_require_a_direct_whole_local_destination() {
+fn discarded_heap_results_run_from_source_and_wasm() {
     let f = Fixture::new();
-    for body in ["make();", "make().len();"] {
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-discard'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make(text: String, early: Bool) -> String {
+            if early { return text; }
+            let result := text.concat("!");
+            result
+        }
+        fn early_concat() -> Bool {
+            let first := "é".concat("!");
+            first.concat({ return first.len() == 3; "unreachable" });
+            false
+        }
+        fn main() -> Result<Bool, Error> {
+            let first := "é".concat("!");
+            make(first, true);
+            "x".concat("😀");
+            let second := "a".concat("b");
+            make(second, { return Ok(early_concat()); false });
+            Ok(false)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "discard.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "discard.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn discarded_heap_call_preserves_trap_diagnostics() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='concat-discard-trap'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn make(text: String, divisor: i32) -> String {
+            let quotient := 1 / divisor;
+            if quotient == 0 { return "zero"; }
+            text
+        }
+        fn main() {
+            let text := "é".concat("!");
+            make(text, 0);
+        }
+        "#,
+    );
+    let source = err(f.run(&["run"]), "RE007");
+    assert!(source.contains("division by zero"), "{source}");
+    let build = f.run(&["build", "--output", "discard-trap.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(err(f.run(&["run", "discard-trap.wasm"]), "RE007"), source);
+}
+
+#[test]
+fn heap_returns_reject_nested_temporaries() {
+    let f = Fixture::new();
+    for body in ["make().len();", "take(make());"] {
         f.write(
             "text.mb",
             &format!(
                 r#"fn make() -> String {{ let result := "é".concat("!"); result }}
+               fn take(value: String) {{ value.len(); }}
                fn main() {{ {body} }}"#,
             ),
         );

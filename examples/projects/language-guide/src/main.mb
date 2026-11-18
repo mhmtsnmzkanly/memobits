@@ -251,6 +251,9 @@ fn text_concat() -> Bool {
     // binding leaves scope. Moving to a new let transfers that obligation.
     let joined := left.concat(right.borrow());
     let left_moved := left;
+    // These standalone statements release their unused results immediately.
+    joined.concat("?");
+    add_suffix(joined.borrow());
     var with_suffix := add_suffix(joined.borrow());
     // The RHS reads the old text before assignment releases its bytes.
     with_suffix = with_suffix.concat("?");
