@@ -108,7 +108,14 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
             var words: List<u32> = [];
             var index: u32 = 0;
             loop {
-                append(bytes.share(), words.share(), index);
+                if index % 2 == 0 {
+                    append(bytes.share(), words.share(), index);
+                } else {
+                    var byte_handle := bytes.share();
+                    var word_handle := words.share();
+                    byte_handle.push(169);
+                    word_handle.push(305_419_896 + index);
+                }
                 index += 1;
                 if index == 12_000 { break; }
             }

@@ -216,8 +216,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `.push()` on whole mutable locals. Growth uses the same checked allocator
   as String. The [List design](list-slice.md) records copied `.get(index)`
   reads with checked unsigned bounds. Direct internal borrow parameters
-  can read either primitive List type. Share parameters can also push
-  through the caller descriptor. Direct owned parameters take named local
+  can read either primitive List type. Share parameters and stored `var`
+  shares can also push through the owner's descriptor. Direct owned parameters take named local
   moves with cleanup on either side of invocation. Direct returns move a
   named List local into a caller binding. Whole mutable local replacement
   and replacement through a share parameter or a stored `var` share evaluate the RHS before

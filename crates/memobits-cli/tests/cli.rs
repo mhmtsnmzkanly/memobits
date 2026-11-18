@@ -1152,7 +1152,7 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
 }
 
 #[test]
-fn stored_list_share_replacement_runs_from_source_and_wasm() {
+fn stored_list_share_updates_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -1173,8 +1173,13 @@ fn stored_list_share_replacement_runs_from_source_and_wasm() {
             items.push(40);
             var handle := items.share();
             handle = { if early { return handle.len() == 1; } rebuild(handle.borrow()) };
+            let preview := handle.borrow();
+            let next := preview.len() + 40;
+            handle.push(next);
             let moved := items;
-            match moved.get(1) { Some(value) => value == 41, None => false }
+            let old_ok := match moved.get(1) { Some(value) => value == 41, None => false };
+            let pushed := match moved.get(2) { Some(value) => value == 42, None => false };
+            old_ok && pushed
         }
         fn main() -> Result<Bool, Error> {
             var bytes: List<u8> = [];
@@ -1183,9 +1188,11 @@ fn stored_list_share_replacement_runs_from_source_and_wasm() {
             next.push(255);
             var handle := bytes.share();
             handle = next;
+            handle.push(128);
+            let appended := match handle.get(1) { Some(value) => value == 128, None => false };
             let found := match handle.get(0) { Some(value) => value == 255, None => false };
             handle = [];
-            Ok(found && bytes.len() == 0 && check(false) && check(true))
+            Ok(found && appended && bytes.len() == 0 && check(false) && check(true))
         }
     "#,
     );
@@ -1239,7 +1246,16 @@ fn list_shares_reject_conflicts_and_immutable_handle_replacement() {
             "TE004",
         ),
         (
-            r#"fn main() { var items: List<u8> = []; var alias := items.share(); alias.push(1); }"#,
+            r#"fn main() { var items: List<u8> = []; var alias := items.share();
+                         let held := alias.borrow(); alias.push(1); held.len(); }"#,
+            "BE005",
+        ),
+        (
+            r#"fn main() { var items: List<u8> = []; var alias := items.borrow(); alias.push(1); }"#,
+            "TE017",
+        ),
+        (
+            r#"fn main() { var items: List<u8> = []; let alias := items.share(); alias.push(1); }"#,
             "TE017",
         ),
     ] {

@@ -1357,7 +1357,9 @@ fn validate_instruction(
                         Type::Reference {
                             access: Access::Share,
                             inner,
-                        } if function.parameter_locals.contains(target) => list_read_element(inner),
+                        } if local.mutable || function.parameter_locals.contains(target) => {
+                            list_read_element(inner)
+                        }
                         _ => None,
                     });
             if receiver.map(Type::Primitive) != actual
@@ -1369,7 +1371,7 @@ fn validate_instruction(
                     errors,
                     id,
                     Some(block),
-                    "List push requires a mutable List local or share parameter and a matching element",
+                    "List push requires a mutable owner or share and a matching element",
                 );
             }
         }

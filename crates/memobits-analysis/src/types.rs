@@ -1362,14 +1362,21 @@ impl Checker {
     fn list_push(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
-        let owner = matches!(receiver, Ty::List(_));
+        let mutable_receiver = matches!(
+            receiver,
+            Ty::List(_)
+                | Ty::Reference {
+                    access: IrAccess::Share,
+                    ..
+                }
+        );
         let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
-            && self.lookup(&path[0]).is_some_and(|binding| (owner && binding.mutable) || binding.access == IrAccess::Share));
+            && self.lookup(&path[0]).is_some_and(|binding| mutable_receiver && (binding.mutable || binding.access == IrAccess::Share)));
         let Ty::List(element) = read_type(receiver) else {
             self.error(
                 17,
                 base.span,
-                "push() requires a mutable whole List local or direct share List parameter",
+                "push() requires a mutable List local, mutable share handle, or share parameter",
             );
             return Ty::Error;
         };
@@ -1377,7 +1384,7 @@ impl Checker {
             self.error(
                 17,
                 base.span,
-                "push() requires a mutable whole List local or direct share List parameter",
+                "push() requires a mutable List local, mutable share handle, or share parameter",
             );
         }
         if arguments.len() != 1 {

@@ -49,7 +49,8 @@ or a coverage need.
   existing array contexts continue to select Array. Defer nonempty List
   literals, repetition, and conversion from arrays.
 - Use `items.push(value)` to append one element and return unit. The
-  receiver is a whole mutable local or a direct exclusive parameter.
+  receiver is a whole mutable local, a direct exclusive parameter, or a
+  stored mutable share handle.
   Evaluate the element once, before
   allocating, growing, or changing the list. The argument can read the
   receiver's length. A move of the receiver during argument evaluation
@@ -68,7 +69,9 @@ first slice keeps the access rules and types already used in Memobits.
 Scope the owner to whole local bindings, including moves from one local
 to another. Borrow and share parameters receive the caller's private
 descriptor address for the direct call. A share follows the usual
-exclusive loan rules. Push through a stored share handle remains gated.
+exclusive loan rules. A stored `var` share handle also supports `push`.
+A live child borrow blocks mutation until its last use, and a stored
+`let` handle remains read-only.
 An owned parameter receives its own frame descriptor and takes the
 allocation from the caller's moved slot. A return clears the moved
 callee slot before cleanup and transfers the staged descriptor through
