@@ -633,6 +633,10 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             source,
             index: offset,
         }
+        | InstructionKind::ListRead {
+            source,
+            index: offset,
+        }
         | InstructionKind::CollectionSearch {
             source,
             value: offset,
@@ -1530,6 +1534,9 @@ fn check_instruction(
             source: reference, ..
         }
         | InstructionKind::ListGet {
+            source: reference, ..
+        }
+        | InstructionKind::ListRead {
             source: reference, ..
         }
         | InstructionKind::StringLen { source: reference }

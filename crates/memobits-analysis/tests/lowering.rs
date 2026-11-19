@@ -242,7 +242,18 @@ fn array_syntax_cannot_produce_executable_ir() {
 #[test]
 fn fixed_iteration_rejects_unsupported_iterables_and_checks_binding_scope() {
     for (body, code) in [
-        ("let items: List<u8> = []; loop value in items {}", "TE017"),
+        (
+            "let items: List<u8> = []; loop value in { items } {}",
+            "TE017",
+        ),
+        (
+            "let items: List<u8> = []; loop value in items { value = 2; }",
+            "TE004",
+        ),
+        (
+            "let items: List<u32> = []; loop value in items {} value + 1;",
+            "TE005",
+        ),
         ("loop value in [[1]] {}", "TE017"),
         ("loop value in 42 {}", "TE017"),
         ("loop value in [1] { value = 2; }", "TE004"),

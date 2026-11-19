@@ -184,6 +184,30 @@ fn replace_words(items: share List<u32>, value: u32) {
     items = make_words(value);
 }
 
+// List iteration visits immutable copies in insertion order. An empty List
+// skips the body. A direct call result stays alive until the loop exits.
+// The read loan prevents writes and moves of the receiver during the body.
+fn list_iteration() -> Bool {
+    var bytes: List<u8> = [];
+    loop value in bytes { return false; }
+    bytes.push(9);
+    bytes.push(4);
+    bytes.push(2);
+    var digits: u8 = 0;
+    loop value in bytes {
+        if value == 9 { continue; }
+        digits = digits * 10 + value;
+    }
+    bytes.clear();
+
+    var first: u32 = 0;
+    loop value in make_words(1000) {
+        first = value;
+        break;
+    }
+    digits == 42 && bytes.len() == 0 && first == 1000
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -629,5 +653,6 @@ fn main() -> Result<i32, Error> {
     if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
     if !primitive_lists() { return Err(Error { code: 14 }); }
     if !fixed_iteration() { return Err(Error { code: 15 }); }
+    if !list_iteration() { return Err(Error { code: 16 }); }
     Ok(42)
 }

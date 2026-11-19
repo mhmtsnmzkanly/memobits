@@ -1153,9 +1153,16 @@ impl Checker {
                     self.allow_array_value(items);
                     let ty = match read_type(self.expr(items, None)) {
                         Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
+                        Ty::List(element) if self.list_read_receiver(items) => {
+                            Ty::Primitive(element)
+                        }
+                        Ty::List(_) => {
+                            self.error(17, items.span, "List iteration requires a local binding or a direct internal List call");
+                            Ty::Error
+                        }
                         Ty::Never | Ty::Error => Ty::Error,
                         _ => {
-                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements");
+                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements, or a List<u8> or List<u32>");
                             Ty::Error
                         }
                     };

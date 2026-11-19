@@ -670,7 +670,7 @@ impl<'a> Builder<'a> {
             Some(ty),
         )
     }
-    fn finish(&mut self, block: BlockId, kind: TerminatorKind, span: Option<Span>) {
+    fn use_iteration_loans(&mut self) {
         // An iteration loan is lexical. Give it a use at every body block's
         // end, including paths that break, return, or never reach a backedge.
         for index in 0..self.loops.len() {
@@ -678,6 +678,14 @@ impl<'a> Builder<'a> {
                 self.borrow(receiver, Access::Borrow);
             }
         }
+    }
+
+    fn finish(&mut self, block: BlockId, kind: TerminatorKind, span: Option<Span>) {
+        self.use_iteration_loans();
+        self.set_terminator(block, kind, span);
+    }
+
+    fn set_terminator(&mut self, block: BlockId, kind: TerminatorKind, span: Option<Span>) {
         self.function.blocks[block.0 as usize].terminator = Terminator { span, kind };
         if self.current == Some(block) {
             self.current = None;
@@ -928,7 +936,7 @@ impl<'a> Builder<'a> {
                 .and_then(|value| self.preserve_scope_result(value, 0))
                 .map(consume);
             // Stage the return operand before the lexical loans' final uses
-            // so the ownership checker sees any move of an iterated array.
+            // so the ownership checker sees any move of an iterated collection.
             let returned = if self
                 .loops
                 .iter()
@@ -938,8 +946,9 @@ impl<'a> Builder<'a> {
             } else {
                 returned
             };
+            self.use_iteration_loans();
             self.end_owned_locals(0, span);
-            self.finish(current, TerminatorKind::Return(returned), Some(span));
+            self.set_terminator(current, TerminatorKind::Return(returned), Some(span));
         }
     }
 
@@ -1482,19 +1491,27 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_for_each(&mut self, statement: &Statement, items: &Expr, body: &Block) -> Option<()> {
+        let scope_start = self.owned_locals.len();
         let receiver = self.lower_read_receiver(items)?;
         let Some(Type::Reference { inner, .. }) = self.operand_type(receiver) else {
             unreachable!("checked iteration receiver")
         };
-        let Type::Array { len, .. } = *inner else {
-            unreachable!("checked iteration array")
-        };
-        if len == 0 {
-            return Some(());
-        }
-
         let span = statement.span;
         let u32_ty = Type::Primitive(Primitive::U32);
+        let limit = match *inner {
+            Type::Array { len: 0, .. } => return Some(()),
+            Type::Array { len, .. } => {
+                self.constant(span, Constant::Integer(len.to_string()), u32_ty.clone())?
+            }
+            Type::List(_) => self.emit(
+                span,
+                InstructionKind::ListLen {
+                    source: read(receiver),
+                },
+                Some(u32_ty.clone()),
+            )?,
+            _ => unreachable!("checked iteration collection"),
+        };
         let counter = self.hidden_local("iteration index", u32_ty.clone(), span);
         let start = self.constant(span, Constant::Integer("0".into()), u32_ty.clone())?;
         self.initialize_local(counter, consume(start), span);
@@ -1505,7 +1522,6 @@ impl<'a> Builder<'a> {
         self.goto(header, Vec::new(), span);
         self.current = Some(header);
         let position = self.capture(op(Source::Local(counter), span))?;
-        let limit = self.constant(span, Constant::Integer(len.to_string()), u32_ty.clone())?;
         let more = self.emit(
             span,
             InstructionKind::Binary {
@@ -1531,9 +1547,21 @@ impl<'a> Builder<'a> {
             Some(span),
         );
         self.current = Some(entry);
-        let element = self.element_addr(receiver, position, Access::Borrow, items.span)?;
-        let loaded = self.load_element(element, items.span)?;
-        let copy = self.owned(loaded)?;
+        let copy = match *inner {
+            Type::List(element) => consume(self.emit(
+                items.span,
+                InstructionKind::ListRead {
+                    source: read(receiver),
+                    index: read(position),
+                },
+                Some(Type::Primitive(element)),
+            )?),
+            _ => {
+                let element = self.element_addr(receiver, position, Access::Borrow, items.span)?;
+                let loaded = self.load_element(element, items.span)?;
+                self.owned(loaded)?
+            }
+        };
         self.initialize_local(self.local(statement), copy, span);
 
         // Advance before user code so continue uses the same header as a bare loop.
@@ -1550,6 +1578,8 @@ impl<'a> Builder<'a> {
         self.replace_local(counter, consume(next), span, span);
         self.lower_loop_body(body, header, exit, Some(receiver));
         self.current = Some(exit);
+        self.end_owned_locals(scope_start, span);
+        self.owned_locals.truncate(scope_start);
         Some(())
     }
 

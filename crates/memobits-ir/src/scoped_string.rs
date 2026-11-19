@@ -358,7 +358,8 @@ pub(super) fn direct_share_owner(
 }
 
 /// Capture the outgoing descriptor before any lexical cleanup runs. This
-/// temporary can only feed the return at the end of the same block.
+/// temporary can only feed the return at the end of the same block. Final
+/// iteration-loan reads may follow the capture before cleanup.
 pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
     let TerminatorKind::Return(Some(Operand {
         source: Source::Value(result),
@@ -368,12 +369,22 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
     else {
         return None;
     };
-    let (position, instruction) = block
-        .instructions
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, inst)| !is_cleanup(inst))?;
+    let (position, instruction) =
+        block
+            .instructions
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, inst)| {
+                !is_cleanup(inst)
+                    && !matches!(
+                        inst.kind,
+                        InstructionKind::Borrow {
+                            access: Access::Borrow,
+                            ..
+                        }
+                    )
+            })?;
     let InstructionKind::Capture(Operand {
         source: Source::Local(source),
         mode: UseMode::Consume,

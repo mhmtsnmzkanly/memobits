@@ -219,3 +219,33 @@ fn fixed_iteration_loan_covers_the_body_and_ends_on_exit() {
     );
     assert!(codes.iter().any(|code| code == "BE005"), "{codes:?}");
 }
+
+#[test]
+fn list_iteration_loan_covers_the_body_and_ends_on_exit() {
+    accepted(
+        "var items: List<u8> = []; items.push(1); \
+         loop value in items { items.len(); items.get(0); break; } \
+         items.push(2); let moved := items;",
+    );
+    for (action, control) in [
+        ("items.push(value);", "break;"),
+        ("items.pop();", "continue;"),
+        ("items.clear();", "return;"),
+        ("items = [];", "loop {}"),
+        ("let moved := items;", "break;"),
+        ("let exclusive := items.share(); exclusive.len();", "break;"),
+    ] {
+        rejected(&format!(
+            "var items: List<u8> = []; loop value in items {{ {action} {control} }}"
+        ));
+    }
+    rejected(
+        "var items: List<u32> = []; var handle := items.share(); \
+         loop value in handle { handle.push(value); break; }",
+    );
+    let codes = ownership(
+        "fn move_out(items: List<u32>) -> List<u32> { \
+         loop value in items { return items; } items } fn main() {}",
+    );
+    assert!(codes.iter().any(|code| code == "BE005"), "{codes:?}");
+}

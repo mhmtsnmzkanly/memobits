@@ -306,6 +306,11 @@ pub enum InstructionKind {
         source: Operand,
         index: Operand,
     },
+    /// Read an initialized element by value, trapping if the index is out of bounds.
+    ListRead {
+        source: Operand,
+        index: Operand,
+    },
     ListLen {
         source: Operand,
     },
@@ -1452,6 +1457,30 @@ fn validate_instruction(
                 );
             }
         }
+        InstructionKind::ListRead { source, index } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            let index_type = operand_type(program, function, index, errors, id, block);
+            let element = match input {
+                Some(Type::Reference {
+                    access: Access::Borrow,
+                    inner,
+                }) => list_read_element(&inner),
+                _ => None,
+            };
+            if source.mode != UseMode::Read
+                || index.mode != UseMode::Read
+                || index_type != Some(Type::Primitive(Primitive::U32))
+                || element.is_none()
+                || element.map(Type::Primitive).as_ref() != out
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "List read requires a borrowed List, u32 index, and matching element output",
+                );
+            }
+        }
         InstructionKind::CollectionSearch {
             source,
             value,
@@ -1495,7 +1524,8 @@ fn validate_instruction(
         InstructionKind::ListLen { source } => {
             let input = operand_type(program, function, source, errors, id, block);
             if input.as_ref().and_then(list_read_element).is_none()
-                || !matches!(source.source, Source::Local(_))
+                || (!matches!(source.source, Source::Local(_))
+                    && !matches!(input, Some(Type::Reference { .. })))
                 || source.mode != UseMode::Read
                 || out != Some(&Type::Primitive(Primitive::U32))
             {
@@ -1503,7 +1533,7 @@ fn validate_instruction(
                     errors,
                     id,
                     Some(block),
-                    "List length requires a local read and u32 output",
+                    "List length requires a local or reference read and u32 output",
                 );
             }
         }
@@ -3208,6 +3238,10 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::ListGet {
+                    source,
+                    index: offset,
+                }
+                | InstructionKind::ListRead {
                     source,
                     index: offset,
                 }

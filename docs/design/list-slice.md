@@ -117,6 +117,22 @@ ownership or ABI paths are covered. The first consumer can build a list
 in a loop and check inserted values, order, and the first absent index
 from a primitive-returning entry.
 
+## List iteration
+
+`loop value in items { ... }` supports `List<u8>` and `List<u32>`. The
+receiver can be a whole local binding, a borrow or share binding or parameter,
+or a direct internal List call. Other List-valued expressions are gated.
+
+The loop evaluates the receiver once and visits elements in insertion order.
+Each iteration binds an immutable copy. An empty List skips the body.
+A read loan blocks writes and moves of the receiver throughout the body and
+ends when the loop exits. `continue` advances to the next element,
+`break` exits the loop, and `return` exits the function. A direct call
+result stays alive across iterations and is released on exhaustion, break,
+or return.
+
+[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+
 ## Private Wasm storage and cleanup
 
 An empty owner needs no heap block. For a nonempty owner, track the

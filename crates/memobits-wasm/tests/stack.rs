@@ -1332,3 +1332,57 @@ fn other_traps_do_not_set_the_overflow_flag() {
     let flag = instance.get_global(&store, STACK_OVERFLOW_EXPORT).unwrap();
     assert_eq!(flag.get(&store).i32(), Some(0));
 }
+
+#[test]
+fn list_iteration_reuses_temporary_storage_after_each_exit() {
+    let program = lower(
+        r#"
+        fn make() -> List<u32> {
+            var items: List<u32> = [];
+            loop {
+                items.push(items.len());
+                if items.len() == 10_000 { break; }
+            }
+            items
+        }
+        fn run(exit: u32) -> u32 {
+            var count: u32 = 0;
+            loop value in make() {
+                if value == 0 { continue; }
+                if exit == 1 { break; }
+                if exit == 2 { return value; }
+                count += 1;
+            }
+            count
+        }
+        fn main() -> Result<Bool, Error> {
+            if run(0) != 9999 || run(1) != 0 || run(2) != 1 {
+                return Err(Error { code: 1 });
+            }
+            Ok(true)
+        }
+        "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(2),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let (result, _) = main.call(&mut store, ()).unwrap();
+    assert_eq!(memory.data(&store)[result as usize], 0);
+    let warmed_size = memory.data(&store).len();
+    assert!(warmed_size <= 3 * 65_536);
+    for _ in 0..3 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), warmed_size);
+    }
+}

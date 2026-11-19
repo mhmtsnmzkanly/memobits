@@ -95,7 +95,9 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
 - The language guide demonstrates `contains(value) -> Bool` and
   `index_of(value) -> Option<u32>` on fixed arrays of numbers or `Bool`,
   including `Bytes<N>`, and on `List<u8>` and `List<u32>`.
-  It also demonstrates [`loop value in items`](docs/design/fixed-array-implementation.md#fixed-array-iteration) over those fixed arrays.
+  It also demonstrates `loop value in items` over those fixed arrays and Lists.
+  [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
+  · [List iteration](docs/design/list-slice.md#list-iteration)
   [Runnable language guide](examples/projects/language-guide/src/main.mb)
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of

@@ -328,6 +328,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
         | InstructionKind::ListGet { .. }
+        | InstructionKind::ListRead { .. }
         | InstructionKind::CollectionSearch { .. }
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
@@ -995,6 +996,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Unary { operand, .. }
                 | InstructionKind::Assign { value: operand, .. } => count(operand),
                 InstructionKind::ListGet {
+                    source,
+                    index: offset,
+                }
+                | InstructionKind::ListRead {
                     source,
                     index: offset,
                 }
@@ -3080,40 +3085,60 @@ fn compile_instruction(
             body.instructions().i32_const(0).else_().i32_const(1).end();
             emit_store(body, Primitive::U8);
         }
-        InstructionKind::ListGet { source, index } => {
-            let frame = frame.ok_or("List get requires a frame")?;
-            let value = instruction.output.ok_or("List get lacks an output")?;
-            let (tag, payload) = scalar_option_offsets(layout, function, value)?;
+        InstructionKind::ListGet { source, index }
+        | InstructionKind::ListRead { source, index } => {
+            let option_slots = if matches!(instruction.kind, InstructionKind::ListGet { .. }) {
+                let frame = frame.ok_or("List get requires a frame")?;
+                let value = instruction.output.ok_or("List get lacks an output")?;
+                let (tag, payload) = scalar_option_offsets(layout, function, value)?;
+                emit_address(body, frame, tag);
+                Some((frame, payload))
+            } else {
+                None
+            };
             let source_type = value_type(function, source)?;
             let owner_type = match &source_type {
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
             let Type::List(element) = *owner_type else {
-                return Err("List get source is not a List".into());
+                return Err("List element read source is not a List".into());
             };
             let (width, _) = storage_layout(element)?;
-            emit_address(body, frame, tag);
-            emit_operand(body, function, param_count, index, layout, Some(frame))?;
-            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            emit_operand(body, function, param_count, index, layout, frame)?;
+            emit_operand(body, function, param_count, source, layout, frame)?;
             list_descriptor::load_length(body);
-            body.instructions()
-                .i32_lt_u()
-                .if_(BlockType::Result(ValType::I32));
+            if let Some((frame, payload)) = option_slots {
+                body.instructions()
+                    .i32_lt_u()
+                    .if_(BlockType::Result(ValType::I32));
+                emit_address(body, frame, payload);
+            } else {
+                body.instructions().i32_ge_u();
+                trap_if(
+                    body,
+                    traps.site(instruction.span),
+                    TrapReason::IndexOutOfBounds,
+                );
+            }
 
             // An initialized index is within the checked extent from push.
-            emit_address(body, frame, payload);
-            emit_operand(body, function, param_count, source, layout, Some(frame))?;
+            emit_operand(body, function, param_count, source, layout, frame)?;
             list_descriptor::load_address(body);
-            emit_operand(body, function, param_count, index, layout, Some(frame))?;
+            emit_operand(body, function, param_count, index, layout, frame)?;
             body.instructions()
                 .i32_const(width as i32)
                 .i32_mul()
                 .i32_add();
             emit_load(body, element);
-            emit_store(body, element);
-            body.instructions().i32_const(0).else_().i32_const(1).end();
-            emit_store(body, Primitive::U8);
+            if option_slots.is_some() {
+                emit_store(body, element);
+                body.instructions().i32_const(0).else_().i32_const(1).end();
+                emit_store(body, Primitive::U8);
+            } else {
+                body.instructions()
+                    .local_set(output.ok_or("List read lacks an output")?);
+            }
         }
         InstructionKind::CollectionSearch {
             source,

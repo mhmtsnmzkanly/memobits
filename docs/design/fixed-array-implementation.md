@@ -383,7 +383,8 @@ Each iteration binds an immutable primitive copy within the body. A read loan
 holds the iterable for the body and prevents overlapping writes and moves.
 `continue` advances to the next element, `break` leaves the loop, and `return`
 exits the function. Bare `loop { ... }` still repeats until control leaves it.
-Iteration over Lists, Strings, and arrays of aggregates is outside this slice.
+[List iteration](list-slice.md#list-iteration) uses the same loop syntax.
+Iteration over Strings and arrays of aggregates remains deferred.
 
 [Runnable language guide](../../examples/projects/language-guide/src/main.mb)
 

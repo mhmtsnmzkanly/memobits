@@ -4803,3 +4803,67 @@ fn deep_recursion_with_frame_arrays_reports_stack_overflow_not_fuel() {
     assert!(!text.contains("RE006"), "{text}");
     assert!(text.contains("stack overflow"), "{text}");
 }
+
+#[test]
+fn list_iteration_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-iteration'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn bytes(calls: share u32, empty: Bool) -> List<u8> {
+            calls += 1;
+            var items: List<u8> = [];
+            if !empty {
+                items.push(255);
+                items.push(2);
+                items.push(3);
+                items.push(4);
+            }
+            items
+        }
+        fn first(items: borrow List<u32>) -> u32 {
+            loop value in items { return value; }
+            0
+        }
+        fn from_temporary(calls: share u32) -> u8 {
+            loop value in bytes(calls, false) { return value; }
+            0
+        }
+        fn main() -> Result<Bool, Error> {
+            var calls: u32 = 0;
+            loop value in bytes(calls.share(), true) { return Ok(false); }
+            var order: u32 = 0;
+            loop value in bytes(calls.share(), false) {
+                if value == 255 { order = 1; continue; }
+                if value == 4 { return Ok(false); }
+                if value == 2 { order = order * 10 + 2; }
+                if value == 3 { order = order * 10 + 3; break; }
+            }
+            var words: List<u32> = [];
+            words.push(4_294_967_295);
+            var handle := words.share();
+            if first(handle.borrow()) != 4_294_967_295 { return Ok(false); }
+            loop value in handle {
+                if value != 4_294_967_295 { return Ok(false); }
+            }
+            handle.clear();
+            var count: u32 = 0;
+            loop value in bytes(calls.share(), false) { count += 1; }
+            let first_byte := from_temporary(calls.share());
+            Ok(order == 123 && count == 4 && first_byte == 255 && calls == 4)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "list-iteration.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "list-iteration.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}

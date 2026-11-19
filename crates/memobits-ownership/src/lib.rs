@@ -224,6 +224,10 @@ fn transfer_instruction(
             source,
             index: offset,
         }
+        | InstructionKind::ListRead {
+            source,
+            index: offset,
+        }
         | InstructionKind::CollectionSearch {
             source,
             value: offset,
