@@ -192,6 +192,13 @@ local. A whole-local move into another new binding transfers cleanup to
 that binding. Read a String field by borrowing it from a named struct local.
 A live field loan blocks moving or ending the heap-owning struct.
 
+A direct internal call can take a read-only `borrow` parameter for one of
+these structs. Pass `record.borrow()` directly from a named owning local.
+The callee receives the address of the caller's struct and can read or borrow
+its String fields. The caller keeps ownership and performs cleanup. The
+whole-struct loan stays live through later argument evaluation and the call,
+so it prevents a move or write to the struct during that interval.
+
 Lowering evaluates fields in source order and stages each String move,
 concat, or call result as a lexical owner. If a later initializer returns,
 breaks, or continues, the staged owner releases its allocation. Construction
@@ -218,9 +225,10 @@ lexical cleanup, including after a whole-local move.
 Wasm gates general block and branch results and indirect calls as String
 field initializers, heap-owning struct temporaries that escape their
 constructor, whole-value replacement of a heap-owning struct, consuming
-field extraction and other field writes on heap-owning structs, whole-struct
-borrows, aggregate nesting, Error inheritance, and signatures that pass or
-return these structs. String field
+field extraction and other field writes on heap-owning structs, aggregate
+nesting, and Error inheritance. Owned and share arguments, struct returns,
+exported struct borrow parameters, storing whole borrows in local bindings,
+and forwarding a whole borrow from a parameter are gated. String field
 replacement through a reference or projection chain, indirect calls, and
 general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's

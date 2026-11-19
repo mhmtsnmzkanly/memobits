@@ -2562,7 +2562,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
             r#"fn take(label: Label) {}
                 fn main() { let text := "a".concat("b"); take(Label { text: text }); }"#,
             "LE900",
-            "must stay local to one function",
+            "only as read-only borrow parameters",
         ),
         (
             r#"fn main() { var label := Label { text: "a" }; label.text = if true { "b" } else { "c" }; }"#,
@@ -2577,7 +2577,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
         (
             r#"fn replace(label: share Label) { let text := "b"; label.text = text; } fn main() {}"#,
             "LE900",
-            "must stay local to one function",
+            "only as read-only borrow parameters",
         ),
         (
             r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
@@ -2592,12 +2592,19 @@ fn wasm_gates_unsupported_string_struct_uses() {
         (
             r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
             "LE900",
-            "must stay local to one function",
+            "only as read-only borrow parameters",
         ),
         (
-            "fn take(label: borrow Label) {} fn main() {}",
+            r#"fn main() { let label := Label { text: "a" }; let view := label.borrow(); }"#,
             "LE900",
-            "must stay local to one function",
+            "cannot be stored in local bindings",
+        ),
+        (
+            r#"fn inspect(label: borrow Label) {}
+                fn forward(label: borrow Label) { inspect(label); }
+                fn main() {}"#,
+            "LE900",
+            "requires a named owner",
         ),
         (
             r#"fn main() { let labels := [Label { text: "a" }]; }"#,
@@ -2617,6 +2624,43 @@ fn wasm_gates_unsupported_string_struct_uses() {
         let diagnostic = err(f.run(&["build"]), code);
         assert!(diagnostic.contains(message), "{source}: {diagnostic}");
     }
+}
+
+#[test]
+fn string_struct_call_borrow_blocks_moves_and_field_replacement() {
+    let f = Fixture::new();
+    for later_argument in [r#"label.text = "changed"; 0"#, "let moved := label; 0"] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"type Label {{ text: String }}
+                fn inspect(label: borrow Label, extra: u32) -> u32 {{ label.text.len() + extra }}
+                fn main() {{
+                    var label := Label {{ text: "old".concat("!") }};
+                    inspect(label.borrow(), {{ {later_argument} }});
+                }}"#
+            ),
+        );
+        err(f.run(&["ownership", "text.mb"]), "BE005");
+    }
+}
+
+#[test]
+fn string_struct_borrow_is_not_an_exported_parameter() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='labels'\nentry='main::main'\n[export]\ninspect='main::inspect'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "pub type Label { text: String } pub fn inspect(label: borrow Label) -> u32 { label.text.len() }",
+    );
+    let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        diagnostic.contains("Wasm exported signatures cannot take structs"),
+        "{diagnostic}"
+    );
 }
 
 #[test]

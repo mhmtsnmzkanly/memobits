@@ -291,6 +291,23 @@ fn temporary_string_fields() -> Bool {
         && byte_is(called.note.byte_at(2), 63)
 }
 
+fn inspect_text_label(label: borrow TextLabel) -> Bool {
+    label.number == 9 && byte_length(label.text.borrow()) == 3
+        && byte_is(label.text.byte_at(2), 33)
+}
+
+// Pass an explicit borrow of a named owner to a direct internal call.
+// The callee reads the fields through its borrow parameter. The caller
+// still owns the struct and can move it after the call. Whole borrows
+// cannot be saved in another binding or forwarded as whole-struct borrows.
+fn borrow_string_struct() -> Bool {
+    let prefix := "é";
+    let label := TextLabel { text: prefix.concat("!"), number: 9 };
+    if !inspect_text_label(label.borrow()) { return false; }
+    let moved := label;
+    inspect_text_label(moved.borrow()) && moved.text.len() == 3
+}
+
 // Direct String field assignment on a var local consumes a named String
 // or stages a literal, concat, or direct internal String call. The RHS can
 // borrow the old field. The write releases the old allocation after the RHS
@@ -756,6 +773,7 @@ fn main() -> Result<i32, Error> {
     if !list_iteration() { return Err(Error { code: 16 }); }
     if !explicit_drop() { return Err(Error { code: 17 }); }
     if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
+    if !borrow_string_struct() { return Err(Error { code: 21 }); }
     if !temporary_string_fields() { return Err(Error { code: 20 }); }
     if !replace_local_string_field() { return Err(Error { code: 19 }); }
     Ok(42)

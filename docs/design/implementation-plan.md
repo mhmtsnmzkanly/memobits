@@ -266,7 +266,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   support literals, named heap String moves, direct concat, and direct
   internal String-returning calls as field initializers. Whole-local moves
   into new bindings transfer ownership. Fields support borrowed reads and
-  direct replacement on a mutable local.
+  direct replacement on a mutable local. Direct internal calls can borrow
+  a named struct owner to read its fields while the caller retains cleanup.
   Exported String signatures, general nested String storage, and a public
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.

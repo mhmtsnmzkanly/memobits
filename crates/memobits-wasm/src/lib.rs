@@ -12,7 +12,7 @@ use memobits_ir::{
     Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
     Type, TypeDef, TypeDefKind, UnaryOp, ValueId,
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ExportKind, ExportSection,
     Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
@@ -281,31 +281,12 @@ fn compile_target(
     }
     let heap_strings = program.heap_strings();
     for (function, heap) in program.functions.iter().zip(&heap_strings) {
-        let local_string_struct = |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
-        let references_string_struct =
-            |ty: &Type| matches!(ty, Type::Reference { inner, .. } if local_string_struct(inner));
-        if function
-            .signature
-            .parameters
-            .iter()
-            .any(|p| local_string_struct(&p.ty) || references_string_struct(&p.ty))
-            || local_string_struct(&function.signature.result)
-            || references_string_struct(&function.signature.result)
-            || function
-                .locals
-                .iter()
-                .any(|l| references_string_struct(&l.ty))
-            || function.values.iter().any(references_string_struct)
-        {
-            errors.push(diagnostic(
-                "structs with String fields must stay local to one function and cannot be borrowed as a whole",
-                Some(function.span),
-            ));
-        }
+        let uses = value_use_counts(function);
+        validate_string_struct_borrows(function, &structs, &uses, &mut errors);
         if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
             errors.push(diagnostic(error.message, error.span));
         }
-        let aliases = construction_aliases(function);
+        let aliases = construction_aliases(function, &uses);
         for block in &function.blocks {
             // Literal descriptors have zero allocation provenance.
             let mut string_literals = HashSet::new();
@@ -387,6 +368,126 @@ fn compile_target(
     encode(program, exports, stack_size, entry)
         .map(|(bytes, trap_sites)| Compiled { bytes, trap_sites })
         .map_err(|message| vec![diagnostic(message, None)])
+}
+
+fn validate_string_struct_borrows(
+    function: &Function,
+    structs: &[StructLayout],
+    uses: &[u32],
+    errors: &mut Vec<Diagnostic>,
+) {
+    use memobits_ir::Access;
+
+    let is_string_struct =
+        |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
+    let is_string_struct_ref =
+        |ty: &Type| matches!(ty, Type::Reference { inner, .. } if is_string_struct(inner));
+
+    if function.signature.parameters.iter().any(|p| {
+        (is_string_struct(&p.ty) && p.access != Access::Borrow) || is_string_struct_ref(&p.ty)
+    }) || is_string_struct(&function.signature.result)
+        || is_string_struct_ref(&function.signature.result)
+    {
+        errors.push(diagnostic(
+            "structs with String fields can cross internal calls only as read-only borrow parameters",
+            Some(function.span),
+        ));
+    }
+
+    if function.locals.iter().enumerate().any(|(index, local)| {
+        is_string_struct_ref(&local.ty)
+            && !(function.parameter_locals.contains(&LocalId(index as u32))
+                && matches!(
+                    local.ty,
+                    Type::Reference {
+                        access: Access::Borrow,
+                        ..
+                    }
+                ))
+    }) {
+        errors.push(diagnostic(
+            "whole borrows of structs with String fields cannot be stored in local bindings",
+            Some(function.span),
+        ));
+    }
+
+    if !function.values.iter().any(is_string_struct_ref)
+        && !function
+            .locals
+            .iter()
+            .any(|local| is_string_struct_ref(&local.ty))
+    {
+        return;
+    }
+    let instructions = || function.blocks.iter().flat_map(|block| &block.instructions);
+    let borrows: HashMap<_, _> = instructions()
+        .filter_map(|instruction| {
+            let output = instruction.output?;
+            let index = output.0 as usize;
+            let InstructionKind::Borrow {
+                owner,
+                access: Access::Borrow,
+                ..
+            } = &instruction.kind
+            else {
+                return None;
+            };
+            (uses[index] == 1 && is_string_struct_ref(&function.values[index]))
+                .then_some((output, owner.source))
+        })
+        .collect();
+    let mut allowed = HashSet::new();
+    let mut forwarded_parameter = false;
+    for instruction in instructions() {
+        let InstructionKind::Call {
+            callee:
+                Operand {
+                    source: Source::Function(_),
+                    ..
+                },
+            arguments,
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        for argument in arguments {
+            let value = match argument.source {
+                Source::Local(local)
+                    if is_string_struct_ref(&function.locals[local.0 as usize].ty) =>
+                {
+                    forwarded_parameter = true;
+                    continue;
+                }
+                Source::Value(value) => value,
+                _ => continue,
+            };
+            let Some(&source) = borrows.get(&value) else {
+                continue;
+            };
+            // Argument lowering reborrows the explicit `owner.borrow()`.
+            // Both addresses must be used only in this chain to the call.
+            let (root, original) = match source {
+                Source::Value(original) => (borrows.get(&original).copied(), Some(original)),
+                _ => (Some(source), None),
+            };
+            if matches!(root, Some(Source::Local(local))
+                if is_string_struct(&function.locals[local.0 as usize].ty))
+            {
+                allowed.insert(value);
+                allowed.extend(original);
+            }
+        }
+    }
+    if forwarded_parameter
+        || function.values.iter().enumerate().any(|(index, ty)| {
+            is_string_struct_ref(ty) && !allowed.contains(&ValueId(index as u32))
+        })
+    {
+        errors.push(diagnostic(
+            "a whole borrow of a struct with String fields requires a named owner and direct use as an internal call argument",
+            Some(function.span),
+        ));
+    }
 }
 
 fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
@@ -981,7 +1082,7 @@ impl FrameLayout {
                     .enumerate()
                     .map(|(index, ty)| (Slot::Value(index as u32), ty, None)),
             );
-        let aliases = construction_aliases(function);
+        let aliases = construction_aliases(function, &value_use_counts(function));
         let mut arrays = BTreeMap::new();
         for (slot, ty, span) in array_types {
             if !is_aggregate(ty) {
@@ -1069,13 +1170,7 @@ fn stack_exceeded(what: &str, size: String, stack_size: u32) -> String {
     )
 }
 
-/// Array values built and immediately assigned to a local share that local's
-/// cell, so the array is constructed in place instead of occupying a second
-/// cell and being copied. The pattern is an `ArrayNew` or array `Capture`
-/// whose output is consumed only by the very next instruction, an `Assign` to
-/// a distinct array local. Element operands are scalars, so constructing into
-/// the destination cannot read the cell being written.
-fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
+fn value_use_counts(function: &Function) -> Vec<u32> {
     let mut uses = vec![0u32; function.values.len()];
     let mut count = |operand: &Operand| {
         if let Source::Value(value) = operand.source {
@@ -1190,6 +1285,16 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             TerminatorKind::Unreachable => {}
         }
     }
+    uses
+}
+
+/// Array values built and immediately assigned to a local share that local's
+/// cell, so the array is constructed in place instead of occupying a second
+/// cell and being copied. The pattern is an `ArrayNew` or array `Capture`
+/// whose output is consumed only by the very next instruction, an `Assign` to
+/// a distinct array local. Element operands are scalars, so constructing into
+/// the destination cannot read the cell being written.
+fn construction_aliases(function: &Function, uses: &[u32]) -> BTreeMap<u32, u32> {
     let mut aliases = BTreeMap::new();
     for block in &function.blocks {
         for (position, producer) in block.instructions.iter().enumerate() {
