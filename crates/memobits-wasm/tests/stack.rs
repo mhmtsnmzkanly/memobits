@@ -1592,3 +1592,76 @@ fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
         assert_eq!(main.call(&mut store, ()).unwrap(), 1);
     }
 }
+
+#[test]
+fn temporary_string_initializers_reuse_memory_after_constructor_exits() {
+    let part = "a".repeat(20_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Record {{ first: String, order: u32, second: String }}
+        type Note {{ text: String }}
+        fn static_note() -> String {{ "é" }}
+        fn make(part: borrow String, order: u32) -> String {{
+            if order == 1 {{
+                let text := part.concat("?");
+                return text;
+            }}
+            ""
+        }}
+        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+            match value {{ Some(byte) => byte == expected, None => false }}
+        }}
+        fn early(part: borrow String, exit: Bool) -> Bool {{
+            let record := Record {{
+                first: part.concat("!"),
+                second: make(part, 1),
+                order: {{ if exit {{ return true; }} 3 }},
+            }};
+            record.order == 3 && record.first.len() == 20_001 && record.second.len() == 20_001
+        }}
+        fn main() -> i32 {{
+            let part := "{part}";
+            let note := Note {{ text: static_note() }};
+            if !byte_is(note.text.byte_at(1), 169) {{ return 0; }}
+            var iteration := 0;
+            loop {{
+                var order: u32 = 0;
+                let record := Record {{
+                    second: make(part.borrow(), {{ order = 1; order }}),
+                    first: part.concat({{ order = order * 10 + 2; "!" }}),
+                    order: {{
+                        iteration += 1;
+                        if iteration == 1 {{ continue; }}
+                        if iteration == 5 {{ break; }}
+                        order * 10 + 3
+                    }},
+                }};
+                let moved := record;
+                if moved.order != 123 || !byte_is(moved.first.byte_at(20_000), 33)
+                    || !byte_is(moved.second.byte_at(20_000), 63) {{ return 0; }}
+            }}
+            if early(part.borrow(), true) && early(part.borrow(), false) {{ 1 }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}

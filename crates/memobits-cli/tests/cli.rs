@@ -2514,9 +2514,26 @@ fn wasm_gates_unsupported_string_struct_uses() {
         ),
         (
             r#"fn make() -> String { let text := "a".concat("b"); text }
-                fn main() { let label := Label { text: make() }; }"#,
+                fn main() { let label := Label { text: { make() } }; }"#,
             "TE018",
             "heap String call result must be assigned directly",
+        ),
+        (
+            r#"fn main() { let label := if true { Label { text: "a".concat("b") } } else { Label { text: "c" } }; }"#,
+            "LE900",
+            "requires a direct new local binding",
+        ),
+        (
+            r#"fn make() -> String { "a" }
+                fn main() { let label := if true { Label { text: make() } } else { Label { text: "c" } }; }"#,
+            "LE900",
+            "requires a direct new local binding",
+        ),
+        (
+            r#"fn make() -> String { "a" }
+                fn main() { let named := make(); let label := Label { text: named }; }"#,
+            "LE900",
+            "requires a direct String literal",
         ),
         (
             r#"fn main() { let text := "a"; let label := Label { text: text }; }"#,
@@ -2661,6 +2678,24 @@ fn temporary_string_field_replacement_checks_loans_during_rhs_and_write() {
         );
         err(f.run(&["ownership", "text.mb"]), "BE005");
     }
+}
+
+#[test]
+fn temporary_string_field_initializer_keeps_operand_loan_live() {
+    let f = Fixture::new();
+    f.write(
+        "text.mb",
+        r#"
+        type Label { text: String }
+        fn main() {
+            var original := Label { text: "old" };
+            let label := Label {
+                text: original.text.concat({ original.text = "new"; "!" }),
+            };
+        }
+        "#,
+    );
+    err(f.run(&["ownership", "text.mb"]), "BE005");
 }
 
 #[test]

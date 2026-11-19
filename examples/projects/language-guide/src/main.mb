@@ -272,6 +272,25 @@ fn append_question(text: borrow String) -> String {
     result
 }
 
+// A new local struct can take a direct concat or internal String call
+// result. Initializers run in source order. A temporary owner is released
+// on an early exit from a later initializer. After construction the struct
+// owns the bytes and releases them at lexical exit.
+fn temporary_string_fields() -> Bool {
+    let prefix := "é";
+    var order: u32 = 0;
+    let label := TextLabel {
+        text: prefix.concat({ order = 1; "!" }),
+        number: { order = order * 10 + 2; order },
+    };
+    let called := EditableLabel {
+        note: append_question(prefix.borrow()),
+        text: "",
+    };
+    label.number == 12 && byte_is(label.text.byte_at(2), 33)
+        && byte_is(called.note.byte_at(2), 63)
+}
+
 // Direct String field assignment on a var local consumes a named String
 // or stages a literal, concat, or direct internal String call. The RHS can
 // borrow the old field. The write releases the old allocation after the RHS
@@ -737,6 +756,7 @@ fn main() -> Result<i32, Error> {
     if !list_iteration() { return Err(Error { code: 16 }); }
     if !explicit_drop() { return Err(Error { code: 17 }); }
     if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
+    if !temporary_string_fields() { return Err(Error { code: 20 }); }
     if !replace_local_string_field() { return Err(Error { code: 19 }); }
     Ok(42)
 }

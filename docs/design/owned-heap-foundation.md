@@ -184,17 +184,19 @@ No host allocator imports or new manifest setting are needed for this slice.
 
 ### Local structs with String fields
 
-A plain local struct can own String fields alongside primitive fields. Use
-direct literals or move named String locals that can own heap allocations.
-Bind a constructor that moves a named String directly to a new local. A
-whole-local move into another new binding transfers cleanup to that binding.
-Read a String field by borrowing it from a named struct local. A live field
-loan blocks moving or ending the heap-owning struct.
+A plain local struct can own String fields alongside primitive fields. A
+String field initializer can be a direct literal, a named heap String move,
+a direct concat, or a direct internal String-returning call. Bind a
+constructor that uses a String move, concat, or call directly to a new
+local. A whole-local move into another new binding transfers cleanup to
+that binding. Read a String field by borrowing it from a named struct local.
+A live field loan blocks moving or ending the heap-owning struct.
 
-Lowering stages each named initializer as a lexical String owner in source
-order. If a later initializer returns, breaks, or continues, the staged
-owner releases its allocation. On construction the struct receives the
-descriptor and the staging slot loses allocation provenance. Whole-local
+Lowering evaluates fields in source order and stages each String move,
+concat, or call result as a lexical owner. If a later initializer returns,
+breaks, or continues, the staged owner releases its allocation. Construction
+transfers the descriptor to the struct and clears the staging slot's
+allocation provenance. Whole-local
 moves likewise clear provenance in the old slots. Lexical exit releases
 each still-owned allocation, including on paths where other branches have
 moved the struct. Literal descriptors have zero allocation provenance.
@@ -213,11 +215,12 @@ loan, or a live loan of the consumed RHS. Loans of other fields can remain
 live. A field that acquires heap ownership is included in the struct's
 lexical cleanup, including after a whole-local move.
 
-Wasm gates temporary or indirect String initializers, heap-owning struct
-temporaries that escape their constructor, whole-value replacement of a
-heap-owning struct, consuming field extraction and other field writes on
-heap-owning structs, whole-struct borrows, aggregate nesting, Error
-inheritance, and signatures that pass or return these structs. String field
+Wasm gates general block and branch results and indirect calls as String
+field initializers, heap-owning struct temporaries that escape their
+constructor, whole-value replacement of a heap-owning struct, consuming
+field extraction and other field writes on heap-owning structs, whole-struct
+borrows, aggregate nesting, Error inheritance, and signatures that pass or
+return these structs. String field
 replacement through a reference or projection chain, indirect calls, and
 general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's

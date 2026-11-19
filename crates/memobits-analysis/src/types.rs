@@ -1343,7 +1343,7 @@ impl Checker {
             self.error(
                 17,
                 expression.span,
-                "concat requires a whole String local, a direct String field of a mutable local struct, a standalone statement, an immediate read-only method, or an owned or explicit borrow String argument to a direct internal call",
+                "concat requires a whole String local, a direct String field initializer or assignment on a local struct, a standalone statement, an immediate read-only method, or an owned or explicit borrow String argument to a direct internal call",
             );
         }
         let expected = usize::from(method != "len");
@@ -3213,7 +3213,12 @@ impl Checker {
                     // A field initialiser is an owned-value position, so a nested
                     // struct or array literal, a call or a named aggregate is moved in.
                     self.allow_array_value(&init.value);
+                    let previous_concat = self.concat_destination;
+                    if expected_field == Some(Ty::String) {
+                        self.concat_destination = Some(&init.value as *const Expr as usize);
+                    }
                     let actual = self.expr(&init.value, expected_field.as_ref());
+                    self.concat_destination = previous_concat;
                     self.reject_extraction(&init.value, &actual);
                     if let Some(want) = &expected_field {
                         self.ensure(&actual, want, init.value.span);

@@ -328,14 +328,15 @@ fn compile_target(
                             }
                             let message = match operand.source {
                                 Source::Value(id) if string_literals.contains(&id) => continue,
-                                Source::Local(local) if heap.locals.contains(&local)
+                                Source::Local(local) if (heap.locals.contains(&local)
+                                    || heap.string_call_bindings.contains(&local))
                                     && operand.mode == memobits_ir::UseMode::Consume => {
                                     if instruction.output.is_some_and(|id| aliases.contains_key(&id.0)) {
                                         continue;
                                     }
-                                    "a struct initialized from a named String requires a direct new local binding"
+                                    "a struct initialized from a String move or call requires a direct new local binding"
                                 }
-                                _ => "a String struct field requires a direct String literal or a move of a named heap String",
+                                _ => "a String struct field requires a direct String literal, a named heap String move, concat, or a direct internal String-returning call",
                             };
                             errors.push(diagnostic(message, operand.span.or(instruction.span)));
                         }
@@ -1193,10 +1194,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
     for block in &function.blocks {
         for (position, producer) in block.instructions.iter().enumerate() {
             let mut after = block.instructions[position + 1..].iter();
-            let has_named_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
+            let has_staged_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
                 if fields.iter().any(|operand| matches!(operand.source, Source::Local(id)
                     if function.locals[id.0 as usize].ty == Type::String)));
-            let consumer = if has_named_string {
+            let consumer = if has_staged_string {
                 // Initializer slots end after the constructor has moved from them.
                 after.find(|inst| !matches!(inst.kind, InstructionKind::EndStringLocal { .. }))
             } else {
@@ -1219,7 +1220,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             else {
                 continue;
             };
-            if has_named_string && (!initialize || *mode != memobits_ir::UseMode::Consume) {
+            if has_staged_string && (!initialize || *mode != memobits_ir::UseMode::Consume) {
                 continue;
             }
             if !initialize && matches!(producer.kind, InstructionKind::EmptyList) {

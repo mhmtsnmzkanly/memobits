@@ -263,10 +263,10 @@ the implemented subset; a milestone is not complete merely because its crate exi
   or after a direct internal return. Both require an explicit success
   binding. Other escapes remain gated.
   [Local structs with String fields](owned-heap-foundation.md#local-structs-with-string-fields)
-  support literal fields, moves from named heap String locals, whole-local
-  moves into new bindings, borrowed field reads, and replacement of direct
-  String fields on mutable locals using named owned Strings, literals,
-  direct concat, or direct internal String-returning calls.
+  support literals, named heap String moves, direct concat, and direct
+  internal String-returning calls as field initializers. Whole-local moves
+  into new bindings transfer ownership. Fields support borrowed reads and
+  direct replacement on a mutable local.
   Exported String signatures, general nested String storage, and a public
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.

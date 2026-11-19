@@ -113,8 +113,9 @@ function with explicit `Ok(value)` and `Err` arms. A direct internal call
 can also return a heap-backed Result to an immediate consuming match, with
 an optional binding. Ignoring the success owner, forwarding the Result
 without matching it, and general nested String storage are gated.
-A plain local struct can contain direct String literals alongside primitive
-fields. A new local struct can also take ownership of a named heap String.
+A plain local struct can contain String fields alongside primitive fields.
+A new local struct can initialize a String field with a literal, a named
+heap String move, direct concat, or a direct internal String-returning call.
 The whole struct can move into another new local, whose scope exit releases
 any owned String allocations. String fields support borrowed reads and
 replacement on a mutable local using a named owned String, a literal, a

@@ -827,6 +827,20 @@ impl<'a> Builder<'a> {
         self.lower_expr(expr);
     }
 
+    fn is_direct_string_call(&self, expr: &Expr) -> bool {
+        let ExprKind::Call { callee, .. } = &expr.kind else {
+            return false;
+        };
+        match &callee.kind {
+            ExprKind::Field { name, .. } => name == "concat",
+            ExprKind::Path(_) => {
+                self.ty(expr) == Some(Type::String)
+                    && matches!(self.path(callee), PathTarget::Function(_))
+            }
+            _ => false,
+        }
+    }
+
     fn lower_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
         if let ExprKind::Call { callee, arguments } = &base.kind {
             if let ExprKind::Field { base: left, name } = &callee.kind {
@@ -1241,16 +1255,9 @@ impl<'a> Builder<'a> {
         let (root, positions) = self.lower_place(target)?;
         if operator == "=" {
             if let Some((local, field)) = self.local_string_field(target, root) {
-                let supported_rhs = match &value.kind {
-                    ExprKind::Path(_) | ExprKind::StringLiteral(_) => true,
-                    ExprKind::Call { callee, .. } => match &callee.kind {
-                        ExprKind::Field { name, .. } => name == "concat",
-                        ExprKind::Path(_) => matches!(self.path(callee), PathTarget::Function(_)),
-                        _ => false,
-                    },
-                    _ => false,
-                };
-                if supported_rhs {
+                if matches!(value.kind, ExprKind::Path(_) | ExprKind::StringLiteral(_))
+                    || self.is_direct_string_call(value)
+                {
                     // Stage the RHS before the write so it can borrow the old field.
                     let scope_start = self.owned_locals.len();
                     let Some(rhs) = self.lower_with_temporary_owner(value) else {
@@ -1967,16 +1974,25 @@ impl<'a> Builder<'a> {
                 let scope_start = self.owned_locals.len();
                 let mut slots: Vec<Option<Operand>> = vec![None; definition.fields.len()];
                 for init in fields {
-                    let Some(value) = self.lower_expr(&init.value) else {
-                        self.owned_locals.truncate(scope_start);
-                        return None;
-                    };
                     let index = definition
                         .fields
                         .iter()
                         .position(|field| field.name == init.name)
                         .expect("checked struct field");
                     let ty = &definition.fields[index].ty;
+                    if *ty == Type::String && self.is_direct_string_call(&init.value) {
+                        // Keep each finished temporary live while later fields evaluate.
+                        let Some(staged) = self.lower_with_temporary_owner(&init.value) else {
+                            self.owned_locals.truncate(scope_start);
+                            return None;
+                        };
+                        slots[index] = Some(consume(staged));
+                        continue;
+                    }
+                    let Some(value) = self.lower_expr(&init.value) else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
                     let operand = if *ty == Type::String
                         && matches!(init.value.kind, ExprKind::Path(_))
                         && matches!(value.source, Source::Local(id)

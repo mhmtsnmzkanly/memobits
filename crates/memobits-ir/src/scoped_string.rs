@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Default, Clone)]
 pub struct HeapStrings {
     pub locals: HashSet<LocalId>,
+    /// Direct call result bindings, including calls that only return static text.
+    pub string_call_bindings: HashSet<LocalId>,
     pub(super) returns_heap: bool,
     pub returns_heap_ok: bool,
     pub(super) writes_heap: HashSet<usize>,
@@ -160,6 +162,7 @@ impl super::Program {
                                 &block.instructions[position..],
                                 &Type::String,
                             ) {
+                                facts[index].string_call_bindings.insert(target);
                                 moves
                                     .entry(Slot::Return(callee))
                                     .or_default()
