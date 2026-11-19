@@ -250,8 +250,8 @@ fn local_string_fields() -> Bool {
 // Move a named heap String into a new local struct, then move the whole
 // struct into another local. The final owner releases the String at scope exit.
 // Borrow the field to read it. Wasm gates temporary String initializers,
-// escaping or replacing a heap-owning struct, field writes, nesting,
-// and passing or returning the struct.
+// escaping or replacing a whole heap-owning struct, nesting, and passing
+// or returning the struct.
 fn local_heap_string_fields() -> Bool {
     let text := "é".concat("!");
     let label := TextLabel { number: 9, text: text };
@@ -260,6 +260,26 @@ fn local_heap_string_fields() -> Bool {
         moved.number == 9 && moved.text.len() == 3
             && byte_is(moved.text.byte_at(2), 33)
     }
+}
+
+type EditableLabel {
+    note: String,
+    text: String,
+}
+
+// Replace a String field of a mutable local with a named owned String.
+// Evaluate and bind the replacement before the assignment. The assignment
+// consumes it and releases the old field allocation. A borrow of a different
+// field can stay live. Literal and other temporary RHS expressions are gated.
+fn replace_local_string_field() -> Bool {
+    var label := EditableLabel { note: "keep", text: "" };
+    let note := label.note.borrow();
+    let replacement := "é".concat("!");
+    label.text = replacement;
+    if !byte_is(label.text.byte_at(2), 33) { return false; }
+    let empty := "";
+    label.text = empty;
+    note.len() == 4 && label.text.len() == 0
 }
 
 // An annotation selects an empty List. push appends to a whole var local.
@@ -710,5 +730,6 @@ fn main() -> Result<i32, Error> {
     if !list_iteration() { return Err(Error { code: 16 }); }
     if !explicit_drop() { return Err(Error { code: 17 }); }
     if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
+    if !replace_local_string_field() { return Err(Error { code: 19 }); }
     Ok(42)
 }

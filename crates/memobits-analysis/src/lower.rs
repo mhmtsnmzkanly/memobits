@@ -1231,11 +1231,11 @@ impl<'a> Builder<'a> {
         operator: &str,
         value: &Expr,
     ) -> Option<()> {
-        let (array, positions) = self.lower_place(target)?;
+        let (root, positions) = self.lower_place(target)?;
         let previous = if operator == "=" {
             None
         } else {
-            let reference = self.address_chain(array, &positions, Access::Borrow, span)?;
+            let reference = self.address_chain(root, &positions, Access::Borrow, span)?;
             Some(self.load_element(reference, span)?)
         };
         let rhs = self.lower_expr(value)?;
@@ -1258,7 +1258,36 @@ impl<'a> Builder<'a> {
             }
         };
         let assigned = self.owned(assigned)?;
-        let reference = self.address_chain(array, &positions, Access::Share, span)?;
+        if let ("=", ExprKind::Field { base, name }, Source::Local(target), Source::Local(source)) =
+            (operator, &target.kind, root.source, assigned.source)
+        {
+            let local = &self.function.locals[target.0 as usize];
+            if let Type::Struct(id) = local.ty {
+                if local.mutable
+                    && matches!(base.kind, ExprKind::Path(_))
+                    && matches!(value.kind, ExprKind::Path(_))
+                    && self.function.locals[source.0 as usize].ty == Type::String
+                    && !self.function.parameter_locals.contains(&target)
+                {
+                    let field = self.types[id.0 as usize]
+                        .fields
+                        .iter()
+                        .position(|field| field.name == *name)
+                        .expect("checked struct field");
+                    self.emit(
+                        span,
+                        InstructionKind::ReplaceStringField {
+                            target,
+                            field: field as u32,
+                            value: assigned,
+                        },
+                        None,
+                    );
+                    return Some(());
+                }
+            }
+        }
+        let reference = self.address_chain(root, &positions, Access::Share, span)?;
         self.emit(
             span,
             InstructionKind::Store {

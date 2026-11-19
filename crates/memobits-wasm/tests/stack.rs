@@ -1455,3 +1455,55 @@ fn local_struct_strings_reuse_heap_on_lexical_exits() {
         assert_eq!(main.call(&mut store, ()).unwrap(), 1);
     }
 }
+
+#[test]
+fn string_field_replacement_reuses_blocks_without_overwriting_live_fields() {
+    let part = "a".repeat(20_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Label {{ other: String, text: String }}
+        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+            match value {{ Some(byte) => byte == expected, None => false }}
+        }}
+        fn main() -> i32 {{
+            let part := "{part}";
+            var label := Label {{ other: "é", text: "start" }};
+            let other := label.other.borrow();
+            var iteration := 0;
+            loop {{
+                let first := part.concat("!");
+                if iteration != 0 && !byte_is(label.text.byte_at(20_000), 63) {{ return 0; }}
+                label.text = first;
+                let second := part.concat("?");
+                if !byte_is(label.text.byte_at(20_000), 33) {{ return 0; }}
+                label.text = second;
+                iteration += 1;
+                if iteration == 8 {{ break; }}
+            }}
+            if other.len() != 2 {{ return 0; }}
+            let moved := label;
+            if byte_is(moved.text.byte_at(20_000), 63) {{ 1 }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}

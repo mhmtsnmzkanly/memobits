@@ -347,7 +347,7 @@ fn compile_target(
                                 || !matches!(base.source, Source::Local(_))) =>
                     {
                         errors.push(diagnostic(
-                            "a String struct field can only be read through a borrow of a named local field",
+                            "a String struct field can only be read through a borrow of a named local field or replaced using a named owned String on a mutable local",
                             instruction.span,
                         ));
                     }
@@ -414,7 +414,8 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Assign { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
-        | InstructionKind::Store { .. } => None,
+        | InstructionKind::Store { .. }
+        | InstructionKind::ReplaceStringField { .. } => None,
         InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
         InstructionKind::StructNew { .. }
         | InstructionKind::EnumNew { .. }
@@ -1103,7 +1104,8 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::Borrow { owner: operand, .. }
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
-                | InstructionKind::Assign { value: operand, .. } => count(operand),
+                | InstructionKind::Assign { value: operand, .. }
+                | InstructionKind::ReplaceStringField { value: operand, .. } => count(operand),
                 InstructionKind::ListGet {
                     source,
                     index: offset,
@@ -2351,13 +2353,23 @@ fn release_string_local(
     heap_copy_index: Option<u32>,
 ) -> Result<(), String> {
     let cell = array_cell_of(layout, Slot::Local(local.0))?;
-    emit_address(
+    release_string_at(
         body,
         frame.ok_or("String local requires a frame")?,
         cell.offset,
-    );
-    string_descriptor::load_allocation(body);
+        heap_copy_index,
+    )
+}
+
+fn release_string_at(
+    body: &mut WasmFunction,
+    frame: FrameState,
+    offset: u32,
+    heap_copy_index: Option<u32>,
+) -> Result<(), String> {
     let releaser = heap_copy_index.ok_or("missing String release helper")? + 1;
+    emit_address(body, frame, offset);
+    string_descriptor::load_allocation(body);
     body.instruction(&WasmInstruction::Call(releaser));
     Ok(())
 }
@@ -3023,11 +3035,8 @@ fn compile_instruction(
                 };
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
                 let frame = frame.ok_or("struct local requires a frame")?;
-                let releaser = heap_copy_index.ok_or("missing String release helper")? + 1;
                 for offset in &layout.structs[id.0 as usize].string_offsets {
-                    emit_address(body, frame, cell.offset + offset);
-                    string_descriptor::load_allocation(body);
-                    body.instructions().call(releaser);
+                    release_string_at(body, frame, cell.offset + offset, heap_copy_index)?;
                     emit_address(body, frame, cell.offset + offset);
                     body.instructions().i32_const(0);
                     string_descriptor::store_allocation(body);
@@ -3892,6 +3901,42 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::LocalSet(
                 output.ok_or("load lacks output")?,
             ));
+        }
+        InstructionKind::ReplaceStringField {
+            target,
+            field,
+            value,
+        } => {
+            let Type::Struct(id) = function.locals[target.0 as usize].ty else {
+                return Err("String field replacement requires a struct local".into());
+            };
+            let cell = array_cell_of(layout, Slot::Local(target.0))?;
+            let frame = frame.ok_or("struct local requires a frame")?;
+            let offset = cell.offset + layout.structs[id.0 as usize].offsets[*field as usize];
+            if heap_locals.contains(target) {
+                release_string_at(body, frame, offset, heap_copy_index)?;
+            }
+            emit_array_copy(
+                body,
+                function,
+                param_count,
+                ArrayCell {
+                    offset,
+                    size: string_descriptor::SIZE,
+                },
+                value,
+                layout,
+                Some(frame),
+            )?;
+            clear_moved_heap_source(
+                body,
+                function,
+                param_count,
+                value,
+                layout,
+                Some(frame),
+                heap_locals,
+            )?;
         }
         InstructionKind::Store { reference, value } => {
             if let Type::Reference { inner, .. } = value_type(function, reference)? {

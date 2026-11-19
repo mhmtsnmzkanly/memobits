@@ -654,6 +654,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::StringScalarAt { source, offset } => vec![source, offset],
         InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
         InstructionKind::Store { reference, value } => vec![reference, value],
+        InstructionKind::ReplaceStringField { value, .. } => vec![value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
         InstructionKind::FieldAddr { base, .. }
         | InstructionKind::VariantAddr { base, .. }
@@ -1577,6 +1578,22 @@ fn check_instruction(
                     infos,
                     diagnostics,
                 );
+            }
+        }
+        InstructionKind::ReplaceStringField { target, field, .. } => {
+            let roots = BTreeSet::from([Place {
+                root: Root::Local(target.0),
+                path: vec![Step::Field(*field)],
+            }]);
+            if let Some(conflict) =
+                active_conflict(&roots, Access::Share, active_before, &BTreeSet::new())
+            {
+                diagnostics.push(conflict_diagnostic(
+                    instruction.span,
+                    "write",
+                    (function, program),
+                    conflict,
+                ));
             }
         }
         InstructionKind::Store { reference, .. } => {

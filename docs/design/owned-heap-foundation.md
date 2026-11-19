@@ -198,13 +198,24 @@ descriptor and the staging slot loses allocation provenance. Whole-local
 moves likewise clear provenance in the old slots. Lexical exit releases
 each still-owned allocation, including on paths where other branches have
 moved the struct. Literal descriptors have zero allocation provenance.
-Structs initialized only with literals need no guest deallocation.
+Structs whose fields always hold literal storage need no guest deallocation.
+
+A mutable local struct can replace a direct String field with a named owned
+String local, including a local holding a literal. The RHS is evaluated
+before the write. The write releases the old allocation if present, moves
+the descriptor into the field, and clears the source's allocation provenance.
+Borrow checking rejects a live loan of the field, an overlapping enclosing
+loan, or a live loan of the consumed RHS. Loans of other fields can remain
+live. A field that acquires heap ownership is included in the struct's
+lexical cleanup, including after a whole-local move.
 
 Wasm gates temporary or indirect String initializers, heap-owning struct
 temporaries that escape their constructor, whole-value replacement of a
-heap-owning struct, consuming field extraction and field writes on heap-owning structs,
-String field writes on literal-only structs, whole-struct borrows, aggregate nesting, Error
-inheritance, and signatures that pass or return these structs. Direct
+heap-owning struct, consuming field extraction and other field writes on
+heap-owning structs, whole-struct borrows, aggregate nesting, Error
+inheritance, and signatures that pass or return these structs. String field
+replacement through a reference or projection chain and replacement with
+an inline literal, call, or other temporary are gated. Direct
 literal initializers still need to be evaluated in the constructor's
 basic block. See the checked examples in the
 [runnable language guide](../../examples/projects/language-guide/src/main.mb).

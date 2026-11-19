@@ -289,6 +289,16 @@ fn transfer_instruction(
         InstructionKind::Load { reference } => {
             transfer_operand(reference, state, diagnostics, function)
         }
+        InstructionKind::ReplaceStringField { target, value, .. } => {
+            let mut diagnostics = diagnostics;
+            transfer_operand(value, state, diagnostics.as_deref_mut(), function);
+            let owner = Operand {
+                source: Source::Local(*target),
+                mode: UseMode::Read,
+                span: instruction.span,
+            };
+            transfer_operand(&owner, state, diagnostics, function);
+        }
         InstructionKind::Store { reference, value } => {
             let mut diagnostics = diagnostics;
             transfer_operand(reference, state, diagnostics.as_deref_mut(), function);

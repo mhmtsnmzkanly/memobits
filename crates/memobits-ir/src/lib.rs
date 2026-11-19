@@ -391,6 +391,12 @@ pub enum InstructionKind {
         field: u32,
         access: Access,
     },
+    /// Replace a String field of a mutable struct local with a consumed String local.
+    ReplaceStringField {
+        target: LocalId,
+        field: u32,
+        value: Operand,
+    },
     /// Enum twin of `FieldAddr`: a reference to payload field `field` of variant
     /// `variant` of an enum owner or of a reference to one. The output is
     /// `Reference { access, payload type }`. It is only meaningful on a path
@@ -2723,6 +2729,23 @@ fn validate_instruction(
                 None => {}
             }
         }
+        InstructionKind::ReplaceStringField { target, field, value } => {
+            let actual = operand_type(program, function, value, errors, id, block);
+            let destination = function.locals.get(target.0 as usize).is_some_and(|local| {
+                let Type::Struct(ty) = local.ty else { return false; };
+                local.mutable && !function.parameter_locals.contains(target)
+                    && program.types.get(ty.0 as usize).is_some_and(|ty| {
+                        matches!(&ty.kind, TypeDefKind::Struct { fields }
+                            if fields.get(*field as usize).is_some_and(|field| field.ty == Type::String))
+                    })
+            });
+            if instruction.output.is_some() || !destination || actual != Some(Type::String)
+                || value.mode != UseMode::Consume || !matches!(value.source, Source::Local(_))
+            {
+                push(errors, id, Some(block),
+                    "String field replacement requires a mutable local struct and a consumed String local");
+            }
+        }
         InstructionKind::Store { reference, value } => {
             if instruction.output.is_some() {
                 push(
@@ -3353,6 +3376,7 @@ fn validate_operand_escapes(
                 | InstructionKind::EndListLocal { .. }
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStructLocal { .. }
+                | InstructionKind::ReplaceStringField { .. }
                 | InstructionKind::EndStringLocal { .. } => {}
             }
         }

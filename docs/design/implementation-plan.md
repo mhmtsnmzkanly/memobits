@@ -264,7 +264,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   binding. Other escapes remain gated.
   [Local structs with String fields](owned-heap-foundation.md#local-structs-with-string-fields)
   support literal fields, moves from named heap String locals, whole-local
-  moves into new bindings, and borrowed field reads.
+  moves into new bindings, borrowed field reads, and replacement of direct
+  String fields on mutable locals using named owned Strings.
   Exported String signatures, general nested String storage, and a public
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.

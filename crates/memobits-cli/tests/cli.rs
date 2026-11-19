@@ -2553,6 +2553,16 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "read through a borrow",
         ),
         (
+            r#"fn main() { var label := Label { text: "a" }; label.text = { "b" }; }"#,
+            "LE900",
+            "read through a borrow",
+        ),
+        (
+            r#"fn replace(label: share Label) { let text := "b"; label.text = text; } fn main() {}"#,
+            "LE900",
+            "must stay local to one function",
+        ),
+        (
             r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
             "LE900",
             "must stay local to one function",
@@ -2579,6 +2589,40 @@ fn wasm_gates_unsupported_string_struct_uses() {
         );
         let diagnostic = err(f.run(&["build"]), code);
         assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn string_field_replacement_rejects_conflicting_loans_and_unavailable_owners() {
+    let f = Fixture::new();
+    for (body, code) in [
+        (
+            "let view := label.text.borrow(); label.text = replacement; inspect(view);",
+            "BE005",
+        ),
+        (
+            "let view := replacement.borrow(); label.text = replacement; inspect(view);",
+            "BE005",
+        ),
+        (
+            "label.text = replacement; inspect(replacement.borrow());",
+            "BE001",
+        ),
+        ("let moved := label; label.text = replacement;", "BE001"),
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"type Label {{ text: String }}
+                fn inspect(value: borrow String) {{}}
+                fn main() {{
+                    var label := Label {{ text: "old" }};
+                    let replacement := "new".concat("!");
+                    {body}
+                }}"#
+            ),
+        );
+        err(f.run(&["ownership", "text.mb"]), code);
     }
 }
 

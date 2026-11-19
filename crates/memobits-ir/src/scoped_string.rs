@@ -106,6 +106,14 @@ impl super::Program {
                                 }
                             }
                         }
+                        InstructionKind::ReplaceStringField { target, value, .. } => {
+                            if let Source::Local(source) = value.source {
+                                moves
+                                    .entry(Slot::Local(index, source))
+                                    .or_default()
+                                    .push(Slot::Local(index, *target));
+                            }
+                        }
                         InstructionKind::Store { reference, value } => {
                             if let (Some(parameter), Source::Local(source)) =
                                 (string_share_parameter(function, reference), value.source)
@@ -646,6 +654,21 @@ pub(super) fn validate(
                         push(errors, id, Some(block_id), message);
                     }
                     initialize.then_some(*target)
+                }
+                InstructionKind::ReplaceStringField { target, value, .. } => {
+                    let outside_scope =
+                        |local| locals.contains(&local) && !in_scope.contains(&local);
+                    if outside_scope(*target)
+                        || matches!(value.source, Source::Local(source) if outside_scope(source))
+                    {
+                        push(
+                            errors,
+                            id,
+                            Some(block_id),
+                            "String field replacement outside the local's scope",
+                        );
+                    }
+                    None
                 }
                 InstructionKind::ListPush { target, .. }
                 | InstructionKind::ListPop { target }
