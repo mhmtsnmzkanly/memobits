@@ -198,3 +198,24 @@ fn chains_through_a_shared_prefix_only_conflict_at_the_leaf() {
         rejected(&format!("{GRID}{body}"));
     }
 }
+
+#[test]
+fn fixed_iteration_loan_covers_the_body_and_ends_on_exit() {
+    accepted(
+        "var grid := [[1, 2], [3, 4]]; \
+         loop value in grid[0] { grid[1][0] = value; break; } \
+         grid[0][0] = 7;",
+    );
+    accepted("let empty: Bytes<0> = []; loop value in empty { let moved := empty; }");
+    for control in ["break;", "continue;", "return;", "loop {}"] {
+        rejected(&format!(
+            "var array := [1, 2]; loop value in array {{ array[0] = value; {control} }}"
+        ));
+    }
+    rejected("let array := [1]; loop value in array { let moved := array; break; }");
+    let codes = ownership(
+        "fn move_out(array: Array<i32, 1>) -> Array<i32, 1> { \
+         loop value in array { return array; } array } fn main() {}",
+    );
+    assert!(codes.iter().any(|code| code == "BE005"), "{codes:?}");
+}

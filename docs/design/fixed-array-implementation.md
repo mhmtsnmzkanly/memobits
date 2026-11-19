@@ -371,6 +371,22 @@ a borrow or share handle, a row or field of a local aggregate, or an array
 value such as a literal or a function result.
 [Runnable language guide](../../examples/projects/language-guide/src/main.mb)
 
+## Fixed array iteration
+
+`loop value in items { ... }` evaluates the iterable once and visits its
+elements in increasing index order. It supports fixed arrays with numeric or
+`Bool` elements, including `Bytes<N>`. The iterable can be an array value,
+an array reference, or a field or row reached through a local binding. An
+empty array evaluates the iterable and skips the body.
+
+Each iteration binds an immutable primitive copy within the body. A read loan
+holds the iterable for the body and prevents overlapping writes and moves.
+`continue` advances to the next element, `break` leaves the loop, and `return`
+exits the function. Bare `loop { ... }` still repeats until control leaves it.
+Iteration over Lists, Strings, and arrays of aggregates is outside this slice.
+
+[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+
 ## Implicit primitive copy checkpoint
 
 The decision that primitives are copied implicitly supersedes the earlier

@@ -45,6 +45,10 @@ fn check_block(block: &Block, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) 
             StatementKind::Return(Some(expr)) => check_expr(expr, in_loop, diagnostics),
             StatementKind::Return(None) => {}
             StatementKind::Loop(body) => check_block(body, true, diagnostics),
+            StatementKind::ForEach { items, body, .. } => {
+                check_expr(items, in_loop, diagnostics);
+                check_block(body, true, diagnostics);
+            }
             StatementKind::Break if !in_loop => {
                 diagnostics.push(invalid_control(20, "break", statement.span));
             }

@@ -196,6 +196,10 @@ fn check_block(
             StatementKind::Return(Some(value)) => check_expr(value, types, diagnostics),
             StatementKind::Return(None) | StatementKind::Break | StatementKind::Continue => {}
             StatementKind::Loop(body) => check_block(body, types, diagnostics),
+            StatementKind::ForEach { items, body, .. } => {
+                check_expr(items, types, diagnostics);
+                check_block(body, types, diagnostics);
+            }
         }
     }
     if let Some(tail) = &block.tail {

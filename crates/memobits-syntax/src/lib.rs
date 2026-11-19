@@ -121,6 +121,11 @@ pub enum StatementKind {
     Expression(Expr),
     Return(Option<Expr>),
     Loop(Block),
+    ForEach {
+        binding: String,
+        items: Expr,
+        body: Block,
+    },
     Break,
     Continue,
 }
@@ -472,8 +477,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    /// True while parsing an `if` condition: there a `{` after an expression
-    /// starts the branch block, so a struct literal needs parentheses.
+    /// A following brace starts a control-flow block. Struct literals need parentheses.
     no_struct: bool,
     diagnostics: Vec<Diagnostic>,
 }
@@ -919,7 +923,18 @@ impl Parser {
             self.expect(";")?;
             StatementKind::Return(value)
         } else if self.eat("loop") {
-            StatementKind::Loop(self.block()?)
+            if self.at("{") {
+                StatementKind::Loop(self.block()?)
+            } else {
+                let binding = self.name()?;
+                self.expect("in")?;
+                let items = self.before_block()?;
+                StatementKind::ForEach {
+                    binding,
+                    items,
+                    body: self.block()?,
+                }
+            }
         } else if self.eat("break") {
             self.expect(";")?;
             StatementKind::Break
@@ -985,10 +1000,7 @@ impl Parser {
             return self.match_expr();
         }
         self.expect("if")?;
-        let saved = std::mem::replace(&mut self.no_struct, true);
-        let condition = self.expr(0);
-        self.no_struct = saved;
-        let condition = Box::new(condition?);
+        let condition = Box::new(self.before_block()?);
         let then_branch = self.block()?;
         let else_branch = if self.eat("else") {
             if !self.at("if") && !self.at("{") {
@@ -1016,10 +1028,7 @@ impl Parser {
     fn match_expr(&mut self) -> PResult<Expr> {
         let start = self.current().span.start;
         self.expect("match")?;
-        let saved = std::mem::replace(&mut self.no_struct, true);
-        let scrutinee = self.expr(0);
-        self.no_struct = saved;
-        let scrutinee = Box::new(scrutinee?);
+        let scrutinee = Box::new(self.before_block()?);
         self.expect("{")?;
         let mut arms = Vec::new();
         self.nested(|p| {
@@ -1133,8 +1142,14 @@ impl Parser {
             kind: PatternKind::Variant { path, slots },
         })
     }
-    /// Parse inside delimiters, where a `{` can no longer be mistaken for the
-    /// block that follows an `if` condition.
+    fn before_block(&mut self) -> PResult<Expr> {
+        let saved = std::mem::replace(&mut self.no_struct, true);
+        let result = self.expr(0);
+        self.no_struct = saved;
+        result
+    }
+
+    /// Parse inside delimiters, where a brace can start a struct literal.
     fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         let saved = std::mem::replace(&mut self.no_struct, false);
         let result = parse(self);
@@ -1243,7 +1258,7 @@ impl Parser {
                     let path = self.path()?;
                     if self.at("{") && self.no_struct && self.looks_like_struct_fields() {
                         return self.fail(
-                            "a struct literal is not allowed directly in an `if` condition or `match` scrutinee; wrap it in parentheses",
+                            "a struct literal is not allowed directly in an `if` condition, `match` scrutinee, or loop iterable; wrap it in parentheses",
                         );
                     }
                     if self.at("{") && !self.no_struct {

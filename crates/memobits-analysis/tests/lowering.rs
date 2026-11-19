@@ -238,3 +238,22 @@ fn array_syntax_cannot_produce_executable_ir() {
         assert!(lowering_codes(source).contains(&"TE017".into()), "{source}");
     }
 }
+
+#[test]
+fn fixed_iteration_rejects_unsupported_iterables_and_checks_binding_scope() {
+    for (body, code) in [
+        ("let items: List<u8> = []; loop value in items {}", "TE017"),
+        ("loop value in [[1]] {}", "TE017"),
+        ("loop value in 42 {}", "TE017"),
+        ("loop value in [1] { value = 2; }", "TE004"),
+        ("loop value in [1] {} value + 1;", "TE005"),
+        ("loop value in { break; [1] } {}", "TE020"),
+    ] {
+        let source = format!("fn main() {{ {body} }}");
+        let codes = lowering_codes(&source);
+        assert!(
+            codes.iter().any(|actual| actual == code),
+            "{body}: {codes:?}"
+        );
+    }
+}

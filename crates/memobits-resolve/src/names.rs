@@ -275,6 +275,16 @@ impl Checker<'_> {
                 StatementKind::Expression(e) => self.expr(e),
                 StatementKind::Return(Some(e)) => self.expr(e),
                 StatementKind::Loop(b) => self.block(b),
+                StatementKind::ForEach {
+                    binding,
+                    items,
+                    body,
+                } => {
+                    self.expr(items);
+                    self.scopes.push(BTreeSet::from([binding.clone()]));
+                    self.block(body);
+                    self.scopes.pop();
+                }
                 _ => {}
             }
         }

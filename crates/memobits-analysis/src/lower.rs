@@ -381,6 +381,7 @@ struct LoopTargets {
     exit: BlockId,
     had_break: bool,
     scope_start: usize,
+    iterable_loan: Option<Operand>,
 }
 struct Builder<'a> {
     function: Function,
@@ -670,6 +671,13 @@ impl<'a> Builder<'a> {
         )
     }
     fn finish(&mut self, block: BlockId, kind: TerminatorKind, span: Option<Span>) {
+        // An iteration loan is lexical. Give it a use at every body block's
+        // end, including paths that break, return, or never reach a backedge.
+        for index in 0..self.loops.len() {
+            if let Some(receiver) = self.loops[index].iterable_loan {
+                self.borrow(receiver, Access::Borrow);
+            }
+        }
         self.function.blocks[block.0 as usize].terminator = Terminator { span, kind };
         if self.current == Some(block) {
             self.current = None;
@@ -821,6 +829,16 @@ impl<'a> Builder<'a> {
         self.lower_expr(base)
     }
 
+    fn lower_read_receiver(&mut self, base: &Expr) -> Option<Operand> {
+        if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+            let (root, projections) = self.lower_place(base)?;
+            self.address_chain(root, &projections, Access::Borrow, base.span)
+        } else {
+            let owner = self.lower_with_temporary_owner(base)?;
+            self.borrow(owner, Access::Borrow)
+        }
+    }
+
     fn lower_collection_read(
         &mut self,
         expr: &Expr,
@@ -833,13 +851,7 @@ impl<'a> Builder<'a> {
             let search = matches!(method, "contains" | "index_of");
             let receiver = if search {
                 // Keep the receiver loan live across value evaluation.
-                if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
-                    let (root, projections) = self.lower_place(base)?;
-                    self.address_chain(root, &projections, Access::Borrow, base.span)?
-                } else {
-                    let owner = self.lower_with_temporary_owner(base)?;
-                    self.borrow(owner, Access::Borrow)?
-                }
+                self.lower_read_receiver(base)?
             } else {
                 self.lower_with_temporary_owner(base)?
             };
@@ -915,6 +927,17 @@ impl<'a> Builder<'a> {
             let returned = returned
                 .and_then(|value| self.preserve_scope_result(value, 0))
                 .map(consume);
+            // Stage the return operand before the lexical loans' final uses
+            // so the ownership checker sees any move of an iterated array.
+            let returned = if self
+                .loops
+                .iter()
+                .any(|targets| targets.iterable_loan.is_some())
+            {
+                returned.and_then(|value| self.capture(value)).map(consume)
+            } else {
+                returned
+            };
             self.end_owned_locals(0, span);
             self.finish(current, TerminatorKind::Return(returned), Some(span));
         }
@@ -1054,6 +1077,9 @@ impl<'a> Builder<'a> {
                     self.return_from_body(returned, statement.span);
                 }
                 StatementKind::Loop(body) => self.lower_loop(body, statement.span),
+                StatementKind::ForEach { items, body, .. } => {
+                    self.lower_for_each(statement, items, body);
+                }
                 StatementKind::Break => {
                     let loop_targets = self.loops.last_mut().expect("checked break");
                     loop_targets.had_break = true;
@@ -1432,19 +1458,101 @@ impl<'a> Builder<'a> {
         let exit = self.new_block();
         self.goto(header, Vec::new(), span);
         self.current = Some(header);
+        let had_break = self.lower_loop_body(body, header, exit, None);
+        self.current = had_break.then_some(exit);
+    }
+
+    fn lower_loop_body(
+        &mut self,
+        body: &Block,
+        header: BlockId,
+        exit: BlockId,
+        iterable_loan: Option<Operand>,
+    ) -> bool {
         self.loops.push(LoopTargets {
             header,
             exit,
             had_break: false,
             scope_start: self.owned_locals.len(),
+            iterable_loan,
         });
         self.lower_block(body);
-        if self.current.is_some() {
-            self.goto(header, Vec::new(), body.span);
-        }
-        let had_break = self.loops.pop().unwrap().had_break;
-        self.current = had_break.then_some(exit);
+        self.goto(header, Vec::new(), body.span);
+        self.loops.pop().unwrap().had_break
     }
+
+    fn lower_for_each(&mut self, statement: &Statement, items: &Expr, body: &Block) -> Option<()> {
+        let receiver = self.lower_read_receiver(items)?;
+        let Some(Type::Reference { inner, .. }) = self.operand_type(receiver) else {
+            unreachable!("checked iteration receiver")
+        };
+        let Type::Array { len, .. } = *inner else {
+            unreachable!("checked iteration array")
+        };
+        if len == 0 {
+            return Some(());
+        }
+
+        let span = statement.span;
+        let u32_ty = Type::Primitive(Primitive::U32);
+        let counter = self.hidden_local("iteration index", u32_ty.clone(), span);
+        let start = self.constant(span, Constant::Integer("0".into()), u32_ty.clone())?;
+        self.initialize_local(counter, consume(start), span);
+
+        let header = self.new_block();
+        let entry = self.new_block();
+        let exit = self.new_block();
+        self.goto(header, Vec::new(), span);
+        self.current = Some(header);
+        let position = self.capture(op(Source::Local(counter), span))?;
+        let limit = self.constant(span, Constant::Integer(len.to_string()), u32_ty.clone())?;
+        let more = self.emit(
+            span,
+            InstructionKind::Binary {
+                op: BinaryOp::Less,
+                left: read(position),
+                right: read(limit),
+            },
+            Some(Type::Primitive(Primitive::Bool)),
+        )?;
+        self.finish(
+            header,
+            TerminatorKind::Branch {
+                condition: read(more),
+                then_edge: Edge {
+                    target: entry,
+                    arguments: Vec::new(),
+                },
+                else_edge: Edge {
+                    target: exit,
+                    arguments: Vec::new(),
+                },
+            },
+            Some(span),
+        );
+        self.current = Some(entry);
+        let element = self.element_addr(receiver, position, Access::Borrow, items.span)?;
+        let loaded = self.load_element(element, items.span)?;
+        let copy = self.owned(loaded)?;
+        self.initialize_local(self.local(statement), copy, span);
+
+        // Advance before user code so continue uses the same header as a bare loop.
+        let one = self.constant(span, Constant::Integer("1".into()), u32_ty.clone())?;
+        let next = self.emit(
+            span,
+            InstructionKind::Binary {
+                op: BinaryOp::Add,
+                left: read(position),
+                right: read(one),
+            },
+            Some(u32_ty),
+        )?;
+        self.replace_local(counter, consume(next), span, span);
+        self.lower_loop_body(body, header, exit, Some(receiver));
+        self.current = Some(exit);
+        Some(())
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Option<Operand> {
         self.current?;
         match &expr.kind {

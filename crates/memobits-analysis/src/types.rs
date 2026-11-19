@@ -244,6 +244,7 @@ fn flow_block(block: &Block) -> Flow {
                 falls: flow_block(body).breaks,
                 breaks: false,
             },
+            StatementKind::ForEach { items, .. } => flow_expr(items),
             StatementKind::Break => Flow {
                 falls: false,
                 breaks: true,
@@ -1143,6 +1144,42 @@ impl Checker {
                 }
                 StatementKind::Loop(body) => {
                     self.block(body, None);
+                }
+                StatementKind::ForEach {
+                    binding,
+                    items,
+                    body,
+                } => {
+                    self.allow_array_value(items);
+                    let ty = match read_type(self.expr(items, None)) {
+                        Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
+                        Ty::Never | Ty::Error => Ty::Error,
+                        _ => {
+                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements");
+                            Ty::Error
+                        }
+                    };
+                    let origin = statement as *const Statement as usize;
+                    let id = self.register_local(
+                        binding,
+                        &ty,
+                        false,
+                        IrAccess::Owned,
+                        statement.span,
+                        origin,
+                    );
+                    self.scopes.push(HashMap::from([(
+                        binding.clone(),
+                        Binding {
+                            ty,
+                            mutable: false,
+                            access: IrAccess::Owned,
+                            id,
+                            origin,
+                        },
+                    )]));
+                    self.block(body, None);
+                    self.scopes.pop();
                 }
                 StatementKind::Break | StatementKind::Continue => {}
             }

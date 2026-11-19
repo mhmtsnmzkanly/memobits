@@ -141,6 +141,23 @@ fn fixed_bytes() -> Bool {
         && first_byte(array.borrow()) == 42
 }
 
+// Fixed arrays and Bytes iterate in index order. Each iteration binds an
+// immutable primitive copy. The read loan ends when the loop exits.
+fn fixed_iteration() -> Bool {
+    var bytes: Bytes<4> = [1, 0, 3, 9];
+    var digits: u8 = 0;
+    loop byte in bytes {
+        if byte == 0 { continue; }
+        if byte == 9 { break; }
+        digits = digits * 10 + byte;
+    }
+    bytes[0] = 7;
+
+    let empty: Array<Bool, 0> = [];
+    loop flag in empty { return flag; }
+    digits == 13 && bytes[0] == 7
+}
+
 fn list_word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
     items.get(index)
 }
@@ -611,5 +628,6 @@ fn main() -> Result<i32, Error> {
     if !text_concat() { return Err(Error { code: 12 }); }
     if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
     if !primitive_lists() { return Err(Error { code: 14 }); }
+    if !fixed_iteration() { return Err(Error { code: 15 }); }
     Ok(42)
 }

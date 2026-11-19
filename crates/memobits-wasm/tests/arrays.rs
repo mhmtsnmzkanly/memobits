@@ -579,3 +579,44 @@ fn oversized_or_overflowing_array_layouts_are_diagnostics() {
         );
     }
 }
+
+#[test]
+fn fixed_iteration_preserves_order_and_control_flow() {
+    assert_eq!(
+        run_main(
+            "fn make(calls: share i32) -> Array<i32, 4> {
+                calls += 1; [1, 2, 3, 4]
+            }
+            fn empty(calls: share i32) -> Array<i32, 0> {
+                calls += 1; []
+            }
+            fn select(items: share Bytes<3>) -> u8 {
+                loop value in items {
+                    if value == 0 { continue; }
+                    return value;
+                }
+                255
+            }
+            fn main() -> i32 {
+                var calls := 0;
+                var order := 0;
+                loop value in make(calls.share()) {
+                    if value == 2 { continue; }
+                    loop { break; }
+                    order = order * 10 + value;
+                    if value == 3 { break; }
+                }
+                loop value in empty(calls.share()) { return -1; }
+                var items: Bytes<3> = [0, 7, 8];
+                if select(items.share()) != 7 { return -2; }
+                let items := [[4, 5], [6, 7]];
+                var row := 0;
+                loop items in items[{ row += 1; row }] {
+                    order = order * 10 + items;
+                }
+                calls * 10000 + order + row
+            }"
+        ),
+        21368
+    );
+}
