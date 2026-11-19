@@ -859,7 +859,9 @@ impl<'a> Builder<'a> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
             let search = matches!(method, "contains" | "index_of");
-            let receiver = if search {
+            let string_field =
+                matches!(base.kind, ExprKind::Field { .. }) && self.ty(base) == Some(Type::String);
+            let receiver = if search || string_field {
                 // Keep the receiver loan live across value evaluation.
                 self.lower_read_receiver(base)?
             } else {

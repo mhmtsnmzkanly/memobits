@@ -112,8 +112,14 @@ A heap-backed `Ok` can be bound and immediately matched in the same
 function with explicit `Ok(value)` and `Err` arms. A direct internal call
 can also return a heap-backed Result to an immediate consuming match, with
 an optional binding. Ignoring the success owner, forwarding the Result
-without matching it, and other nested String storage are gated. Application
-builds export the manifest entry as
+without matching it, and general nested String storage are gated.
+Plain local structs can contain direct String literals alongside primitive
+fields. The whole struct can move between local bindings, and its String
+fields support borrowed reads. See the
+[local struct example](../../examples/projects/language-guide/src/main.mb)
+and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-literal-backed-string-fields).
+
+Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or
 `Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.
 The private adapter applies to `main` and uses the `memobits.entry` custom

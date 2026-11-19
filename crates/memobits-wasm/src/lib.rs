@@ -280,11 +280,71 @@ fn compile_target(
         }
     }
     for function in &program.functions {
+        let local_string_struct = |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].literal_string_fields);
+        let references_string_struct =
+            |ty: &Type| matches!(ty, Type::Reference { inner, .. } if local_string_struct(inner));
+        if function
+            .signature
+            .parameters
+            .iter()
+            .any(|p| local_string_struct(&p.ty) || references_string_struct(&p.ty))
+            || local_string_struct(&function.signature.result)
+            || references_string_struct(&function.signature.result)
+            || function
+                .locals
+                .iter()
+                .any(|l| references_string_struct(&l.ty))
+            || function.values.iter().any(references_string_struct)
+        {
+            errors.push(diagnostic(
+                "structs with String fields must stay local to one function and cannot be borrowed as a whole",
+                Some(function.span),
+            ));
+        }
         if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
             errors.push(diagnostic(error.message, error.span));
         }
         for block in &function.blocks {
+            // Accept only descriptors emitted by literals earlier in this
+            // block. Their allocation provenance is always zero.
+            let mut string_literals = HashSet::new();
             for instruction in &block.instructions {
+                match &instruction.kind {
+                    InstructionKind::Constant(Constant::String(_)) => {
+                        string_literals.extend(instruction.output);
+                    }
+                    InstructionKind::StructNew { ty, fields }
+                        if structs[ty.0 as usize].literal_string_fields =>
+                    {
+                        let TypeDefKind::Struct { fields: declared } =
+                            &program.types[ty.0 as usize].kind
+                        else {
+                            unreachable!("validated StructNew type");
+                        };
+                        for (field, operand) in declared.iter().zip(fields) {
+                            if field.ty == Type::String
+                                && !matches!(operand.source, Source::Value(id) if string_literals.contains(&id))
+                            {
+                                errors.push(diagnostic(
+                                    "a String struct field requires a direct String literal",
+                                    operand.span.or(instruction.span),
+                                ));
+                            }
+                        }
+                    }
+                    InstructionKind::FieldAddr { access, base, .. }
+                        if matches!(instruction.output.map(|id| &function.values[id.0 as usize]),
+                            Some(Type::Reference { inner, .. }) if **inner == Type::String)
+                            && (*access != memobits_ir::Access::Borrow
+                                || !matches!(base.source, Source::Local(_))) =>
+                    {
+                        errors.push(diagnostic(
+                            "a String struct field can only be read through a borrow of a named local field",
+                            instruction.span,
+                        ));
+                    }
+                    _ => {}
+                }
                 if let Some(message) = unsupported_instruction(instruction) {
                     errors.push(diagnostic(message, instruction.span));
                 }
@@ -482,6 +542,8 @@ struct StructLayout {
     fields: Vec<FieldStorage>,
     enum_layout: Option<EnumLayout>,
     error_identity: Option<u32>,
+    // Raw aggregate copies are safe only while these descriptors are static.
+    literal_string_fields: bool,
 }
 
 /// Enum layout: the tag at offset 0 with the smallest unsigned width that holds
@@ -540,6 +602,10 @@ fn member_layout(
         nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
             nested_struct_layouts(types, nested, done, active)?;
             let layout_at = |id: u32| done.get(id as usize).and_then(Option::as_ref);
+            if matches!(nested, Type::Struct(id) if layout_at(id.0).is_some_and(|layout| layout.literal_string_fields))
+            {
+                return Err("Wasm does not yet support nesting structs with String fields".into());
+            }
             if matches!(nested, Type::Enum(id) if layout_at(id.0).is_some_and(has_string_success)) {
                 return Err("Wasm does not yet support nested Result<String, E> storage".into());
             }
@@ -573,6 +639,15 @@ fn struct_layout_at(
     active.push(index);
     let layout = match &definition.kind {
         TypeDefKind::Struct { fields } => {
+            let literal_string_fields = fields.iter().any(|field| field.ty == Type::String);
+            if literal_string_fields
+                && (definition.error_ancestry.is_some()
+                    || fields
+                        .iter()
+                        .any(|field| !matches!(field.ty, Type::String | Type::Primitive(_))))
+            {
+                return Err("structs with String fields support only String and primitive fields and cannot inherit from Error".into());
+            }
             let mut offset = if definition.error_ancestry == Some(ErrorAncestry::Root) {
                 entry_abi::ERROR_ID_BYTES
             } else {
@@ -593,9 +668,16 @@ fn struct_layout_at(
                 storage.extend_from_slice(&base.fields);
             }
             for field in &fields[offsets.len()..] {
-                let Some((size, field_align, kind)) =
+                let member = if field.ty == Type::String {
+                    Some((
+                        string_descriptor::SIZE,
+                        string_descriptor::ALIGN,
+                        FieldStorage::Aggregate(string_descriptor::SIZE),
+                    ))
+                } else {
                     member_layout(types, &field.ty, done, active)?
-                else {
+                };
+                let Some((size, field_align, kind)) = member else {
                     return Err(format!(
                         "field '{}' of struct '{}' has an unsupported type",
                         field.name, definition.path.name
@@ -614,6 +696,7 @@ fn struct_layout_at(
                 fields: storage,
                 enum_layout: None,
                 error_identity: definition.error_ancestry.map(|_| index as u32 + 1),
+                literal_string_fields,
             }
         }
         TypeDefKind::Enum { variants } => {
@@ -675,6 +758,7 @@ fn struct_layout_at(
                 offsets: Vec::new(),
                 fields: Vec::new(),
                 error_identity: None,
+                literal_string_fields: false,
                 enum_layout: Some(EnumLayout {
                     tag_size,
                     string_success,
@@ -728,6 +812,10 @@ fn type_layout<'a>(
             .map(|layout| (layout.size, layout.align))
             .ok_or_else(|| "type is out of range".to_string()),
         Type::Array { element, len } => {
+            if matches!(element.as_ref(), Type::Struct(id) if struct_layout(id.0).is_some_and(|layout| layout.literal_string_fields))
+            {
+                return Err("Wasm does not yet support nesting structs with String fields".into());
+            }
             if **element == Type::String {
                 return Err("Wasm does not yet support String array elements".into());
             }

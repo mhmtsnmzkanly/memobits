@@ -182,6 +182,35 @@ No host allocator imports or new manifest setting are needed for this slice.
 
 ## Ownership and cleanup
 
+### Local structs with literal-backed String fields
+
+A plain local struct can own String fields initialized directly with
+literals, alongside primitive fields. Use straight-line field initializers
+so each literal is evaluated in the same basic block as construction.
+Each field stores the existing inline
+String descriptor with zero allocation provenance. A whole-struct move
+invalidates the source binding and transfers the value to its destination.
+Field reads borrow a named local, so a live field loan blocks a move of the
+struct. Scope exit needs no guest deallocation. The descriptors occupy frame
+storage and the literal bytes live for the Wasm instance.
+
+Wasm gates nonliteral field initializers, String field writes, whole-struct
+borrows, aggregate nesting, Error inheritance, and signatures that pass or
+return these structs. See the checked example in the
+[runnable language guide](../../examples/projects/language-guide/src/main.mb).
+
+To support heap-backed fields, first stage each evaluated field initializer
+as a lexical owner so early return, break, or continue releases any fields
+already evaluated. Then transfer the descriptors into the struct and clear
+their source provenance. Add a lexical struct exit operation that releases
+each still-owned field. Use the same cleanup on whole-value replacement,
+after evaluating the replacement, and clear moved-out slots on whole-struct
+transfers. Check mixed branch joins, loop exits, and live field loans, and
+exercise repeated moves and cleanup under a bounded Wasm memory limit before
+lifting the literal-only restriction.
+
+### Whole String locals
+
 Move checking distinguishes definitely available, definitely unavailable and
 mixed ownership at reachable block entries. It computes those facts separately
 from diagnostic replay. Both run the same block and edge transfers,

@@ -2452,7 +2452,7 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "String array elements",
         ),
         (
-            "type Box { text: String } fn main() {}",
+            "type Box [ Text(String) ] fn main() {}",
             &["build"][..],
             "String fields or enum payloads",
         ),
@@ -2496,6 +2496,85 @@ fn wasm_gates_string_exports_and_nested_storage() {
         let diagnostic = err(f.run(args), "LE900");
         assert!(diagnostic.contains(message), "{diagnostic}");
         assert!(!f.0.join("target/memobits/app.wasm").exists());
+    }
+}
+
+#[test]
+fn wasm_gates_heap_and_escaping_string_struct_fields() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='labels'\nentry='main::main'\n",
+    );
+    for (source, code, message) in [
+        (
+            r#"fn main() { let text := "a".concat("b"); let label := Label { text: text }; }"#,
+            "TE018",
+            "heap String requires a whole String destination",
+        ),
+        (
+            r#"fn main() { let text := "a"; let label := Label { text: text }; }"#,
+            "LE900",
+            "requires a direct String literal",
+        ),
+        (
+            r#"fn main() { var label := Label { text: "a" }; label.text = "b"; }"#,
+            "LE900",
+            "read through a borrow",
+        ),
+        (
+            r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
+            "LE900",
+            "must stay local to one function",
+        ),
+        (
+            "fn take(label: borrow Label) {} fn main() {}",
+            "LE900",
+            "must stay local to one function",
+        ),
+        (
+            r#"fn main() { let labels := [Label { text: "a" }]; }"#,
+            "LE900",
+            "nesting structs with String fields",
+        ),
+        (
+            "type Outer { label: Label } fn main() {}",
+            "LE900",
+            "nesting structs with String fields",
+        ),
+    ] {
+        f.write(
+            "src/main.mb",
+            &format!("type Label {{ text: String }} {source}"),
+        );
+        let diagnostic = err(f.run(&["build"]), code);
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn string_struct_moves_invalidate_the_source_and_respect_field_loans() {
+    let f = Fixture::new();
+    for (body, code) in [
+        (r#"let moved := label; label.text.len();"#, "BE001"),
+        (
+            r#"let view := label.text.borrow(); let moved := label; inspect(view);"#,
+            "BE005",
+        ),
+        (
+            r#"label.text.byte_at({ label = Label { text: "x" }; let offset: u32 = 0; offset });"#,
+            "BE005",
+        ),
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"type Label {{ text: String }}
+                fn inspect(text: borrow String) {{}}
+                fn main() {{ var label := Label {{ text: "é" }}; {body} }}"#
+            ),
+        );
+        err(f.run(&["ownership", "text.mb"]), code);
     }
 }
 
