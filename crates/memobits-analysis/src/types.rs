@@ -1345,6 +1345,45 @@ impl Checker {
         )
     }
 
+    fn collection_contains(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        self.allow_array_value(base);
+        let receiver = read_type(self.expr(base, None));
+        let mut diverges = receiver == Ty::Never;
+        let element = match receiver {
+            Ty::Array(element, _) if numeric(&element) || *element == BOOL => Some(*element),
+            Ty::List(element @ ("u8" | "u32")) if self.list_read_receiver(base) => {
+                Some(Ty::Primitive(element))
+            }
+            Ty::Error | Ty::Never => None,
+            _ => {
+                self.error(
+                    17,
+                    base.span,
+                    "contains() requires an array with numeric or Bool elements, or a List<u8> or List<u32> local, reference binding, or direct internal call result",
+                );
+                None
+            }
+        };
+        for argument in arguments {
+            let actual = read_type(self.expr(argument, element.as_ref()));
+            if let Some(element) = &element {
+                self.ensure(&actual, element, argument.span);
+            }
+            diverges |= actual == Ty::Never;
+        }
+        if arguments.len() != 1 {
+            self.error(10, expr.span, "contains() expects one value");
+            return Ty::Error;
+        }
+        if diverges {
+            Ty::Never
+        } else if element.is_some() {
+            BOOL
+        } else {
+            Ty::Error
+        }
+    }
+
     fn list_get(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
@@ -2859,6 +2898,9 @@ impl Checker {
                     }
                     if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
                         return self.byte_utf8(expr, base, name, arguments);
+                    }
+                    if name == "contains" {
+                        return self.collection_contains(expr, base, arguments);
                     }
                     if name == "get" {
                         return self.list_get(expr, base, arguments);

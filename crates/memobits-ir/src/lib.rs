@@ -309,6 +309,11 @@ pub enum InstructionKind {
     ListLen {
         source: Operand,
     },
+    /// Read a collection through a shared loan and compare its elements with a scalar.
+    CollectionContains {
+        source: Operand,
+        value: Operand,
+    },
     StringLen {
         source: Operand,
     },
@@ -1443,6 +1448,37 @@ fn validate_instruction(
                     id,
                     Some(block),
                     "List get requires a local read, u32 index, and matching Option output",
+                );
+            }
+        }
+        InstructionKind::CollectionContains { source, value } => {
+            let input = operand_type(program, function, source, errors, id, block);
+            let needle = operand_type(program, function, value, errors, id, block);
+            let element = match input {
+                Some(Type::Reference {
+                    access: Access::Borrow,
+                    inner,
+                }) => match *inner {
+                    Type::Array { element, .. } => match *element {
+                        Type::Primitive(kind) if kind != Primitive::Unit => Some(kind),
+                        _ => None,
+                    },
+                    Type::List(kind @ (Primitive::U8 | Primitive::U32)) => Some(kind),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if source.mode != UseMode::Read
+                || value.mode != UseMode::Read
+                || element.is_none()
+                || element.map(Type::Primitive) != needle
+                || out != Some(&Type::Primitive(Primitive::Bool))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "contains requires a borrowed primitive collection, matching scalar value, and Bool output",
                 );
             }
         }
@@ -3164,6 +3200,10 @@ fn validate_operand_escapes(
                 InstructionKind::ListGet {
                     source,
                     index: offset,
+                }
+                | InstructionKind::CollectionContains {
+                    source,
+                    value: offset,
                 }
                 | InstructionKind::ValidateUtf8 {
                     source,

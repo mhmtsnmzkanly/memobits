@@ -987,6 +987,97 @@ fn discarded_list_returns_run_from_source_and_wasm() {
 }
 
 #[test]
+fn collection_contains_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='contains'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Rows { flags: Array<Bool, 2> }
+        fn make(log: share List<u8>) -> List<u32> {
+            log.push(1);
+            var words: List<u32> = [];
+            words.push(4_294_967_295);
+            words
+        }
+        fn reads(bytes: borrow Bytes<2>, words: share List<u32>) -> Bool {
+            bytes.contains(bytes[1]) && words.contains(4_294_967_295)
+        }
+        fn main() -> Result<Bool, Error> {
+            var log: List<u8> = [];
+            let empty := !log.contains({ log.len(); 0 });
+            let found := make(log.share()).contains({
+                if log.len() != 1 { return Ok(false); }
+                log.push(2);
+                4_294_967_295
+            });
+            var early := false;
+            loop {
+                make(log.share()).contains({ early = true; break; });
+            }
+            let mutating_after_read := log.contains(2) && !log.contains(3);
+            log.clear();
+            let cleared := !log.contains(2);
+            let bytes: Bytes<2> = [0, 255];
+            var words := make(log.share());
+            let borrowed := reads(bytes.borrow(), words.share());
+            words.clear();
+            let rows := Rows { flags: [false, true] };
+            let nested: Array<Array<i8, 2>, 1> = [[-2, 3]];
+            let no_values: Array<i32, 0> = [];
+            let wide: Array<u64, 1> = [4_294_967_296];
+            let floats: Array<f32, 2> = [0.0, 1.0];
+            let zero: f32 = 0.0;
+            let nan := zero / zero;
+            let doubles: Array<f64, 1> = [0.0];
+            Ok(empty && found && early && mutating_after_read && cleared && borrowed
+                && rows.flags.contains(true) && nested[0].contains(-2)
+                && !no_values.contains(0) && wide.contains(4_294_967_296)
+                && !wide.contains(0) && floats.contains(-0.0) && !floats.contains(nan)
+                && doubles.contains(-0.0) && [1, 2].contains(2))
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "contains.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "contains.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn collection_contains_checks_types_and_preserves_the_receiver_loan() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("let a: Bytes<1> = [1]; a.contains(true);", "TE002"),
+        ("let a: Bytes<1> = [1]; a.contains();", "TE010"),
+        ("let a: Bytes<1> = [1]; a.contains(1, 2);", "TE010"),
+        ("let a := [[1]]; a.contains([1]);", "TE017"),
+        ("let a := \"text\"; a.contains(1);", "TE017"),
+        ("let a: List<u32> = []; a.contains(true);", "TE002"),
+        (
+            "var a: List<u8> = []; a.contains({ a.push(1); 1 });",
+            "BE005",
+        ),
+        (
+            "let a: List<u8> = []; a.contains({ let moved := a; 1 });",
+            "BE005",
+        ),
+        ("var a := [1]; a.contains({ a[0] = 2; 1 });", "BE005"),
+        ("let a := [1]; a.contains({ let moved := a; 1 });", "BE005"),
+    ] {
+        f.write("contains.mb", &format!("fn main() {{ {body} }}"));
+        err(f.run(&["ownership", "contains.mb"]), code);
+    }
+}
+
+#[test]
 fn temporary_list_reads_run_from_source_and_wasm() {
     let f = Fixture::new();
     f.write(

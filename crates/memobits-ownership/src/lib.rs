@@ -224,6 +224,10 @@ fn transfer_instruction(
             source,
             index: offset,
         }
+        | InstructionKind::CollectionContains {
+            source,
+            value: offset,
+        }
         | InstructionKind::ValidateUtf8 {
             source,
             length: offset,

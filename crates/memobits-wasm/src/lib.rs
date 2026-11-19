@@ -328,6 +328,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
         | InstructionKind::ListGet { .. }
+        | InstructionKind::CollectionContains { .. }
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
         | InstructionKind::ListPop { .. }
@@ -996,6 +997,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 InstructionKind::ListGet {
                     source,
                     index: offset,
+                }
+                | InstructionKind::CollectionContains {
+                    source,
+                    value: offset,
                 }
                 | InstructionKind::ValidateUtf8 {
                     source,
@@ -2508,6 +2513,15 @@ fn emit_binary(
     Ok(())
 }
 
+fn primitive_eq(kind: Primitive) -> WasmInstruction<'static> {
+    match kind {
+        Primitive::I64 | Primitive::U64 => WasmInstruction::I64Eq,
+        Primitive::F32 => WasmInstruction::F32Eq,
+        Primitive::F64 => WasmInstruction::F64Eq,
+        _ => WasmInstruction::I32Eq,
+    }
+}
+
 fn emit_compare(
     body: &mut WasmFunction,
     op: BinaryOp,
@@ -2525,27 +2539,18 @@ fn emit_compare(
         Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64
     );
     let instruction = match (kind, op) {
-        (Primitive::F32, BinaryOp::Equal) => WasmInstruction::F32Eq,
         (Primitive::F32, BinaryOp::NotEqual) => WasmInstruction::F32Ne,
         (Primitive::F32, BinaryOp::Less) => WasmInstruction::F32Lt,
         (Primitive::F32, BinaryOp::LessEqual) => WasmInstruction::F32Le,
         (Primitive::F32, BinaryOp::Greater) => WasmInstruction::F32Gt,
         (Primitive::F32, BinaryOp::GreaterEqual) => WasmInstruction::F32Ge,
-        (Primitive::F64, BinaryOp::Equal) => WasmInstruction::F64Eq,
         (Primitive::F64, BinaryOp::NotEqual) => WasmInstruction::F64Ne,
         (Primitive::F64, BinaryOp::Less) => WasmInstruction::F64Lt,
         (Primitive::F64, BinaryOp::LessEqual) => WasmInstruction::F64Le,
         (Primitive::F64, BinaryOp::Greater) => WasmInstruction::F64Gt,
         (Primitive::F64, BinaryOp::GreaterEqual) => WasmInstruction::F64Ge,
-        (Primitive::Bool | Primitive::Unit, BinaryOp::Equal) => WasmInstruction::I32Eq,
         (Primitive::Bool | Primitive::Unit, BinaryOp::NotEqual) => WasmInstruction::I32Ne,
-        (_, BinaryOp::Equal) => {
-            if matches!(kind, Primitive::I64 | Primitive::U64) {
-                WasmInstruction::I64Eq
-            } else {
-                WasmInstruction::I32Eq
-            }
-        }
+        (_, BinaryOp::Equal) => primitive_eq(*kind),
         (_, BinaryOp::NotEqual) => {
             if matches!(kind, Primitive::I64 | Primitive::U64) {
                 WasmInstruction::I64Ne
@@ -3108,6 +3113,71 @@ fn compile_instruction(
             emit_store(body, element);
             body.instructions().i32_const(0).else_().i32_const(1).end();
             emit_store(body, Primitive::U8);
+        }
+        InstructionKind::CollectionContains { source, value } => {
+            let output = output.ok_or("contains lacks an output")?;
+            let Type::Reference { inner, .. } = value_type(function, source)? else {
+                return Err("contains requires a collection reference".into());
+            };
+            let (element, length) = match *inner {
+                Type::Array { element, len } => {
+                    let Type::Primitive(element) = *element else {
+                        return Err("contains requires primitive array elements".into());
+                    };
+                    (element, Some(len))
+                }
+                Type::List(element) => (element, None),
+                _ => return Err("contains requires an Array or List".into()),
+            };
+            let (width, _) = storage_layout(element)?;
+
+            // Use the result local as the scan index until the loop produces its Bool.
+            body.instructions()
+                .i32_const(0)
+                .local_set(output)
+                .block(BlockType::Result(ValType::I32))
+                .loop_(BlockType::Empty)
+                .local_get(output);
+            if let Some(length) = length {
+                body.instructions().i32_const(length as i32);
+            } else {
+                emit_operand(body, function, param_count, source, layout, frame)?;
+                list_descriptor::load_length(body);
+            }
+            body.instructions()
+                .i32_ge_u()
+                .if_(BlockType::Empty)
+                .i32_const(0)
+                .br(2)
+                .end();
+
+            // Only indices below the initialized length reach a payload load.
+            emit_operand(body, function, param_count, source, layout, frame)?;
+            if length.is_none() {
+                list_descriptor::load_address(body);
+            }
+            body.instructions()
+                .local_get(output)
+                .i32_const(width as i32)
+                .i32_mul()
+                .i32_add();
+            emit_load(body, element);
+            emit_operand(body, function, param_count, value, layout, frame)?;
+            body.instruction(&primitive_eq(element));
+            body.instructions()
+                .if_(BlockType::Empty)
+                .i32_const(1)
+                .br(2)
+                .end()
+                .local_get(output)
+                .i32_const(1)
+                .i32_add()
+                .local_set(output)
+                .br(0)
+                .end()
+                .unreachable()
+                .end()
+                .local_set(output);
         }
         InstructionKind::ListLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;

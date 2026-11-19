@@ -830,8 +830,25 @@ impl<'a> Builder<'a> {
     ) -> Option<Operand> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
-            let receiver = self.lower_with_temporary_owner(base)?;
-            let instruction = if method == "len" {
+            let receiver = if method == "contains" {
+                // Keep the receiver loan live across value evaluation.
+                if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                    let (root, projections) = self.lower_place(base)?;
+                    self.address_chain(root, &projections, Access::Borrow, base.span)?
+                } else {
+                    let owner = self.lower_with_temporary_owner(base)?;
+                    self.borrow(owner, Access::Borrow)?
+                }
+            } else {
+                self.lower_with_temporary_owner(base)?
+            };
+            let instruction = if method == "contains" {
+                let value = self.lower_expr(&arguments[0])?;
+                InstructionKind::CollectionContains {
+                    source: read(receiver),
+                    value: read(self.scalar(value)?),
+                }
+            } else if method == "len" {
                 let receiver_type = self.operand_type(receiver);
                 if matches!(receiver_type, Some(Type::List(_)))
                     || matches!(receiver_type, Some(Type::Reference { inner, .. }) if matches!(*inner, Type::List(_)))
@@ -1608,7 +1625,7 @@ impl<'a> Builder<'a> {
                     }
                     if matches!(
                         name.as_str(),
-                        "len" | "get" | "is_char_boundary" | "byte_at" | "scalar_at"
+                        "len" | "get" | "contains" | "is_char_boundary" | "byte_at" | "scalar_at"
                     ) {
                         return self.lower_collection_read(expr, base, name, arguments);
                     }

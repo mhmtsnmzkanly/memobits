@@ -354,6 +354,21 @@ returned references (TE017, `a` where `a` is a `borrow`/`share` array); `Unit`
 elements (TE017); arrays and array references in exported signatures
 (parameters and results, LE900); reference rebinding (TE017).
 
+## Primitive membership
+
+`array.contains(value) -> Bool` checks for an element equal to `value`
+using the same comparison as `==`. The search value must have the element
+type. Supported element types are `Bool`, `i8`, `i16`, `i32`, `i64`,
+`u8`, `u16`, `u32`, `u64`, `f32`, and `f64`. This includes `Bytes<N>`.
+An empty array returns false. With float elements, signed zeros compare
+equal and NaN never matches.
+
+The receiver is evaluated and borrowed before the value is evaluated
+once. The scan stops at the first match. The receiver can be a local,
+a borrow or share handle, a row or field of a local aggregate, or an array
+value such as a literal or a function result.
+[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+
 ## Implicit primitive copy checkpoint
 
 The decision that primitives are copied implicitly supersedes the earlier

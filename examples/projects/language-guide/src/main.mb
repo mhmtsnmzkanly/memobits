@@ -130,11 +130,18 @@ fn fixed_bytes() -> Bool {
         Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
         Err(_) => false
     };
-    valid && copied && first_byte(array.borrow()) == 42
+    // contains reads without moving the array. Numeric and Bool arrays
+    // use == for each comparison, including Bytes and fixed-size array rows.
+    valid && copied && array.contains(42) && !array.contains(255)
+        && first_byte(array.borrow()) == 42
 }
 
 fn list_word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
     items.get(index)
+}
+
+fn list_has_word(items: borrow List<u32>, value: u32) -> Bool {
+    items.contains(value)
 }
 
 fn append_word(items: share List<u32>, value: u32) {
@@ -160,6 +167,7 @@ fn replace_words(items: share List<u32>, value: u32) {
 fn primitive_lists() -> Bool {
     var bytes: List<u8> = [];
     let before := bytes.len();
+    let empty := !bytes.contains(42);
     bytes.push(42);
     // Bind a direct internal List result to take ownership of its block.
     let words := make_words(1000);
@@ -169,6 +177,10 @@ fn primitive_lists() -> Bool {
     // before the index, and the temporary is released after the read or
     // on a normal early exit from the index expression.
     let temporary_length := make_words(999).len();
+    // List<u8> and List<u32> also support contains. It evaluates the
+    // receiver first, then the search value once, even for an empty List.
+    let temporary_contains := make_words(1234).contains(1234);
+    let borrowed_contains := list_has_word(words.borrow(), 1000);
     let temporary_word := match make_words(1234).get(0) {
         Some(value) => value == 1234,
         None => false
@@ -219,6 +231,7 @@ fn primitive_lists() -> Bool {
     let final_length := owned_list_length(moved);
     before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
         && temporary_length == 1 && temporary_word && borrowed_word && owned_temporary_length == 1
+        && empty && temporary_contains && borrowed_contains && bytes.contains(42)
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 
