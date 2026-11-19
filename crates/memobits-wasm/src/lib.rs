@@ -328,7 +328,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
         | InstructionKind::ListGet { .. }
-        | InstructionKind::CollectionContains { .. }
+        | InstructionKind::CollectionSearch { .. }
         | InstructionKind::ListLen { .. }
         | InstructionKind::ListPush { .. }
         | InstructionKind::ListPop { .. }
@@ -998,9 +998,10 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                     source,
                     index: offset,
                 }
-                | InstructionKind::CollectionContains {
+                | InstructionKind::CollectionSearch {
                     source,
                     value: offset,
+                    ..
                 }
                 | InstructionKind::ValidateUtf8 {
                     source,
@@ -3114,24 +3115,38 @@ fn compile_instruction(
             body.instructions().i32_const(0).else_().i32_const(1).end();
             emit_store(body, Primitive::U8);
         }
-        InstructionKind::CollectionContains { source, value } => {
-            let output = output.ok_or("contains lacks an output")?;
+        InstructionKind::CollectionSearch {
+            source,
+            value,
+            return_index,
+        } => {
+            let output = output.ok_or("collection search lacks an output")?;
             let Type::Reference { inner, .. } = value_type(function, source)? else {
-                return Err("contains requires a collection reference".into());
+                return Err("collection search requires a collection reference".into());
             };
             let (element, length) = match *inner {
                 Type::Array { element, len } => {
                     let Type::Primitive(element) = *element else {
-                        return Err("contains requires primitive array elements".into());
+                        return Err("collection search requires primitive array elements".into());
                     };
                     (element, Some(len))
                 }
                 Type::List(element) => (element, None),
-                _ => return Err("contains requires an Array or List".into()),
+                _ => return Err("collection search requires an Array or List".into()),
             };
             let (width, _) = storage_layout(element)?;
 
-            // Use the result local as the scan index until the loop produces its Bool.
+            let option = if *return_index {
+                let frame = frame.ok_or("index_of requires a frame")?;
+                let value = instruction.output.ok_or("index_of lacks an output")?;
+                let (tag, payload) = scalar_option_offsets(layout, function, value)?;
+                emit_address(body, frame, tag);
+                Some((frame, payload))
+            } else {
+                None
+            };
+            // Use the result local as the index. The loop returns a Bool or
+            // an Option tag (0 for Some, 1 for None).
             body.instructions()
                 .i32_const(0)
                 .local_set(output)
@@ -3147,7 +3162,7 @@ fn compile_instruction(
             body.instructions()
                 .i32_ge_u()
                 .if_(BlockType::Empty)
-                .i32_const(0)
+                .i32_const(i32::from(*return_index))
                 .br(2)
                 .end();
 
@@ -3164,9 +3179,14 @@ fn compile_instruction(
             emit_load(body, element);
             emit_operand(body, function, param_count, value, layout, frame)?;
             body.instruction(&primitive_eq(element));
+            body.instructions().if_(BlockType::Empty);
+            if let Some((frame, payload)) = option {
+                emit_address(body, frame, payload);
+                body.instructions().local_get(output);
+                emit_store(body, Primitive::U32);
+            }
             body.instructions()
-                .if_(BlockType::Empty)
-                .i32_const(1)
+                .i32_const(i32::from(!*return_index))
                 .br(2)
                 .end()
                 .local_get(output)
@@ -3176,8 +3196,12 @@ fn compile_instruction(
                 .br(0)
                 .end()
                 .unreachable()
-                .end()
-                .local_set(output);
+                .end();
+            if *return_index {
+                emit_store(body, Primitive::U8);
+            } else {
+                body.instructions().local_set(output);
+            }
         }
         InstructionKind::ListLen { source } => {
             emit_operand(body, function, param_count, source, layout, frame)?;

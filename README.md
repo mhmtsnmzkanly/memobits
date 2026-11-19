@@ -92,8 +92,9 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
   Unicode scalar encodings and reports byte offsets for malformed input.
 - `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
   Use `Bytes<N>` as a built-in spelling for `Array<u8, N>`.
-- The language guide demonstrates `contains(value) -> Bool` on fixed
-  arrays of numbers or `Bool`, and on `List<u8>` and `List<u32>`.
+- The language guide demonstrates `contains(value) -> Bool` and
+  `index_of(value) -> Option<u32>` on fixed arrays of numbers or `Bool`,
+  including `Bytes<N>`, and on `List<u8>` and `List<u32>`.
   [Runnable language guide](examples/projects/language-guide/src/main.mb)
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of

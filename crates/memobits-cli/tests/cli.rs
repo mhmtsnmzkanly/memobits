@@ -1052,7 +1052,81 @@ fn collection_contains_runs_from_source_and_wasm() {
 }
 
 #[test]
-fn collection_contains_checks_types_and_preserves_the_receiver_loan() {
+fn collection_index_of_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='index-of'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Flags { values: Array<Bool, 2> }
+
+        fn at(result: Option<u32>, expected: u32) -> Bool {
+            match result { Some(index) => index == expected, None => false }
+        }
+        fn missing(result: Option<u32>) -> Bool {
+            match result { Some(_) => false, None => true }
+        }
+        fn make(log: share List<u8>) -> List<u32> {
+            log.push(1);
+            var words: List<u32> = [];
+            words.push(7);
+            words.push(4_294_967_295);
+            words.push(4_294_967_295);
+            words
+        }
+        fn reads(bytes: borrow Bytes<3>, words: share List<u32>) -> Bool {
+            at(bytes.index_of(bytes[2]), 0) && at(words.index_of(4_294_967_295), 1)
+        }
+        fn main() -> Result<Bool, Error> {
+            var log: List<u8> = [];
+            var evaluations: u32 = 0;
+            let empty := missing(log.index_of({ evaluations = evaluations + 1; 1 }))
+                && evaluations == 1;
+            let found := make(log.share()).index_of({
+                if log.len() != 1 { return Ok(false); }
+                log.push(2);
+                4_294_967_295
+            });
+            loop {
+                make(log.share()).index_of({ break; });
+            }
+            let order := log.len() == 3 && at(log.index_of(2), 1);
+            log.clear();
+            let cleared := missing(log.index_of(2));
+            let bytes: Bytes<3> = [255, 0, 255];
+            var words := make(log.share());
+            let borrowed := reads(bytes.borrow(), words.share());
+            let flags := Flags { values: [false, true] };
+            let rows: Array<Array<i8, 2>, 1> = [[-2, 3]];
+            let empty_array: Array<i32, 0> = [];
+            let wide: Array<u64, 2> = [0, 4_294_967_296];
+            let floats: Array<f32, 2> = [1.0, 0.0];
+            let zero: f32 = 0.0;
+            let nan := zero / zero;
+            let doubles: Array<f64, 1> = [0.0];
+            Ok(empty && at(found, 1) && order && cleared && borrowed
+                && at(flags.values.index_of(true), 1) && at(rows[0].index_of(-2), 0)
+                && missing(empty_array.index_of(0)) && at(wide.index_of(4_294_967_296), 1)
+                && at(floats.index_of(-0.0), 1) && missing(floats.index_of(nan))
+                && at(doubles.index_of(-0.0), 0) && at([1, 2].index_of(2), 1))
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "index-of.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "index-of.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn collection_search_checks_types_and_preserves_the_receiver_loan() {
     let f = Fixture::new();
     for (body, code) in [
         ("let a: Bytes<1> = [1]; a.contains(true);", "TE002"),
@@ -1072,8 +1146,11 @@ fn collection_contains_checks_types_and_preserves_the_receiver_loan() {
         ("var a := [1]; a.contains({ a[0] = 2; 1 });", "BE005"),
         ("let a := [1]; a.contains({ let moved := a; 1 });", "BE005"),
     ] {
-        f.write("contains.mb", &format!("fn main() {{ {body} }}"));
-        err(f.run(&["ownership", "contains.mb"]), code);
+        for method in ["contains", "index_of"] {
+            let body = body.replace(".contains(", &format!(".{method}("));
+            f.write("search.mb", &format!("fn main() {{ {body} }}"));
+            err(f.run(&["ownership", "search.mb"]), code);
+        }
     }
 }
 

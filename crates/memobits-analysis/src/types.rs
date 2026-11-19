@@ -1345,7 +1345,13 @@ impl Checker {
         )
     }
 
-    fn collection_contains(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+    fn collection_search(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        method: &str,
+        arguments: &[Expr],
+    ) -> Ty {
         self.allow_array_value(base);
         let receiver = read_type(self.expr(base, None));
         let mut diverges = receiver == Ty::Never;
@@ -1359,7 +1365,7 @@ impl Checker {
                 self.error(
                     17,
                     base.span,
-                    "contains() requires an array with numeric or Bool elements, or a List<u8> or List<u32> local, reference binding, or direct internal call result",
+                    format!("{method}() requires an array with numeric or Bool elements, or a List<u8> or List<u32> local, reference binding, or direct internal call result"),
                 );
                 None
             }
@@ -1372,15 +1378,21 @@ impl Checker {
             diverges |= actual == Ty::Never;
         }
         if arguments.len() != 1 {
-            self.error(10, expr.span, "contains() expects one value");
+            self.error(10, expr.span, format!("{method}() expects one value"));
             return Ty::Error;
         }
         if diverges {
             Ty::Never
-        } else if element.is_some() {
-            BOOL
-        } else {
+        } else if element.is_none() {
             Ty::Error
+        } else if method == "index_of" {
+            self.table.instantiate_enum(
+                registry::by_id(registry::TemplateId::Option),
+                vec![ResolvedArgument::Type(Ty::Primitive("u32"))],
+                expr.span,
+            )
+        } else {
+            BOOL
         }
     }
 
@@ -2899,8 +2911,8 @@ impl Checker {
                     if matches!(name.as_str(), "validate_utf8" | "to_utf8_string") {
                         return self.byte_utf8(expr, base, name, arguments);
                     }
-                    if name == "contains" {
-                        return self.collection_contains(expr, base, arguments);
+                    if matches!(name.as_str(), "contains" | "index_of") {
+                        return self.collection_search(expr, base, name, arguments);
                     }
                     if name == "get" {
                         return self.list_get(expr, base, arguments);

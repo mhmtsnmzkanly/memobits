@@ -633,9 +633,10 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             source,
             index: offset,
         }
-        | InstructionKind::CollectionContains {
+        | InstructionKind::CollectionSearch {
             source,
             value: offset,
+            ..
         }
         | InstructionKind::ValidateUtf8 {
             source,
@@ -1525,7 +1526,7 @@ fn check_instruction(
         }
         InstructionKind::Load { reference }
         | InstructionKind::ListLen { source: reference }
-        | InstructionKind::CollectionContains {
+        | InstructionKind::CollectionSearch {
             source: reference, ..
         }
         | InstructionKind::ListGet {

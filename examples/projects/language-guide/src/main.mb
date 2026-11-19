@@ -130,9 +130,14 @@ fn fixed_bytes() -> Bool {
         Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
         Err(_) => false
     };
-    // contains reads without moving the array. Numeric and Bool arrays
-    // use == for each comparison, including Bytes and fixed-size array rows.
-    valid && copied && array.contains(42) && !array.contains(255)
+    // contains and index_of read without moving the array. Numeric and Bool
+    // arrays use == for comparisons, including Bytes and fixed-size rows.
+    // index_of returns the first zero-based match, or None for a miss.
+    let first := match [0, 42, 42].index_of(42) {
+        Some(index) => index == 1,
+        None => false
+    };
+    valid && copied && first && array.contains(42) && !array.contains(255)
         && first_byte(array.borrow()) == 42
 }
 
@@ -177,10 +182,15 @@ fn primitive_lists() -> Bool {
     // before the index, and the temporary is released after the read or
     // on a normal early exit from the index expression.
     let temporary_length := make_words(999).len();
-    // List<u8> and List<u32> also support contains. It evaluates the
-    // receiver first, then the search value once, even for an empty List.
+    // List<u8> and List<u32> support both searches on locals, borrow and
+    // share bindings, and direct internal call results. The receiver runs
+    // first and stays borrowed while the value runs once, even if empty.
     let temporary_contains := make_words(1234).contains(1234);
     let borrowed_contains := list_has_word(words.borrow(), 1000);
+    let missing_index := match make_words(1234).index_of(999) {
+        Some(_) => false,
+        None => true
+    };
     let temporary_word := match make_words(1234).get(0) {
         Some(value) => value == 1234,
         None => false
@@ -231,7 +241,7 @@ fn primitive_lists() -> Bool {
     let final_length := owned_list_length(moved);
     before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
         && temporary_length == 1 && temporary_word && borrowed_word && owned_temporary_length == 1
-        && empty && temporary_contains && borrowed_contains && bytes.contains(42)
+        && empty && temporary_contains && borrowed_contains && missing_index && bytes.contains(42)
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

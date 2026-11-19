@@ -830,7 +830,8 @@ impl<'a> Builder<'a> {
     ) -> Option<Operand> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
-            let receiver = if method == "contains" {
+            let search = matches!(method, "contains" | "index_of");
+            let receiver = if search {
                 // Keep the receiver loan live across value evaluation.
                 if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
                     let (root, projections) = self.lower_place(base)?;
@@ -842,9 +843,10 @@ impl<'a> Builder<'a> {
             } else {
                 self.lower_with_temporary_owner(base)?
             };
-            let instruction = if method == "contains" {
+            let instruction = if search {
                 let value = self.lower_expr(&arguments[0])?;
-                InstructionKind::CollectionContains {
+                InstructionKind::CollectionSearch {
+                    return_index: method == "index_of",
                     source: read(receiver),
                     value: read(self.scalar(value)?),
                 }
@@ -1625,7 +1627,13 @@ impl<'a> Builder<'a> {
                     }
                     if matches!(
                         name.as_str(),
-                        "len" | "get" | "contains" | "is_char_boundary" | "byte_at" | "scalar_at"
+                        "len"
+                            | "get"
+                            | "contains"
+                            | "index_of"
+                            | "is_char_boundary"
+                            | "byte_at"
+                            | "scalar_at"
                     ) {
                         return self.lower_collection_read(expr, base, name, arguments);
                     }

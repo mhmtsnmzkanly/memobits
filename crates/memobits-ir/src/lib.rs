@@ -309,10 +309,11 @@ pub enum InstructionKind {
     ListLen {
         source: Operand,
     },
-    /// Read a collection through a shared loan and compare its elements with a scalar.
-    CollectionContains {
+    /// Read a primitive collection through a shared loan, returning membership or the first index.
+    CollectionSearch {
         source: Operand,
         value: Operand,
+        return_index: bool,
     },
     StringLen {
         source: Operand,
@@ -1219,7 +1220,7 @@ fn mutable_list_element(function: &Function, target: LocalId) -> Option<Primitiv
     }
 }
 
-fn list_option_matches(
+fn scalar_option_matches(
     program: &Program,
     element: Option<Primitive>,
     output: Option<&Type>,
@@ -1407,7 +1408,7 @@ fn validate_instruction(
             }
         }
         InstructionKind::ListPop { target } => {
-            if !list_option_matches(program, mutable_list_element(function, *target), out) {
+            if !scalar_option_matches(program, mutable_list_element(function, *target), out) {
                 push(
                     errors,
                     id,
@@ -1436,7 +1437,7 @@ fn validate_instruction(
             let input = operand_type(program, function, source, errors, id, block);
             let index_type = operand_type(program, function, index, errors, id, block);
             let valid_output =
-                list_option_matches(program, input.as_ref().and_then(list_read_element), out);
+                scalar_option_matches(program, input.as_ref().and_then(list_read_element), out);
             if !matches!(source.source, Source::Local(_))
                 || source.mode != UseMode::Read
                 || index.mode != UseMode::Read
@@ -1451,7 +1452,11 @@ fn validate_instruction(
                 );
             }
         }
-        InstructionKind::CollectionContains { source, value } => {
+        InstructionKind::CollectionSearch {
+            source,
+            value,
+            return_index,
+        } => {
             let input = operand_type(program, function, source, errors, id, block);
             let needle = operand_type(program, function, value, errors, id, block);
             let element = match input {
@@ -1468,17 +1473,22 @@ fn validate_instruction(
                 },
                 _ => None,
             };
+            let valid_output = if *return_index {
+                scalar_option_matches(program, Some(Primitive::U32), out)
+            } else {
+                out == Some(&Type::Primitive(Primitive::Bool))
+            };
             if source.mode != UseMode::Read
                 || value.mode != UseMode::Read
                 || element.is_none()
                 || element.map(Type::Primitive) != needle
-                || out != Some(&Type::Primitive(Primitive::Bool))
+                || !valid_output
             {
                 push(
                     errors,
                     id,
                     Some(block),
-                    "contains requires a borrowed primitive collection, matching scalar value, and Bool output",
+                    "collection search requires a borrowed primitive collection, matching scalar value, and the corresponding Bool or Option<u32> output",
                 );
             }
         }
@@ -3201,9 +3211,10 @@ fn validate_operand_escapes(
                     source,
                     index: offset,
                 }
-                | InstructionKind::CollectionContains {
+                | InstructionKind::CollectionSearch {
                     source,
                     value: offset,
+                    ..
                 }
                 | InstructionKind::ValidateUtf8 {
                     source,

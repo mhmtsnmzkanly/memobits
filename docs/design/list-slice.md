@@ -11,8 +11,9 @@ the equivalence of `Bytes<N>` and `Array<u8, N>`.
 ## Executable checkpoint
 
 `List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
-local bindings, non-consuming `.len()`, `.get(index)`, and `.contains(value)`, plus `.push(value)`,
-`.pop()`, and `.clear()` on whole mutable locals. Empty construction
+local bindings, non-consuming `.len()`, `.get(index)`, `.contains(value)`,
+and `.index_of(value)`, plus `.push(value)`, `.pop()`, and `.clear()` on
+whole mutable locals. Empty construction
 allocates no heap block. A push evaluates the element once and returns unit.
 Moves transfer the block and normal scope exits release the owner. The applied spelling is built in, and bare `List`
 can still name a user type. Direct internal calls accept `borrow List<T>`
@@ -22,12 +23,13 @@ as the argument itself when the factory is a direct internal call. The caller
 evaluates the factory once in argument order and owns the result until the
 call finishes. Normal early exits during later arguments release the temporary
 through lexical cleanup. Storing that borrow or sharing a temporary is
-unsupported. The callee can use `.len()`, `.get()`, and `.contains()`. A live loan
-blocks mutation, moves and cleanup of the owner until its last use.
+unsupported. The callee can use `.len()`, `.get()`, `.contains()`, and
+`.index_of()`. A live loan blocks mutation, moves and cleanup of the
+owner until its last use.
 A direct `share List<T>` parameter accepts an explicit `.share()` from
-a mutable owner and supports `push`, `pop`, `clear`, `len`, `get`, and `contains`. Growth
-updates the caller descriptor in place, and the caller retains cleanup
-responsibility.
+a mutable owner and supports `push`, `pop`, `clear`, `len`, `get`,
+`contains`, and `index_of`. Growth updates the caller descriptor in place,
+and the caller retains cleanup responsibility.
 A direct internal owned parameter takes a named whole List local by move
 or a direct internal List call result, as in `consume(make_list())`.
 Arguments evaluate left to right. An earlier owned argument is staged
@@ -41,11 +43,12 @@ A direct share parameter or a `var` share handle can also receive a
 replacement List. The original owner retains ownership and cleanup.
 A standalone direct internal call statement releases its unused List result
 immediately via the same lexical cleanup as a named owner. A direct internal
-call result can also be the receiver of `.len()`, `.get(index)`, or `.contains(value)`. The call
-runs once before any argument and its result lives in a temporary owner until
-the read finishes. Normal early exits during argument evaluation release it
-through lexical cleanup. Other temporary
-uses, indirect calls, nesting, subscript syntax, and exports remain gated.
+call result can also be the receiver of `.len()`, `.get(index)`,
+`.contains(value)`, or `.index_of(value)`. The call runs once before any
+argument and its result lives in a temporary owner until the read finishes.
+Normal early exits during argument evaluation release it through lexical
+cleanup. Other temporary uses, indirect calls, nesting, subscript syntax,
+and exports remain gated.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
 ## Source scope
@@ -81,10 +84,13 @@ or a coverage need.
   element address or loading a value. Subscript syntax can follow with
   the accepted checked-indexing behavior.
 
-- Use `items.contains(value)` to check membership with primitive `==`.
-  The search value must have the element type. The method borrows the
-  receiver before evaluating the value once, then scans the initialized
-  elements up to the first match. An empty List returns false.
+- Use `items.contains(value) -> Bool` to check membership and
+  `items.index_of(value) -> Option<u32>` to get the first zero-based match.
+  Both use primitive `==` and require a search value of the element type.
+  The methods borrow the receiver before evaluating the value once, then
+  scan the initialized elements up to the first match. If no element
+  matches, including on an empty List, they return false and `None`,
+  respectively.
   Locals, borrow and share bindings or parameters, and direct internal
   List call results are supported.
 
