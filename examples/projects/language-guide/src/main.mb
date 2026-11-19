@@ -165,6 +165,14 @@ fn primitive_lists() -> Bool {
     let words := make_words(1000);
     // A standalone call releases an ignored List result at the statement.
     make_words(999);
+    // Read a direct internal List result with len or get. The call runs
+    // before the index, and the temporary is released after the read or
+    // on a normal early exit from the index expression.
+    let temporary_length := make_words(999).len();
+    let temporary_word := match make_words(1234).get(0) {
+        Some(value) => value == 1234,
+        None => false
+    };
     var moved := words;
     // An exclusive call can grow the List that the caller owns.
     append_word(moved.share(), 2000);
@@ -199,6 +207,7 @@ fn primitive_lists() -> Bool {
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
     before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
+        && temporary_length == 1 && temporary_word
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

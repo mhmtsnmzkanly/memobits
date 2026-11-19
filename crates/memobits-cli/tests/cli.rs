@@ -987,6 +987,59 @@ fn discarded_list_returns_run_from_source_and_wasm() {
 }
 
 #[test]
+fn temporary_list_reads_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-temporary-read'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn bytes(log: share List<u8>) -> List<u8> {
+            log.push(1);
+            var items: List<u8> = [];
+            items.push(255);
+            items
+        }
+        fn words() -> List<u32> {
+            var items: List<u32> = [];
+            items.push(4_294_967_295);
+            items
+        }
+        fn main() -> Result<Bool, Error> {
+            var log: List<u8> = [];
+            let length := bytes(log.share()).len();
+            let byte := bytes(log.share()).get({
+                if log.len() != 2 { return Ok(false); }
+                log.push(2);
+                0
+            });
+            let present := match byte { Some(value) => value == 255, None => false };
+            let word := match words().get(0) {
+                Some(value) => value == 4_294_967_295,
+                None => false
+            };
+            let missing := match bytes(log.share()).get(4_294_967_295) {
+                Some(_) => false,
+                None => true
+            };
+            let final_entry := match log.get(2) { Some(value) => value == 2, None => false };
+            Ok(length == 1 && words().len() == 1 && present && word && missing && final_entry && log.len() == 4)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "list-read.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "list-read.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
 fn list_returns_keep_temporary_and_abi_gates() {
     let f = Fixture::new();
     for (body, code, message) in [
@@ -995,7 +1048,14 @@ fn list_returns_keep_temporary_and_abi_gates() {
             "TE018",
             "assigned directly to a whole List local",
         ),
-        ("make().len();", "TE017", "requires a local binding"),
+        ("({ make() }).len();", "TE017", "direct internal List call"),
+        ("({ make() }).get(0);", "TE017", "direct internal List call"),
+        (
+            "let indirect := make; indirect().get(0);",
+            "TE017",
+            "direct internal List call",
+        ),
+        ("make().borrow();", "TE017", "named local owner"),
         (
             "let indirect := make; let result := indirect();",
             "TE018",

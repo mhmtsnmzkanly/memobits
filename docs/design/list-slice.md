@@ -34,7 +34,11 @@ the block and releases it on a normal exit unless it moves onward.
 A direct share parameter or a `var` share handle can also receive a
 replacement List. The original owner retains ownership and cleanup.
 A standalone direct internal call statement releases its unused List result
-immediately via the same lexical cleanup as a named owner. Other temporary
+immediately via the same lexical cleanup as a named owner. A direct internal
+call result can also be the receiver of `.len()` or `.get(index)`. The call
+runs once before the index and its result lives in a temporary owner until
+the read finishes. Normal early exits during index evaluation release it
+through lexical cleanup. Other temporary
 uses, indirect calls, nesting, subscript syntax, and exports remain gated.
 [Runnable guide](../../examples/projects/language-guide/src/main.mb)
 
@@ -155,6 +159,7 @@ and an early exit during RHS evaluation leaves the caller's List intact.
    return, break and continue. Check reuse after the first high-water
    mark, mixed move paths, and preservation of a distinct live list
    across another list's growth and cleanup. Repeat discards of large direct
-   call results in one instance to check storage reuse. Force growth failure under a
-   small memory limit and verify the trap. Keep the String reuse and
-   allocation-failure tests in the same suite.
+   call results in one instance to check storage reuse. Repeat temporary reads
+   across successful reads and index return, break, and continue paths.
+   Force growth failure under a small memory limit and verify the trap.
+   Keep the String reuse and allocation-failure tests in the same suite.

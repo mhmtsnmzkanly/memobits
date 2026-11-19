@@ -802,7 +802,7 @@ impl<'a> Builder<'a> {
         self.lower_expr(expr);
     }
 
-    fn lower_string_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
+    fn lower_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
         if let ExprKind::Call { callee, arguments } = &base.kind {
             if let ExprKind::Field { base: left, name } = &callee.kind {
                 if name == "concat" {
@@ -811,9 +811,9 @@ impl<'a> Builder<'a> {
                     return Some(op(Source::Local(owner), base.span));
                 }
             }
-            if self.ty(base) == Some(Type::String) {
+            if let Some(ty @ (Type::String | Type::List(_))) = self.ty(base) {
                 let result = self.lower_expr(base)?;
-                let owner = self.hidden_local("String temporary", Type::String, base.span);
+                let owner = self.hidden_local("temporary owner", ty, base.span);
                 self.initialize_local(owner, consume(result), base.span);
                 return Some(op(Source::Local(owner), base.span));
             }
@@ -821,7 +821,7 @@ impl<'a> Builder<'a> {
         self.lower_expr(base)
     }
 
-    fn lower_string_read(
+    fn lower_collection_read(
         &mut self,
         expr: &Expr,
         base: &Expr,
@@ -830,7 +830,7 @@ impl<'a> Builder<'a> {
     ) -> Option<Operand> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
-            let receiver = self.lower_string_with_temporary_owner(base)?;
+            let receiver = self.lower_with_temporary_owner(base)?;
             let instruction = if method == "len" {
                 let receiver_type = self.operand_type(receiver);
                 if matches!(receiver_type, Some(Type::List(_)))
@@ -843,6 +843,12 @@ impl<'a> Builder<'a> {
                     InstructionKind::StringLen {
                         source: read(receiver),
                     }
+                }
+            } else if method == "get" {
+                let index = self.lower_expr(&arguments[0])?;
+                InstructionKind::ListGet {
+                    source: read(receiver),
+                    index: read(self.scalar(index)?),
                 }
             } else {
                 // Keep the receiver loan live while evaluating the offset.
@@ -1571,16 +1577,6 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
-                    if name == "get" {
-                        let source = read(self.lower_expr(base)?);
-                        let index = self.lower_expr(&arguments[0])?;
-                        let index = read(self.scalar(index)?);
-                        return self.emit(
-                            expr.span,
-                            InstructionKind::ListGet { source, index },
-                            self.ty(expr),
-                        );
-                    }
                     if name == "clear" {
                         let PathTarget::Local(target) = self.path(base) else {
                             unreachable!("checked List clear receiver")
@@ -1612,9 +1608,9 @@ impl<'a> Builder<'a> {
                     }
                     if matches!(
                         name.as_str(),
-                        "len" | "is_char_boundary" | "byte_at" | "scalar_at"
+                        "len" | "get" | "is_char_boundary" | "byte_at" | "scalar_at"
                     ) {
-                        return self.lower_string_read(expr, base, name, arguments);
+                        return self.lower_collection_read(expr, base, name, arguments);
                     }
                     let access = match name.as_str() {
                         "borrow" => Access::Borrow,
@@ -1667,7 +1663,7 @@ impl<'a> Builder<'a> {
                             _ => None,
                         };
                         let value = if let Some(base) = temporary_receiver {
-                            self.lower_string_with_temporary_owner(base)?
+                            self.lower_with_temporary_owner(base)?
                         } else {
                             self.lower_expr(argument)?
                         };

@@ -1204,6 +1204,19 @@ impl Checker {
             }
         }
     }
+    fn direct_callee(&self, callee: &Expr) -> bool {
+        matches!(&callee.kind, ExprKind::Path(path)
+            if path.len() != 1 || self.lookup(&path[0]).is_none())
+    }
+
+    fn list_read_receiver(&self, base: &Expr) -> bool {
+        match &base.kind {
+            ExprKind::Path(path) => path.len() == 1,
+            ExprKind::Call { callee, .. } => self.direct_callee(callee),
+            _ => false,
+        }
+    }
+
     fn string_read(
         &mut self,
         expression: &Expr,
@@ -1219,11 +1232,11 @@ impl Checker {
         let receiver = read_type(self.expr(base, None));
         self.concat_destination = previous;
         if matches!(receiver, Ty::List(_)) && method == "len" {
-            if !matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
+            if !self.list_read_receiver(base) {
                 self.error(
                     17,
                     base.span,
-                    "List len() currently requires a local binding",
+                    "List len() requires a local binding or a direct internal List call",
                 );
             }
             if !arguments.is_empty() {
@@ -1336,11 +1349,19 @@ impl Checker {
         self.allow_array_value(base);
         let receiver = self.expr(base, None);
         let Ty::List(element) = read_type(receiver) else {
-            self.error(17, base.span, "get() requires a whole List local");
+            self.error(
+                17,
+                base.span,
+                "get() requires a whole List local or a direct internal List call",
+            );
             return Ty::Error;
         };
-        if !matches!(&base.kind, ExprKind::Path(path) if path.len() == 1) {
-            self.error(17, base.span, "get() requires a whole List local");
+        if !self.list_read_receiver(base) {
+            self.error(
+                17,
+                base.span,
+                "get() requires a whole List local or a direct internal List call",
+            );
         }
         if arguments.len() != 1 {
             self.error(10, expr.span, "get() expects one index");
@@ -2844,8 +2865,7 @@ impl Checker {
                 }
                 let ty = self.expr(callee, None);
                 if let Ty::Function(params, result) = ty {
-                    let direct = matches!(&callee.kind, ExprKind::Path(path)
-                        if path.len() != 1 || self.lookup(&path[0]).is_none());
+                    let direct = self.direct_callee(callee);
                     if params.len() != arguments.len() {
                         self.error(
                             10,

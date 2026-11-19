@@ -65,8 +65,11 @@ callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.
 A direct share parameter or a stored `var` share handle can also replace
 the owner's List. A standalone direct internal call statement releases its
-unused List result. Other temporary uses, subscript syntax, indirect
-calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
+unused List result. Use `make_list().len()` or `make_list().get(index)` to
+read a direct internal List result. The receiver runs once before the index,
+which also runs once. The temporary is released after the read or on a
+normal early exit from the index. Other temporary uses, subscript syntax,
+indirect calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and
 `.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`
