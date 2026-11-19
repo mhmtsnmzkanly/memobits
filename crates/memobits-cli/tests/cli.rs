@@ -2500,7 +2500,7 @@ fn wasm_gates_string_exports_and_nested_storage() {
 }
 
 #[test]
-fn wasm_gates_heap_and_escaping_string_struct_fields() {
+fn wasm_gates_unsupported_string_struct_uses() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -2508,14 +2508,44 @@ fn wasm_gates_heap_and_escaping_string_struct_fields() {
     );
     for (source, code, message) in [
         (
-            r#"fn main() { let text := "a".concat("b"); let label := Label { text: text }; }"#,
+            r#"fn main() { let text := "a".concat("b"); let label := if true { Label { text: text } } else { Label { text: "c" } }; }"#,
+            "LE900",
+            "requires a direct new local binding",
+        ),
+        (
+            r#"fn make() -> String { let text := "a".concat("b"); text }
+                fn main() { let label := Label { text: make() }; }"#,
             "TE018",
-            "heap String requires a whole String destination",
+            "heap String call result must be assigned directly",
         ),
         (
             r#"fn main() { let text := "a"; let label := Label { text: text }; }"#,
             "LE900",
             "requires a direct String literal",
+        ),
+        (
+            r#"fn main() {
+                let text := "a".concat("b");
+                var label := Label { text: text };
+                label = Label { text: "c" };
+            }"#,
+            "TE018",
+            "requires a new local binding",
+        ),
+        (
+            r#"fn main() {
+                let text := "a".concat("b");
+                let label := Label { text: text };
+                let Label { text: field } := label;
+            }"#,
+            "TE018",
+            "can only move directly into a new local",
+        ),
+        (
+            r#"fn take(label: Label) {}
+                fn main() { let text := "a".concat("b"); take(Label { text: text }); }"#,
+            "LE900",
+            "must stay local to one function",
         ),
         (
             r#"fn main() { var label := Label { text: "a" }; label.text = "b"; }"#,
@@ -2572,6 +2602,32 @@ fn string_struct_moves_invalidate_the_source_and_respect_field_loans() {
                 r#"type Label {{ text: String }}
                 fn inspect(text: borrow String) {{}}
                 fn main() {{ var label := Label {{ text: "é" }}; {body} }}"#
+            ),
+        );
+        err(f.run(&["ownership", "text.mb"]), code);
+    }
+}
+
+#[test]
+fn heap_string_struct_moves_respect_loans_and_invalidate_the_source() {
+    let f = Fixture::new();
+    for (body, code) in [
+        ("inspect(text.borrow());", "BE001"),
+        (
+            "let view := label.text.borrow(); let moved := label; inspect(view);",
+            "BE005",
+        ),
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"type Label {{ text: String }}
+                fn inspect(text: borrow String) {{}}
+                fn main() {{
+                    let text := "é".concat("!");
+                    let label := Label {{ text: text }};
+                    {body}
+                }}"#
             ),
         );
         err(f.run(&["ownership", "text.mb"]), code);

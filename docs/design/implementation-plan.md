@@ -262,8 +262,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   A heap `Ok` supports immediate consuming matches in the same function
   or after a direct internal return. Both require an explicit success
   binding. Other escapes remain gated.
-  [Local structs with literal-backed String fields](owned-heap-foundation.md#local-structs-with-literal-backed-string-fields)
-  support whole-local moves and borrowed field reads.
+  [Local structs with String fields](owned-heap-foundation.md#local-structs-with-string-fields)
+  support literal fields, moves from named heap String locals, whole-local
+  moves into new bindings, and borrowed field reads.
   Exported String signatures, general nested String storage, and a public
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.

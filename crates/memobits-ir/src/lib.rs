@@ -276,8 +276,11 @@ pub enum InstructionKind {
         target: LocalId,
         strings: [Operand; 2],
     },
-    /// End lexical storage for a String local, even if it has been moved.
-    /// This invalidates the local without consuming a value or freeing bytes.
+    /// End lexical storage for a struct with String fields, even after a move.
+    EndStructLocal {
+        local: LocalId,
+    },
+    /// End lexical storage for a String local, even after a move.
     EndStringLocal {
         local: LocalId,
     },
@@ -1622,6 +1625,17 @@ fn validate_instruction(
                     Some(block),
                     "drop requires a consumed String or primitive List local and no output",
                 );
+            }
+        }
+        InstructionKind::EndStructLocal { local } => {
+            if instruction.output.is_some()
+                || !function.locals.get(local.0 as usize).is_some_and(|local| {
+                    matches!(local.ty, Type::Struct(ty) if program.types.get(ty.0 as usize).is_some_and(|ty| {
+                        matches!(&ty.kind, TypeDefKind::Struct { fields } if fields.iter().any(|field| field.ty == Type::String))
+                    }))
+                })
+            {
+                push(errors, id, Some(block), "struct scope exit requires a struct local with String fields and no output");
             }
         }
         InstructionKind::EndStringLocal { local } => {
@@ -3185,7 +3199,12 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                "heap String requires a whole String destination for moves and a checked loan for reference access",
+                if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Struct(_)))
+                {
+                    "a struct owning a heap String can only move directly into a new local"
+                } else {
+                    "heap String requires a whole String destination for moves and a checked loan for reference access"
+                },
             );
         }
         if operand_is_read_only(operand, &read_only) && (escape || operand.mode != UseMode::Read) {
@@ -3227,14 +3246,19 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::FieldAddr { base, .. }
                 | InstructionKind::VariantAddr { base, .. }
-                | InstructionKind::Extract { base, .. }
                 | InstructionKind::EnumTag { base }
                 | InstructionKind::VariantExtract { base, .. } => {
                     report(block_id, base, false, false)
                 }
+                InstructionKind::Extract { base, .. } => report(block_id, base, true, false),
                 InstructionKind::StructNew { fields, .. } => {
                     for field in fields {
-                        report(block_id, field, true, false);
+                        if !(field.mode == UseMode::Consume
+                            && matches!(field.source, Source::Local(local)
+                                if function.locals.get(local.0 as usize).is_some_and(|local| local.ty == Type::String)))
+                        {
+                            report(block_id, field, true, false);
+                        }
                     }
                 }
                 InstructionKind::EnumNew { payload, .. } => {
@@ -3301,6 +3325,9 @@ fn validate_operand_escapes(
                     initialize,
                 } => {
                     if scoped_string::local_move_source(function, *target, value, *initialize)
+                        .or_else(|| {
+                            scoped_string::struct_move_source(function, *target, value, *initialize)
+                        })
                         .is_none()
                     {
                         report(block_id, value, true, false);
@@ -3325,6 +3352,7 @@ fn validate_operand_escapes(
                 | InstructionKind::DropLocal { .. }
                 | InstructionKind::EndListLocal { .. }
                 | InstructionKind::Constant(_)
+                | InstructionKind::EndStructLocal { .. }
                 | InstructionKind::EndStringLocal { .. } => {}
             }
         }

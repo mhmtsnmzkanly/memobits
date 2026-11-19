@@ -113,11 +113,12 @@ function with explicit `Ok(value)` and `Err` arms. A direct internal call
 can also return a heap-backed Result to an immediate consuming match, with
 an optional binding. Ignoring the success owner, forwarding the Result
 without matching it, and general nested String storage are gated.
-Plain local structs can contain direct String literals alongside primitive
-fields. The whole struct can move between local bindings, and its String
-fields support borrowed reads. See the
+A plain local struct can contain direct String literals alongside primitive
+fields. A new local struct can also take ownership of a named heap String.
+The whole struct can move into another new local, whose scope exit releases
+any owned String allocations. String fields support borrowed reads. See the
 [local struct example](../../examples/projects/language-guide/src/main.mb)
-and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-literal-backed-string-fields).
+and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 
 Application builds export the manifest entry as
 `main`. A zero-argument application entry can return `Result<T, E>` or

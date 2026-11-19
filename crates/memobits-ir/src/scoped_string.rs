@@ -44,13 +44,29 @@ impl super::Program {
                         InstructionKind::InitConcatString { target, .. } => {
                             pending.push(Slot::Local(index, *target));
                         }
+                        InstructionKind::StructNew { fields, .. } => {
+                            if let Some(target) =
+                                struct_binding(function, &block.instructions[position..])
+                            {
+                                for field in fields {
+                                    if let Source::Local(source) = field.source {
+                                        moves
+                                            .entry(Slot::Local(index, source))
+                                            .or_default()
+                                            .push(Slot::Local(index, target));
+                                    }
+                                }
+                            }
+                        }
                         InstructionKind::Assign {
                             target,
                             value,
                             initialize,
                         } => {
                             if let Some(source) =
-                                local_move_source(function, *target, value, *initialize)
+                                local_move_source(function, *target, value, *initialize).or_else(
+                                    || struct_move_source(function, *target, value, *initialize),
+                                )
                             {
                                 moves
                                     .entry(Slot::Local(index, source))
@@ -464,10 +480,49 @@ pub(super) fn list_share_destination(
     .then_some(local)
 }
 
+fn struct_binding(function: &Function, instructions: &[Instruction]) -> Option<LocalId> {
+    let [constructor, after @ ..] = instructions else {
+        return None;
+    };
+    let output = constructor.output?;
+    let InstructionKind::Assign {
+        target,
+        value,
+        initialize: true,
+    } = &after.iter().find(|inst| !is_cleanup(inst))?.kind
+    else {
+        return None;
+    };
+    (matches!(function.locals.get(target.0 as usize)?.ty, Type::Struct(_))
+        && value.source == Source::Value(output)
+        && value.mode == UseMode::Consume)
+        .then_some(*target)
+}
+
+pub(super) fn struct_move_source(
+    function: &Function,
+    target: LocalId,
+    value: &Operand,
+    initialize: bool,
+) -> Option<LocalId> {
+    let Source::Local(source) = value.source else {
+        return None;
+    };
+    let ty = &function.locals.get(target.0 as usize)?.ty;
+    (initialize
+        && value.mode == UseMode::Consume
+        && matches!(ty, Type::Struct(_))
+        && function.locals.get(source.0 as usize)?.ty == *ty
+        && !function.parameter_locals.contains(&target))
+    .then_some(source)
+}
+
 fn is_cleanup(instruction: &Instruction) -> bool {
     matches!(
         instruction.kind,
-        InstructionKind::EndStringLocal { .. } | InstructionKind::EndListLocal { .. }
+        InstructionKind::EndStringLocal { .. }
+            | InstructionKind::EndListLocal { .. }
+            | InstructionKind::EndStructLocal { .. }
     )
 }
 
@@ -531,6 +586,12 @@ pub(super) fn validate(
             .get(id.0 as usize)
             .is_some_and(|local| matches!(local.ty, Type::List(_)))
     };
+    let struct_local = |id: LocalId| {
+        function
+            .locals
+            .get(id.0 as usize)
+            .is_some_and(|local| matches!(local.ty, Type::Struct(_)))
+    };
     locals.extend(
         function
             .locals
@@ -568,12 +629,17 @@ pub(super) fn validate(
                 } if locals.contains(target) => {
                     let source_outside_scope = matches!(value.source, Source::Local(source)
                         if locals.contains(&source) && !in_scope.contains(&source));
-                    if (!list_local(*target) && !string_destination(function, *target, *initialize))
+                    if (!list_local(*target)
+                        && !struct_local(*target)
+                        && !string_destination(function, *target, *initialize))
+                        || (struct_local(*target) && !initialize)
                         || source_outside_scope
                         || (!initialize && !in_scope.contains(target))
                     {
                         let message = if list_local(*target) {
                             "List move requires a source local in scope"
+                        } else if struct_local(*target) {
+                            "a struct owning a heap String requires a new local binding"
                         } else {
                             "heap String assignment requires a whole local in scope or a new binding"
                         };
@@ -604,6 +670,7 @@ pub(super) fn validate(
                 }
                 InstructionKind::EndStringLocal { local }
                 | InstructionKind::EndListLocal { local }
+                | InstructionKind::EndStructLocal { local }
                     if locals.contains(local) =>
                 {
                     if !in_scope.remove(local) {
@@ -613,6 +680,8 @@ pub(super) fn validate(
                             Some(block_id),
                             if list_local(*local) {
                                 "List local ends outside its scope"
+                            } else if struct_local(*local) {
+                                "struct local ends outside its scope"
                             } else {
                                 "heap String local ends outside its scope"
                             },
@@ -638,6 +707,8 @@ pub(super) fn validate(
                 Some(block_id),
                 if in_scope.iter().any(|local| list_local(*local)) {
                     "return leaves a List local in scope"
+                } else if in_scope.iter().any(|local| struct_local(*local)) {
+                    "return leaves a struct owning a heap String in scope"
                 } else {
                     "return leaves a heap String local in scope"
                 },

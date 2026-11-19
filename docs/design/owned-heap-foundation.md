@@ -182,32 +182,32 @@ No host allocator imports or new manifest setting are needed for this slice.
 
 ## Ownership and cleanup
 
-### Local structs with literal-backed String fields
+### Local structs with String fields
 
-A plain local struct can own String fields initialized directly with
-literals, alongside primitive fields. Use straight-line field initializers
-so each literal is evaluated in the same basic block as construction.
-Each field stores the existing inline
-String descriptor with zero allocation provenance. A whole-struct move
-invalidates the source binding and transfers the value to its destination.
-Field reads borrow a named local, so a live field loan blocks a move of the
-struct. Scope exit needs no guest deallocation. The descriptors occupy frame
-storage and the literal bytes live for the Wasm instance.
+A plain local struct can own String fields alongside primitive fields. Use
+direct literals or move named String locals that can own heap allocations.
+Bind a constructor that moves a named String directly to a new local. A
+whole-local move into another new binding transfers cleanup to that binding.
+Read a String field by borrowing it from a named struct local. A live field
+loan blocks moving or ending the heap-owning struct.
 
-Wasm gates nonliteral field initializers, String field writes, whole-struct
-borrows, aggregate nesting, Error inheritance, and signatures that pass or
-return these structs. See the checked example in the
+Lowering stages each named initializer as a lexical String owner in source
+order. If a later initializer returns, breaks, or continues, the staged
+owner releases its allocation. On construction the struct receives the
+descriptor and the staging slot loses allocation provenance. Whole-local
+moves likewise clear provenance in the old slots. Lexical exit releases
+each still-owned allocation, including on paths where other branches have
+moved the struct. Literal descriptors have zero allocation provenance.
+Structs initialized only with literals need no guest deallocation.
+
+Wasm gates temporary or indirect String initializers, heap-owning struct
+temporaries that escape their constructor, whole-value replacement of a
+heap-owning struct, consuming field extraction and field writes on heap-owning structs,
+String field writes on literal-only structs, whole-struct borrows, aggregate nesting, Error
+inheritance, and signatures that pass or return these structs. Direct
+literal initializers still need to be evaluated in the constructor's
+basic block. See the checked examples in the
 [runnable language guide](../../examples/projects/language-guide/src/main.mb).
-
-To support heap-backed fields, first stage each evaluated field initializer
-as a lexical owner so early return, break, or continue releases any fields
-already evaluated. Then transfer the descriptors into the struct and clear
-their source provenance. Add a lexical struct exit operation that releases
-each still-owned field. Use the same cleanup on whole-value replacement,
-after evaluating the replacement, and clear moved-out slots on whole-struct
-transfers. Check mixed branch joins, loop exits, and live field loans, and
-exercise repeated moves and cleanup under a bounded Wasm memory limit before
-lifting the literal-only restriction.
 
 ### Whole String locals
 

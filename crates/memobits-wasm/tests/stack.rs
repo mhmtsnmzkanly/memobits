@@ -1386,3 +1386,72 @@ fn list_iteration_reuses_temporary_storage_after_each_exit() {
         assert_eq!(memory.data(&store).len(), warmed_size);
     }
 }
+
+#[test]
+fn local_struct_strings_reuse_heap_on_lexical_exits() {
+    let part = "a".repeat(12_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Label {{ first: String, number: u32, second: String, literal: String }}
+
+        fn staged(part: borrow String, exit: Bool) -> u32 {{
+            let first := part.concat("!");
+            let second := part.concat("?");
+            let label := Label {{
+                second: second,
+                first: first,
+                number: {{ if exit {{ return 1; }} 7 }},
+                literal: "é"
+            }};
+            return label.number;
+        }}
+
+        fn main() -> i32 {{
+            let part := "{part}";
+            var iteration := 0;
+            loop {{
+                let first := part.concat("!");
+                let second := part.concat("?");
+                let label := Label {{ second: second, first: first, literal: "é", number: 7 }};
+                if iteration != 0 {{
+                    let moved := label;
+                    if moved.number != 7 || moved.literal.len() != 2 {{ return 0; }}
+                    match moved.first.byte_at(12_000) {{
+                        Some(byte) => {{ if byte != 33 {{ return 0; }} }},
+                        None => {{ return 0; }}
+                    }};
+                    match moved.second.byte_at(12_000) {{
+                        Some(byte) => {{ if byte != 63 {{ return 0; }} }},
+                        None => {{ return 0; }}
+                    }};
+                    if iteration == 1 {{ iteration += 1; continue; }}
+                }};
+                iteration += 1;
+                if iteration == 3 {{ break; }}
+            }}
+            if staged(part.borrow(), true) == 1 && staged(part.borrow(), false) == 7 {{
+                1
+            }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}

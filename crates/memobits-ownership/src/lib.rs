@@ -200,7 +200,9 @@ fn transfer_instruction(
             }
             state[target.0 as usize] = Availability::Available;
         }
-        InstructionKind::EndStringLocal { local } | InstructionKind::EndListLocal { local } => {
+        InstructionKind::EndStructLocal { local }
+        | InstructionKind::EndStringLocal { local }
+        | InstructionKind::EndListLocal { local } => {
             state[local.0 as usize] = Availability::Unavailable
         }
         InstructionKind::ListPush { target, .. }

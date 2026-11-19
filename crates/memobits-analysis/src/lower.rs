@@ -712,10 +712,10 @@ impl<'a> Builder<'a> {
             },
             None,
         );
-        if matches!(
-            self.function.locals[local.0 as usize].ty,
-            Type::String | Type::List(_)
-        ) {
+        let ty = &self.function.locals[local.0 as usize].ty;
+        if matches!(ty, Type::String | Type::List(_))
+            || matches!(ty, Type::Struct(id) if self.types[id.0 as usize].fields.iter().any(|field| field.ty == Type::String))
+        {
             self.owned_locals.push(local);
         }
     }
@@ -916,10 +916,10 @@ impl<'a> Builder<'a> {
     fn end_owned_locals(&mut self, from: usize, span: Span) {
         for index in (from..self.owned_locals.len()).rev() {
             let local = self.owned_locals[index];
-            let end = if matches!(self.function.locals[local.0 as usize].ty, Type::List(_)) {
-                InstructionKind::EndListLocal { local }
-            } else {
-                InstructionKind::EndStringLocal { local }
+            let end = match self.function.locals[local.0 as usize].ty {
+                Type::List(_) => InstructionKind::EndListLocal { local },
+                Type::Struct(_) => InstructionKind::EndStructLocal { local },
+                _ => InstructionKind::EndStringLocal { local },
             };
             self.emit(span, end, None);
         }
@@ -1894,19 +1894,42 @@ impl<'a> Builder<'a> {
                 let definition = &types[id.0 as usize];
                 // Evaluate and capture every initialiser in source order, then
                 // hand them to StructNew in declaration order.
+                let scope_start = self.owned_locals.len();
                 let mut slots: Vec<Option<Operand>> = vec![None; definition.fields.len()];
                 for init in fields {
-                    let value = self.lower_expr(&init.value)?;
+                    let Some(value) = self.lower_expr(&init.value) else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
                     let index = definition
                         .fields
                         .iter()
                         .position(|field| field.name == init.name)
                         .expect("checked struct field");
-                    let operand =
-                        self.owned_captured(value, &definition.fields[index].ty.clone())?;
+                    let ty = &definition.fields[index].ty;
+                    let operand = if *ty == Type::String
+                        && matches!(init.value.kind, ExprKind::Path(_))
+                        && matches!(value.source, Source::Local(id)
+                            if self.function.locals[id.0 as usize].ty == Type::String)
+                    {
+                        // A later initializer can return or leave the loop.
+                        // Register the move as a lexical owner before evaluating it.
+                        let staged = self.hidden_local(
+                            "String field initializer",
+                            Type::String,
+                            init.value.span,
+                        );
+                        self.initialize_local(staged, consume(value), init.value.span);
+                        consume(op(Source::Local(staged), init.value.span))
+                    } else if let Some(operand) = self.owned_captured(value, ty) {
+                        operand
+                    } else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
                     slots[index] = Some(operand);
                 }
-                self.emit(
+                let result = self.emit(
                     expr.span,
                     InstructionKind::StructNew {
                         ty: id,
@@ -1916,7 +1939,10 @@ impl<'a> Builder<'a> {
                             .collect(),
                     },
                     Some(Type::Struct(id)),
-                )
+                );
+                self.end_owned_locals(scope_start, expr.span);
+                self.owned_locals.truncate(scope_start);
+                result
             }
             ExprKind::Block(block) => self.lower_block(block),
             ExprKind::If {

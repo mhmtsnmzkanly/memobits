@@ -233,8 +233,7 @@ type TextLabel {
 // Read the field by borrowing it and move the whole struct to transfer it.
 // Scope exit needs no deallocation. The frame is reclaimed on return, and
 // literal bytes live in static memory.
-// Use straight-line field initializers. Heap initializers, String field
-// writes, nesting, and passing or returning the struct are gated in Wasm.
+// Use straight-line literal field initializers.
 fn local_string_fields() -> Bool {
     var label := TextLabel { text: "é", number: 42 };
     {
@@ -246,6 +245,21 @@ fn local_string_fields() -> Bool {
     };
     label = TextLabel { number: 7, text: "" };
     label.number == 7 && label.text.len() == 0
+}
+
+// Move a named heap String into a new local struct, then move the whole
+// struct into another local. The final owner releases the String at scope exit.
+// Borrow the field to read it. Wasm gates temporary String initializers,
+// escaping or replacing a heap-owning struct, field writes, nesting,
+// and passing or returning the struct.
+fn local_heap_string_fields() -> Bool {
+    let text := "é".concat("!");
+    let label := TextLabel { number: 9, text: text };
+    {
+        let moved := label;
+        moved.number == 9 && moved.text.len() == 3
+            && byte_is(moved.text.byte_at(2), 33)
+    }
 }
 
 // An annotation selects an empty List. push appends to a whole var local.
@@ -695,6 +709,6 @@ fn main() -> Result<i32, Error> {
     if !fixed_iteration() { return Err(Error { code: 15 }); }
     if !list_iteration() { return Err(Error { code: 16 }); }
     if !explicit_drop() { return Err(Error { code: 17 }); }
-    if !local_string_fields() { return Err(Error { code: 18 }); }
+    if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
     Ok(42)
 }

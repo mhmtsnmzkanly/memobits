@@ -279,8 +279,9 @@ fn compile_target(
             }
         }
     }
-    for function in &program.functions {
-        let local_string_struct = |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].literal_string_fields);
+    let heap_strings = program.heap_strings();
+    for (function, heap) in program.functions.iter().zip(&heap_strings) {
+        let local_string_struct = |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
         let references_string_struct =
             |ty: &Type| matches!(ty, Type::Reference { inner, .. } if local_string_struct(inner));
         if function
@@ -304,9 +305,9 @@ fn compile_target(
         if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
             errors.push(diagnostic(error.message, error.span));
         }
+        let aliases = construction_aliases(function);
         for block in &function.blocks {
-            // Accept only descriptors emitted by literals earlier in this
-            // block. Their allocation provenance is always zero.
+            // Literal descriptors have zero allocation provenance.
             let mut string_literals = HashSet::new();
             for instruction in &block.instructions {
                 match &instruction.kind {
@@ -314,7 +315,7 @@ fn compile_target(
                         string_literals.extend(instruction.output);
                     }
                     InstructionKind::StructNew { ty, fields }
-                        if structs[ty.0 as usize].literal_string_fields =>
+                        if structs[ty.0 as usize].has_string_fields() =>
                     {
                         let TypeDefKind::Struct { fields: declared } =
                             &program.types[ty.0 as usize].kind
@@ -322,14 +323,21 @@ fn compile_target(
                             unreachable!("validated StructNew type");
                         };
                         for (field, operand) in declared.iter().zip(fields) {
-                            if field.ty == Type::String
-                                && !matches!(operand.source, Source::Value(id) if string_literals.contains(&id))
-                            {
-                                errors.push(diagnostic(
-                                    "a String struct field requires a direct String literal",
-                                    operand.span.or(instruction.span),
-                                ));
+                            if field.ty != Type::String {
+                                continue;
                             }
+                            let message = match operand.source {
+                                Source::Value(id) if string_literals.contains(&id) => continue,
+                                Source::Local(local) if heap.locals.contains(&local)
+                                    && operand.mode == memobits_ir::UseMode::Consume => {
+                                    if instruction.output.is_some_and(|id| aliases.contains_key(&id.0)) {
+                                        continue;
+                                    }
+                                    "a struct initialized from a named String requires a direct new local binding"
+                                }
+                                _ => "a String struct field requires a direct String literal or a move of a named heap String",
+                            };
+                            errors.push(diagnostic(message, operand.span.or(instruction.span)));
                         }
                     }
                     InstructionKind::FieldAddr { access, base, .. }
@@ -383,6 +391,7 @@ fn compile_target(
 fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
     match &instruction.kind {
         InstructionKind::Constant(_)
+        | InstructionKind::EndStructLocal { .. }
         | InstructionKind::EndStringLocal { .. }
         | InstructionKind::DropLocal { .. }
         | InstructionKind::Capture(_)
@@ -542,8 +551,13 @@ struct StructLayout {
     fields: Vec<FieldStorage>,
     enum_layout: Option<EnumLayout>,
     error_identity: Option<u32>,
-    // Raw aggregate copies are safe only while these descriptors are static.
-    literal_string_fields: bool,
+    string_offsets: Vec<u32>,
+}
+
+impl StructLayout {
+    fn has_string_fields(&self) -> bool {
+        !self.string_offsets.is_empty()
+    }
 }
 
 /// Enum layout: the tag at offset 0 with the smallest unsigned width that holds
@@ -602,7 +616,7 @@ fn member_layout(
         nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
             nested_struct_layouts(types, nested, done, active)?;
             let layout_at = |id: u32| done.get(id as usize).and_then(Option::as_ref);
-            if matches!(nested, Type::Struct(id) if layout_at(id.0).is_some_and(|layout| layout.literal_string_fields))
+            if matches!(nested, Type::Struct(id) if layout_at(id.0).is_some_and(|layout| layout.has_string_fields()))
             {
                 return Err("Wasm does not yet support nesting structs with String fields".into());
             }
@@ -639,8 +653,8 @@ fn struct_layout_at(
     active.push(index);
     let layout = match &definition.kind {
         TypeDefKind::Struct { fields } => {
-            let literal_string_fields = fields.iter().any(|field| field.ty == Type::String);
-            if literal_string_fields
+            let has_string_fields = fields.iter().any(|field| field.ty == Type::String);
+            if has_string_fields
                 && (definition.error_ancestry.is_some()
                     || fields
                         .iter()
@@ -692,11 +706,15 @@ fn struct_layout_at(
             StructLayout {
                 size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
                 align,
+                string_offsets: fields
+                    .iter()
+                    .zip(&offsets)
+                    .filter_map(|(field, offset)| (field.ty == Type::String).then_some(*offset))
+                    .collect(),
                 offsets,
                 fields: storage,
                 enum_layout: None,
                 error_identity: definition.error_ancestry.map(|_| index as u32 + 1),
-                literal_string_fields,
             }
         }
         TypeDefKind::Enum { variants } => {
@@ -758,7 +776,7 @@ fn struct_layout_at(
                 offsets: Vec::new(),
                 fields: Vec::new(),
                 error_identity: None,
-                literal_string_fields: false,
+                string_offsets: Vec::new(),
                 enum_layout: Some(EnumLayout {
                     tag_size,
                     string_success,
@@ -812,7 +830,7 @@ fn type_layout<'a>(
             .map(|layout| (layout.size, layout.align))
             .ok_or_else(|| "type is out of range".to_string()),
         Type::Array { element, len } => {
-            if matches!(element.as_ref(), Type::Struct(id) if struct_layout(id.0).is_some_and(|layout| layout.literal_string_fields))
+            if matches!(element.as_ref(), Type::Struct(id) if struct_layout(id.0).is_some_and(|layout| layout.has_string_fields()))
             {
                 return Err("Wasm does not yet support nesting structs with String fields".into());
             }
@@ -1076,6 +1094,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 | InstructionKind::DropLocal { .. }
                 | InstructionKind::EmptyList
                 | InstructionKind::Constant(_)
+                | InstructionKind::EndStructLocal { .. }
                 | InstructionKind::EndStringLocal { .. } => {}
                 InstructionKind::Capture(operand)
                 | InstructionKind::Copy { source: operand }
@@ -1170,8 +1189,18 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
     }
     let mut aliases = BTreeMap::new();
     for block in &function.blocks {
-        for pair in block.instructions.windows(2) {
-            let [producer, consumer] = pair else { continue };
+        for (position, producer) in block.instructions.iter().enumerate() {
+            let mut after = block.instructions[position + 1..].iter();
+            let has_named_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
+                if fields.iter().any(|operand| matches!(operand.source, Source::Local(id)
+                    if function.locals[id.0 as usize].ty == Type::String)));
+            let consumer = if has_named_string {
+                // Initializer slots end after the constructor has moved from them.
+                after.find(|inst| !matches!(inst.kind, InstructionKind::EndStringLocal { .. }))
+            } else {
+                after.next()
+            };
+            let Some(consumer) = consumer else { continue };
             let Some(output) = producer.output else {
                 continue;
             };
@@ -1180,6 +1209,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 value:
                     Operand {
                         source: Source::Value(assigned),
+                        mode,
                         ..
                     },
                 initialize,
@@ -1187,6 +1217,9 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
             else {
                 continue;
             };
+            if has_named_string && (!initialize || *mode != memobits_ir::UseMode::Consume) {
+                continue;
+            }
             if !initialize && matches!(producer.kind, InstructionKind::EmptyList) {
                 // The previous List descriptor must survive until the replacement.
                 continue;
@@ -2357,9 +2390,19 @@ fn clear_moved_heap_source(
             emit_operand(body, function, param_count, operand, layout, frame)?;
             list_descriptor::clear_allocation(body);
         } else if heap_locals.contains(&source) {
-            emit_operand(body, function, param_count, operand, layout, frame)?;
-            body.instruction(&WasmInstruction::I32Const(0));
-            string_descriptor::store_allocation(body);
+            if let Type::Struct(id) = function.locals[source.0 as usize].ty {
+                let cell = array_cell_of(layout, Slot::Local(source.0))?;
+                let frame = frame.ok_or("struct local requires a frame")?;
+                for offset in &layout.structs[id.0 as usize].string_offsets {
+                    emit_address(body, frame, cell.offset + offset);
+                    body.instructions().i32_const(0);
+                    string_descriptor::store_allocation(body);
+                }
+            } else {
+                emit_operand(body, function, param_count, operand, layout, frame)?;
+                body.instructions().i32_const(0);
+                string_descriptor::store_allocation(body);
+            }
         }
     }
     Ok(())
@@ -2973,6 +3016,24 @@ fn compile_instruction(
                 heap_locals,
             )?;
         }
+        InstructionKind::EndStructLocal { local } => {
+            if heap_locals.contains(local) {
+                let Type::Struct(id) = function.locals[local.0 as usize].ty else {
+                    return Err("struct scope exit requires a struct local".into());
+                };
+                let cell = array_cell_of(layout, Slot::Local(local.0))?;
+                let frame = frame.ok_or("struct local requires a frame")?;
+                let releaser = heap_copy_index.ok_or("missing String release helper")? + 1;
+                for offset in &layout.structs[id.0 as usize].string_offsets {
+                    emit_address(body, frame, cell.offset + offset);
+                    string_descriptor::load_allocation(body);
+                    body.instructions().call(releaser);
+                    emit_address(body, frame, cell.offset + offset);
+                    body.instructions().i32_const(0);
+                    string_descriptor::store_allocation(body);
+                }
+            }
+        }
         InstructionKind::EndStringLocal { local } => {
             if heap_locals.contains(local) {
                 release_string_local(body, *local, layout, frame, heap_copy_index)?;
@@ -3522,6 +3583,20 @@ fn compile_instruction(
                             dst_mem: 0,
                         });
                     }
+                }
+                if struct_layout
+                    .string_offsets
+                    .contains(&struct_layout.offsets[index])
+                {
+                    clear_moved_heap_source(
+                        body,
+                        function,
+                        param_count,
+                        operand,
+                        layout,
+                        Some(frame),
+                        heap_locals,
+                    )?;
                 }
             }
         }

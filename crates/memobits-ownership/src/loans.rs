@@ -617,6 +617,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
     match kind {
         InstructionKind::EmptyList
         | InstructionKind::Constant(_)
+        | InstructionKind::EndStructLocal { .. }
         | InstructionKind::EndStringLocal { .. }
         | InstructionKind::EndListLocal { .. }
         | InstructionKind::ListPop { .. }
@@ -1610,7 +1611,9 @@ fn check_instruction(
                 ));
             }
         }
-        InstructionKind::EndStringLocal { local } | InstructionKind::EndListLocal { local } => {
+        InstructionKind::EndStructLocal { local }
+        | InstructionKind::EndStringLocal { local }
+        | InstructionKind::EndListLocal { local } => {
             let roots = BTreeSet::from([Place::whole(Root::Local(local.0))]);
             if let Some(conflict) =
                 active_conflict(&roots, Access::Share, active_after, &BTreeSet::new())
