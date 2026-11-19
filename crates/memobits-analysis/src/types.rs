@@ -2935,12 +2935,13 @@ impl Checker {
                                     "List arguments require a direct internal call",
                                 );
                             } else if parameter.access == IrAccess::Owned
-                                && !matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
+                                && !(matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
+                                    || matches!(&arg.kind, ExprKind::Call { callee, .. } if self.direct_callee(callee)))
                             {
                                 self.error(
                                     17,
                                     arg.span,
-                                    "owned List arguments require a named whole local",
+                                    "owned List arguments require a named whole local or a direct internal List call result",
                                 );
                             }
                         }

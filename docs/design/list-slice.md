@@ -28,7 +28,8 @@ A direct `share List<T>` parameter accepts an explicit `.share()` from
 a mutable owner and supports `push`, `pop`, `clear`, `len` and `get`. Growth
 updates the caller descriptor in place, and the caller retains cleanup
 responsibility.
-A direct internal owned parameter takes a named whole List local by move.
+A direct internal owned parameter takes a named whole List local by move
+or a direct internal List call result, as in `consume(make_list())`.
 Arguments evaluate left to right. An earlier owned argument is staged
 until invocation, and normal exits before the call release it in the caller.
 Once invoked, the callee owns and cleans up the block. A direct internal
@@ -166,7 +167,7 @@ and an early exit during RHS evaluation leaves the caller's List intact.
    across another list's growth and cleanup. Repeat discards of large direct
    call results in one instance to check storage reuse. Repeat temporary reads
    across successful reads and index return, break, and continue paths.
-   Repeat calls with temporary borrows across successful calls and later
-   argument return, break, and continue paths.
+   Repeat calls with borrowed and owned temporaries across successful calls
+   and later argument return, break, and continue paths.
    Force growth failure under a small memory limit and verify the trap.
    Keep the String reuse and allocation-failure tests in the same suite.

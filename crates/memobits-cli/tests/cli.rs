@@ -1219,6 +1219,28 @@ fn owned_list_arguments_run_from_source_and_wasm() {
             let valid := match bytes.get(0) { Some(byte) => byte == 255, None => false };
             valid && finish(words)
         }
+        fn make_bytes(log: share List<u8>) -> List<u8> {
+            log.push(1);
+            var bytes: List<u8> = [];
+            bytes.push(255);
+            bytes
+        }
+        fn make_words(log: borrow List<u8>) -> List<u32> {
+            var words: List<u32> = [];
+            if log.len() != 2 { return words; }
+            words.push(99);
+            words
+        }
+        fn run_temporary(skip: Bool) -> Bool {
+            var log: List<u8> = [];
+            let check := take(make_bytes(log.share()), {
+                if skip { return log.len() == 1; }
+                if log.len() != 1 { return false; }
+                log.push(2);
+                true
+            }, make_words(log.borrow()));
+            check && log.len() == 2
+        }
         fn run(skip: Bool) -> Bool {
             var bytes: List<u8> = [];
             bytes.push(255);
@@ -1232,7 +1254,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
             }, words);
             check && evaluations == 1
         }
-        fn main() -> Result<Bool, Error> { Ok(run(false) && run(true)) }
+        fn main() -> Result<Bool, Error> { Ok(run(false) && run(true) && run_temporary(false) && run_temporary(true)) }
     "#,
     );
     let source = f.run(&["run"]);
@@ -1257,10 +1279,14 @@ fn owned_list_arguments_keep_move_loan_and_abi_gates() {
         ("let indirect := take; indirect(items, 0);", "TE017"),
         ("take([], 0);", "TE017"),
         ("take({ items }, 0);", "TE017"),
+        ("take({ make() }, 0);", "TE017"),
+        ("let indirect := take; indirect(make(), 0);", "TE017"),
+        ("let indirect := make; take(indirect(), 0);", "TE017"),
+        ("take(make_words(), 0);", "TE002"),
     ] {
         f.write(
             "list.mb",
-            &format!("fn take(items: List<u8>, later: u32) {{}} fn main() {{ let items: List<u8> = []; {body} }}"),
+            &format!("fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn make_words() -> List<u32> {{ let items: List<u32> = []; items }} fn take(items: List<u8>, later: u32) {{}} fn main() {{ let items: List<u8> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }

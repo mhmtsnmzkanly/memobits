@@ -60,7 +60,10 @@ and returns `None` when the `u32` index is outside the List. Direct internal
 share handles support the same mutations as whole mutable locals.
 `.pop()` returns the last element as `Some(value)` or `None` if empty.
 `.clear()` sets the length to zero and returns unit. Both retain backing storage. A direct internal owned List parameter
-takes a named local by move. A direct internal List return moves a named
+takes a named local by move or a direct internal List result, as in
+`consume(make_list())`. Arguments run left to right. The caller releases the
+owned temporary on a normal early exit from a later argument, and the callee
+owns it once invoked. A direct internal List return moves a named
 callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.
 A direct share parameter or a stored `var` share handle can also replace

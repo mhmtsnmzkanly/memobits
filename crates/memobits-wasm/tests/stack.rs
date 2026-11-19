@@ -948,7 +948,7 @@ fn temporary_list_reads_reuse_storage_across_normal_and_early_exits() {
 }
 
 #[test]
-fn temporary_list_borrows_reuse_storage_across_normal_and_early_exits() {
+fn temporary_list_arguments_reuse_storage_across_normal_and_early_exits() {
     let program = lower(
         r#"
         fn make(count: u32) -> List<u32> {
@@ -962,22 +962,32 @@ fn temporary_list_borrows_reuse_storage_across_normal_and_early_exits() {
         fn inspect(items: borrow List<u32>, index: u32) -> Bool {
             match items.get(index) { Some(value) => value == index, None => false }
         }
+        fn consume(items: List<u32>, index: u32) -> Bool {
+            match items.get(index) { Some(value) => value == index, None => false }
+        }
         fn early_return() -> Bool {
+            consume(make(10_000), { return true; });
+            false
+        }
+        fn early_borrow_return() -> Bool {
             inspect(make(10_000).borrow(), { return true; });
             false
         }
-        fn main() -> Result<Bool, Error> {
+        fn check(owned: Bool, limit: u32) -> Result<Bool, Error> {
             var live: List<u32> = [];
             live.push(305_419_896);
             var repeats: u32 = 0;
             loop {
-                if !inspect(make(10_000).borrow(), 9_999) || !early_return() {
+                if !inspect(make(10_000).borrow(), 9_999) || !early_borrow_return()
+                    || !consume(make(10_000), 9_999) || !early_return() {
                     return Err(Error { code: 3 });
                 }
                 repeats += 1;
-                if repeats == 4 {
+                if repeats == limit {
+                    if owned { consume(make(10_000), { break; }); }
                     inspect(make(10_000).borrow(), { break; });
                 }
+                if owned { consume(make(10_000), { continue; }); }
                 inspect(make(10_000).borrow(), { continue; });
             }
             match live.get(0) {
@@ -985,11 +995,17 @@ fn temporary_list_borrows_reuse_storage_across_normal_and_early_exits() {
                 None => Err(Error { code: 2 })
             }
         }
+        fn main() -> Result<Bool, Error> {
+            match check(false, 4) {
+                Ok(value) => check(true, 4),
+                Err(error) => Err(error)
+            }
+        }
         "#,
     );
     let artifact = compile_application_traced(
         &program,
-        FunctionId(3),
+        FunctionId(6),
         &CompileOptions { stack_size: 4096 },
     )
     .unwrap();

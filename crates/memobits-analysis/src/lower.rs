@@ -1643,7 +1643,8 @@ impl<'a> Builder<'a> {
                         let direct_list = direct && matches!(parameter.ty, Type::List(_));
                         let temporary_receiver = match &argument.kind {
                             ExprKind::Call { .. }
-                                if direct_string && parameter.access == Access::Owned =>
+                                if (direct_string || direct_list)
+                                    && parameter.access == Access::Owned =>
                             {
                                 Some(argument)
                             }

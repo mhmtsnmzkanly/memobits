@@ -180,6 +180,10 @@ fn primitive_lists() -> Bool {
         Some(value) => value == 2345,
         None => false
     };
+    // A direct owned parameter takes a direct List call result. Arguments
+    // run left to right. The caller releases the temporary if a later
+    // argument exits early, and the callee owns it once invoked.
+    let owned_temporary_length := owned_list_length(make_words(3456));
     var moved := words;
     // An exclusive call can grow the List that the caller owns.
     append_word(moved.share(), 2000);
@@ -214,7 +218,7 @@ fn primitive_lists() -> Bool {
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
     before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
-        && temporary_length == 1 && temporary_word && borrowed_word
+        && temporary_length == 1 && temporary_word && borrowed_word && owned_temporary_length == 1
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

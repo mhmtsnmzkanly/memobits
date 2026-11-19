@@ -220,8 +220,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   can read either primitive List type and accept an explicit `.borrow()`
   of a direct internal List call result. Share parameters and stored `var`
   shares can push, pop, and clear through the owner's descriptor. Direct
-  owned parameters take named local moves with cleanup on either side of
-  invocation. Direct returns move a
+  owned parameters take named local moves or direct internal List results
+  with cleanup on either side of invocation. Direct returns move a
   named List local into a caller binding. A standalone direct call statement
   releases its discarded List result. Whole mutable local replacement
   and replacement through a share parameter or a stored `var` share evaluate the RHS before
