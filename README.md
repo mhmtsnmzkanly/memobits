@@ -99,6 +99,12 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
   [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
   · [List iteration](docs/design/list-slice.md#list-iteration)
   [Runnable language guide](examples/projects/language-guide/src/main.mb)
+- `drop(value)` consumes a whole named owned `String`, `List<u8>`, or
+  `List<u32>` local or parameter and releases any heap storage it owns.
+  Any live borrow or share prevents the drop. The binding is unavailable on
+  every path that drops it until it is assigned again, if mutable.
+  An in-scope function, import, or value named `drop` takes precedence over the
+  built-in. [Runnable example](examples/projects/language-guide/src/main.mb)
 - `examples/projects/structs/` — structs: a constructor function, a share-mutating
   function, a borrow-reading function, literals, field reads and a two-module use of
   public fields.

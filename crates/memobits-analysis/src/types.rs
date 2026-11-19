@@ -410,6 +410,7 @@ pub struct FunctionFacts {
     pub path_uses: Vec<PathUse>,
     /// Enum variant constructions: a unit variant path or a payload call.
     pub variant_uses: Vec<VariantUse>,
+    pub explicit_drops: Vec<ExprId>,
     /// `match` expressions over owned enums, with the pattern facts lowering needs.
     pub matches: Vec<MatchFact>,
     next_expr: u32,
@@ -1219,6 +1220,40 @@ impl Checker {
         }
         ty
     }
+    fn explicit_drop(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
+        let [value] = arguments else {
+            self.error(
+                10,
+                span,
+                format!("drop() expects one argument, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        self.allow_array_value(value);
+        let ty = self.expr(value, None);
+        if ty == Ty::Error {
+            return Ty::Error;
+        }
+        if !matches!(ty, Ty::String | Ty::List("u8" | "u32"))
+            || !matches!(&value.kind, ExprKind::Path(path) if path.len() == 1
+                && self.lookup(&path[0]).is_some_and(|binding| binding.access == IrAccess::Owned))
+        {
+            self.error(
+                17,
+                value.span,
+                "drop() requires a whole named owned String, List<u8>, or List<u32> local",
+            );
+            return Ty::Error;
+        }
+        if let Some((facts, id)) = self.facts.as_mut().zip(id) {
+            facts.explicit_drops.push(id);
+        }
+        UNIT
+    }
+
     /// `expr.copy()`: a fresh owned value of a primitive type. The receiver is
     /// only read; a primitive behind a reference is copied out of it.
     fn copy_conversion(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
@@ -2929,6 +2964,13 @@ impl Checker {
             }
             ExprKind::Call { callee, arguments } => {
                 if let ExprKind::Path(path) = &callee.kind {
+                    if path.as_slice() == ["drop"]
+                        && self.lookup("drop").is_none()
+                        && !self.functions.contains_key("drop")
+                        && !self.imports.contains_key("drop")
+                    {
+                        return self.explicit_drop(expr.span, arguments, id);
+                    }
                     if let Some((template, variant)) = self.prelude_variant(path) {
                         return self.infer_variant(
                             expr,
@@ -3362,6 +3404,7 @@ fn check_standalone(
                     expressions: Vec::new(),
                     path_uses: Vec::new(),
                     variant_uses: Vec::new(),
+                    explicit_drops: Vec::new(),
                     matches: Vec::new(),
                     next_expr: 0,
                 });
@@ -3569,6 +3612,7 @@ pub(crate) fn check_resolved_mode(
                             expressions: Vec::new(),
                             path_uses: Vec::new(),
                             variant_uses: Vec::new(),
+                            explicit_drops: Vec::new(),
                             matches: Vec::new(),
                             next_expr: 0,
                         });

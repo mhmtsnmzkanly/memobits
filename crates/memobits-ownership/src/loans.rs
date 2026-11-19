@@ -623,6 +623,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::ListClear { .. } => Vec::new(),
         InstructionKind::ListPush { value, .. } => vec![value],
         InstructionKind::Capture(operand)
+        | InstructionKind::DropLocal { value: operand }
         | InstructionKind::Copy { source: operand }
         | InstructionKind::ListLen { source: operand }
         | InstructionKind::StringLen { source: operand }
@@ -1686,6 +1687,11 @@ fn check_instruction(
             active_conflict(&provenance.roots, access, active_before, &BTreeSet::new())
         {
             let action = match operand.mode {
+                UseMode::Consume
+                    if matches!(instruction.kind, InstructionKind::DropLocal { .. }) =>
+                {
+                    "drop"
+                }
                 UseMode::Consume => "move",
                 UseMode::Share => "share",
                 UseMode::Read | UseMode::Borrow => "read",

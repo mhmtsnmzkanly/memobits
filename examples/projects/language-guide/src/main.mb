@@ -208,6 +208,22 @@ fn list_iteration() -> Bool {
     digits == 42 && bytes.len() == 0 && first == 1000
 }
 
+// drop consumes a whole named owned String, List<u8>, or List<u32>.
+// A mutable binding can be assigned again. A loan must end before drop.
+// A user binding or function named drop takes precedence.
+fn explicit_drop() -> Bool {
+    let text := "release".concat(" me");
+    var bytes: List<u8> = [];
+    bytes.push(42);
+    let words := make_words(1000);
+    drop(text);
+    drop(bytes);
+    drop(words);
+    bytes = [];
+    bytes.push(7);
+    bytes.len() == 1 && bytes.contains(7)
+}
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 fn primitive_lists() -> Bool {
@@ -654,5 +670,6 @@ fn main() -> Result<i32, Error> {
     if !primitive_lists() { return Err(Error { code: 14 }); }
     if !fixed_iteration() { return Err(Error { code: 15 }); }
     if !list_iteration() { return Err(Error { code: 16 }); }
+    if !explicit_drop() { return Err(Error { code: 17 }); }
     Ok(42)
 }

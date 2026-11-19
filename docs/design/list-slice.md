@@ -164,6 +164,12 @@ ownership marker, so mixed moved/live paths can use the existing cleanup
 approach. Freed blocks are reusable, and committed pages stay at their
 high-water mark.
 
+An unshadowed `drop(items)` consumes an available whole owned List local
+or parameter and releases its block immediately. A live loan blocks the
+drop. The operation clears the allocation marker, so later scope cleanup
+can handle both dropped and still-owned paths. Assignment can restore a
+dropped mutable binding. The same operation supports owned String locals.
+
 Whole mutable local assignment evaluates the RHS before releasing the old
 block. The RHS may borrow that List while rebuilding it. Assigning `[]`
 releases the old block and installs an empty descriptor. A moved slot has

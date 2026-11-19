@@ -391,6 +391,7 @@ struct Builder<'a> {
     expressions: HashMap<ExprId, Option<Type>>,
     paths: HashMap<ExprId, PathTarget>,
     variants: HashMap<ExprId, VariantUse>,
+    explicit_drops: HashSet<ExprId>,
     matches: HashMap<ExprId, &'a MatchFact>,
     current: Option<BlockId>,
     owned_locals: Vec<LocalId>,
@@ -442,6 +443,7 @@ impl<'a> Builder<'a> {
             expressions,
             paths,
             variants,
+            explicit_drops: facts.explicit_drops.iter().copied().collect(),
             matches,
             current: Some(BlockId(0)),
             owned_locals,
@@ -1703,6 +1705,11 @@ impl<'a> Builder<'a> {
             }
             ExprKind::Call { arguments, .. } if self.variants.contains_key(&self.id(expr)) => {
                 self.lower_variant(expr, arguments)
+            }
+            ExprKind::Call { arguments, .. } if self.explicit_drops.contains(&self.id(expr)) => {
+                let value = consume(self.lower_expr(&arguments[0])?);
+                self.emit(expr.span, InstructionKind::DropLocal { value }, None);
+                self.unit(expr.span)
             }
             ExprKind::Call { callee, arguments } => {
                 if let ExprKind::Field { base, name } = &callee.kind {

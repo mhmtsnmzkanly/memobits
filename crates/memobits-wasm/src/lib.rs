@@ -324,6 +324,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
     match &instruction.kind {
         InstructionKind::Constant(_)
         | InstructionKind::EndStringLocal { .. }
+        | InstructionKind::DropLocal { .. }
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }
@@ -984,6 +985,7 @@ fn construction_aliases(function: &Function) -> BTreeMap<u32, u32> {
                 InstructionKind::ListPush { value, .. } => count(value),
                 InstructionKind::ListClear { .. } | InstructionKind::ListPop { .. } => {}
                 InstructionKind::EndListLocal { .. }
+                | InstructionKind::DropLocal { .. }
                 | InstructionKind::EmptyList
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStringLocal { .. } => {}
@@ -2862,6 +2864,27 @@ fn compile_instruction(
         .output
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
+        InstructionKind::DropLocal { value } => {
+            let Source::Local(local) = value.source else {
+                return Err("drop requires a local".into());
+            };
+            if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
+                let cell = array_cell_of(layout, Slot::Local(local.0))?;
+                release_list_cell(body, cell, frame, heap_copy_index)?;
+            } else if heap_locals.contains(&local) {
+                release_string_local(body, local, layout, frame, heap_copy_index)?;
+            }
+            // Lexical cleanup and reassignment still visit the slot.
+            clear_moved_heap_source(
+                body,
+                function,
+                param_count,
+                value,
+                layout,
+                frame,
+                heap_locals,
+            )?;
+        }
         InstructionKind::EndStringLocal { local } => {
             if heap_locals.contains(local) {
                 release_string_local(body, *local, layout, frame, heap_copy_index)?;

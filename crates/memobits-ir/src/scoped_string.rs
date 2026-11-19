@@ -594,6 +594,14 @@ pub(super) fn validate(
                     );
                     None
                 }
+                InstructionKind::DropLocal { value } => {
+                    if matches!(value.source, Source::Local(local)
+                        if locals.contains(&local) && !in_scope.contains(&local))
+                    {
+                        push(errors, id, Some(block_id), "drop outside the local's scope");
+                    }
+                    None
+                }
                 InstructionKind::EndStringLocal { local }
                 | InstructionKind::EndListLocal { local }
                     if locals.contains(local) =>

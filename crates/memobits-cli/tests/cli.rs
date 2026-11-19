@@ -4867,3 +4867,124 @@ fn list_iteration_runs_from_source_and_wasm() {
     assert!(wasm.status.success(), "{wasm:?}");
     assert_eq!(wasm.stdout, source.stdout);
 }
+
+#[test]
+fn explicit_drop_releases_owners_and_allows_reinitialization() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='explicit-drop'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn consume(value: List<u32>) { drop(value); }
+        fn check(drop_first: Bool) -> Bool {
+            var text := "old".concat("!");
+            var bytes: List<u8> = [];
+            bytes.push(42);
+            if drop_first {
+                let loan := text.borrow();
+                if loan.len() != 4 { return false; }
+                drop(text);
+                drop(bytes);
+            }
+            text = "new".concat("!");
+            bytes = [];
+            bytes.push(7);
+            {
+                let scoped := "temp".concat("!");
+                drop(scoped);
+                text = "kept".concat("!");
+            }
+            let other := "next".concat("!");
+            var words: List<u32> = [];
+            words.push(1024);
+            consume(words);
+            let literal := "static";
+            drop(literal);
+            text.len() == 5 && other.len() == 5 && bytes.contains(7)
+                && match text.byte_at(0) { Some(byte) => byte == 107, None => false }
+        }
+        fn main() -> Result<Bool, Error> { Ok(check(true) && check(false)) }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "drop.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "drop.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn explicit_drop_checks_availability_loans_and_operand_shape() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='explicit-drop'\nentry='main::main'\n",
+    );
+    for (body, code, message) in [
+        (
+            "drop(text); text.len();",
+            "BE001",
+            "unavailable after a move",
+        ),
+        (
+            "drop(words); drop(words);",
+            "BE001",
+            "unavailable after a move",
+        ),
+        (
+            "if flag { drop(text); } text.len();",
+            "BE001",
+            "on some paths",
+        ),
+        (
+            "let r := text.borrow(); drop(text); r.len();",
+            "BE005",
+            "cannot drop",
+        ),
+        (
+            "let r := words.share(); drop(words); r.len();",
+            "BE005",
+            "cannot drop",
+        ),
+        (
+            "loop word in words { drop(words); }",
+            "BE005",
+            "cannot drop",
+        ),
+        ("drop(text.borrow());", "TE017", "whole named owned"),
+        ("drop(\"literal\");", "TE017", "whole named owned"),
+        ("drop(flag);", "TE017", "whole named owned"),
+        ("drop();", "TE010", "expects one argument"),
+    ] {
+        f.write(
+            "src/main.mb",
+            &format!(
+                "fn check(flag: Bool) {{ let text := \"hi\".concat(\"!\"); var words: List<u32> = []; {body} }} fn main() {{ check(true); }}"
+            ),
+        );
+        let diagnostic = err(f.run(&["build"]), code);
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
+}
+
+#[test]
+fn user_drop_function_takes_precedence() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='user-drop'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn drop(n: u32) -> u32 { n + 1 } fn main() -> Result<u32, Error> { Ok(drop(41)) }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(42))\n");
+}

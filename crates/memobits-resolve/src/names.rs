@@ -319,7 +319,12 @@ impl Checker<'_> {
                 self.expr(right);
             }
             ExprKind::Call { callee, arguments } => {
-                self.expr(callee);
+                // An unbound `drop` is a built-in only in call position.
+                if !matches!(&callee.kind, ExprKind::Path(path) if path.as_slice() == ["drop"]
+                    && !self.scopes.iter().rev().any(|scope| scope.contains("drop")))
+                {
+                    self.expr(callee);
+                }
                 for arg in arguments {
                     self.expr(arg);
                 }

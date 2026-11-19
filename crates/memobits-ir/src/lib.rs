@@ -281,6 +281,10 @@ pub enum InstructionKind {
     EndStringLocal {
         local: LocalId,
     },
+    /// Release an available owner while keeping its binding in lexical scope.
+    DropLocal {
+        value: Operand,
+    },
     /// Read the byte length of an owned String or a reference to one.
     /// Validate a logical byte prefix and optionally copy it into an owned String.
     ValidateUtf8 {
@@ -1600,6 +1604,24 @@ fn validate_instruction(
                         "concat requires read-only String borrows",
                     );
                 }
+            }
+        }
+        InstructionKind::DropLocal { value } => {
+            let ty = operand_type(program, function, value, errors, id, block);
+            if instruction.output.is_some()
+                || value.mode != UseMode::Consume
+                || !matches!(value.source, Source::Local(_))
+                || !matches!(
+                    ty,
+                    Some(Type::String | Type::List(Primitive::U8 | Primitive::U32))
+                )
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "drop requires a consumed String or primitive List local and no output",
+                );
             }
         }
         InstructionKind::EndStringLocal { local } => {
@@ -3300,6 +3322,7 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::EmptyList
+                | InstructionKind::DropLocal { .. }
                 | InstructionKind::EndListLocal { .. }
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStringLocal { .. } => {}
