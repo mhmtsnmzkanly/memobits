@@ -2548,7 +2548,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "must stay local to one function",
         ),
         (
-            r#"fn main() { var label := Label { text: "a" }; label.text = "b"; }"#,
+            r#"fn main() { var label := Label { text: "a" }; label.text = if true { "b" } else { "c" }; }"#,
             "LE900",
             "read through a borrow",
         ),
@@ -2561,6 +2561,16 @@ fn wasm_gates_unsupported_string_struct_uses() {
             r#"fn replace(label: share Label) { let text := "b"; label.text = text; } fn main() {}"#,
             "LE900",
             "must stay local to one function",
+        ),
+        (
+            r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
+            "TE017",
+            "concat requires",
+        ),
+        (
+            r#"fn replace(label: share Label) { label.text = label.text.concat("!"); } fn main() {}"#,
+            "TE017",
+            "concat requires",
         ),
         (
             r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
@@ -2623,6 +2633,33 @@ fn string_field_replacement_rejects_conflicting_loans_and_unavailable_owners() {
             ),
         );
         err(f.run(&["ownership", "text.mb"]), code);
+    }
+}
+
+#[test]
+fn temporary_string_field_replacement_checks_loans_during_rhs_and_write() {
+    let f = Fixture::new();
+    for body in [
+        r#"let view := label.text.borrow(); label.text = label.text.concat("!"); inspect(view);"#,
+        r#"label.text = label.text.concat({ label.text = "other"; "!" });"#,
+        r#"let view := label.text.borrow(); label.text = append(view); inspect(view);"#,
+    ] {
+        f.write(
+            "text.mb",
+            &format!(
+                r#"type Label {{ text: String }}
+                fn inspect(value: borrow String) {{}}
+                fn append(value: borrow String) -> String {{
+                    let text := value.concat("!");
+                    text
+                }}
+                fn main() {{
+                    var label := Label {{ text: "old" }};
+                    {body}
+                }}"#
+            ),
+        );
+        err(f.run(&["ownership", "text.mb"]), "BE005");
     }
 }
 

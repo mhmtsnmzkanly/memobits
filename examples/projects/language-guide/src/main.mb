@@ -267,18 +267,25 @@ type EditableLabel {
     text: String,
 }
 
-// Replace a String field of a mutable local with a named owned String.
-// Evaluate and bind the replacement before the assignment. The assignment
-// consumes it and releases the old field allocation. A borrow of a different
-// field can stay live. Literal and other temporary RHS expressions are gated.
+fn append_question(text: borrow String) -> String {
+    let result := text.concat("?");
+    result
+}
+
+// Direct String field assignment on a var local consumes a named String
+// or stages a literal, concat, or direct internal String call. The RHS can
+// borrow the old field. The write releases the old allocation after the RHS
+// finishes, and a borrow of a different field can stay live.
 fn replace_local_string_field() -> Bool {
     var label := EditableLabel { note: "keep", text: "" };
     let note := label.note.borrow();
-    let replacement := "é".concat("!");
+    let replacement := "é";
     label.text = replacement;
+    label.text = label.text.concat("!");
     if !byte_is(label.text.byte_at(2), 33) { return false; }
-    let empty := "";
-    label.text = empty;
+    label.text = append_question(label.text.borrow());
+    if !byte_is(label.text.byte_at(3), 63) { return false; }
+    label.text = "";
     note.len() == 4 && label.text.len() == 0
 }
 

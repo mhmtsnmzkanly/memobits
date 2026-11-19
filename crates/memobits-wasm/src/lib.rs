@@ -347,7 +347,7 @@ fn compile_target(
                                 || !matches!(base.source, Source::Local(_))) =>
                     {
                         errors.push(diagnostic(
-                            "a String struct field can only be read through a borrow of a named local field or replaced using a named owned String on a mutable local",
+                            "a String struct field can only be read through a borrow of a named local field or replaced directly on a mutable local using a named String, literal, concat, or direct internal String call",
                             instruction.span,
                         ));
                     }

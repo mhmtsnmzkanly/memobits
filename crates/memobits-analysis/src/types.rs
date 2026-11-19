@@ -1078,12 +1078,25 @@ impl Checker {
                         self.allow_array_value(value);
                     }
                     let previous = self.concat_destination;
-                    if operator == "="
-                        && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
-                            && self.lookup(&path[0]).is_some_and(|binding|
+                    let concat_target = match &target.kind {
+                        ExprKind::Path(path) if path.len() == 1 => {
+                            self.lookup(&path[0]).is_some_and(|binding| {
                                 (binding.mutable && binding.ty == Ty::String)
-                                || (binding.access == IrAccess::Share && target_ty == Ty::String)))
-                    {
+                                    || (binding.access == IrAccess::Share
+                                        && target_ty == Ty::String)
+                            })
+                        }
+                        ExprKind::Field { base, .. } if target_ty == Ty::String => {
+                            // The outermost scope contains function parameters.
+                            matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
+                                && self.scopes.iter().skip(1).rev()
+                                    .find_map(|scope| scope.get(&path[0]))
+                                    .is_some_and(|binding| binding.mutable
+                                        && matches!(binding.ty, Ty::Struct(..))))
+                        }
+                        _ => false,
+                    };
+                    if operator == "=" && concat_target {
                         self.concat_destination = Some(value as *const Expr as usize);
                     }
                     let value_ty = self.expr(value, Some(&target_ty));
@@ -1330,7 +1343,7 @@ impl Checker {
             self.error(
                 17,
                 expression.span,
-                "concat requires a whole String local, a standalone statement, an immediate read-only method, or an owned or explicit borrow String argument to a direct internal call",
+                "concat requires a whole String local, a direct String field of a mutable local struct, a standalone statement, an immediate read-only method, or an owned or explicit borrow String argument to a direct internal call",
             );
         }
         let expected = usize::from(method != "len");

@@ -745,12 +745,19 @@ impl<'a> Builder<'a> {
         right: &Expr,
         span: Span,
     ) -> Option<()> {
-        let left = self.lower_expr(left)?;
-        let left = self.borrow(left, Access::Borrow)?;
-        let right = self.lower_expr(right)?;
-        let right = self.borrow(right, Access::Borrow)?;
+        let left = self.lower_concat_operand(left)?;
+        let right = self.lower_concat_operand(right)?;
         self.initialize_concat(target, left, right, span);
         Some(())
+    }
+
+    fn lower_concat_operand(&mut self, expr: &Expr) -> Option<Operand> {
+        if matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+            self.lower_read_receiver(expr)
+        } else {
+            let owner = self.lower_expr(expr)?;
+            self.borrow(owner, Access::Borrow)
+        }
     }
 
     fn initialize_concat(&mut self, target: LocalId, left: Operand, right: Operand, span: Span) {
@@ -1232,6 +1239,47 @@ impl<'a> Builder<'a> {
         value: &Expr,
     ) -> Option<()> {
         let (root, positions) = self.lower_place(target)?;
+        if operator == "=" {
+            if let Some((local, field)) = self.local_string_field(target, root) {
+                let supported_rhs = match &value.kind {
+                    ExprKind::Path(_) | ExprKind::StringLiteral(_) => true,
+                    ExprKind::Call { callee, .. } => match &callee.kind {
+                        ExprKind::Field { name, .. } => name == "concat",
+                        ExprKind::Path(_) => matches!(self.path(callee), PathTarget::Function(_)),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if supported_rhs {
+                    // Stage the RHS before the write so it can borrow the old field.
+                    let scope_start = self.owned_locals.len();
+                    let Some(rhs) = self.lower_with_temporary_owner(value) else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
+                    let rhs = if matches!(value.kind, ExprKind::StringLiteral(_)) {
+                        let staged =
+                            self.hidden_local("String field replacement", Type::String, value.span);
+                        self.initialize_local(staged, consume(rhs), value.span);
+                        op(Source::Local(staged), value.span)
+                    } else {
+                        rhs
+                    };
+                    self.emit(
+                        span,
+                        InstructionKind::ReplaceStringField {
+                            target: local,
+                            field,
+                            value: consume(rhs),
+                        },
+                        None,
+                    );
+                    self.end_owned_locals(scope_start, span);
+                    self.owned_locals.truncate(scope_start);
+                    return Some(());
+                }
+            }
+        }
         let previous = if operator == "=" {
             None
         } else {
@@ -1258,35 +1306,6 @@ impl<'a> Builder<'a> {
             }
         };
         let assigned = self.owned(assigned)?;
-        if let ("=", ExprKind::Field { base, name }, Source::Local(target), Source::Local(source)) =
-            (operator, &target.kind, root.source, assigned.source)
-        {
-            let local = &self.function.locals[target.0 as usize];
-            if let Type::Struct(id) = local.ty {
-                if local.mutable
-                    && matches!(base.kind, ExprKind::Path(_))
-                    && matches!(value.kind, ExprKind::Path(_))
-                    && self.function.locals[source.0 as usize].ty == Type::String
-                    && !self.function.parameter_locals.contains(&target)
-                {
-                    let field = self.types[id.0 as usize]
-                        .fields
-                        .iter()
-                        .position(|field| field.name == *name)
-                        .expect("checked struct field");
-                    self.emit(
-                        span,
-                        InstructionKind::ReplaceStringField {
-                            target,
-                            field: field as u32,
-                            value: assigned,
-                        },
-                        None,
-                    );
-                    return Some(());
-                }
-            }
-        }
         let reference = self.address_chain(root, &positions, Access::Share, span)?;
         self.emit(
             span,
@@ -1298,6 +1317,28 @@ impl<'a> Builder<'a> {
         );
         Some(())
     }
+    fn local_string_field(&self, target: &Expr, root: Operand) -> Option<(LocalId, u32)> {
+        let (ExprKind::Field { base, name }, Source::Local(local)) = (&target.kind, root.source)
+        else {
+            return None;
+        };
+        let binding = &self.function.locals[local.0 as usize];
+        let Type::Struct(id) = binding.ty else {
+            return None;
+        };
+        if !matches!(base.kind, ExprKind::Path(_))
+            || !binding.mutable
+            || self.function.parameter_locals.contains(&local)
+        {
+            return None;
+        }
+        self.types[id.0 as usize]
+            .fields
+            .iter()
+            .position(|field| field.name == *name && field.ty == Type::String)
+            .map(|field| (local, field as u32))
+    }
+
     /// Address one field of a struct owner or of a reference to a struct. The
     /// result is a reference with the requested access.
     fn field_addr(

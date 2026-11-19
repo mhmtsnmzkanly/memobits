@@ -201,9 +201,13 @@ moved the struct. Literal descriptors have zero allocation provenance.
 Structs whose fields always hold literal storage need no guest deallocation.
 
 A mutable local struct can replace a direct String field with a named owned
-String local, including a local holding a literal. The RHS is evaluated
-before the write. The write releases the old allocation if present, moves
-the descriptor into the field, and clears the source's allocation provenance.
+String, a literal, a direct concat, or a direct internal String-returning
+call. Lowering stages a temporary RHS as a lexical String owner. It evaluates
+the RHS before the write, so `record.text = record.text.concat("!")` reads the
+old field while its allocation is live. The write releases the old allocation
+if present, moves the descriptor into the field, and clears the source's
+allocation provenance. A return, break, or continue during RHS evaluation
+bypasses the write and runs the normal lexical cleanup.
 Borrow checking rejects a live loan of the field, an overlapping enclosing
 loan, or a live loan of the consumed RHS. Loans of other fields can remain
 live. A field that acquires heap ownership is included in the struct's
@@ -214,8 +218,8 @@ temporaries that escape their constructor, whole-value replacement of a
 heap-owning struct, consuming field extraction and other field writes on
 heap-owning structs, whole-struct borrows, aggregate nesting, Error
 inheritance, and signatures that pass or return these structs. String field
-replacement through a reference or projection chain and replacement with
-an inline literal, call, or other temporary are gated. Direct
+replacement through a reference or projection chain, indirect calls, and
+general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's
 basic block. See the checked examples in the
 [runnable language guide](../../examples/projects/language-guide/src/main.mb).

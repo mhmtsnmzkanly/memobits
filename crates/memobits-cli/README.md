@@ -117,7 +117,8 @@ A plain local struct can contain direct String literals alongside primitive
 fields. A new local struct can also take ownership of a named heap String.
 The whole struct can move into another new local, whose scope exit releases
 any owned String allocations. String fields support borrowed reads and
-replacement on a mutable local using a named owned String. See the
+replacement on a mutable local using a named owned String, a literal, a
+direct concat, or a direct internal String-returning call. See the
 [local struct example](../../examples/projects/language-guide/src/main.mb)
 and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 

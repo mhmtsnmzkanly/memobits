@@ -1507,3 +1507,88 @@ fn string_field_replacement_reuses_blocks_without_overwriting_live_fields() {
         assert_eq!(main.call(&mut store, ()).unwrap(), 1);
     }
 }
+
+#[test]
+fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
+    let part = "a".repeat(20_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Label {{ text: String, note: String }}
+        fn join(left: borrow String, right: borrow String) -> String {{
+            let result := left.concat(right);
+            result
+        }}
+        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+            match value {{ Some(byte) => byte == expected, None => false }}
+        }}
+        fn early(part: borrow String) -> Bool {{
+            var label := Label {{ text: "", note: "" }};
+            label.text = part.concat("?");
+            label.text = label.text.concat({{
+                if label.text.len() == 20_001 {{
+                    return byte_is(label.text.byte_at(20_000), 63);
+                }}
+                "!"
+            }});
+            false
+        }}
+        fn forward(value: String, unused: u32) -> String {{
+            value
+        }}
+        fn early_call(part: borrow String) -> Bool {{
+            var label := Label {{ text: "", note: "" }};
+            label.text = part.concat("?");
+            label.text = forward(part.concat("!"), {{
+                if label.text.len() == 20_001 {{
+                    return byte_is(label.text.byte_at(20_000), 63);
+                }}
+                0
+            }});
+            false
+        }}
+        fn main() -> i32 {{
+            let part := "{part}";
+            let question := "?";
+            var iteration := 0;
+            loop {{
+                var label := Label {{ text: "", note: "é" }};
+                let note := label.note.borrow();
+                label.text = join(part.borrow(), question.borrow());
+                label.text = label.text.concat({{
+                    iteration += 1;
+                    if iteration == 1 {{ continue; }}
+                    if iteration == 5 {{ break; }}
+                    "!"
+                }});
+                if label.text.len() != 20_002 || !byte_is(label.text.byte_at(20_000), 63)
+                    || !byte_is(label.text.byte_at(20_001), 33) {{ return 0; }}
+                label.text = join(part.borrow(), note);
+                if note.len() != 2 || !byte_is(label.text.byte_at(20_001), 169) {{ return 0; }}
+                label.text = "";
+                if label.text.len() != 0 {{ return 0; }}
+            }}
+            if early(part.borrow()) && early_call(part.borrow()) {{ 1 }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}
