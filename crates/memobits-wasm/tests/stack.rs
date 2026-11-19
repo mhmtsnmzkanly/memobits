@@ -948,6 +948,72 @@ fn temporary_list_reads_reuse_storage_across_normal_and_early_exits() {
 }
 
 #[test]
+fn temporary_list_borrows_reuse_storage_across_normal_and_early_exits() {
+    let program = lower(
+        r#"
+        fn make(count: u32) -> List<u32> {
+            var result: List<u32> = [];
+            loop {
+                result.push(result.len());
+                if result.len() == count { break; }
+            }
+            result
+        }
+        fn inspect(items: borrow List<u32>, index: u32) -> Bool {
+            match items.get(index) { Some(value) => value == index, None => false }
+        }
+        fn early_return() -> Bool {
+            inspect(make(10_000).borrow(), { return true; });
+            false
+        }
+        fn main() -> Result<Bool, Error> {
+            var live: List<u32> = [];
+            live.push(305_419_896);
+            var repeats: u32 = 0;
+            loop {
+                if !inspect(make(10_000).borrow(), 9_999) || !early_return() {
+                    return Err(Error { code: 3 });
+                }
+                repeats += 1;
+                if repeats == 4 {
+                    inspect(make(10_000).borrow(), { break; });
+                }
+                inspect(make(10_000).borrow(), { continue; });
+            }
+            match live.get(0) {
+                Some(value) => if value == 305_419_896 { Ok(true) } else { Err(Error { code: 1 }) },
+                None => Err(Error { code: 2 })
+            }
+        }
+        "#,
+    );
+    let artifact = compile_application_traced(
+        &program,
+        FunctionId(3),
+        &CompileOptions { stack_size: 4096 },
+    )
+    .unwrap();
+    let (mut store, instance) = instantiate(&artifact.bytes);
+    let memory = instance
+        .get_memory(&store, memobits_entry_abi::MEMORY_EXPORT)
+        .unwrap();
+    let main = instance
+        .get_typed_func::<(), (i32, i32)>(&store, "main")
+        .unwrap();
+    let initial_size = memory.data(&store).len();
+    let (result, _) = main.call(&mut store, ()).unwrap();
+    assert_eq!(memory.data(&store)[result as usize], 0);
+    let warmed_size = memory.data(&store).len();
+    assert!(warmed_size > initial_size);
+    assert!(warmed_size <= 3 * 65_536);
+    for _ in 0..2 {
+        let (result, _) = main.call(&mut store, ()).unwrap();
+        assert_eq!(memory.data(&store)[result as usize], 0);
+        assert_eq!(memory.data(&store).len(), warmed_size);
+    }
+}
+
+#[test]
 fn repeated_string_discard_reuses_one_block() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(

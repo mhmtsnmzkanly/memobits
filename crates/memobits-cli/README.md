@@ -68,7 +68,11 @@ the owner's List. A standalone direct internal call statement releases its
 unused List result. Use `make_list().len()` or `make_list().get(index)` to
 read a direct internal List result. The receiver runs once before the index,
 which also runs once. The temporary is released after the read or on a
-normal early exit from the index. Other temporary uses, subscript syntax,
+normal early exit from the index. A direct internal `borrow List<T>` parameter
+also accepts `make_list().borrow()` when the factory is a direct internal call.
+Arguments run left to right, and the caller releases the temporary after the
+call or on a normal early exit from a later argument. Storing that borrow,
+sharing a temporary, other temporary uses, subscript syntax,
 indirect calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and

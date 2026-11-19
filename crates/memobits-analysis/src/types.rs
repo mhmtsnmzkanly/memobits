@@ -558,7 +558,7 @@ struct Checker {
     /// such a position.
     allowed_arrays: HashSet<usize>,
     concat_destination: Option<usize>,
-    temporary_string_borrow_argument: Option<usize>,
+    temporary_borrow_argument: Option<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
     /// Address of the path expression currently checked as an index or field base.
@@ -1494,27 +1494,40 @@ impl Checker {
             return Ty::Error;
         }
 
-        if access == IrAccess::Borrow
-            && self.temporary_string_borrow_argument == Some(expression as *const Expr as usize)
-            && matches!(base.kind, ExprKind::Call { .. })
-        {
-            let previous = self
-                .concat_destination
-                .replace(base as *const Expr as usize);
-            let receiver = self.expr(base, Some(&Ty::String));
+        let temporary_inner = match (expected, &base.kind) {
+            (Some(inner @ Ty::String), ExprKind::Call { .. }) => Some(inner),
+            (Some(inner @ Ty::List(_)), ExprKind::Call { callee, .. })
+                if self.direct_callee(callee) =>
+            {
+                Some(inner)
+            }
+            _ => None,
+        };
+        if let Some(inner) = temporary_inner.filter(|_| {
+            access == IrAccess::Borrow
+                && self.temporary_borrow_argument == Some(expression as *const Expr as usize)
+        }) {
+            let previous = self.concat_destination;
+            if *inner == Ty::String {
+                self.concat_destination = Some(base as *const Expr as usize);
+            }
+            let receiver = self.expr(base, Some(inner));
             self.concat_destination = previous;
-            return match receiver {
-                Ty::String => Ty::Reference {
+            return match (receiver, inner) {
+                (ty @ Ty::String, Ty::String) | (ty @ Ty::List(_), Ty::List(_)) => Ty::Reference {
                     access,
-                    inner: Box::new(Ty::String),
+                    inner: Box::new(ty),
                     origin: ReferenceOrigin::Temporary,
                 },
-                ty @ (Ty::Never | Ty::Error) => ty,
+                (ty @ (Ty::Never | Ty::Error), _) => ty,
                 _ => {
                     self.error(
                         17,
                         base.span,
-                        "a temporary borrow argument requires an owned String call result",
+                        format!(
+                            "a temporary borrow argument requires an owned {} call result",
+                            name(inner)
+                        ),
                     );
                     Ty::Error
                 }
@@ -2895,22 +2908,22 @@ impl Checker {
                             self.allow_array_value(arg);
                         }
                         let previous_concat = self.concat_destination;
-                        let previous_borrow = self.temporary_string_borrow_argument;
-                        if let Some(parameter) =
-                            params.get(i).filter(|p| direct && p.ty == Ty::String)
-                        {
+                        let previous_borrow = self.temporary_borrow_argument;
+                        if let Some(parameter) = params.get(i).filter(|_| direct) {
                             let argument = arg as *const Expr as usize;
-                            match parameter.access {
-                                IrAccess::Owned => self.concat_destination = Some(argument),
-                                IrAccess::Borrow => {
-                                    self.temporary_string_borrow_argument = Some(argument)
+                            match (&parameter.ty, parameter.access) {
+                                (Ty::String, IrAccess::Owned) => {
+                                    self.concat_destination = Some(argument)
                                 }
-                                IrAccess::Share => {}
+                                (Ty::String | Ty::List(_), IrAccess::Borrow) => {
+                                    self.temporary_borrow_argument = Some(argument)
+                                }
+                                _ => {}
                             }
                         }
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
                         self.concat_destination = previous_concat;
-                        self.temporary_string_borrow_argument = previous_borrow;
+                        self.temporary_borrow_argument = previous_borrow;
                         if let Some(parameter) = params
                             .get(i)
                             .filter(|parameter| matches!(parameter.ty, Ty::List(_)))
@@ -3178,7 +3191,7 @@ fn check_standalone(
         lowering: capture,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
-        temporary_string_borrow_argument: None,
+        temporary_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
@@ -3490,7 +3503,7 @@ fn checker() -> Checker {
         lowering: true,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
-        temporary_string_borrow_argument: None,
+        temporary_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),

@@ -217,7 +217,8 @@ the implemented subset; a milestone is not complete merely because its crate exi
   returns the last element as an Option. Pop and clear retain capacity.
   Growth uses the same checked allocator as String. The [List design](list-slice.md) records copied `.get(index)`
   reads with checked unsigned bounds. Direct internal borrow parameters
-  can read either primitive List type. Share parameters and stored `var`
+  can read either primitive List type and accept an explicit `.borrow()`
+  of a direct internal List call result. Share parameters and stored `var`
   shares can push, pop, and clear through the owner's descriptor. Direct
   owned parameters take named local moves with cleanup on either side of
   invocation. Direct returns move a

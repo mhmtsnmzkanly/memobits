@@ -1649,7 +1649,9 @@ impl<'a> Builder<'a> {
                             }
                             ExprKind::Call {
                                 callee: conversion, ..
-                            } if direct_string && parameter.access == Access::Borrow => {
+                            } if (direct_string || direct_list)
+                                && parameter.access == Access::Borrow =>
+                            {
                                 match &conversion.kind {
                                     ExprKind::Field { base, name }
                                         if name == "borrow"

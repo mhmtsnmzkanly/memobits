@@ -173,6 +173,13 @@ fn primitive_lists() -> Bool {
         Some(value) => value == 1234,
         None => false
     };
+    // A direct borrow parameter also accepts an explicit borrow of a direct
+    // List call result. The owner lives through the call and is released
+    // afterward or on a normal early exit from a later argument.
+    let borrowed_word := match list_word_at(make_words(2345).borrow(), 0) {
+        Some(value) => value == 2345,
+        None => false
+    };
     var moved := words;
     // An exclusive call can grow the List that the caller owns.
     append_word(moved.share(), 2000);
@@ -207,7 +214,7 @@ fn primitive_lists() -> Bool {
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
     before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
-        && temporary_length == 1 && temporary_word
+        && temporary_length == 1 && temporary_word && borrowed_word
         && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
 }
 

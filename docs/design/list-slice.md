@@ -17,7 +17,12 @@ allocates no heap block. A push evaluates the element once and returns unit.
 Moves transfer the block and normal scope exits release the owner. The applied spelling is built in, and bare `List`
 can still name a user type. Direct internal calls accept `borrow List<T>`
 for these element types. Use `.borrow()` on a whole local to create the
-read-only handle. The callee can use `.len()` and `.get()`. A live loan
+read-only handle. A direct borrow parameter also accepts `make_list().borrow()`
+as the argument itself when the factory is a direct internal call. The caller
+evaluates the factory once in argument order and owns the result until the
+call finishes. Normal early exits during later arguments release the temporary
+through lexical cleanup. Storing that borrow or sharing a temporary is
+unsupported. The callee can use `.len()` and `.get()`. A live loan
 blocks mutation, moves and cleanup of the owner until its last use.
 A direct `share List<T>` parameter accepts an explicit `.share()` from
 a mutable owner and supports `push`, `pop`, `clear`, `len` and `get`. Growth
@@ -161,5 +166,7 @@ and an early exit during RHS evaluation leaves the caller's List intact.
    across another list's growth and cleanup. Repeat discards of large direct
    call results in one instance to check storage reuse. Repeat temporary reads
    across successful reads and index return, break, and continue paths.
+   Repeat calls with temporary borrows across successful calls and later
+   argument return, break, and continue paths.
    Force growth failure under a small memory limit and verify the trap.
    Keep the String reuse and allocation-failure tests in the same suite.

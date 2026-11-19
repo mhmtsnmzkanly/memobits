@@ -1040,6 +1040,112 @@ fn temporary_list_reads_run_from_source_and_wasm() {
 }
 
 #[test]
+fn temporary_list_borrows_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='list-temporary-borrow'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn bytes(log: share List<u8>) -> List<u8> {
+            log.push(1);
+            var items: List<u8> = [];
+            items.push(255);
+            items
+        }
+        fn words(log: share List<u8>) -> List<u32> {
+            log.push(2);
+            var items: List<u32> = [];
+            items.push(log.len() + 1000);
+            items
+        }
+        fn inspect(first: borrow List<u8>, second: borrow List<u32>, order: u32) -> Bool {
+            let byte_ok := match first.get(0) { Some(value) => value == 255, None => false };
+            let word_ok := match second.get(0) { Some(value) => value == 1002, None => false };
+            byte_ok && word_ok && order == 3
+        }
+        fn early() -> Bool {
+            var log: List<u8> = [];
+            inspect(bytes(log.share()).borrow(), words(log.share()).borrow(), {
+                return log.len() == 2;
+            })
+        }
+        fn main() -> Result<Bool, Error> {
+            var log: List<u8> = [];
+            let inspected := inspect(bytes(log.share()).borrow(), words(log.share()).borrow(), {
+                log.push(3);
+                log.len()
+            });
+            Ok(inspected && early())
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "list-borrow.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "list-borrow.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn temporary_list_borrows_require_an_explicit_direct_argument() {
+    let f = Fixture::new();
+    for (body, code, message) in [
+        (
+            "let view := make().borrow(); view.len();",
+            "TE017",
+            "named local owner",
+        ),
+        ("inspect(make());", "TE017", "explicit .borrow()"),
+        (
+            "inspect({ make().borrow() });",
+            "TE017",
+            "named local owner",
+        ),
+        (
+            "inspect(({ make() }).borrow());",
+            "TE017",
+            "named local owner",
+        ),
+        (
+            "let indirect := inspect; indirect(make().borrow());",
+            "TE017",
+            "named local owner",
+        ),
+        (
+            "let indirect := make; inspect(indirect().borrow());",
+            "TE017",
+            "named local owner",
+        ),
+        ("mutate(make().share());", "TE017", "named local owner"),
+        ("inspect(make().share());", "TE017", "named local owner"),
+        (
+            "inspect_words(make().borrow());",
+            "TE002",
+            "expected borrow List<u32>",
+        ),
+    ] {
+        f.write(
+            "list.mb",
+            &format!(
+                r#"fn make() -> List<u8> {{ let items: List<u8> = []; items }}
+                   fn inspect(items: borrow List<u8>) {{ items.len(); }}
+                   fn inspect_words(items: borrow List<u32>) {{ items.len(); }}
+                   fn mutate(items: share List<u8>) {{ items.clear(); }}
+                   fn main() {{ {body} }}"#,
+            ),
+        );
+        let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
+        assert!(diagnostic.contains(message), "{body}: {diagnostic}");
+    }
+}
+
+#[test]
 fn list_returns_keep_temporary_and_abi_gates() {
     let f = Fixture::new();
     for (body, code, message) in [
