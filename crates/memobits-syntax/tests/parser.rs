@@ -1,5 +1,7 @@
 use memobits_diagnostics::SourceId;
-use memobits_syntax::{lex, parse, Access, ExprKind, ItemKind, StatementKind};
+use memobits_syntax::{
+    lex, parse, Access, ExprKind, GenericParameterKind, ItemKind, StatementKind, TypeArgument,
+};
 
 #[test]
 fn parses_real_project_sources() {
@@ -12,6 +14,249 @@ fn parses_real_project_sources() {
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
         assert!(!result.module.items.is_empty());
     }
+}
+
+#[test]
+fn postfix_optional_type_preserves_grouped_reference_precedence() {
+    let parsed = parse(
+        SourceId(0),
+        "fn f(value: borrow i32?, wrapped: (borrow i32)?) {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { parameters, .. } = &parsed.module.items[0].kind else {
+        panic!("expected a function");
+    };
+    assert_eq!(parameters[0].access, Access::Borrow);
+    assert_eq!(parameters[0].ty.path, ["Option"]);
+    let [TypeArgument::Type(borrowed_option)] = parameters[0].ty.arguments.as_slice() else {
+        panic!("expected an owned Option payload");
+    };
+    assert_eq!(borrowed_option.path, ["i32"]);
+    assert_eq!(parameters[1].access, Access::Owned);
+    assert_eq!(parameters[1].ty.path, ["Option"]);
+    let [TypeArgument::Reference {
+        access: Access::Borrow,
+        referent,
+        ..
+    }] = parameters[1].ty.arguments.as_slice()
+    else {
+        panic!("expected an Option containing a borrow");
+    };
+    assert_eq!(referent.path, ["i32"]);
+}
+
+#[test]
+fn parses_bodyless_nominal_types_separately_from_empty_structs() {
+    let parsed = parse(SourceId(0), "type Token; type Empty {}");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Type {
+        definition: memobits_syntax::TypeDefinition::Bodyless,
+        ..
+    } = &parsed.module.items[0].kind
+    else {
+        panic!("expected a bodyless nominal declaration");
+    };
+    let ItemKind::Type {
+        definition: memobits_syntax::TypeDefinition::Struct(fields),
+        ..
+    } = &parsed.module.items[1].kind
+    else {
+        panic!("expected an empty struct declaration");
+    };
+    assert!(fields.is_empty());
+}
+
+#[test]
+fn parses_inherent_extensions_without_an_interface_constraint() {
+    let parsed = parse(
+        SourceId(0),
+        "type Point; extend Point { fn zero(borrow self) -> i32 { 0 } }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::InherentExtension {
+        target, methods, ..
+    } = &parsed.module.items[1].kind
+    else {
+        panic!("expected an inherent extension");
+    };
+    assert_eq!(target.path, ["Point"]);
+    assert_eq!(methods[0].name, "zero");
+    assert_eq!(methods[0].receiver, Access::Borrow);
+}
+
+#[test]
+fn parses_trailing_inherent_extension_as_a_type_associated_item() {
+    let parsed = parse(
+        SourceId(0),
+        "type Point { x: i32 } extend { fn zero(borrow self) -> i32 { 0 } }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert!(matches!(
+        parsed.module.items[0].kind,
+        ItemKind::Type {
+            definition: memobits_syntax::TypeDefinition::Struct(_),
+            ..
+        }
+    ));
+    let ItemKind::InherentExtension {
+        target, methods, ..
+    } = &parsed.module.items[1].kind
+    else {
+        panic!("expected the trailing inherent extension");
+    };
+    assert_eq!(target.path, ["Point"]);
+    assert_eq!(methods[0].name, "zero");
+}
+
+#[test]
+fn generic_trailing_inherent_extensions_have_a_clear_gate() {
+    syntax_error(
+        "type Box<T> { value: T } extend { fn value(borrow self) -> T { self.value } }",
+        "trailing inherent extensions on generic nominal types are not supported yet",
+    );
+}
+
+#[test]
+fn parses_interface_and_borrowing_extension_methods() {
+    let result = parse(
+        SourceId(0),
+        "pub interface Draw { fn draw(borrow self) -> i32; }\ntype Point { x: i32 }\nextend Point of Draw { fn draw(borrow self) -> i32 { 42 } }",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(matches!(
+        &result.module.items[0].kind,
+        ItemKind::Interface { public: true, name, methods, .. }
+            if name == "Draw" && methods.len() == 1 && methods[0].receiver == Access::Borrow
+    ));
+    assert!(matches!(
+        &result.module.items[2].kind,
+        ItemKind::Extension { methods, .. }
+            if methods.len() == 1 && methods[0].body.is_some()
+    ));
+}
+
+#[test]
+fn interface_extension_words_remain_valid_identifiers_outside_declaration_positions() {
+    let result = parse(
+        SourceId(0),
+        "fn extend(of: i32) -> i32 { let interface := of; interface }",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn generic_function_type_and_const_parameter_syntax_parses() {
+    let parsed = parse(
+        SourceId(0),
+        "interface Draw { fn draw(borrow self) -> i32; } type Buffer<T, const N: u32> { data: Array<T, N> } fn project<T, const N: u32>(value: T) -> Array<T, N> where T: Draw { value }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Type {
+        generic_parameters, ..
+    } = &parsed.module.items[1].kind
+    else {
+        panic!()
+    };
+    assert_eq!(generic_parameters.len(), 2);
+    assert!(matches!(
+        generic_parameters[1].kind,
+        GenericParameterKind::Const(_)
+    ));
+    let ItemKind::Function {
+        generic_parameters,
+        bounds,
+        result,
+        ..
+    } = &parsed.module.items[2].kind
+    else {
+        panic!()
+    };
+    assert_eq!(generic_parameters.len(), 2);
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].parameter, "T");
+    assert_eq!(result.as_ref().unwrap().arguments.len(), 2);
+    assert!(matches!(
+        result.as_ref().unwrap().arguments[1],
+        TypeArgument::Const(_)
+    ));
+}
+
+#[test]
+fn generic_struct_constructor_keeps_explicit_type_arguments() {
+    let parsed = parse(
+        SourceId(0),
+        "fn make() { let value := Box<i32> { item: 42 }; }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Struct {
+        type_arguments,
+        fields,
+        ..
+    } = &value.kind
+    else {
+        panic!()
+    };
+    assert_eq!(type_arguments.len(), 1);
+    assert_eq!(fields[0].name, "item");
+}
+
+#[test]
+fn parses_explicit_interface_selection_on_a_call() {
+    let result = parse(
+        SourceId(0),
+        "fn f(point: Point) { (point.draw() of graphics::Draw).inspect(); }",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
+        panic!()
+    };
+    let StatementKind::Expression(expression) = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Call { callee, .. } = &expression.kind else {
+        panic!()
+    };
+    let ExprKind::Field { base, name } = &callee.kind else {
+        panic!()
+    };
+    assert_eq!(name, "inspect");
+    let ExprKind::Call { interface, .. } = &base.kind else {
+        panic!()
+    };
+    assert_eq!(interface.as_ref().unwrap().path, ["graphics", "Draw"]);
+}
+
+#[test]
+fn grouped_symbol_imports_expand_to_individual_bindings() {
+    let result = parse(
+        SourceId(0),
+        "use graphics::{Color as Hue, Draw}; fn main() {}",
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let uses = result
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Use { path, alias, .. } => Some((path, alias)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(uses.len(), 2);
+    assert_eq!(
+        uses[0],
+        (
+            &vec!["graphics".to_owned(), "Color".to_owned()],
+            &Some("Hue".to_owned())
+        )
+    );
+    assert_eq!(uses[1].0, &["graphics", "Draw"]);
 }
 
 #[test]
@@ -35,6 +280,124 @@ fn string_literals_preserve_utf8_and_quoted_byte_spans() {
             format!("\"{expected}\"")
         );
     }
+}
+
+#[test]
+fn character_literals_decode_one_unicode_scalar_and_escapes() {
+    let source = r#"fn f() { 'a'; 'é'; '😀'; '\n'; '\'' }"#;
+    let result = parse(SourceId(0), source);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
+        panic!()
+    };
+    let values = body
+        .statements
+        .iter()
+        .map(|statement| match &statement.kind {
+            StatementKind::Expression(expr) => match expr.kind {
+                ExprKind::CharLiteral(ch) => ch,
+                _ => panic!("{expr:?}"),
+            },
+            _ => panic!("{statement:?}"),
+        })
+        .collect::<Vec<_>>();
+    let tail = body.tail.as_deref().unwrap();
+    assert_eq!(tail.kind, ExprKind::CharLiteral('\''));
+    assert_eq!(values, ['a', 'é', '😀', '\n']);
+}
+
+#[test]
+fn tuples_parse_as_ordered_types_and_expressions_without_changing_grouping() {
+    let source = "fn pair(v: (i32, Bool)) -> (i32, Bool) { (1, true) } fn grouped() -> i32 { (1) } fn first(v: (i32, Bool)) -> i32 { v.0 }";
+    let result = parse(SourceId(0), source);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function {
+        parameters,
+        result: Some(result_ty),
+        body,
+        ..
+    } = &result.module.items[0].kind
+    else {
+        panic!()
+    };
+    assert_eq!(parameters[0].ty.path, ["\0tuple"]);
+    assert_eq!(result_ty.path, ["\0tuple"]);
+    assert!(matches!(
+        body.tail.as_deref().unwrap().kind,
+        ExprKind::Tuple(_)
+    ));
+    let ItemKind::Function { body, .. } = &result.module.items[1].kind else {
+        panic!()
+    };
+    assert_eq!(
+        body.tail.as_deref().unwrap().kind,
+        ExprKind::Number("1".into())
+    );
+    let ItemKind::Function { body, .. } = &result.module.items[2].kind else {
+        panic!()
+    };
+    assert!(
+        matches!(&body.tail.as_deref().unwrap().kind, ExprKind::Field { name, .. } if name == "0")
+    );
+}
+
+#[test]
+fn labeled_tuple_shapes_and_initializers_preserve_labels_and_order() {
+    let source =
+        "fn f(v: (left: i32, right: Bool)) -> i32 { let pair := (right: true, left: 1); v.left }";
+    let result = parse(SourceId(0), source);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let ItemKind::Function {
+        parameters, body, ..
+    } = &result.module.items[0].kind
+    else {
+        panic!()
+    };
+    let TypeArgument::TupleField {
+        label: Some(left), ..
+    } = &parameters[0].ty.arguments[0]
+    else {
+        panic!()
+    };
+    assert_eq!(left, "left");
+    let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
+        panic!()
+    };
+    let ExprKind::Tuple(elements) = &value.kind else {
+        panic!()
+    };
+    assert_eq!(
+        elements
+            .iter()
+            .map(|element| element.label.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("right"), Some("left")]
+    );
+}
+
+#[test]
+fn malformed_character_literals_report_scalar_errors_and_recover() {
+    for source in ["fn f() { ''; }", "fn f() { 'ab'; }", "fn f() { 'a\n'; }"] {
+        let result = parse(SourceId(0), source);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("exactly one Unicode scalar")),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+    let result = parse(SourceId(0), r#"fn f() { '\q'; }"#);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("unsupported escape")));
+    let surrogate = parse(SourceId(0), r#"fn f() { '\u{D800}'; }"#);
+    assert!(surrogate
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("unsupported escape")));
 }
 
 #[test]
@@ -122,6 +485,7 @@ fn parses_documented_access_conversion_suffixes() {
         let ExprKind::Call {
             callee,
             arguments: suffix_args,
+            ..
         } = &arguments[0].kind
         else {
             panic!("expected conversion call")
@@ -258,6 +622,13 @@ fn arrays_preserve_nested_types_literals_and_spans() {
     assert_eq!(count.raw, "03");
     assert_eq!(&source[count.span.start..count.span.end], "03");
     assert_eq!(&source[expr.span.start..expr.span.end], "[f(); 03]");
+}
+
+#[test]
+fn nested_generic_closers_remain_separate_from_right_shift_tokens() {
+    let source = "fn f(value: List<List<u32>>) -> u32 { value >> 1 }";
+    let parsed = parse(SourceId(0), source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 }
 
 #[test]
@@ -450,7 +821,7 @@ fn first_binding_value(source: &str) -> memobits_syntax::Expr {
 #[test]
 fn struct_literals_keep_field_order_and_allow_trailing_commas() {
     let value = first_binding_value("fn f() { let p := Version { minor: 1, major: 0, }; }");
-    let ExprKind::Struct { path, fields } = &value.kind else {
+    let ExprKind::Struct { path, fields, .. } = &value.kind else {
         panic!("{value:?}")
     };
     assert_eq!(path, &["Version"]);
@@ -459,7 +830,7 @@ fn struct_literals_keep_field_order_and_allow_trailing_commas() {
     assert!(matches!(fields[0].value.kind, ExprKind::Number(_)));
 
     let value = first_binding_value("fn f() { let p := a::P { x: 1 + 2, y: g(3) }; }");
-    let ExprKind::Struct { path, fields } = &value.kind else {
+    let ExprKind::Struct { path, fields, .. } = &value.kind else {
         panic!()
     };
     assert_eq!(path, &["a", "P"]);
@@ -697,4 +1068,30 @@ fn divergent_statements_can_be_arm_bodies_directly() {
         })
         .collect();
     assert_eq!(kinds, ["return", "break", "continue"]);
+}
+
+#[test]
+fn associated_type_declarations_and_bindings_parse_in_interface_extensions() {
+    let parsed = parse(
+        SourceId(0),
+        "interface Add { type Rhs; type Output; fn add(self, rhs: Rhs) -> Output; } extend Left of Add { type Rhs = Right; type Output = Result; fn add(self, rhs: Right) -> Result { Result {} } }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let module = parsed.module;
+    let ItemKind::Interface {
+        associated_types, ..
+    } = &module.items[0].kind
+    else {
+        panic!("expected interface")
+    };
+    assert_eq!(associated_types, &["Rhs", "Output"]);
+    let ItemKind::Extension {
+        associated_types, ..
+    } = &module.items[1].kind
+    else {
+        panic!("expected interface extension")
+    };
+    assert_eq!(associated_types.len(), 2);
+    assert_eq!(associated_types[0].name, "Rhs");
+    assert_eq!(associated_types[0].ty.as_ref().unwrap().path, ["Right"]);
 }

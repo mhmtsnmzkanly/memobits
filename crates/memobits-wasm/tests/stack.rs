@@ -573,19 +573,19 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
     let right = "😀".repeat(6_000);
     let program = lower(&format!(
         r#"
-        fn consume(early: Bool, value: String) -> u32 {{
+        fn consume(early: Bool, value: string) -> u32 {{
             if early {{ return value.len(); }}
             let moved := value;
             moved.len()
         }}
-        fn forward(value: String, early: Bool) -> u32 {{
+        fn forward(value: string, early: Bool) -> u32 {{
             consume(early, value)
         }}
-        fn make(left: borrow String, right: borrow String) -> String {{
+        fn make(left: borrow string, right: borrow string) -> string {{
             let result := left.concat(right);
             result
         }}
-        fn measure(left: borrow String, right: borrow String, early: Bool) -> u32 {{
+        fn measure(left: borrow string, right: borrow string, early: Bool) -> u32 {{
             var steps := 0;
             loop {{
                 let joined := make(left, right);
@@ -721,20 +721,20 @@ fn temporary_string_arguments_reuse_blocks_after_call_and_early_exit() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn make(seed: borrow String) -> String {{
+        fn make(seed: borrow string) -> string {{
             let result := seed.concat("");
             result
         }}
-        fn read(text: borrow String, expected: u32) -> Bool {{
+        fn read(text: borrow string, expected: u32) -> Bool {{
             text.len() == expected
         }}
-        fn early(seed: borrow String) -> Bool {{
+        fn early(seed: borrow string) -> Bool {{
             read(make(seed).borrow(), {{ return true; 0 }})
         }}
-        fn consume(text: String, expected: u32) -> Bool {{
+        fn consume(text: string, expected: u32) -> Bool {{
             text.len() == expected
         }}
-        fn early_owned(seed: borrow String) -> Bool {{
+        fn early_owned(seed: borrow string) -> Bool {{
             consume(make(seed), {{ return true; 0 }})
         }}
         fn main() -> Result<Bool, Error> {{
@@ -781,11 +781,11 @@ fn immediate_string_reads_reuse_memory_after_read_and_early_exit() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn make(seed: borrow String) -> String {{
+        fn make(seed: borrow string) -> string {{
             let result := seed.concat("");
             result
         }}
-        fn early(seed: borrow String) -> Bool {{
+        fn early(seed: borrow string) -> Bool {{
             make(seed).byte_at({{ return true; 0 }});
             false
         }}
@@ -1034,7 +1034,7 @@ fn repeated_string_discard_reuses_one_block() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn make(seed: borrow String) -> String {{
+        fn make(seed: borrow string) -> string {{
             let result := seed.concat("");
             result
         }}
@@ -1077,9 +1077,9 @@ fn immediate_heap_result_matches_reuse_the_arm_allocation() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn check(seed: borrow String, early: Bool) -> Bool {{
+        fn check(seed: borrow string, early: Bool) -> Bool {{
             let text := seed.concat("");
-            let result: Result<String, Error> = Ok(text);
+            let result: Result<string, Error> = Ok(text);
             match result {{
                 Err(_) => false,
                 Ok(value) => {{
@@ -1088,11 +1088,11 @@ fn immediate_heap_result_matches_reuse_the_arm_allocation() {
                 }}
             }}
         }}
-        fn make(seed: borrow String) -> Result<String, Error> {{
+        fn make(seed: borrow string) -> Result<string, Error> {{
             let text := seed.concat("");
             Ok(text)
         }}
-        fn check_return(seed: borrow String, early: Bool) -> Bool {{
+        fn check_return(seed: borrow string, early: Bool) -> Bool {{
             let result := make(seed);
             match result {{
                 Ok(value) => {{
@@ -1142,11 +1142,11 @@ fn share_string_replacement_and_push_str_reuse_caller_blocks() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn replace(text: share String, seed: borrow String) {{
+        fn replace(text: share string, seed: borrow string) {{
             text = seed.concat("");
         }}
-        fn inspect(text: share String) -> u32 {{ text.len() }}
-        fn append_empty(text: share String) {{ text.push_str(""); }}
+        fn inspect(text: share string) -> u32 {{ text.len() }}
+        fn append_empty(text: share string) {{ text.push_str(""); }}
         fn main() -> Result<Bool, Error> {{
             let seed := "{literal}";
             var step := 0;
@@ -1393,9 +1393,9 @@ fn local_struct_strings_reuse_heap_on_lexical_exits() {
     let bytes = build(
         &format!(
             r#"
-        type Label {{ first: String, number: u32, second: String, literal: String }}
+        type Label {{ first: string, number: u32, second: string, literal: string }}
 
-        fn staged(part: borrow String, exit: Bool) -> u32 {{
+        fn staged(part: borrow string, exit: Bool) -> u32 {{
             let first := part.concat("!");
             let second := part.concat("?");
             let label := Label {{
@@ -1462,7 +1462,7 @@ fn string_field_replacement_reuses_blocks_without_overwriting_live_fields() {
     let bytes = build(
         &format!(
             r#"
-        type Label {{ other: String, text: String }}
+        type Label {{ other: string, text: string }}
         fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
@@ -1514,15 +1514,15 @@ fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
     let bytes = build(
         &format!(
             r#"
-        type Label {{ text: String, note: String }}
-        fn join(left: borrow String, right: borrow String) -> String {{
+        type Label {{ text: string, note: string }}
+        fn join(left: borrow string, right: borrow string) -> string {{
             let result := left.concat(right);
             result
         }}
         fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn early(part: borrow String) -> Bool {{
+        fn early(part: borrow string) -> Bool {{
             var label := Label {{ text: "", note: "" }};
             label.text = part.concat("?");
             label.text = label.text.concat({{
@@ -1533,10 +1533,10 @@ fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
             }});
             false
         }}
-        fn forward(value: String, unused: u32) -> String {{
+        fn forward(value: string, unused: u32) -> string {{
             value
         }}
-        fn early_call(part: borrow String) -> Bool {{
+        fn early_call(part: borrow string) -> Bool {{
             var label := Label {{ text: "", note: "" }};
             label.text = part.concat("?");
             label.text = forward(part.concat("!"), {{
@@ -1599,10 +1599,10 @@ fn temporary_string_initializers_reuse_memory_after_constructor_exits() {
     let bytes = build(
         &format!(
             r#"
-        type Record {{ first: String, order: u32, second: String }}
-        type Note {{ text: String }}
-        fn static_note() -> String {{ "é" }}
-        fn make(part: borrow String, order: u32) -> String {{
+        type Record {{ first: string, order: u32, second: string }}
+        type Note {{ text: string }}
+        fn static_note() -> string {{ "é" }}
+        fn make(part: borrow string, order: u32) -> string {{
             if order == 1 {{
                 let text := part.concat("?");
                 return text;
@@ -1612,7 +1612,7 @@ fn temporary_string_initializers_reuse_memory_after_constructor_exits() {
         fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn early(part: borrow String, exit: Bool) -> Bool {{
+        fn early(part: borrow string, exit: Bool) -> Bool {{
             let record := Record {{
                 first: part.concat("!"),
                 second: make(part, 1),
@@ -1672,15 +1672,15 @@ fn string_struct_call_borrows_keep_heap_cleanup_in_the_caller() {
     let bytes = build(
         &format!(
             r#"
-        type Record {{ text: String, number: u32 }}
-        fn last_is(text: borrow String, index: u32, expected: u8) -> Bool {{
+        type Record {{ text: string, number: u32 }}
+        fn last_is(text: borrow string, index: u32, expected: u8) -> Bool {{
             match text.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
         }}
         fn inspect(record: borrow Record, expected: u8) -> Bool {{
             record.number == 7 && record.text.len() == 20_001
                 && last_is(record.text.borrow(), 20_000, expected)
         }}
-        fn early(part: borrow String, stop: Bool) -> Bool {{
+        fn early(part: borrow string, stop: Bool) -> Bool {{
             let record := Record {{ text: part.concat("!"), number: 7 }};
             inspect(record.borrow(), {{
                 if stop {{ return record.text.len() == 20_001; }}
@@ -1696,6 +1696,168 @@ fn string_struct_call_borrows_keep_heap_cleanup_in_the_caller() {
             let moved := record;
             if !inspect(moved.borrow(), 63) || moved.text.len() != 20_001 {{ return 0; }}
             if early(part.borrow(), true) && early(part.borrow(), false) {{ 1 }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}
+
+#[test]
+fn string_struct_call_shares_keep_heap_cleanup_in_the_caller() {
+    let part = "a".repeat(20_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Record {{ text: string, literal: string, number: u32 }}
+        fn last_is(text: borrow string, index: u32, expected: u8) -> Bool {{
+            match text.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
+        }}
+        fn inspect_pair(first: borrow string, second: borrow string) -> Bool {{
+            first.len() == 20_001 && second.len() == 3
+        }}
+        fn inspect(record: share Record, expected: u8) -> Bool {{
+            record.number == 7 && record.text.len() == 20_001
+                && last_is(record.text.borrow(), 20_000, expected)
+                && record.literal.len() == 3
+                && last_is(record.literal.borrow(), 0, 195)
+                && last_is(record.literal.borrow(), 2, 33)
+                && inspect_pair(record.text.borrow(), record.literal.borrow())
+        }}
+        fn early(part: borrow string, stop: Bool) -> Bool {{
+            var record := Record {{ text: part.concat("!"), literal: "é!", number: 7 }};
+            inspect(record.share(), {{
+                if stop {{ return part.len() == 20_000; }}
+                33
+            }})
+        }}
+        fn main() -> i32 {{
+            let part := "{part}";
+            var record := Record {{ text: part.concat("!"), literal: "é!", number: 7 }};
+            if !inspect(record.share(), 33) {{ return 0; }}
+            record.text = part.concat("?");
+            if !inspect(record.share(), 63) {{ return 0; }}
+            var moved := record;
+            if !inspect(moved.share(), 63) || moved.text.len() != 20_001 {{ return 0; }}
+            if early(part.borrow(), true) && early(part.borrow(), false) {{ 1 }} else {{ 0 }}
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}
+
+#[test]
+fn string_struct_share_replacement_reuses_heap_and_keeps_sibling_loan_live() {
+    let part = "a".repeat(8_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Record {{ text: string, sibling: string }}
+        fn byte_is(value: borrow string, index: u32, expected: u8) -> Bool {{
+            match value.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
+        }}
+        fn replace(record: share Record, suffix: borrow string, should_exit: Bool) {{
+            let sibling := record.sibling.borrow();
+            if should_exit {{ return; }}
+            record.text = record.text.concat(suffix);
+            if sibling.len() != 4 {{ return; }}
+        }}
+        fn make_text(value: Bool) -> string {{
+            let text := "fresh";
+            text
+        }}
+        fn replace_with_rhs_exit(record: share Record, should_exit: Bool) {{
+            record.text = make_text({{ if should_exit {{ return; }} false }});
+        }}
+        fn main() -> i32 {{
+            let part := "{part}";
+            var record := Record {{ text: part.concat("!"), sibling: "keep" }};
+            replace_with_rhs_exit(record.share(), true);
+            if record.text.len() != 8_001 || !byte_is(record.text.borrow(), 8_000, 33) {{ return 0; }}
+            if false {{ record.text = "skipped".concat("!"); }}
+            if record.text.len() != 8_001 || !byte_is(record.text.borrow(), 8_000, 33) {{ return 0; }}
+            let other := part.concat("?");
+            replace(record.share(), other.borrow(), false);
+            if record.text.len() != 16_002 || !byte_is(record.text.borrow(), 16_001, 63)
+                || other.len() != 8_001 || !byte_is(other.borrow(), 8_000, 63)
+                || !byte_is(record.sibling.borrow(), 0, 107) {{ return 0; }}
+            1
+        }}
+        "#
+        ),
+        4096,
+    )
+    .unwrap();
+
+    wasmparser::validate(&bytes).unwrap();
+    let engine = Engine::default();
+    let module = Module::new(&engine, &bytes).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    for _ in 0..16 {
+        assert_eq!(main.call(&mut store, ()).unwrap(), 1);
+    }
+}
+
+#[test]
+fn string_struct_share_later_argument_exit_reuses_heap() {
+    let part = "a".repeat(8_000);
+    let bytes = build(
+        &format!(
+            r#"
+        type Record {{ text: string, sibling: string }}
+        fn replace(record: share Record, suffix: borrow string, code: i32) {{}}
+        fn later_argument_exit(should_exit: Bool) -> i32 {{
+            let part := "{part}";
+            var record := Record {{ text: part.concat("!"), sibling: "keep" }};
+            let pending := part.concat("discard");
+            replace(record.share(), pending.borrow(), {{ if should_exit {{ return 5; }} 0 }});
+            6
+        }}
+        fn main() -> i32 {{
+            if later_argument_exit(true) == 5 {{ 1 }} else {{ 0 }}
         }}
         "#
         ),

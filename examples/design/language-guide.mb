@@ -194,8 +194,8 @@ let independent := scores[0];
 // ACCEPTED DIRECTION: named source relationships and independently owned results.
 // Exact StringView and 'from' syntax remain illustrative.
 
-// fn first_word(text: borrow String) -> StringView from text
-// fn owned_first_word(text: borrow String) -> String
+// fn first_word(text: borrow string) -> StringView from text
+// fn owned_first_word(text: borrow string) -> string
 
 // The first result depends on text; the second owns its data independently.
 // A relationship annotation does not keep an owner alive automatically.

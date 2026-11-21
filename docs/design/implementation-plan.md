@@ -242,7 +242,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   receivers after the read or an early exit during offset evaluation.
   Direct internal calls can borrow an explicit temporary String argument
   through the call or receive ownership of an inline concat or String call
-  result. A direct `share String` parameter can replace a whole caller
+  result. A direct `share string` parameter can replace a whole caller
   local while preserving caller ownership. `String.push_str` uses checked
   concat and replacement to append a read-only suffix. Heap replacement through
   forwarded share handles, other nested heap uses, and general drop
@@ -258,7 +258,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   `.is_char_boundary(offset)` checks scalar boundaries. `.byte_at(index)`
   returns a raw byte as `Option<u8>`, and `.scalar_at(index)` decodes a
   Unicode scalar at a byte offset as `Option<u32>`. Internal
-  `Result<String, E>` supports static success payloads and consuming matches.
+  `Result<string, E>` supports static success payloads and consuming matches.
   A heap `Ok` supports immediate consuming matches in the same function
   or after a direct internal return. Both require an explicit success
   binding. Other escapes remain gated.

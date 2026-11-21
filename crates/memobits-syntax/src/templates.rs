@@ -9,7 +9,7 @@ pub enum ParameterKind {
     Integer,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateId {
     Array,
     Bytes,

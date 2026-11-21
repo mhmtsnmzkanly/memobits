@@ -1,0 +1,27 @@
+fn factorial(count: i32) -> i32 {
+    var result: i32 = 1;
+    var step: i32 = 1;
+    loop {
+        if step > count { break; }
+        result = result * step;
+        step = step + 1;
+    }
+    result
+}
+
+fn sum_to(count: i32) -> i32 {
+    var total: i32 = 0;
+    var step: i32 = 1;
+    loop {
+        if step > count { break; }
+        total = total + step;
+        step = step + 1;
+    }
+    total
+}
+
+fn main() -> i32 {
+    let value := factorial(5);
+    let total := sum_to(10);
+    if value == 120 && total == 55 { 0 } else { 1 }
+}

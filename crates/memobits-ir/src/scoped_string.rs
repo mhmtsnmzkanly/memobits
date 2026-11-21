@@ -40,6 +40,11 @@ impl super::Program {
                         .entry(Slot::Local(index, source))
                         .or_default()
                         .push(Slot::Return(index));
+                } else if let Some(source) = direct_string_tuple_return(self, function, block) {
+                    moves
+                        .entry(Slot::Local(index, source))
+                        .or_default()
+                        .push(Slot::Return(index));
                 }
                 for (position, instruction) in block.instructions.iter().enumerate() {
                     match &instruction.kind {
@@ -110,10 +115,22 @@ impl super::Program {
                         }
                         InstructionKind::ReplaceStringField { target, value, .. } => {
                             if let Source::Local(source) = value.source {
+                                let parameter = function
+                                    .parameter_locals
+                                    .iter()
+                                    .position(|local| local == target)
+                                    .filter(|position| {
+                                        function.signature.parameters[*position].access
+                                            == Access::Share
+                                    });
+                                let destination = parameter
+                                    .map_or(Slot::Local(index, *target), |parameter| {
+                                        Slot::ShareWrite(index, parameter)
+                                    });
                                 moves
                                     .entry(Slot::Local(index, source))
                                     .or_default()
-                                    .push(Slot::Local(index, *target));
+                                    .push(destination);
                             }
                         }
                         InstructionKind::Store { reference, value } => {
@@ -157,12 +174,20 @@ impl super::Program {
                                         .push(Slot::Local(index, target));
                                 }
                             }
-                            if let Some((callee, target)) = call_binding(
+                            if let Some(result) = call_binding_result(
+                                self,
                                 function,
+                                callee,
                                 &block.instructions[position..],
-                                &Type::String,
                             ) {
-                                facts[index].string_call_bindings.insert(target);
+                                let (callee, target) = result;
+                                if function
+                                    .locals
+                                    .get(target.0 as usize)
+                                    .is_some_and(|local| local.ty == Type::String)
+                                {
+                                    facts[index].string_call_bindings.insert(target);
+                                }
                                 moves
                                     .entry(Slot::Return(callee))
                                     .or_default()
@@ -380,7 +405,7 @@ pub(super) fn direct_share_owner(
     function
         .locals
         .get(local.0 as usize)
-        .is_some_and(|local| local.ty == Type::String && local.mutable)
+        .is_some_and(|local| matches!(local.ty, Type::String | Type::Struct(_)) && local.mutable)
         .then_some(*local)
 }
 
@@ -425,6 +450,7 @@ pub(super) fn return_capture(block: &Block) -> Option<(usize, LocalId)> {
 
 /// Find a direct call result assigned to a permitted local after argument cleanup.
 pub(super) fn call_binding(
+    program: &super::Program,
     function: &Function,
     instructions: &[Instruction],
     result: &Type,
@@ -458,6 +484,15 @@ pub(super) fn call_binding(
                             &local.ty == result && (*initialize || local.mutable)
                         })
                 }
+                Type::Struct(id) if tuple_owns_string(program, id.0) => {
+                    *initialize
+                        && value.mode == UseMode::Consume
+                        && !function.parameter_locals.contains(target)
+                        && function
+                            .locals
+                            .get(target.0 as usize)
+                            .is_some_and(|local| local.ty == *result)
+                }
                 _ => false,
             };
             if !permitted {
@@ -472,6 +507,57 @@ pub(super) fn call_binding(
     };
     (value.source == Source::Value(output) && value.mode == UseMode::Consume)
         .then_some((callee.0 as usize, target))
+}
+
+fn call_binding_result(
+    program: &super::Program,
+    function: &Function,
+    callee: &Operand,
+    instructions: &[Instruction],
+) -> Option<(usize, LocalId)> {
+    let Source::Function(callee_id) = callee.source else {
+        return None;
+    };
+    let result = program
+        .functions
+        .get(callee_id.0 as usize)?
+        .signature
+        .result
+        .as_ref();
+    if !matches!(result, Type::String)
+        && !matches!(result, Type::Struct(id) if tuple_owns_string(program, id.0))
+    {
+        return None;
+    }
+    call_binding(program, function, instructions, result)
+}
+
+pub(super) fn tuple_owns_string(program: &super::Program, id: u32) -> bool {
+    program.types.get(id as usize).is_some_and(|definition| {
+        definition.path.module.as_slice() == ["\0tuple"]
+            && matches!(&definition.kind, super::TypeDefKind::Struct { fields }
+                if fields.iter().any(|field| field.ty == Type::String))
+    })
+}
+
+fn direct_string_tuple_return(
+    program: &super::Program,
+    function: &Function,
+    block: &Block,
+) -> Option<LocalId> {
+    if !matches!(function.signature.result.as_ref(), Type::Struct(id) if tuple_owns_string(program, id.0))
+    {
+        return None;
+    }
+    let TerminatorKind::Return(Some(Operand {
+        source: Source::Local(local),
+        mode: UseMode::Consume,
+        ..
+    })) = block.terminator.kind
+    else {
+        return None;
+    };
+    Some(local)
 }
 
 pub(super) fn list_share_destination(
@@ -553,8 +639,10 @@ pub(super) fn owned_call_transfer(
     let Source::Local(local) = source.source else {
         return None;
     };
+    let owns_string_tuple =
+        matches!(parameter.ty, Type::Struct(id) if tuple_owns_string(program, id.0));
     if parameter.access != super::Access::Owned
-        || parameter.ty != Type::String
+        || (parameter.ty != Type::String && !owns_string_tuple)
         || source.mode != UseMode::Consume
     {
         return None;
@@ -585,6 +673,7 @@ fn string_destination(function: &Function, target: LocalId, initialize: bool) ->
 }
 
 pub(super) fn validate(
+    program: &super::Program,
     function: &Function,
     id: FunctionId,
     facts: &[HeapStrings],
@@ -630,8 +719,19 @@ pub(super) fn validate(
         // A moved binding remains in lexical scope. The separate move checker
         // tracks availability, and the descriptor tracks who owns the block.
         let mut in_scope = entries[block_id.0 as usize].clone().unwrap();
-        for instruction in &block.instructions {
+        let return_capture = return_capture(block);
+        for (position, instruction) in block.instructions.iter().enumerate() {
             let initialized = match &instruction.kind {
+                InstructionKind::Capture(Operand {
+                    source: Source::Local(source),
+                    ..
+                }) if return_capture == Some((position, *source))
+                    && matches!(function.signature.result.as_ref(), Type::Struct(id)
+                            if tuple_owns_string(program, id.0)) =>
+                {
+                    in_scope.remove(source);
+                    None
+                }
                 InstructionKind::InitConcatString { target, .. } => Some(*target),
                 InstructionKind::Assign {
                     target,
@@ -724,6 +824,11 @@ pub(super) fn validate(
                     Some(block_id),
                     "owned local initialized while still in scope",
                 );
+            }
+        }
+        if matches!(block.terminator.kind, TerminatorKind::Return(_)) {
+            if let Some(source) = direct_string_tuple_return(program, function, block) {
+                in_scope.remove(&source);
             }
         }
         if matches!(block.terminator.kind, TerminatorKind::Return(_)) && !in_scope.is_empty() {

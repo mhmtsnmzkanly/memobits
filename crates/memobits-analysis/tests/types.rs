@@ -14,9 +14,9 @@ fn codes(source: &str) -> Vec<String> {
 #[test]
 fn string_literals_are_owned_in_type_analysis() {
     let source = r#"
-        type Text = String;
+        type Text = string;
         fn inspect(s: borrow Text) {}
-        fn take(s: String) -> String { s }
+        fn take(s: string) -> string { s }
         fn f() {
             let text: Text = "é";
             inspect(text.borrow());
@@ -29,9 +29,9 @@ fn string_literals_are_owned_in_type_analysis() {
     let diagnostics = check(source);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     for (source, expected) in [
-        (r#"fn f() { let s: String = 1; }"#, "TE002"),
+        (r#"fn f() { let s: string = 1; }"#, "TE002"),
         (
-            r#"fn take(s: String) {} fn f(s: borrow String) { take(s); }"#,
+            r#"fn take(s: string) {} fn f(s: borrow string) { take(s); }"#,
             "TE002",
         ),
         (r#"fn f() { let s := "é"; s.copy(); }"#, "TE017"),
@@ -48,7 +48,7 @@ fn string_scope_exits_end_shadowed_owners_and_preserve_return_values() {
     use memobits_ir::{InstructionKind, Source, TerminatorKind, UseMode};
 
     let source = r#"
-        fn make(input: String, again: Bool) -> String {
+        fn make(input: string, again: Bool) -> string {
             let label := "outer";
             loop {
                 let label := "inner";
@@ -97,7 +97,7 @@ fn string_scope_exits_end_shadowed_owners_and_preserve_return_values() {
         assert_eq!(ended, expected, "{exit}");
         if let TerminatorKind::Return(Some(value)) = &block.terminator.kind {
             let Source::Value(result) = value.source else {
-                panic!("return must use the captured String")
+                panic!("return must use the captured string")
             };
             assert!(matches!(&block.instructions[0].kind,
                 InstructionKind::Capture(operand)
@@ -148,7 +148,7 @@ fn string_scope_end_invalidates_owner_and_rejects_live_loans() {
 #[test]
 fn string_scalar_at_requires_u32_and_returns_owned_option_u32() {
     assert!(
-        codes(r#"fn f(s: borrow String, n: u32) -> Option<u32> { s.scalar_at(n) }"#).is_empty()
+        codes(r#"fn f(s: borrow string, n: u32) -> Option<u32> { s.scalar_at(n) }"#).is_empty()
     );
     for (source, expected) in [
         (r#"fn f() -> Option<u8> { "é".scalar_at(0) }"#, "TE002"),
@@ -164,7 +164,7 @@ fn string_scalar_at_requires_u32_and_returns_owned_option_u32() {
 
 #[test]
 fn string_byte_at_returns_owned_option_u8_and_requires_a_u32_offset() {
-    assert!(codes(r#"fn f(s: borrow String, n: u32) -> Option<u8> { s.byte_at(n) }"#).is_empty());
+    assert!(codes(r#"fn f(s: borrow string, n: u32) -> Option<u8> { s.byte_at(n) }"#).is_empty());
     for (source, expected) in [
         (r#"fn f() -> Option<i8> { "é".byte_at(1) }"#, "TE002"),
         (r#"fn f(n: i32) { "é".byte_at(n); }"#, "TE002"),
@@ -200,7 +200,7 @@ fn string_byte_at_ir_rejects_an_incompatible_option_layout() {
 #[test]
 fn string_boundary_requires_a_string_and_one_u32_offset() {
     assert!(
-        codes(r#"fn f(s: borrow String, n: u32) -> Bool { s.is_char_boundary(n) }"#).is_empty()
+        codes(r#"fn f(s: borrow string, n: u32) -> Bool { s.is_char_boundary(n) }"#).is_empty()
     );
     for (source, expected) in [
         (r#"fn f() { "é".is_char_boundary(); }"#, "TE010"),
@@ -217,7 +217,7 @@ fn string_boundary_requires_a_string_and_one_u32_offset() {
 
 #[test]
 fn string_length_requires_a_string_and_no_arguments() {
-    assert!(codes(r#"fn f(s: borrow String) -> u32 { s.len() }"#).is_empty());
+    assert!(codes(r#"fn f(s: borrow string) -> u32 { s.len() }"#).is_empty());
     for (source, expected) in [
         (r#"fn f() -> i32 { "é".len() }"#, "TE002"),
         (r#"fn f() { "é".len(1); }"#, "TE010"),
@@ -236,7 +236,7 @@ fn string_literals_lower_to_owned_ir_with_utf8_payloads() {
 
     let parsed = parse(
         SourceId(9),
-        r#"fn f() -> String { let empty := ""; "é😀" }"#,
+        r#"fn f() -> string { let empty := ""; "é😀" }"#,
     );
     let program =
         memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap();

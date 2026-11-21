@@ -50,7 +50,7 @@ Immediate `.len()`, `.byte_at()`, `.is_char_boundary()` and `.scalar_at()`
 reads can also use concat or direct call results. A hidden local owns the
 receiver before the offset is evaluated. It releases the allocation after
 the read or on an early normal exit while evaluating the offset. A direct
-internal `borrow String` parameter also accepts an explicit `.borrow()` on
+internal `borrow string` parameter also accepts an explicit `.borrow()` on
 a concat or owned String call result. The caller keeps that owner live
 through later argument evaluation and the call. Cleanup releases it when
 the call returns or when later argument evaluation exits normally without
@@ -59,7 +59,7 @@ owned String parameter can also take an inline concat or owned String call
 result. The caller stages the owner during argument evaluation. Invocation
 moves it to the callee. A normal exit before invocation releases it in the
 caller. A whole mutable caller local can be passed as `text.share()` to a
-direct internal `share String` parameter. The callee can replace it with
+direct internal `share string` parameter. The callee can replace it with
 concat, a literal, or an owned local. Use a named local for a heap-producing
 call result on the RHS. Replacement reads the RHS before releasing the old
 allocation, then moves the new descriptor into the caller's existing slot.
@@ -68,8 +68,17 @@ or sharing that slot leaves its descriptor intact. Installing heap text
 through a forwarded share or a share alias remains gated. General nested
 heap uses still require broader drop elaboration.
 
+A direct `share Record` parameter can also replace one of its String fields.
+The same RHS forms and sequencing rules apply as for a direct mutable local:
+the RHS is staged before the previous field descriptor is released, and a
+named local is required for a heap-producing call result. The caller keeps
+the only owning descriptor and cleans it up after the call. Field loans remain
+exclusive for the written field, while disjoint sibling field loans remain
+available. Stored or forwarded share aliases and whole-record replacement
+remain gated.
+
 `text.push_str(suffix)` appends a read-only String suffix and returns unit.
-The receiver must be a named mutable String local or a direct `share String`
+The receiver must be a named mutable String local or a direct `share string`
 parameter. The exclusive loan covers suffix evaluation, so the suffix
 cannot alias the receiver. Early exit during suffix evaluation leaves the
 append unperformed. The implementation allocates through checked concat and
@@ -192,12 +201,14 @@ local. A whole-local move into another new binding transfers cleanup to
 that binding. Read a String field by borrowing it from a named struct local.
 A live field loan blocks moving or ending the heap-owning struct.
 
-A direct internal call can take a read-only `borrow` parameter for one of
-these structs. Pass `record.borrow()` directly from a named owning local.
-The callee receives the address of the caller's struct and can read or borrow
-its String fields. The caller keeps ownership and performs cleanup. The
-whole-struct loan stays live through later argument evaluation and the call,
-so it prevents a move or write to the struct during that interval.
+A direct internal call can take a `borrow` or `share` parameter for one of
+these structs. Pass `record.borrow()` or `record.share()` directly from a
+named owning local. The callee receives the address of the caller's struct
+and can read or borrow its String fields. A share is exclusive for the loan's
+duration; field writes through it remain gated. The caller keeps ownership and
+performs cleanup. The whole-struct loan stays live through later argument
+evaluation and the call, so it prevents a move or write to the struct during
+that interval.
 
 Lowering evaluates fields in source order and stages each String move,
 concat, or call result as a lexical owner. If a later initializer returns,
@@ -226,9 +237,9 @@ Wasm gates general block and branch results and indirect calls as String
 field initializers, heap-owning struct temporaries that escape their
 constructor, whole-value replacement of a heap-owning struct, consuming
 field extraction and other field writes on heap-owning structs, aggregate
-nesting, and Error inheritance. Owned and share arguments, struct returns,
-exported struct borrow parameters, storing whole borrows in local bindings,
-and forwarding a whole borrow from a parameter are gated. String field
+nesting, and Error inheritance. Owned arguments, struct returns, exported
+struct reference parameters, storing whole references in local bindings, and
+forwarding a whole reference from a parameter are gated. String field
 replacement through a reference or projection chain, indirect calls, and
 general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's

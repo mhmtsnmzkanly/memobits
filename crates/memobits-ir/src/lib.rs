@@ -139,6 +139,7 @@ impl TypeDef {
 pub enum Primitive {
     Unit,
     Bool,
+    Char,
     I8,
     I16,
     I32,
@@ -246,6 +247,13 @@ pub enum BinaryOp {
     Add,
     Subtract,
     Multiply,
+    WrappingAdd,
+    WrappingMultiply,
+    BitwiseAnd,
+    BitwiseXor,
+    BitwiseOr,
+    ShiftLeft,
+    ShiftRight,
     Divide,
     Remainder,
     Less,
@@ -460,6 +468,13 @@ pub enum InstructionKind {
     Unary {
         op: UnaryOp,
         operand: Operand,
+    },
+    /// Explicit numeric conversion. `source` is retained so validation and
+    /// backends can implement the source language's width and signedness rules.
+    Cast {
+        value: Operand,
+        source: Primitive,
+        target: Primitive,
     },
     Binary {
         op: BinaryOp,
@@ -748,7 +763,7 @@ impl Program {
             if defined.len() != function.values.len() {
                 push(&mut errors, id, None, "some value IDs have no definition");
             }
-            scoped_string::validate(function, id, &heap_strings, &mut errors);
+            scoped_string::validate(self, function, id, &heap_strings, &mut errors);
             validate_operand_escapes(self, function, id, &heap_strings, &mut errors);
         }
         if errors.is_empty() {
@@ -1675,7 +1690,8 @@ fn validate_instruction(
                             | Primitive::U8
                             | Primitive::U16
                             | Primitive::U32
-                            | Primitive::U64,
+                            | Primitive::U64
+                            | Primitive::Char,
                     )),
                 ) | (
                     Constant::Float(_),
@@ -1684,7 +1700,15 @@ fn validate_instruction(
                     | (Constant::Unit, Some(Type::Primitive(Primitive::Unit)))
                     | (Constant::String(_), Some(Type::String))
             );
-            if out.is_some() && !okay {
+            let valid_char = match (value, out) {
+                (Constant::Integer(text), Some(Type::Primitive(Primitive::Char))) => text
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(char::from_u32)
+                    .is_some(),
+                _ => true,
+            };
+            if out.is_some() && (!okay || !valid_char) {
                 push(
                     errors,
                     id,
@@ -2732,8 +2756,30 @@ fn validate_instruction(
         InstructionKind::ReplaceStringField { target, field, value } => {
             let actual = operand_type(program, function, value, errors, id, block);
             let destination = function.locals.get(target.0 as usize).is_some_and(|local| {
-                let Type::Struct(ty) = local.ty else { return false; };
-                local.mutable && !function.parameter_locals.contains(target)
+                let (ty, allowed) = match &local.ty {
+                    Type::Struct(ty) => (
+                        *ty,
+                        local.mutable && !function.parameter_locals.contains(target),
+                    ),
+                    Type::Reference {
+                        access: Access::Share,
+                        inner,
+                    } if function.parameter_locals.contains(target) => {
+                        let Type::Struct(ty) = inner.as_ref() else {
+                            return false;
+                        };
+                        let Some(position) = function
+                            .parameter_locals
+                            .iter()
+                            .position(|parameter| parameter == target)
+                        else {
+                            return false;
+                        };
+                        (*ty, function.signature.parameters[position].access == Access::Share)
+                    }
+                    _ => return false,
+                };
+                allowed
                     && program.types.get(ty.0 as usize).is_some_and(|ty| {
                         matches!(&ty.kind, TypeDefKind::Struct { fields }
                             if fields.get(*field as usize).is_some_and(|field| field.ty == Type::String))
@@ -2743,7 +2789,7 @@ fn validate_instruction(
                 || value.mode != UseMode::Consume || !matches!(value.source, Source::Local(_))
             {
                 push(errors, id, Some(block),
-                    "String field replacement requires a mutable local struct and a consumed String local");
+                    "String field replacement requires a mutable local or shared struct parameter and a consumed String local");
             }
         }
         InstructionKind::Store { reference, value } => {
@@ -2823,6 +2869,23 @@ fn validate_instruction(
                 }
             }
         }
+        InstructionKind::Cast { value, source, target } => {
+            let input = operand_type(program, function, value, errors, id, block);
+            let expected = Type::Primitive(*target);
+            let numeric = |primitive: Primitive| matches!(primitive,
+                Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 |
+                Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 |
+                Primitive::F32 | Primitive::F64);
+            if instruction.output.is_none()
+                || !numeric(*source)
+                || !numeric(*target)
+                || input != Some(Type::Primitive(*source))
+                || out != Some(&expected)
+                || value.mode != UseMode::Read
+            {
+                push(errors, id, Some(block), "numeric cast source, target, or operand type is invalid");
+            }
+        }
         InstructionKind::Binary { op, left, right } => {
             if matches!(op, BinaryOp::And | BinaryOp::Or) {
                 push(
@@ -2849,13 +2912,29 @@ fn validate_instruction(
                     BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
                         both && is_numeric(&lhs) && output == &lhs
                     }
+                    BinaryOp::WrappingAdd | BinaryOp::WrappingMultiply => {
+                        both
+                            && lhs == Type::Primitive(Primitive::U32)
+                            && output == &lhs
+                    }
+                    BinaryOp::BitwiseAnd
+                    | BinaryOp::BitwiseXor
+                    | BinaryOp::BitwiseOr
+                    | BinaryOp::ShiftLeft
+                    | BinaryOp::ShiftRight => {
+                        both && lhs == Type::Primitive(Primitive::U32) && output == &lhs
+                    }
                     BinaryOp::Remainder => both && is_integer(&lhs) && output == &lhs,
                     BinaryOp::Less
                     | BinaryOp::LessEqual
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => both && is_numeric(&lhs) && output == &bool_ty,
                     BinaryOp::Equal | BinaryOp::NotEqual => {
-                        both && (is_numeric(&lhs) || lhs == bool_ty) && output == &bool_ty
+                        both
+                            && (is_numeric(&lhs)
+                                || lhs == bool_ty
+                                || lhs == Type::Primitive(Primitive::Char))
+                            && output == &bool_ty
                     }
                     BinaryOp::And | BinaryOp::Or => both && lhs == bool_ty && output == &bool_ty,
                 };
@@ -3165,6 +3244,7 @@ fn validate_operand_escapes(
                         .as_ref();
                     if matches!(result, Type::List(_))
                         && scoped_string::call_binding(
+                            program,
                             function,
                             &block.instructions[position..],
                             result,
@@ -3180,14 +3260,19 @@ fn validate_operand_escapes(
                     }
                     if facts.returns_heap
                         && scoped_string::call_binding(
+                            program,
                             function,
                             &block.instructions[position..],
-                            &Type::String,
+                            result,
                         )
                         .is_none()
                     {
-                        push(errors, id, block_id,
-                            "heap String call result must be assigned directly to a whole String local");
+                        let message = if matches!(result, Type::String) {
+                            "heap String call result must be assigned directly to a whole String local"
+                        } else {
+                            "heap String tuple call result must be assigned directly to a whole tuple local"
+                        };
+                        push(errors, id, block_id, message);
                     }
                     if facts.returns_heap_ok
                         && scoped_string::immediate_result_match(program, function, block, position)
@@ -3246,9 +3331,11 @@ fn validate_operand_escapes(
         for (position, instruction) in block.instructions.iter().enumerate() {
             match &instruction.kind {
                 InstructionKind::Capture(value) => {
+                    let returns_owned_tuple = matches!(function.signature.result.as_ref(),
+                        Type::Struct(tuple) if scoped_string::tuple_owns_string(program, tuple.0));
                     if !return_capture.is_some_and(|(returned, source)| {
                         returned == position && heap_locals.contains(&source)
-                    }) || *function.signature.result != Type::String
+                    }) || (*function.signature.result != Type::String && !returns_owned_tuple)
                     {
                         report(block_id, value, false, true);
                     }
@@ -3338,6 +3425,7 @@ fn validate_operand_escapes(
                     report(block_id, source, false, false);
                 }
                 InstructionKind::Unary { operand, .. } => report(block_id, operand, false, false),
+                InstructionKind::Cast { value, .. } => report(block_id, value, false, false),
                 InstructionKind::Binary { left, right, .. } => {
                     report(block_id, left, false, false);
                     report(block_id, right, false, false);
@@ -3411,7 +3499,15 @@ fn validate_operand_escapes(
                     }
                 }
             }
-            TerminatorKind::Return(Some(value)) => report(block_id, value, true, false),
+            TerminatorKind::Return(Some(value)) => {
+                let tuple_move = matches!(function.signature.result.as_ref(),
+                    Type::Struct(tuple) if scoped_string::tuple_owns_string(program, tuple.0))
+                    && matches!(value.source, Source::Local(_))
+                    && value.mode == UseMode::Consume;
+                if !tuple_move {
+                    report(block_id, value, true, false);
+                }
+            }
             TerminatorKind::Return(None) | TerminatorKind::Unreachable => {}
         }
     }

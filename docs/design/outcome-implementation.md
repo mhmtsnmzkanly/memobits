@@ -152,7 +152,7 @@ fn main() -> i32 {
    conversion. The entry metadata and decoder must support reporting that
    identity when it differs from declared `E`.
    Ancestor reference coercion is currently limited to direct internal call
-   arguments. `message: String` depends on string support.
+   arguments. `message: string` depends on string support.
 
 ## Acceptance evidence
 

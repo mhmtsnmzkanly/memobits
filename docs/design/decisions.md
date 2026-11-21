@@ -81,20 +81,32 @@ only where explicitly stated; unresolved API spellings remain proposals.
 ## Types, numbers, and text
 
 - Type declarations use `type Name { fields... }` for field-based types,
-  `type Name [ variants... ]` for enums, and `type Name = Other;` for aliases.
-- Type parameters exist only on compiler-known types: `Array<T, N>`, `Bytes<N>`, `List<T>`,
-  `Option<T>`, `Result<T, E>`, and the three-state `Attempt<T, E>`. They share
-  one category with `Array`: the compiler instantiates them per use.
-  User-defined generic types are not available now, but the door stays open:
-  `<...>` after a type name is reserved for type arguments, and compiler-known
-  types are instantiated through a general mechanism rather than per-type
-  special cases, so user declarations can adopt it later without a redesign.
+  `type Name [ variants... ]` for enums, `type Name;` for a bodyless nominal,
+  and `type Name = Other;` for aliases. A bodyless nominal is distinct from an
+  empty struct and cannot be constructed as a value in the current slice.
+- Non-generic nominal types can attach inherent methods with a trailing
+  `extend { ... }` block, or declare them in `extend Type { ... }`. Calls use
+  `value.method(...)`; public methods become available across a direct module
+  import. Trailing inherent extensions on generic types remain gated.
+- Compiler-known types include `Array<T, N>`, `Bytes<N>`, `List<T>`,
+  `Option<T>`, `Result<T, E>`, and the three-state `Attempt<T, E>`. User
+  nominal structs and enums also accept concrete type parameters; `u32` const
+  parameters are supported for admitted fixed-array shapes. Generic enum
+  variants are constructed and matched using the expected concrete enum type.
+  Generic functions support one direct owned `T` parameter constrained by one
+  interface bound, with explicit method selection and caller-visible unique
+  evidence forwarded through nested generic calls. Other constraint shapes,
+  borrowed parameters, and generic const-plus-evidence combinations remain
+  gated while G1 continues.
+- A postfix `T?` is shorthand for `Option<T>`. Grouped `(borrow T)?` parses as
+  `Option<borrow T>`, while `borrow T?` keeps the borrow outside the optional
+  type. This does not expand the current reference transport subset.
 - The three-state result is `Attempt<T, E>` with variants `Done(T)`, `Skipped`,
   and `Failed(E)`. `Result<T, E>` has `Ok(T)` and `Err(E)`; `Option<T>` has
   `Some(T)` and `None`. No short variant name is shared between them.
 - Errors form a hierarchy rooted in the compiler-known type `Error`, which the
   host understands. `Error` has the public fields `code: u32`, a
-  program-defined numeric code, and `message: String`, which joins it when
+  program-defined numeric code, and `message: string`, which joins it when
   strings are implemented. The compiler also records the concrete error type's
   identity in every error value; programs do not write it, and the host uses it
   to name the error type from artifact metadata.
@@ -128,14 +140,52 @@ only where explicitly stated; unresolved API spellings remain proposals.
   errors remain checked.
 - Floating-point operations follow IEEE behavior, including NaN and infinities.
   Protocol libraries can impose stricter finite-value requirements.
-- Strings are UTF-8. Byte length and Unicode scalar iteration are separate APIs;
+- `Char` is a distinct Unicode scalar type. Single-quoted literals contain
+  exactly one scalar; `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, and `\\'` escapes are
+  accepted. Its current Wasm representation is an unsigned 32-bit scalar code
+  point; only equality is supported in this slice.
+- Tuples preserve positional type identity and order. `(value)` remains
+  grouping; `(value,)` and `(first, second)` construct tuples, with `.0`/`.1`
+  projections. Positional initializers evaluate in written order and store by
+  tuple position. Labels are occurrence-local projection aliases: each labeled
+  type or value maps its own names to tuple slots, while structural identity
+  remains the ordered element types. Labeled initializers evaluate in written
+  order and store by mapped slot. Internal tuple arguments/results and local
+  tuples with owned String fields are supported. Named local tuples with direct
+  String fields can move through internal owned parameters and results; Wasm
+  transfers their cleanup with the tuple. Nominal String-owning struct transport
+  retains its separate gate. Tuple patterns/destructuring remain outside this slice.
+- Strings are UTF-8. The only source type spelling is lowercase `string`.
+  Byte length and Unicode scalar iteration are separate APIs;
   integer indexing is unsupported. Initial interpolation accepts identifiers
   only, reads without consuming, and formats basic types only. String literals
   appear as owned `String`; storage may be optimized without changing semantics.
 - Property/getter/setter systems, static storage, tasks, and parallel execution
   are deferred. The host/task boundary needs a separate design. Properties are
-  not ordinary field syntax. Extension definitions are also not yet specified;
-  initial extension targets, if adopted, are limited to same-package types.
+  not ordinary field syntax. The implemented I1 extension slice selects a
+  method explicitly with postfix `of`, and activates public extensions only
+  from a direct module import. See the [runnable multi-module example](../../examples/projects/module-imports/README.md).
+  Loading independent packages and cross-package extension identity remain
+  outside the current implementation.
+- User-defined `+` selects the compiler-provided `core::ops::Add` interface.
+  Add declares associated `Rhs` and `Output` types, bound by an implementation
+  with `type Rhs = T;` and `type Output = U;`. The selected method takes owned
+  operands and returns its declared output. A constrained `T: Add` function
+  may use `T::Rhs` and `T::Output` in its signature; specialization resolves
+  these projections through the uniquely selected, forwarded evidence. A local
+  interface named `Add` does not affect operator selection. Primitive numeric
+  `+` remains checked and built in; broader operator families remain gated.
+- User-defined `-` selects the compiler-provided `core::ops::Sub` interface.
+  It follows the same owned `Rhs`/`Output` and constrained evidence-forwarding
+  contract as `Add`. Primitive numeric subtraction remains checked and built in.
+- User-defined `*` selects the compiler-provided `core::ops::Mul` interface.
+  It follows the same owned `Rhs`/`Output` and constrained evidence-forwarding
+  contract as `Add` and `Sub`. Primitive numeric multiplication remains checked
+  and built in.
+- User-defined `/` and `%` select the compiler-provided `core::ops::Div` and
+  `core::ops::Rem` interfaces for nominal operands. Both follow the same owned
+  `Rhs`/`Output` and constrained evidence-forwarding contract. Primitive
+  numeric division and remainder retain their built-in checked semantics.
 
 ## Repetition and implementation order
 

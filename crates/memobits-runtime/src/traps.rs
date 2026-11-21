@@ -31,6 +31,7 @@ pub enum TrapReason {
     IndexOutOfBounds,
     ArgumentRange,
     HeapAllocation,
+    ShiftCount,
 }
 
 impl TrapReason {
@@ -46,6 +47,7 @@ impl TrapReason {
             8 => Self::IndexOutOfBounds,
             9 => Self::ArgumentRange,
             10 => Self::HeapAllocation,
+            11 => Self::ShiftCount,
             _ => return None,
         })
     }
@@ -63,6 +65,7 @@ impl TrapReason {
             Self::IndexOutOfBounds => "array index out of bounds",
             Self::ArgumentRange => "argument out of range for its parameter type",
             Self::HeapAllocation => "guest heap allocation failed",
+            Self::ShiftCount => "shift count must be less than 32",
         }
     }
 }

@@ -307,6 +307,9 @@ fn transfer_instruction(
         InstructionKind::Unary { operand, .. } => {
             transfer_operand(operand, state, diagnostics, function)
         }
+        InstructionKind::Cast { value, .. } => {
+            transfer_operand(value, state, diagnostics, function)
+        }
         InstructionKind::Binary { left, right, .. } => {
             let mut diagnostics = diagnostics;
             transfer_operand(left, state, diagnostics.as_deref_mut(), function);

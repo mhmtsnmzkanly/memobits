@@ -6,12 +6,15 @@ use std::collections::{HashMap, HashSet};
 
 use memobits_diagnostics::{Diagnostic, Span};
 use memobits_ir::{ErrorAncestry, TypeId};
-use memobits_syntax::{Field, ItemKind, Module, Type, TypeDefinition};
+use memobits_syntax::{
+    Field, GenericParameter, GenericParameterKind, ItemKind, Module, Type, TypeArgument,
+    TypeDefinition,
+};
 
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
 
-use super::templates::{resolve_arguments, ResolvedArgument};
-use super::{diagnostic, Ty};
+use super::templates::{ResolvedArgument, resolve_arguments};
+use super::{TupleAliases, Ty, diagnostic};
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldInfo {
@@ -43,6 +46,7 @@ pub(super) struct StructInfo {
     pub module: String,
     pub span: Span,
     pub is_enum: bool,
+    pub bodyless: bool,
     pub fields: Vec<FieldInfo>,
     pub variants: Vec<VariantInfo>,
 }
@@ -63,6 +67,19 @@ enum Def {
         module: String,
         target: Type,
     },
+    Generic {
+        module: String,
+        name: String,
+        parameters: Vec<GenericParameter>,
+        definition: TypeDefinition,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InstanceKey {
+    Template(TemplateId),
+    Generic(String),
+    Tuple(String),
 }
 
 #[derive(Clone)]
@@ -73,15 +90,60 @@ enum AliasState {
 
 pub(super) struct TypeTable {
     types: Vec<StructInfo>,
-    instances: RefCell<Vec<(TemplateId, Vec<ResolvedArgument>, StructInfo)>>,
+    instances: RefCell<Vec<(InstanceKey, Vec<ResolvedArgument>, StructInfo)>>,
     defs: HashMap<String, Def>,
     error_parents: HashMap<u32, u32>,
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
+    generic_in_progress: RefCell<HashSet<String>>,
 }
 
 fn key(module: &str, name: &str) -> String {
     format!("{module}::{name}")
+}
+
+fn substitute_type(
+    written: &Type,
+    types: &HashMap<String, Type>,
+    constants: &HashMap<String, u32>,
+) -> Type {
+    if written.path.len() == 1 && written.arguments.is_empty() {
+        if let Some(replacement) = types.get(&written.path[0]) {
+            return replacement.clone();
+        }
+    }
+    let mut output = written.clone();
+    output.arguments = written
+        .arguments
+        .iter()
+        .map(|argument| match argument {
+            TypeArgument::Type(ty) => TypeArgument::Type(substitute_type(ty, types, constants)),
+            TypeArgument::TupleField { label, ty } => TypeArgument::TupleField {
+                label: label.clone(),
+                ty: Box::new(substitute_type(ty, types, constants)),
+            },
+            TypeArgument::Reference {
+                span,
+                access,
+                referent,
+            } => TypeArgument::Reference {
+                span: *span,
+                access: *access,
+                referent: substitute_type(referent, types, constants),
+            },
+            TypeArgument::Integer(integer) => TypeArgument::Integer(integer.clone()),
+            TypeArgument::Const(name) => constants.get(name).map_or_else(
+                || TypeArgument::Const(name.clone()),
+                |value| {
+                    TypeArgument::Integer(memobits_syntax::IntegerLiteral {
+                        span: written.span,
+                        raw: value.to_string(),
+                    })
+                },
+            ),
+        })
+        .collect();
+    output
 }
 
 fn normalize(path: &str) -> &str {
@@ -105,29 +167,53 @@ fn primitive(name: &str) -> Option<Ty> {
         "f32" => "f32",
         "f64" => "f64",
         "Bool" => "Bool",
+        "Char" => "Char",
         _ => return None,
     }))
 }
 
 impl TypeTable {
+    fn contains_reference(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Ty::Reference { .. } => true,
+            Ty::Array(element, _) => self.contains_reference(element, visited),
+            Ty::Struct(id, _) | Ty::Enum(id, _) => {
+                if !visited.insert(*id) {
+                    return false;
+                }
+                let info = self.info(*id);
+                info.fields
+                    .iter()
+                    .any(|field| self.contains_reference(&field.ty, visited))
+                    || info
+                        .variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
+                        .any(|payload| self.contains_reference(payload, visited))
+            }
+            _ => false,
+        }
+    }
+
     fn error_type(&self, span: Span) -> Ty {
         let mut instances = self.instances.borrow_mut();
         if let Some((index, _)) = instances
             .iter()
             .enumerate()
-            .find(|(_, entry)| entry.0 == TemplateId::Error)
+            .find(|(_, entry)| entry.0 == InstanceKey::Template(TemplateId::Error))
         {
             return Ty::Struct((self.types.len() + index) as u32, "Error".into());
         }
         let id = (self.types.len() + instances.len()) as u32;
         instances.push((
-            TemplateId::Error,
+            InstanceKey::Template(TemplateId::Error),
             Vec::new(),
             StructInfo {
                 name: "Error".into(),
                 module: "__prelude".into(),
                 span,
                 is_enum: false,
+                bodyless: false,
                 fields: vec![FieldInfo {
                     name: "code".into(),
                     public: true,
@@ -151,19 +237,20 @@ impl TypeTable {
         let mut instances = self.instances.borrow_mut();
         if let Some(index) = instances
             .iter()
-            .position(|entry| entry.0 == TemplateId::Utf8Error)
+            .position(|entry| entry.0 == InstanceKey::Template(TemplateId::Utf8Error))
         {
             return Ty::Struct((self.types.len() + index) as u32, "Utf8Error".into());
         }
         let id = (self.types.len() + instances.len()) as u32;
         instances.push((
-            TemplateId::Utf8Error,
+            InstanceKey::Template(TemplateId::Utf8Error),
             vec![ResolvedArgument::Type(root)],
             StructInfo {
                 name: "Utf8Error".into(),
                 module: "__prelude".into(),
                 span,
                 is_enum: false,
+                bodyless: false,
                 fields: [("code", Ty::Primitive("u32")), ("offset", offset)]
                     .into_iter()
                     .map(|(name, ty)| FieldInfo {
@@ -187,10 +274,10 @@ impl TypeTable {
         span: Span,
     ) -> Ty {
         let mut instances = self.instances.borrow_mut();
-        if let Some((index, (_, _, info))) = instances
-            .iter()
-            .enumerate()
-            .find(|(_, (id, args, _))| *id == template.id && *args == arguments)
+        if let Some((index, (_, _, info))) =
+            instances.iter().enumerate().find(|(_, (id, args, _))| {
+                *id == InstanceKey::Template(template.id) && *args == arguments
+            })
         {
             return Ty::Enum((self.types.len() + index) as u32, info.name.as_str().into());
         }
@@ -208,6 +295,7 @@ impl TypeTable {
             module: format!("__prelude::instance{id}"),
             span,
             is_enum: true,
+            bodyless: false,
             fields: Vec::new(),
             variants: template
                 .variants
@@ -227,13 +315,117 @@ impl TypeTable {
                 })
                 .collect(),
         };
-        instances.push((template.id, arguments, info));
+        instances.push((InstanceKey::Template(template.id), arguments, info));
         Ty::Enum(id, name.into())
+    }
+
+    pub(super) fn instantiate_tuple(
+        &self,
+        elements: Vec<(Option<String>, Ty)>,
+        span: Span,
+    ) -> Result<Ty, TypeFailure> {
+        let aliases = TupleAliases {
+            labels: elements.iter().map(|(label, _)| label.clone()).collect(),
+            nested: elements
+                .iter()
+                .map(|(_, ty)| match ty {
+                    Ty::Tuple(_, _, aliases) => Some(Box::new(aliases.clone())),
+                    _ => None,
+                })
+                .collect(),
+        };
+        let identity = format!(
+            "{:?}",
+            elements
+                .iter()
+                .map(|(_, ty)| self.semantic_tuple_element_identity(ty))
+                .collect::<Vec<_>>()
+        );
+        let mut instances = self.instances.borrow_mut();
+        if let Some((index, (_, _, info))) = instances
+            .iter_mut()
+            .enumerate()
+            .find(|(_, (key, _, _))| *key == InstanceKey::Tuple(identity.clone()))
+        {
+            return Ok(Ty::Tuple(
+                (self.types.len() + index) as u32,
+                info.name.as_str().into(),
+                aliases,
+            ));
+        }
+        let id = (self.types.len() + instances.len()) as u32;
+        let name = format!("Tuple{id}");
+        let info = StructInfo {
+            name: name.clone(),
+            module: "\0tuple".into(),
+            span,
+            is_enum: false,
+            bodyless: false,
+            fields: elements
+                .iter()
+                .enumerate()
+                .map(|(index, (_, ty))| FieldInfo {
+                    name: index.to_string(),
+                    public: true,
+                    module: "\0tuple".into(),
+                    ty: ty.clone(),
+                    ty_span: span,
+                })
+                .collect(),
+            variants: Vec::new(),
+        };
+        instances.push((InstanceKey::Tuple(identity), Vec::new(), info));
+        Ok(Ty::Tuple(id, name.into(), aliases))
+    }
+
+    fn semantic_tuple_element_identity(&self, ty: &Ty) -> String {
+        match ty {
+            Ty::Tuple(id, _, _) => {
+                let fields = &self.info(*id).fields;
+                format!(
+                    "tuple({})",
+                    fields
+                        .iter()
+                        .map(|field| self.semantic_tuple_element_identity(&field.ty))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Ty::Array(element, count) => {
+                format!(
+                    "array({}, {count})",
+                    self.semantic_tuple_element_identity(element)
+                )
+            }
+            Ty::Reference { access, inner, .. } => format!(
+                "reference({access:?}, {})",
+                self.semantic_tuple_element_identity(inner)
+            ),
+            Ty::Function(parameters, result) => format!(
+                "function({:?}, {})",
+                parameters
+                    .iter()
+                    .map(|parameter| (
+                        parameter.access,
+                        self.semantic_tuple_element_identity(&parameter.ty)
+                    ))
+                    .collect::<Vec<_>>(),
+                self.semantic_tuple_element_identity(result)
+            ),
+            // All remaining variants have no occurrence-local tuple aliases.
+            other => format!("{other:?}"),
+        }
     }
 
     fn instance_template(&self, id: u32) -> Option<TemplateId> {
         let index = (id as usize).checked_sub(self.types.len())?;
-        self.instances.borrow().get(index).map(|entry| entry.0)
+        self.instances
+            .borrow()
+            .get(index)
+            .and_then(|entry| match entry.0 {
+                InstanceKey::Template(id) => Some(id),
+                InstanceKey::Generic(_) | InstanceKey::Tuple(_) => None,
+            })
     }
 
     pub(super) fn enum_template(&self, id: u32) -> Option<&'static Template> {
@@ -282,7 +474,7 @@ impl TypeTable {
         };
         matches!(
             self.instances.borrow().get(index),
-            Some((TemplateId::Option, args, _))
+            Some((InstanceKey::Template(TemplateId::Option), args, _))
                 if matches!(args.as_slice(), [ResolvedArgument::Type(Ty::Reference { .. })])
         )
     }
@@ -290,11 +482,13 @@ impl TypeTable {
     pub(super) fn resolve_local(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
         if let (
             Some(template),
-            [memobits_syntax::TypeArgument::Reference {
-                access: memobits_syntax::Access::Borrow,
-                referent,
-                span,
-            }],
+            [
+                memobits_syntax::TypeArgument::Reference {
+                    access: memobits_syntax::Access::Borrow,
+                    referent,
+                    span,
+                },
+            ],
         ) = (templates::lookup_type(ty), ty.arguments.as_slice())
         {
             if template.id == TemplateId::Option {
@@ -365,6 +559,23 @@ impl TypeTable {
         }
     }
 
+    /// Canonical declaration identity for a named generic type application.
+    pub fn generic_definition_key(&self, module: &str, ty: &Type) -> Option<String> {
+        let (key, definition) = self.lookup_definition(module, ty)?;
+        matches!(definition, Def::Generic { .. }).then(|| key.clone())
+    }
+
+    /// The generic declaration that produced a concrete nominal instance.
+    pub fn generic_origin(&self, id: u32) -> Option<String> {
+        let index = id as usize;
+        let instances = self.instances.borrow();
+        let instance = instances.get(index.checked_sub(self.types.len())?)?;
+        match &instance.0 {
+            InstanceKey::Generic(key) => Some(key.clone()),
+            InstanceKey::Template(_) | InstanceKey::Tuple(_) => None,
+        }
+    }
+
     /// Snapshot all definitions in their ID order for retained IR type facts.
     pub fn definitions(&self) -> Vec<StructInfo> {
         let mut definitions = self.types.clone();
@@ -380,6 +591,7 @@ impl TypeTable {
             error_parents: HashMap::new(),
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
+            generic_in_progress: RefCell::new(HashSet::new()),
         }
     }
 
@@ -407,16 +619,85 @@ impl TypeTable {
                     name,
                     definition,
                     base,
+                    generic_parameters,
+                    bounds,
                     ..
                 } = &item.kind
                 else {
                     continue;
                 };
-                if name == "String" || templates::lookup(std::slice::from_ref(name)).is_some() {
+                if matches!(name.as_str(), "String" | "string")
+                    || templates::lookup(std::slice::from_ref(name)).is_some()
+                {
                     diagnostics.push(diagnostic(
                         3,
                         item.span,
                         format!("'{}' is reserved for a compiler-known type", name),
+                    ));
+                }
+                if !generic_parameters.is_empty() {
+                    if !bounds.is_empty() {
+                        diagnostics.push(diagnostic(
+                            2,
+                            item.span,
+                            "generic type where-constraints are not implemented yet",
+                        ));
+                    }
+                    match definition {
+                        TypeDefinition::Bodyless => diagnostics.push(diagnostic(
+                            2,
+                            item.span,
+                            "generic bodyless types are not supported",
+                        )),
+                        TypeDefinition::Alias(_) => diagnostics.push(diagnostic(
+                            2,
+                            item.span,
+                            "generic aliases are not supported",
+                        )),
+                        TypeDefinition::Struct(_) | TypeDefinition::Enum(_) => {}
+                    }
+                    if base.is_some() {
+                        diagnostics.push(diagnostic(
+                            2,
+                            item.span,
+                            "generic derived error types are not supported",
+                        ));
+                    }
+                    if generic_parameters
+                        .iter()
+                        .any(|parameter| match &parameter.kind {
+                            GenericParameterKind::Type => false,
+                            GenericParameterKind::Const(ty) => {
+                                ty.path.as_slice() != ["u32"] || !ty.arguments.is_empty()
+                            }
+                        })
+                    {
+                        diagnostics.push(diagnostic(
+                            2,
+                            item.span,
+                            "const generic parameters must have type u32",
+                        ));
+                    }
+                    let def = Def::Generic {
+                        module: (*module).to_owned(),
+                        name: name.clone(),
+                        parameters: generic_parameters.clone(),
+                        definition: definition.clone(),
+                    };
+                    if table.defs.insert(key(module, name), def).is_some() {
+                        diagnostics.push(diagnostic(
+                            14,
+                            item.span,
+                            format!("duplicate type '{name}'"),
+                        ));
+                    }
+                    continue;
+                }
+                if !bounds.is_empty() {
+                    diagnostics.push(diagnostic(
+                        2,
+                        item.span,
+                        "where-constraints require generic parameters",
                     ));
                 }
                 let def = match definition {
@@ -427,6 +708,7 @@ impl TypeTable {
                             module: (*module).to_owned(),
                             span: item.span,
                             is_enum: false,
+                            bodyless: false,
                             fields: Vec::new(),
                             variants: Vec::new(),
                         });
@@ -434,6 +716,20 @@ impl TypeTable {
                         if let Some(base) = base {
                             bases.insert(id as u32, base);
                         }
+                        Def::Named(id as u32)
+                    }
+                    TypeDefinition::Bodyless => {
+                        let id = table.types.len();
+                        table.types.push(StructInfo {
+                            name: name.clone(),
+                            module: (*module).to_owned(),
+                            span: item.span,
+                            is_enum: false,
+                            bodyless: true,
+                            fields: Vec::new(),
+                            variants: Vec::new(),
+                        });
+                        field_types.push(Some(&[]));
                         Def::Named(id as u32)
                     }
                     TypeDefinition::Alias(target) => {
@@ -450,6 +746,7 @@ impl TypeTable {
                             module: (*module).to_owned(),
                             span: item.span,
                             is_enum: true,
+                            bodyless: false,
                             fields: Vec::new(),
                             variants: Vec::new(),
                         });
@@ -777,6 +1074,176 @@ impl TypeTable {
         result
     }
 
+    fn instantiate_generic_type(
+        &self,
+        definition_key: &str,
+        module: &str,
+        name: &str,
+        parameters: &[GenericParameter],
+        definition: &TypeDefinition,
+        written: &Type,
+    ) -> Result<Ty, TypeFailure> {
+        let fail = |message: String| TypeFailure {
+            span: written.span,
+            code: 2,
+            message,
+        };
+        if written.arguments.len() != parameters.len() {
+            return Err(fail(format!(
+                "type '{name}' requires {} generic arguments",
+                parameters.len()
+            )));
+        }
+        let mut resolved = Vec::new();
+        let mut type_substitutions = HashMap::new();
+        let mut const_substitutions = HashMap::new();
+        for (parameter, argument) in parameters.iter().zip(&written.arguments) {
+            match (&parameter.kind, argument) {
+                (GenericParameterKind::Type, TypeArgument::Type(ty)) => {
+                    let ty_value = self.resolve(module, ty)?;
+                    type_substitutions.insert(parameter.name.clone(), ty.clone());
+                    resolved.push(ResolvedArgument::Type(ty_value));
+                }
+                (GenericParameterKind::Const(_), TypeArgument::Integer(integer)) => {
+                    let value =
+                        integer
+                            .raw
+                            .replace('_', "")
+                            .parse::<u32>()
+                            .map_err(|_| TypeFailure {
+                                span: integer.span,
+                                code: 8,
+                                message: "const parameter exceeds u32::MAX".into(),
+                            })?;
+                    const_substitutions.insert(parameter.name.clone(), value);
+                    resolved.push(ResolvedArgument::Integer(value));
+                }
+                (GenericParameterKind::Const(_), TypeArgument::Const(_)) => {
+                    return Err(fail(
+                        "forwarded const arguments require generic function specialization".into(),
+                    ));
+                }
+                _ => {
+                    return Err(fail(format!(
+                        "generic argument for '{}' has the wrong kind",
+                        parameter.name
+                    )));
+                }
+            }
+        }
+        if let Some((index, (_, _, info))) =
+            self.instances
+                .borrow()
+                .iter()
+                .enumerate()
+                .find(|(_, (key, args, _))| {
+                    *key == InstanceKey::Generic(definition_key.to_owned()) && *args == resolved
+                })
+        {
+            let id = self.types.len() + index;
+            let display = info.name.as_str().into();
+            return Ok(if info.is_enum {
+                Ty::Enum(id as u32, display)
+            } else {
+                Ty::Struct(id as u32, display)
+            });
+        }
+        let identity = format!("{definition_key}<{resolved:?}>");
+        {
+            let mut active = self.generic_in_progress.borrow_mut();
+            if active.contains(&identity) {
+                return Err(fail(format!(
+                    "recursive by-value generic type layout for '{name}'"
+                )));
+            }
+            if active.len() >= 32 {
+                return Err(fail("generic type specialization depth exceeds 32".into()));
+            }
+            active.insert(identity.clone());
+        }
+        let info_result = (|| {
+            let (is_enum, fields, variants) = match definition {
+                TypeDefinition::Struct(fields) => {
+                    let mut resolved_fields = Vec::new();
+                    for field in fields {
+                        let field_type =
+                            substitute_type(&field.ty, &type_substitutions, &const_substitutions);
+                        let ty = self.resolve(module, &field_type)?;
+                        resolved_fields.push(FieldInfo {
+                            name: field.name.clone(),
+                            public: field.public,
+                            module: module.to_owned(),
+                            ty,
+                            ty_span: field.ty.span,
+                        });
+                    }
+                    (false, resolved_fields, Vec::new())
+                }
+                TypeDefinition::Enum(variants) => {
+                    let mut resolved_variants = Vec::new();
+                    for variant in variants {
+                        let mut payload = Vec::new();
+                        for written_type in &variant.payload {
+                            let substituted = substitute_type(
+                                written_type,
+                                &type_substitutions,
+                                &const_substitutions,
+                            );
+                            payload.push(self.resolve(module, &substituted)?);
+                        }
+                        resolved_variants.push(VariantInfo {
+                            name: variant.name.clone(),
+                            payload,
+                        });
+                    }
+                    (true, Vec::new(), resolved_variants)
+                }
+                TypeDefinition::Bodyless => {
+                    return Err(fail("generic bodyless types are not supported".into()));
+                }
+                TypeDefinition::Alias(_) => {
+                    return Err(fail("generic aliases are not supported".into()));
+                }
+            };
+            Ok(StructInfo {
+                name: format!(
+                    "{}<{}>",
+                    name,
+                    resolved
+                        .iter()
+                        .map(|arg| match arg {
+                            ResolvedArgument::Type(ty) => super::name(ty),
+                            ResolvedArgument::Integer(n) => n.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                module: module.to_owned(),
+                span: written.span,
+                is_enum,
+                bodyless: false,
+                fields,
+                variants,
+            })
+        })();
+        self.generic_in_progress.borrow_mut().remove(&identity);
+        let info = info_result?;
+        let mut instances = self.instances.borrow_mut();
+        let id = self.types.len() + instances.len();
+        let is_enum = info.is_enum;
+        let display = info.name.clone();
+        instances.push((
+            InstanceKey::Generic(definition_key.to_owned()),
+            resolved,
+            info,
+        ));
+        Ok(if is_enum {
+            Ty::Enum(id as u32, display.into())
+        } else {
+            Ty::Struct(id as u32, display.into())
+        })
+    }
+
     /// Resolve a written type in `module`, following aliases to their targets.
     pub fn resolve(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
         let failure = |code: u16, message: String| TypeFailure {
@@ -784,6 +1251,55 @@ impl TypeTable {
             code,
             message,
         };
+        if ty.path.as_slice() == ["\0tuple"] {
+            let label_count = ty
+                .arguments
+                .iter()
+                .filter(|argument| {
+                    matches!(argument, TypeArgument::TupleField { label: Some(_), .. })
+                })
+                .count();
+            if label_count != 0 && label_count != ty.arguments.len() {
+                return Err(failure(
+                    2,
+                    "tuple type elements must be either all labeled or all positional".into(),
+                ));
+            }
+            let mut labels = HashSet::new();
+            for argument in &ty.arguments {
+                if let TypeArgument::TupleField {
+                    label: Some(label), ..
+                } = argument
+                {
+                    if !labels.insert(label) {
+                        return Err(failure(2, format!("duplicate tuple type label '{label}'")));
+                    }
+                }
+            }
+            let elements = ty
+                .arguments
+                .iter()
+                .map(|argument| match argument {
+                    TypeArgument::Type(element) => {
+                        self.resolve(module, element).map(|ty| (None, ty))
+                    }
+                    TypeArgument::TupleField { label, ty } => {
+                        self.resolve(module, ty).map(|ty| (label.clone(), ty))
+                    }
+                    _ => Err(failure(
+                        17,
+                        "tuple type elements must be value types".into(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if elements
+                .iter()
+                .any(|(_, element)| self.contains_reference(element, &mut HashSet::new()))
+            {
+                return Err(failure(17, "tuple types cannot contain direct or nested references until embedded tuple loans are supported".into()));
+            }
+            return self.instantiate_tuple(elements, ty.span);
+        }
         if let Some(template) = templates::lookup_type(ty) {
             let arguments = resolve_arguments(template, ty, |kind, argument| {
                 let resolved = self.resolve(module, argument)?;
@@ -797,8 +1313,10 @@ impl TypeTable {
                     return Ok(self.instantiate_enum(template, arguments, ty.span));
                 }
                 TemplateId::Array => {
-                    let [ResolvedArgument::Type(element), ResolvedArgument::Integer(count)] =
-                        arguments.as_slice()
+                    let [
+                        ResolvedArgument::Type(element),
+                        ResolvedArgument::Integer(count),
+                    ] = arguments.as_slice()
                     else {
                         unreachable!("template argument contract checked above");
                     };
@@ -823,11 +1341,14 @@ impl TypeTable {
                 }
             }
         }
-        if !ty.arguments.is_empty() {
-            return Err(failure(1, "unsupported type arguments".into()));
+        if ty.path.last().is_some_and(|name| name == "String") {
+            return Err(failure(
+                1,
+                "'String' is no longer a source type; use lowercase 'string'".into(),
+            ));
         }
         if let [name] = ty.path.as_slice() {
-            if name == "String" {
+            if name == "string" {
                 return Ok(Ty::String);
             }
             if let Some(primitive) = primitive(name) {
@@ -835,7 +1356,7 @@ impl TypeTable {
             }
         }
         match self.lookup_definition(module, ty) {
-            Some((_, Def::Named(id))) => {
+            Some((_, Def::Named(id))) if ty.arguments.is_empty() => {
                 let info = &self.types[*id as usize];
                 let name = info.name.as_str().into();
                 Ok(if info.is_enum {
@@ -845,6 +1366,12 @@ impl TypeTable {
                 })
             }
             Some((definition_key, Def::Alias { .. })) => {
+                if !ty.arguments.is_empty() {
+                    return Err(failure(
+                        1,
+                        "type aliases do not accept generic arguments".into(),
+                    ));
+                }
                 if matches!(
                     self.aliases.borrow().get(definition_key),
                     Some(AliasState::Resolving)
@@ -855,6 +1382,25 @@ impl TypeTable {
                     ));
                 }
                 self.resolve_alias(definition_key)
+            }
+            Some((
+                definition_key,
+                Def::Generic {
+                    module,
+                    name,
+                    parameters,
+                    definition,
+                },
+            )) => self.instantiate_generic_type(
+                definition_key,
+                module,
+                name,
+                parameters,
+                definition,
+                ty,
+            ),
+            Some((_, Def::Named(_))) => {
+                Err(failure(1, "type does not accept generic arguments".into()))
             }
             None => Err(unresolved_type(ty)),
         }
@@ -911,8 +1457,10 @@ mod outcome_tests {
 
     #[test]
     fn option_instances_share_alias_identity_and_keep_distinct_payloads() {
-        let parsed = memobits_syntax::parse(SourceId(0),
-            "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;");
+        let parsed = memobits_syntax::parse(
+            SourceId(0),
+            "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;",
+        );
         assert!(parsed.diagnostics.is_empty());
         let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -935,5 +1483,72 @@ mod outcome_tests {
         assert!(parsed.diagnostics.is_empty());
         let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
         assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn generic_nominal_types_specialize_type_and_const_arguments_once() {
+        let parsed = memobits_syntax::parse(
+            SourceId(0),
+            "type Box<T> { value: T } type Buffer<T, const N: u32> { data: Array<T, N> } type Maybe<T> [None, Some(T)] fn use_box(value: Box<i32>) {} fn use_buffer(value: Buffer<u8, 3>) {} fn use_maybe(value: Maybe<i32>) {}",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let (table, diagnostics) = TypeTable::build(&[("main", &parsed.module)], HashMap::new());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let types = parsed
+            .module
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Function { parameters, .. } => Some(parameters[0].ty.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let first_box = table.resolve("main", &types[0]).unwrap();
+        assert_eq!(first_box, table.resolve("main", &types[0]).unwrap());
+        let second_box_ty = memobits_syntax::parse(SourceId(0), "fn f(value: Box<u32>) {}");
+        let ItemKind::Function { parameters, .. } = &second_box_ty.module.items[0].kind else {
+            panic!()
+        };
+        let second_box = table.resolve("main", &parameters[0].ty).unwrap();
+        assert_ne!(first_box, second_box);
+        let buffer = table.resolve("main", &types[1]).unwrap();
+        let Ty::Struct(id, _) = buffer else {
+            panic!("expected struct")
+        };
+        assert_eq!(
+            table.info(id).fields[0].ty,
+            Ty::Array(Box::new(Ty::Primitive("u8")), 3)
+        );
+        let maybe = table.resolve("main", &types[2]).unwrap();
+        let Ty::Enum(id, _) = maybe else {
+            panic!("expected enum")
+        };
+        assert_eq!(
+            table.info(id).variants[1].payload,
+            vec![Ty::Primitive("i32")]
+        );
+    }
+
+    #[test]
+    fn generic_type_layout_cycles_and_unbounded_specialization_are_diagnosed() {
+        for source in [
+            "type Node<T> { next: Node<T> } fn use_node(value: Node<i32>) {}",
+            "type Grow<T> { next: Grow<Array<T, 2>> } fn use_grow(value: Grow<i32>) {}",
+        ] {
+            let parsed = memobits_syntax::parse(SourceId(0), source);
+            assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+            let (table, diagnostics) =
+                TypeTable::build(&[("main", &parsed.module)], HashMap::new());
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let ItemKind::Function { parameters, .. } = &parsed.module.items[1].kind else {
+                panic!()
+            };
+            let failure = table.resolve("main", &parameters[0].ty).unwrap_err();
+            assert!(
+                failure.message.contains("recursive by-value")
+                    || failure.message.contains("depth exceeds"),
+                "{failure:?}"
+            );
+        }
     }
 }

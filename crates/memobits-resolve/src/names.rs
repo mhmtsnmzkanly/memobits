@@ -10,30 +10,40 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn check(
     module: &Module,
     prelude: impl Iterator<Item = (String, String)>,
+    allow_self_type: bool,
 ) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
     let prelude: BTreeMap<String, String> = prelude.collect();
     let mut imports = prelude.clone();
     let mut globals: BTreeSet<String> = prelude.keys().cloned().collect();
     for item in &module.items {
         match &item.kind {
-            ItemKind::Function { name, .. } | ItemKind::Type { name, .. } => {
+            ItemKind::Function { name, .. }
+            | ItemKind::Type { name, .. }
+            | ItemKind::Interface { name, .. } => {
                 globals.insert(name.clone());
             }
             ItemKind::Use { path, alias, .. } => {
+                if path.len() == 1 {
+                    continue;
+                }
                 if let Some(name) = alias.as_ref().or(path.last()) {
                     globals.insert(name.clone());
                     imports.insert(name.clone(), path.join("::"));
                 }
             }
+            ItemKind::Extension { .. } | ItemKind::InherentExtension { .. } => {}
         }
     }
     let mut types: BTreeSet<String> = [
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "Bool", "String",
-        "Char",
+        "string", "Char",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
+    if allow_self_type {
+        types.insert("Self".to_owned());
+    }
     types.extend(prelude.keys().cloned());
     let mut variants = BTreeMap::new();
     let mut aliases = BTreeMap::new();
@@ -53,8 +63,14 @@ pub(crate) fn check(
                     );
                 }
             }
+            ItemKind::Interface { name, .. } => {
+                types.insert(name.clone());
+            }
             // Imported annotation targets are verified after graph loading.
             ItemKind::Use { path, alias, .. } => {
+                if path.len() == 1 {
+                    continue;
+                }
                 if let Some(n) = alias.as_ref().or(path.last()) {
                     types.insert(n.clone());
                 }
@@ -67,18 +83,33 @@ pub(crate) fn check(
         imports,
         variants,
         aliases,
+        generic_types: Vec::new(),
         scopes: vec![globals],
         diagnostics: vec![],
         qualified: vec![],
     };
     for item in &module.items {
         if let ItemKind::Function {
+            generic_parameters,
+            bounds,
             parameters,
             body,
             result,
             ..
         } = &item.kind
         {
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            for bound in bounds {
+                checker.ty(&bound.interface);
+            }
             if let Some(ty) = result {
                 checker.ty(ty);
             }
@@ -100,18 +131,36 @@ pub(crate) fn check(
             }
             checker.block(body);
             checker.scopes.pop();
+            checker.generic_types.pop();
         }
     }
     for item in &module.items {
         if let ItemKind::Type {
-            definition, base, ..
+            definition,
+            base,
+            generic_parameters,
+            bounds,
+            ..
         } = &item.kind
         {
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            for bound in bounds {
+                checker.ty(&bound.interface);
+            }
             if let Some(base) = base {
                 checker.ty(base);
             }
             match definition {
                 TypeDefinition::Alias(ty) => checker.ty(ty),
+                TypeDefinition::Bodyless => {}
                 TypeDefinition::Struct(fields) => {
                     let mut names = BTreeSet::new();
                     for field in fields {
@@ -141,10 +190,82 @@ pub(crate) fn check(
                     }
                 }
             }
+            checker.generic_types.pop();
+        }
+    }
+    for item in &module.items {
+        let method_owner = match &item.kind {
+            ItemKind::Interface { .. } => "interface",
+            ItemKind::Extension { .. } | ItemKind::InherentExtension { .. } => "extension",
+            _ => continue,
+        };
+        if let ItemKind::Interface {
+            associated_types, ..
+        } = &item.kind
+        {
+            checker
+                .generic_types
+                .push(associated_types.iter().cloned().collect());
+        }
+        let (target, interface, methods) = match &item.kind {
+            ItemKind::Interface { methods, .. } => (None, None, methods.as_slice()),
+            ItemKind::Extension {
+                target,
+                interface,
+                methods,
+                ..
+            } => (Some(target), Some(interface), methods.as_slice()),
+            ItemKind::InherentExtension {
+                target, methods, ..
+            } => (Some(target), None, methods.as_slice()),
+            _ => continue,
+        };
+        if let Some(target) = target {
+            checker.ty(target);
+        }
+        if let Some(interface) = interface {
+            checker.ty(interface);
+        }
+        let mut names = BTreeSet::new();
+        for method in methods {
+            if !names.insert(&method.name) {
+                checker.error(
+                    5,
+                    method.span,
+                    format!("duplicate {method_owner} method '{}'", method.name),
+                );
+            }
+            checker.scopes.push(BTreeSet::from(["self".to_owned()]));
+            for parameter in &method.parameters {
+                checker.ty(&parameter.ty);
+                if !checker
+                    .scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(parameter.name.clone())
+                {
+                    checker.error(
+                        2,
+                        parameter.span,
+                        format!("duplicate parameter '{}'", parameter.name),
+                    );
+                }
+            }
+            if let Some(result) = &method.result {
+                checker.ty(result);
+            }
+            if let Some(body) = &method.body {
+                checker.block(body);
+            }
+            checker.scopes.pop();
+        }
+        if matches!(&item.kind, ItemKind::Interface { .. }) {
+            checker.generic_types.pop();
         }
     }
     (checker.diagnostics, checker.qualified)
 }
+
 struct Checker<'a> {
     types: BTreeSet<String>,
     imports: BTreeMap<String, String>,
@@ -152,6 +273,7 @@ struct Checker<'a> {
     /// Local `type Name = path;` aliases, followed when a variant path starts
     /// with an alias name.
     aliases: BTreeMap<String, &'a Type>,
+    generic_types: Vec<BTreeSet<String>>,
     scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
     qualified: Vec<(String, Span, bool)>,
@@ -163,17 +285,46 @@ impl Checker<'_> {
                 TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
                     self.ty(ty)
                 }
+                TypeArgument::TupleField { ty, .. } => self.ty(ty),
                 TypeArgument::Integer(_) => {}
+                TypeArgument::Const(_) => {}
             }
+        }
+        if ty.path.as_slice() == ["\0tuple"] {
+            return;
         }
         if templates::lookup_type(ty).is_some() {
             return;
         }
         if ty.path.len() > 1 {
+            if self
+                .generic_types
+                .iter()
+                .any(|parameters| parameters.contains(&ty.path[0]))
+            {
+                // Projection validity is resolved by type analysis against the
+                // unique selected generic interface evidence.
+                if ty.path.len() != 2 {
+                    self.error(
+                        8,
+                        ty.span,
+                        format!(
+                            "nested associated type projection '{}' is not supported",
+                            ty.path.join("::")
+                        ),
+                    );
+                }
+                return;
+            }
             self.qualified.push((ty.path.join("::"), ty.span, true));
         } else if let Some(path) = self.imports.get(&ty.path[0]) {
             self.qualified.push((path.clone(), ty.span, true));
-        } else if !self.types.contains(&ty.path[0]) {
+        } else if !self.types.contains(&ty.path[0])
+            && !self
+                .generic_types
+                .iter()
+                .any(|parameters| parameters.contains(&ty.path[0]))
+        {
             self.error(3, ty.span, format!("unknown type '{}'", ty.path[0]));
         }
     }
@@ -318,7 +469,11 @@ impl Checker<'_> {
                 self.expr(left);
                 self.expr(right);
             }
-            ExprKind::Call { callee, arguments } => {
+            ExprKind::Call {
+                callee,
+                arguments,
+                interface,
+            } => {
                 // An unbound `drop` is a built-in only in call position.
                 if !matches!(&callee.kind, ExprKind::Path(path) if path.as_slice() == ["drop"]
                     && !self.scopes.iter().rev().any(|scope| scope.contains("drop")))
@@ -328,14 +483,21 @@ impl Checker<'_> {
                 for arg in arguments {
                     self.expr(arg);
                 }
+                if let Some(interface) = interface {
+                    self.ty(interface);
+                }
             }
             ExprKind::Field { base, .. } => self.expr(base),
-            ExprKind::Struct { path, fields } => {
+            ExprKind::Struct {
+                path,
+                type_arguments,
+                fields,
+            } => {
                 // The literal names a type: resolve it like a type annotation.
                 self.ty(&Type {
                     span: expr.span,
                     path: path.clone(),
-                    arguments: Vec::new(),
+                    arguments: type_arguments.clone(),
                 });
                 for field in fields {
                     self.expr(&field.value);
@@ -389,7 +551,7 @@ mod tests {
         ] {
             let parsed = memobits_syntax::parse(SourceId(0), source);
             assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-            let (errors, _) = check(&parsed.module, std::iter::empty());
+            let (errors, _) = check(&parsed.module, std::iter::empty(), false);
             assert_eq!(errors.len(), 1);
             assert_eq!(errors[0].code.to_string(), code);
             assert_eq!(errors[0].span.unwrap().start, source.rfind(member).unwrap());
@@ -405,7 +567,7 @@ mod alias_variant_tests {
     fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
         let parsed = memobits_syntax::parse(SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        check(&parsed.module, std::iter::empty())
+        check(&parsed.module, std::iter::empty(), false)
     }
 
     #[test]
@@ -461,7 +623,7 @@ mod array_tests {
             "fn f(a: Array<Array<Missing, 2>, 3>) { [unknown]; [other; 2]; a[index]; }",
         );
         assert!(parsed.diagnostics.is_empty());
-        let (diagnostics, _) = check(&parsed.module, std::iter::empty());
+        let (diagnostics, _) = check(&parsed.module, std::iter::empty(), false);
         for name in ["Missing", "unknown", "other", "index"] {
             assert!(
                 diagnostics.iter().any(|d| d.message.contains(name)),
@@ -477,7 +639,7 @@ mod array_tests {
             SourceId(0),
             "fn f(a: Array<Array<self::model::Value, 2>, 3>) {}",
         );
-        let (diagnostics, qualified) = check(&parsed.module, std::iter::empty());
+        let (diagnostics, qualified) = check(&parsed.module, std::iter::empty(), false);
         assert!(diagnostics.is_empty());
         assert_eq!(qualified.len(), 1);
         assert_eq!(qualified[0].0, "self::model::Value");

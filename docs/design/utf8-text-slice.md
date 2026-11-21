@@ -14,10 +14,10 @@ usually accessed as `&str`. Rust string literals have type `&'static str`.
 [Rust literal expressions](https://doc.rust-lang.org/reference/expressions/literal-expr.html#string-literal-expressions)
 
 In Memobits, `String` follows existing aggregate move rules. An internal
-`borrow String` parameter provides read-only access to the whole owner
+`borrow string` parameter provides read-only access to the whole owner
 under the existing loan rules. A future substring view would play the role
 of Rust's borrowed `str` and carry a loan of its source. Its type name and
-source annotation remain open. `share String` is exclusive access under
+source annotation remain open. `share string` is exclusive access under
 the existing ownership rules. Future text mutations through it must preserve
 UTF-8, and require an API of their own.
 
@@ -35,9 +35,9 @@ unterminated literals. Raw literals and interpolation remain pending.
 
 String literals retain their UTF-8 payload in typed IR. Ownership checks and
 execution use the same IR. Owned bindings and internal calls transfer the
-whole value, including owned returns. Internal `borrow String` parameters
+whole value, including owned returns. Internal `borrow string` parameters
 use the existing last-use loan rules. A whole assignment through a
-`share String` replaces the descriptor under the usual exclusive access rules.
+`share string` replaces the descriptor under the usual exclusive access rules.
 
 Wasm places reachable literal bytes after the guest stack and any outcome
 entry return cell. Frame cells carry a private 32-bit address and byte
@@ -48,7 +48,7 @@ layout share one private Wasm layout definition. Moving a String copies the
 descriptor through aggregate call and storage paths. Guest code has no
 operation that writes to the literal bytes. For an
 outcome entry, the runner's existing memory export still exposes linear
-memory to the embedding host. Internal `Result<String, E>` can store a
+memory to the embedding host. Internal `Result<string, E>` can store a
 static String in its `Ok` payload. A heap-backed `Ok` is supported when a
 local Result binding is immediately followed by a same-function consuming
 match with explicit `Ok(value)` and `Err` arms. A direct internal call can
@@ -111,7 +111,7 @@ Text slicing should use checked half-open byte ranges. Require
 Zero and the byte length are valid endpoints. In `Aé`, the range `[1, 3)`
 yields `é` and `[1, 2)` fails. Prefer a fallible operation for invalid
 ranges, along the lines of Rust's `get`. Single-integer string indexing
-remains unsupported. A `borrow String` points to the owner's whole descriptor.
+remains unsupported. A `borrow string` points to the owner's whole descriptor.
 A subrange needs its own base address and length while retaining the loan of
 the original owner. A borrow of a temporary descriptor would instead track
 the temporary's storage. The current local `Option<borrow T>` can carry a
@@ -140,7 +140,7 @@ for its boundary and malformed-byte fixtures.
 
 ## Fallible construction from fixed bytes
 
-`bytes.to_utf8_string(length)` returns `Result<String, Utf8Error>` from
+`bytes.to_utf8_string(length)` returns `Result<string, Utf8Error>` from
 the logical prefix of a fixed byte array. The method sits alongside
 `validate_utf8` on the byte receiver. The `to` spelling reflects that it
 borrows the input and makes an owned copy. The length is an `i32` and the
@@ -160,7 +160,7 @@ decoding is outside this strict constructor.
 
 ### Outcomes and offsets
 
-Use an internal `Result<String, Utf8Error>` with the validator's error
+Use an internal `Result<string, Utf8Error>` with the validator's error
 shape, a derived error carrying `offset: Option<i32>`. Validate the length
 before indexing and report the first failing byte. Offsets are zero-based
 within the logical prefix.
@@ -188,7 +188,7 @@ This internal function with a scalar entry exercises the supported static
 case with the application entry ABI left scalar.
 
 ```mb
-fn construct() -> Result<String, Error> { Ok("é") }
+fn construct() -> Result<string, Error> { Ok("é") }
 
 fn main() -> i32 {
     match construct() { Ok(text) => if text.len() == 2 { 0 } else { 1 }, Err(_) => 2 }
@@ -204,7 +204,7 @@ outcome ABI continues to require a primitive success payload.
 [Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
 [Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
 
-1. Implemented internal `Result<String, E>` for static success descriptors,
+1. Implemented internal `Result<string, E>` for static success descriptors,
    including construction, return, receipt and consuming match. A String
    local or internal call result can be used when heap provenance is absent.
    Containers of these results and external signatures remain gated.

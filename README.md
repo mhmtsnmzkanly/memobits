@@ -84,6 +84,12 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
 ```
 
 - `examples/projects/` — buildable projects with a `project.toml`.
+- `examples/projects/calculator/` — arithmetic over internal calls: `add`,
+  `subtract`, `multiply` and `divide` chained into a final checked total.
+- `examples/projects/computation/` — iterative computation with loops:
+  `factorial` and an iterative sum.
+- `examples/projects/strings/` — owned and borrowed String operations:
+  `concat`, `borrow`, `share` and `push_str`, plus struct-owned labels.
 - [A* grid search](examples/projects/astar/README.md) checks the optimal cost
   around a wall and verifies that closing the gap makes the goal unreachable.
 - [Bounded ENF lexer fixture](docs/design/enf-lexer-slice.md) checks decimal

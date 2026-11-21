@@ -54,6 +54,416 @@ fn library_and_application_load_different_roots() {
 }
 
 #[test]
+fn compiler_owned_core_module_path_cannot_be_redeclared() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::create_dir_all(f.0.join("src/core")).unwrap();
+    fs::write(f.0.join("src/core/ops.mb"), "pub interface Add {}").unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("core::ops") && diagnostic.message.contains("reserved")
+        }),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn bare_module_import_is_a_direct_extension_edge_not_a_symbol_alias() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use math; fn main() -> i32 { math::add(1, 2) }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let resolution = resolve(&project, Target::Application);
+    assert!(
+        resolution.diagnostics.is_empty(),
+        "{:?}",
+        resolution.diagnostics
+    );
+    assert_eq!(
+        resolution
+            .module_imports
+            .get("main")
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["math"]
+    );
+}
+
+#[test]
+fn symbol_import_loads_a_module_without_activating_it_as_an_extension_edge() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    let project = Project::load(&f.0, None).unwrap();
+    let resolution = resolve(&project, Target::Application);
+    assert!(
+        resolution.diagnostics.is_empty(),
+        "{:?}",
+        resolution.diagnostics
+    );
+    assert!(!resolution.module_imports.contains_key("main"));
+}
+
+#[test]
+fn interface_signatures_extension_types_and_bodies_participate_in_resolution() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> i32 { self.x } }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn unknown_types_in_extensions_are_resolver_errors() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "interface Draw { fn draw(borrow self) -> Missing; }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.to_string() == "NE003"),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn local_extensions_must_match_interface_method_signatures() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self, scale: i32) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> u32 { 0u32 } }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not match interface 'main::Draw'")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_conformance_resolves_qualified_and_imported_interfaces_and_parameter_access() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use graphics; pub type Point { pub x: i32 }\npub interface Draw { fn draw(borrow self, input: borrow Point) -> i32; }\nfn main() -> i32 { 0 }",
+    )
+    .unwrap();
+    fs::write(
+        f.0.join("src/graphics.mb"),
+        "use self::main::Point; use self::main::Draw; extend Point of Draw { fn draw(borrow self, input: share Point) -> i32 { self.x } }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not match interface 'main::Draw'")),
+        "{:?}",
+        result.diagnostics
+    );
+
+    fs::write(
+        f.0.join("src/graphics.mb"),
+        "use self::main::Point; extend Point of main::Draw { fn draw(borrow self, input: share main::Point) -> i32 { self.x } }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not match interface 'main::Draw'")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_conformance_checks_receiver_mode_and_parameter_mutability() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    for (interface, implementation) in [
+        (
+            "pub interface Draw { fn draw(self) -> i32; }",
+            "extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }",
+        ),
+        (
+            "pub interface Draw { fn draw(borrow self, var amount: i32) -> i32; }",
+            "extend Point of Draw { fn draw(borrow self, amount: i32) -> i32 { self.x } }",
+        ),
+    ] {
+        fs::write(
+            f.0.join("src/main.mb"),
+            format!("use graphics; pub type Point {{ pub x: i32 }}\n{interface}\nfn main() -> i32 {{ 0 }}"),
+        )
+        .unwrap();
+        fs::write(
+            f.0.join("src/graphics.mb"),
+            format!("use self::main::Point; use self::main::Draw; {implementation}"),
+        )
+        .unwrap();
+        let project = Project::load(&f.0, None).unwrap();
+        let result = resolve(&project, Target::Application);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("does not match interface 'main::Draw'")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn associated_type_bindings_are_required_and_substitute_method_signatures() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Left { value: i32 } type Right { value: i32 } type Result { value: i32 } interface Add { type Rhs; type Output; fn add(self, rhs: Rhs) -> Output; } extend Left of Add { type Rhs = Right; type Output = Result; fn add(self, rhs: Right) -> Result { Result { value: self.value + rhs.value } } } fn main() {}",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Left { value: i32 } type Right { value: i32 } type Result { value: i32 } interface Add { type Rhs; type Output; fn add(self, rhs: Rhs) -> Output; } extend Left of Add { type Rhs = Right; fn add(self, rhs: Left) -> Result { Result { value: self.value } } } fn main() {}",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("missing associated type binding 'Output'")),
+        "{:?}",
+        result.diagnostics
+    );
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not match interface 'main::Add'")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_constraint_rejects_a_nominal_type_instead_of_an_interface() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Point { x: i32 }\ntype NotInterface { x: i32 }\nextend Point of NotInterface { fn draw(borrow self) -> i32 { self.x } }\nfn main() {}",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("is a type, not an interface")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_conformance_resolves_transparent_aliases_locally_and_across_modules() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use graphics; pub type Point { pub x: i32 } pub type Number = i32; pub interface Draw { fn draw(borrow self, amount: Number, pair: Result<Number, Number>) -> Result<Number, Number>; } extend Point of Draw { fn draw(borrow self, amount: i32, pair: Result<i32, i32>) -> Result<i32, i32> { pair } } fn main() -> i32 { 0 }",
+    ).unwrap();
+    fs::write(
+        f.0.join("src/graphics.mb"),
+        "use self::main::{Point, Draw, Number}; pub type OtherNumber = Number; extend Point of Draw { fn draw(borrow self, amount: OtherNumber, pair: Result<OtherNumber, OtherNumber>) -> Result<Number, OtherNumber> { pair } }",
+    ).unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("does not match interface")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_conformance_uses_lowercase_string_across_modules() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use graphics; pub type Point { pub x: i32 } pub interface Text { fn echo(borrow self, input: string) -> string; } fn main() -> i32 { 0 }",
+    )
+    .unwrap();
+    fs::write(
+        f.0.join("src/graphics.mb"),
+        "use self::main::{Point, Text}; extend Point of Text { fn echo(borrow self, input: string) -> string { input } }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn extension_constraint_rejects_primitives_and_templates_as_interfaces() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    for constraint in ["i32", "List<i32>", "string"] {
+        fs::write(
+            f.0.join("src/main.mb"),
+            format!("type Point {{ x: i32 }} extend Point of {constraint} {{ fn draw(borrow self) -> i32 {{ self.x }} }} fn main() {{}}"),
+        ).unwrap();
+        let project = Project::load(&f.0, None).unwrap();
+        let result = resolve(&project, Target::Application);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not a declared interface")),
+            "constraint {constraint}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn generic_parameters_are_scoped_types_during_name_resolution() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "pub interface Draw { fn draw(borrow self) -> i32; } pub type Box<T> { value: T } pub fn identity<T>(value: T) -> T where T: Draw { value } fn main() -> i32 { 0 }",
+    ).unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown type 'T'")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn public_interface_cannot_expose_a_private_type() {
+    let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
+    fs::write(
+        f.0.join("src/main.mb"),
+        "type Secret { value: i32 }\npub interface Reveal { fn reveal(borrow self) -> Secret; }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("public signature exposes private type 'Secret'")),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn extension_candidates_follow_direct_module_edges_and_public_visibility() {
+    let f = Fixture::new(
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub type Point { x: i32 }\npub interface Draw { fn draw(borrow self) -> i32; }\npub extend Point of Draw { fn draw(borrow self) -> i32 { 1 } }\nextend Point of Draw { fn draw(borrow self) -> i32 { 2 } }",
+    );
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use math; fn main() -> i32 { math::add(1, 2) }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let candidates = result.extension_candidates("main");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].package, "test");
+    assert_eq!(candidates[0].module, "math");
+    assert!(candidates[0].public);
+    let local_candidates = result.extension_candidates("math");
+    assert_eq!(local_candidates.len(), 2);
+    assert_ne!(local_candidates[0].span, local_candidates[1].span);
+
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use self::math::add; fn main() -> i32 { add(1, 2) }",
+    )
+    .unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.extension_candidates("main").is_empty());
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use math::{add}; fn main() -> i32 { add(1, 2) }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.extension_candidates("main").is_empty());
+
+    fs::write(
+        f.0.join("src/bridge.mb"),
+        "use math; pub fn via_math() -> i32 { math::add(1, 2) }",
+    )
+    .unwrap();
+    fs::write(
+        f.0.join("src/main.mb"),
+        "use bridge; fn main() -> i32 { bridge::via_math() }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.modules.contains_key("math"));
+    assert!(result.extension_candidates("main").is_empty());
+
+    fs::write(
+        f.0.join("project.toml"),
+        "[package]\nname='test'\nentry='main::main'\n[export]\nadd='math::add'\n[prelude]\nsum_add='math::add'\n",
+    )
+    .unwrap();
+    fs::write(
+        f.0.join("src/main.mb"),
+        "fn main() -> i32 { sum_add(1, 2) }",
+    )
+    .unwrap();
+    let project = Project::load(&f.0, None).unwrap();
+    let result = resolve(&project, Target::Application);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.modules.contains_key("math"));
+    assert!(result.extension_candidates("main").is_empty());
+}
+
+#[test]
 fn missing_private_and_duplicate_definitions_are_rejected() {
     for (source, expected) in [
         ("fn add() {}", "ME007"),

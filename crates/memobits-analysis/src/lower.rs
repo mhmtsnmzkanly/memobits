@@ -6,7 +6,7 @@ use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
     Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
     Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UnaryOp, UseMode, ValueId, VariantDef,
+    UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -14,9 +14,26 @@ use memobits_syntax::{
     Block, Expr, ExprKind, FieldPattern, ItemKind, MatchArm, Module, Statement, StatementKind,
 };
 
+mod arrays;
+mod operations;
+use operations::{binary_op, primitive_type, unary_op};
+
+fn struct_field_index(definition: &TypeFact, name: &str) -> Option<usize> {
+    definition
+        .fields
+        .iter()
+        .position(|field| field.name == name)
+        .or_else(|| {
+            (definition.module == "\0tuple")
+                .then(|| name.parse::<usize>().ok())
+                .flatten()
+                .filter(|index| *index < definition.fields.len())
+        })
+}
+
 use crate::types::{
     check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
-    PathTarget, TypeFact, VariantUse,
+    PathTarget, SelectedCall, TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -31,7 +48,9 @@ fn program_types(
         .map(|definition| TypeDef {
             path: CanonicalType {
                 package: package.into(),
-                module: if definition.module == "__prelude" {
+                module: if definition.module == "\0tuple" {
+                    vec![definition.module.clone()]
+                } else if definition.module == "__prelude" {
                     vec![definition.module.clone()]
                 } else {
                     module_of(&definition.module)
@@ -198,43 +217,44 @@ pub fn lower_resolved(
 ) -> Result<Program, Vec<Diagnostic>> {
     let typed = check_resolved_mode(project, resolution, CheckMode::Execution)?;
     let mut constant_errors = Vec::new();
-    let mut fact_start = 0;
-    for source in resolution.modules.values() {
-        let function_count = source
-            .syntax
-            .items
+    for (module_name, source) in &resolution.modules {
+        let module_facts = typed
+            .functions
             .iter()
-            .filter(|item| matches!(item.kind, ItemKind::Function { .. }))
-            .count();
-        let fact_end = fact_start + function_count;
-        let Some(module_facts) = typed.functions.get(fact_start..fact_end) else {
-            return Err(vec![error(
-                source
-                    .syntax
-                    .items
-                    .first()
-                    .map(|item| item.span)
-                    .unwrap_or(Span {
-                        source: source.id,
-                        start: 0,
-                        end: 0,
-                    }),
-                "typed project facts do not match resolved modules",
-            )]);
-        };
-        constant_errors.extend(crate::constants::check_module(&source.syntax, module_facts));
-        fact_start = fact_end;
+            .filter(|facts| facts.source_module == *module_name)
+            .cloned()
+            .collect::<Vec<_>>();
+        constant_errors.extend(crate::constants::check_module(
+            &source.syntax,
+            &module_facts,
+        ));
     }
     if !constant_errors.is_empty() {
         return Err(constant_errors);
     }
     let mut functions = Vec::with_capacity(typed.functions.len());
-    for (module_name, source) in &resolution.modules {
+    for fact in &typed.functions {
+        let Some(source) = resolution.modules.get(&fact.source_module) else {
+            return Err(vec![error(
+                fact.span,
+                "typed fact refers to an unknown source module",
+            )]);
+        };
+        let module_name = &fact.source_module;
         let module_path = module_name
             .split("::")
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        for item in &source.syntax.items {
+        if fact.id.0 as usize != functions.len() {
+            return Err(vec![error(
+                fact.span,
+                "typed project function ID differs from canonical program order",
+            )]);
+        }
+        let source_function = source.syntax.items.iter().find_map(|item| {
+            if item.span != fact.span {
+                return None;
+            }
             if let ItemKind::Function {
                 name,
                 body,
@@ -242,58 +262,101 @@ pub fn lower_resolved(
                 ..
             } = &item.kind
             {
-                let Some(fact) = typed.functions.get(functions.len()) else {
-                    return Err(vec![error(
-                        item.span,
-                        "typed project facts do not match resolved function order",
-                    )]);
-                };
-                if fact.id.0 as usize != functions.len() {
-                    return Err(vec![error(
-                        item.span,
-                        "typed project function ID differs from canonical program order",
-                    )]);
-                }
-                let function = Function {
-                    path: CanonicalFunction {
-                        package: project.manifest.package.name.clone(),
-                        module: module_path.clone(),
-                        name: name.clone(),
-                    },
-                    span: item.span,
-                    signature: fact.signature.clone(),
-                    parameter_locals: fact
-                        .locals
-                        .iter()
-                        .take(parameters.len())
-                        .map(|l| l.id)
-                        .collect(),
-                    locals: fact
-                        .locals
-                        .iter()
-                        .map(|l| Local {
-                            name: l.name.clone(),
-                            ty: l.ty.clone(),
-                            mutable: l.mutable,
-                            span: l.span,
-                        })
-                        .collect(),
-                    values: Vec::new(),
-                    blocks: vec![IrBlock {
-                        parameters: Vec::new(),
-                        instructions: Vec::new(),
-                        terminator: Terminator {
-                            span: None,
-                            kind: TerminatorKind::Unreachable,
-                        },
-                    }],
-                    entry: BlockId(0),
-                };
-                let mut builder = Builder::new(function, fact, &typed.types);
-                builder.lower_body(body);
-                functions.push(builder.function);
+                (name == &fact.source_name).then_some((name.as_str(), body, parameters.len()))
+            } else {
+                None
             }
-        }
+        });
+        let (ir_name, body, parameter_count) = if let Some((name, body, count)) = source_function {
+            let ir_name = fact.specialization_key.as_ref().map_or_else(
+                || name.to_owned(),
+                |_| format!("{name}$specialization${}", fact.id.0),
+            );
+            (ir_name, body, count)
+        } else {
+            let extension = source.syntax.items.iter().find_map(|item| {
+                let (interface, methods) = match &item.kind {
+                    ItemKind::Extension {
+                        interface, methods, ..
+                    } => (Some(interface), methods),
+                    ItemKind::InherentExtension { methods, .. } => (None, methods),
+                    _ => return None,
+                };
+                methods
+                    .iter()
+                    .find(|method| method.span == fact.span && method.name == fact.source_name)
+                    .and_then(|method| method.body.as_ref())
+                    .map(|body| {
+                        let name = interface.map_or_else(
+                            || inherent_function_name(item.span.start, &fact.source_name),
+                            |interface| {
+                                extension_function_name(
+                                    module_name,
+                                    item.span.start,
+                                    interface,
+                                    &fact.source_name,
+                                )
+                            },
+                        );
+                        (
+                            name,
+                            body,
+                            methods
+                                .iter()
+                                .find(|m| m.span == fact.span)
+                                .unwrap()
+                                .parameters
+                                .len()
+                                + 1,
+                        )
+                    })
+            });
+            let Some(extension) = extension else {
+                return Err(vec![error(
+                    fact.span,
+                    "typed fact has no source function body",
+                )]);
+            };
+            extension
+        };
+        let function = Function {
+            path: CanonicalFunction {
+                package: project.manifest.package.name.clone(),
+                module: module_path,
+                name: ir_name,
+            },
+            span: fact.span,
+            signature: fact.signature.clone(),
+            parameter_locals: fact
+                .locals
+                .iter()
+                .take(parameter_count)
+                .map(|local| local.id)
+                .collect(),
+            locals: fact
+                .locals
+                .iter()
+                .map(|local| Local {
+                    name: local.name.clone(),
+                    ty: local.ty.clone(),
+                    mutable: local.mutable,
+                    span: local.span,
+                })
+                .collect(),
+            values: Vec::new(),
+            blocks: vec![IrBlock {
+                parameters: Vec::new(),
+                instructions: Vec::new(),
+                terminator: Terminator {
+                    span: None,
+                    kind: TerminatorKind::Unreachable,
+                },
+            }],
+            entry: BlockId(0),
+        };
+        let mut builder = Builder::new(function, fact, &typed.types);
+        builder.lower_body(body);
+        functions.push(builder.function);
     }
     let program = Program {
         functions,
@@ -333,6 +396,22 @@ fn consume(mut operand: Operand) -> Operand {
     }
     operand
 }
+fn extension_function_name(
+    _module: &str,
+    declaration_start: usize,
+    interface: &memobits_syntax::Type,
+    method: &str,
+) -> String {
+    format!(
+        "__extension_{}_{}_{}",
+        interface.path.join("_"),
+        method,
+        declaration_start
+    )
+}
+fn inherent_function_name(declaration_start: usize, method: &str) -> String {
+    format!("__inherent_{method}_{declaration_start}")
+}
 fn read(mut operand: Operand) -> Operand {
     operand.mode = UseMode::Read;
     operand
@@ -344,37 +423,12 @@ fn op(source: Source, span: Span) -> Operand {
         span: Some(span),
     }
 }
-fn binary_op(value: &str) -> BinaryOp {
-    match value {
-        "+" | "+=" => BinaryOp::Add,
-        "-" | "-=" => BinaryOp::Subtract,
-        "*" | "*=" => BinaryOp::Multiply,
-        "/" | "/=" => BinaryOp::Divide,
-        "%" | "%=" => BinaryOp::Remainder,
-        "<" => BinaryOp::Less,
-        "<=" => BinaryOp::LessEqual,
-        ">" => BinaryOp::Greater,
-        ">=" => BinaryOp::GreaterEqual,
-        "==" => BinaryOp::Equal,
-        "!=" => BinaryOp::NotEqual,
-        "&&" => BinaryOp::And,
-        "||" => BinaryOp::Or,
-        _ => unreachable!("checked operator"),
-    }
-}
-fn unary_op(value: &str) -> UnaryOp {
-    match value {
-        "+" => UnaryOp::Plus,
-        "-" => UnaryOp::Negate,
-        "!" => UnaryOp::Not,
-        _ => unreachable!("checked operator"),
-    }
-}
 /// One step of a place: an indexed element (its position already evaluated and
 /// captured) or a named field.
 enum Projection {
     Index(Operand),
     Field(String),
+    FieldSlot(u32),
 }
 struct LoopTargets {
     header: BlockId,
@@ -392,7 +446,11 @@ struct Builder<'a> {
     paths: HashMap<ExprId, PathTarget>,
     variants: HashMap<ExprId, VariantUse>,
     explicit_drops: HashSet<ExprId>,
+    selected_calls: HashMap<ExprId, SelectedCall>,
+    selected_operators: HashMap<ExprId, SelectedCall>,
     matches: HashMap<ExprId, &'a MatchFact>,
+    tuple_projections: HashMap<usize, u32>,
+    tuple_initializers: HashMap<usize, Vec<u32>>,
     current: Option<BlockId>,
     owned_locals: Vec<LocalId>,
     loops: Vec<LoopTargets>,
@@ -424,6 +482,28 @@ impl<'a> Builder<'a> {
             .map(|u| (u.expression, *u))
             .collect();
         let matches = facts.matches.iter().map(|m| (m.expression, m)).collect();
+        let tuple_projections = facts
+            .tuple_projections
+            .iter()
+            .map(|fact| (fact.node_addr, fact.slot))
+            .collect();
+        let tuple_initializers = facts
+            .tuple_initializers
+            .iter()
+            .map(|fact| (fact.node_addr, fact.slots.clone()))
+            .collect();
+        let selected_calls = facts
+            .selected_calls
+            .iter()
+            .cloned()
+            .map(|call| (call.expression, call))
+            .collect();
+        let selected_operators = facts
+            .selected_operators
+            .iter()
+            .cloned()
+            .map(|operator| (operator.expression, operator))
+            .collect();
         let owned_locals = function
             .parameter_locals
             .iter()
@@ -444,7 +524,11 @@ impl<'a> Builder<'a> {
             paths,
             variants,
             explicit_drops: facts.explicit_drops.iter().copied().collect(),
+            selected_calls,
+            selected_operators,
             matches,
+            tuple_projections,
+            tuple_initializers,
             current: Some(BlockId(0)),
             owned_locals,
             loops: Vec::new(),
@@ -634,6 +718,14 @@ impl<'a> Builder<'a> {
         let operand = self.owned_to(operand, target)?;
         Some(consume(self.capture(operand)?))
     }
+    fn is_string_tuple(&self, ty: &Type) -> bool {
+        let Type::Struct(id) = ty else {
+            return false;
+        };
+        self.types.get(id.0 as usize).is_some_and(|info| {
+            info.module == "\0tuple" && info.fields.iter().any(|field| field.ty == Type::String)
+        })
+    }
     fn borrow(&mut self, mut owner: Operand, access: Access) -> Option<Operand> {
         let ty = self.operand_type(owner).expect("checked borrow source");
         let inner = match ty {
@@ -803,7 +895,10 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_expression_statement(&mut self, expr: &Expr) {
-        if let ExprKind::Call { callee, arguments } = &expr.kind {
+        if let ExprKind::Call {
+            callee, arguments, ..
+        } = &expr.kind
+        {
             let scope_start = self.owned_locals.len();
             if let ExprKind::Field { base, name } = &callee.kind {
                 if name == "concat" {
@@ -842,7 +937,10 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
-        if let ExprKind::Call { callee, arguments } = &base.kind {
+        if let ExprKind::Call {
+            callee, arguments, ..
+        } = &base.kind
+        {
             if let ExprKind::Field { base: left, name } = &callee.kind {
                 if name == "concat" {
                     let owner = self.hidden_local("String temporary", Type::String, base.span);
@@ -996,7 +1094,10 @@ impl<'a> Builder<'a> {
             }
             match &statement.kind {
                 StatementKind::Binding { value, .. } => {
-                    if let ExprKind::Call { callee, arguments } = &value.kind {
+                    if let ExprKind::Call {
+                        callee, arguments, ..
+                    } = &value.kind
+                    {
                         if let ExprKind::Field { base, name } = &callee.kind {
                             if name == "concat" {
                                 self.lower_concat_initializer(
@@ -1033,7 +1134,10 @@ impl<'a> Builder<'a> {
                     let PathTarget::Local(local) = self.path(target) else {
                         unreachable!("checked assignment")
                     };
-                    if let ExprKind::Call { callee, arguments } = &value.kind {
+                    if let ExprKind::Call {
+                        callee, arguments, ..
+                    } = &value.kind
+                    {
                         if let ExprKind::Field { base, name } = &callee.kind {
                             if name == "concat" {
                                 let staged = self.hidden_local(
@@ -1206,7 +1310,13 @@ impl<'a> Builder<'a> {
                 let position = self.scalar(position)?;
                 projections.push(Projection::Index(self.capture(position)?));
             }
-            (_, Some(name)) => projections.push(Projection::Field(name.clone())),
+            (_, Some(name)) => {
+                if let Some(slot) = self.tuple_projections.get(&(expr as *const Expr as usize)) {
+                    projections.push(Projection::FieldSlot(*slot));
+                } else {
+                    projections.push(Projection::Field(name.clone()));
+                }
+            }
             _ => unreachable!(),
         }
         Some((root, projections))
@@ -1228,6 +1338,9 @@ impl<'a> Builder<'a> {
                     self.element_addr(current, *position, access, span)?
                 }
                 Projection::Field(name) => self.field_addr(current, name, access, span)?,
+                Projection::FieldSlot(slot) => {
+                    self.field_addr_slot(current, *slot, access, span)?
+                }
             };
         }
         Some(current)
@@ -1330,19 +1443,37 @@ impl<'a> Builder<'a> {
             return None;
         };
         let binding = &self.function.locals[local.0 as usize];
-        let Type::Struct(id) = binding.ty else {
-            return None;
+        let id = match &binding.ty {
+            Type::Struct(id)
+                if binding.mutable && !self.function.parameter_locals.contains(&local) =>
+            {
+                *id
+            }
+            Type::Reference {
+                access: Access::Share,
+                inner,
+            } if self.function.parameter_locals.contains(&local) => {
+                let Type::Struct(id) = inner.as_ref() else {
+                    return None;
+                };
+                let position = self
+                    .function
+                    .parameter_locals
+                    .iter()
+                    .position(|parameter| *parameter == local)?;
+                if self.function.signature.parameters[position].access != Access::Share {
+                    return None;
+                }
+                *id
+            }
+            _ => return None,
         };
-        if !matches!(base.kind, ExprKind::Path(_))
-            || !binding.mutable
-            || self.function.parameter_locals.contains(&local)
-        {
+        if !matches!(base.kind, ExprKind::Path(_)) {
             return None;
         }
-        self.types[id.0 as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == *name && field.ty == Type::String)
+        let definition = &self.types[id.0 as usize];
+        struct_field_index(definition, name)
+            .filter(|field| definition.fields[*field].ty == Type::String)
             .map(|field| (local, field as u32))
     }
 
@@ -1350,7 +1481,7 @@ impl<'a> Builder<'a> {
     /// result is a reference with the requested access.
     fn field_addr(
         &mut self,
-        mut owner: Operand,
+        owner: Operand,
         field_name: &str,
         access: Access,
         span: Span,
@@ -1364,11 +1495,34 @@ impl<'a> Builder<'a> {
             _ => unreachable!("checked struct field base"),
         };
         let definition = &self.types[id.0 as usize];
-        let index = definition
-            .fields
-            .iter()
-            .position(|field| field.name == field_name)
-            .expect("checked struct field");
+        let index = struct_field_index(definition, field_name).expect("checked struct field");
+        self.field_addr_index(owner, index, access, span)
+    }
+    fn field_addr_slot(
+        &mut self,
+        owner: Operand,
+        slot: u32,
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        self.field_addr_index(owner, slot as usize, access, span)
+    }
+    fn field_addr_index(
+        &mut self,
+        mut owner: Operand,
+        index: usize,
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        let id = match self.operand_type(owner) {
+            Some(Type::Struct(id)) => id,
+            Some(Type::Reference { inner, .. }) => match *inner {
+                Type::Struct(id) => id,
+                _ => unreachable!("checked struct field base"),
+            },
+            _ => unreachable!("checked struct field base"),
+        };
+        let definition = &self.types[id.0 as usize];
         let field_type = definition.fields[index].ty.clone();
         let loan = LoanId(self.next_loan);
         self.next_loan += 1;
@@ -1403,146 +1557,6 @@ impl<'a> Builder<'a> {
     /// loop. Larger counts always lower to a loop over a hidden zeroed
     /// accumulator and a hidden counter, so the IR size does not depend on N and
     /// an owned element expression is a repeated move that ownership rejects.
-    fn lower_repeat(&mut self, expr: &Expr, value: &Expr) -> Option<Operand> {
-        let ty = self.ty(expr).expect("checked repeat type");
-        let Type::Array {
-            len,
-            element: element_ty,
-        } = ty.clone()
-        else {
-            unreachable!("checked repeat type")
-        };
-        let span = expr.span;
-        if len == 0 {
-            return self.emit(
-                span,
-                InstructionKind::ArrayNew {
-                    init: ArrayInit::Zeroed,
-                },
-                Some(ty),
-            );
-        }
-        if len == 1 {
-            let element = self.lower_expr(value)?;
-            let element = self.owned_captured(element, &element_ty)?;
-            return self.emit(
-                span,
-                InstructionKind::ArrayNew {
-                    init: ArrayInit::Elements(vec![element]),
-                },
-                Some(ty),
-            );
-        }
-        let u32_ty = Type::Primitive(Primitive::U32);
-        let accumulator = self.hidden_local("repeat array", ty.clone(), span);
-        let counter = self.hidden_local("repeat index", u32_ty.clone(), span);
-        let zeroed = self.emit(
-            span,
-            InstructionKind::ArrayNew {
-                init: ArrayInit::Zeroed,
-            },
-            Some(ty.clone()),
-        )?;
-        self.emit(
-            span,
-            InstructionKind::Assign {
-                target: accumulator,
-                value: consume(zeroed),
-                initialize: true,
-            },
-            None,
-        );
-        let start = self.constant(span, Constant::Integer("0".into()), u32_ty.clone())?;
-        self.emit(
-            span,
-            InstructionKind::Assign {
-                target: counter,
-                value: consume(start),
-                initialize: true,
-            },
-            None,
-        );
-        let header = self.new_block();
-        let body = self.new_block();
-        let exit = self.new_block();
-        self.goto(header, Vec::new(), span);
-        self.current = Some(header);
-        let current_count = self.capture(op(Source::Local(counter), span))?;
-        let limit = self.constant(span, Constant::Integer(len.to_string()), u32_ty.clone())?;
-        let more = self.emit(
-            span,
-            InstructionKind::Binary {
-                op: BinaryOp::Less,
-                left: read(current_count),
-                right: read(limit),
-            },
-            Some(Type::Primitive(Primitive::Bool)),
-        )?;
-        self.finish(
-            header,
-            TerminatorKind::Branch {
-                condition: read(more),
-                then_edge: Edge {
-                    target: body,
-                    arguments: Vec::new(),
-                },
-                else_edge: Edge {
-                    target: exit,
-                    arguments: Vec::new(),
-                },
-            },
-            Some(span),
-        );
-        self.current = Some(body);
-        let produced = self
-            .lower_expr(value)
-            .and_then(|operand| self.owned_to(operand, &element_ty))
-            .and_then(|operand| self.capture(operand));
-        if let Some(produced) = produced {
-            let position = self.capture(op(Source::Local(counter), span))?;
-            let reference = self.element_addr(
-                op(Source::Local(accumulator), span),
-                position,
-                Access::Share,
-                span,
-            )?;
-            self.emit(
-                span,
-                InstructionKind::Store {
-                    reference,
-                    value: consume(produced),
-                },
-                None,
-            );
-            let current_count = self.capture(op(Source::Local(counter), span))?;
-            let one = self.constant(span, Constant::Integer("1".into()), u32_ty.clone())?;
-            let next = self.emit(
-                span,
-                InstructionKind::Binary {
-                    op: BinaryOp::Add,
-                    left: read(current_count),
-                    right: read(one),
-                },
-                Some(u32_ty),
-            )?;
-            self.emit(
-                span,
-                InstructionKind::Assign {
-                    target: counter,
-                    value: consume(next),
-                    initialize: false,
-                },
-                None,
-            );
-            self.goto(header, Vec::new(), span);
-        }
-        self.current = Some(exit);
-        self.emit(
-            span,
-            InstructionKind::Capture(consume(op(Source::Local(accumulator), span))),
-            Some(ty),
-        )
-    }
     fn lower_loop(&mut self, body: &Block, span: Span) {
         let header = self.new_block();
         let exit = self.new_block();
@@ -1667,6 +1681,68 @@ impl<'a> Builder<'a> {
     fn lower_expr(&mut self, expr: &Expr) -> Option<Operand> {
         self.current?;
         match &expr.kind {
+            ExprKind::Tuple(elements) => {
+                let Some(Type::Struct(id)) = self.ty(expr) else {
+                    unreachable!("checked tuple type")
+                };
+                let fields_def = self.types[id.0 as usize]
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect::<Vec<_>>();
+                let scope_start = self.owned_locals.len();
+                let mut slots: Vec<Option<Operand>> = vec![None; fields_def.len()];
+                let resolved_slots = self
+                    .tuple_initializers
+                    .get(&(expr as *const Expr as usize))
+                    .cloned();
+                for (position, element) in elements.iter().enumerate() {
+                    let index = resolved_slots
+                        .as_ref()
+                        .and_then(|indices| indices.get(position).copied())
+                        .map(|index| index as usize)
+                        .unwrap_or(position);
+                    let field_ty = &fields_def[index].1;
+                    let Some(value) = self.lower_expr(&element.value) else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
+                    let Some(mut value) = (if *field_ty == Type::String {
+                        self.owned_to(value, field_ty)
+                    } else {
+                        self.owned_captured(value, field_ty)
+                    }) else {
+                        self.owned_locals.truncate(scope_start);
+                        return None;
+                    };
+                    if *field_ty == Type::String
+                        && position + 1 < elements.len()
+                        && matches!(value.source, Source::Local(_))
+                    {
+                        let staged =
+                            self.hidden_local("tuple String element", Type::String, element.span);
+                        self.initialize_local(staged, value, element.span);
+                        value = consume(op(Source::Local(staged), element.span));
+                    }
+                    slots[index] = Some(value);
+                }
+                let result = self.emit(
+                    expr.span,
+                    InstructionKind::StructNew {
+                        ty: id,
+                        fields: slots
+                            .into_iter()
+                            .map(|slot| slot.expect("checked complete tuple initializer"))
+                            .collect(),
+                    },
+                    Some(Type::Struct(id)),
+                );
+                if result.is_some() {
+                    self.end_owned_locals(scope_start, expr.span);
+                }
+                self.owned_locals.truncate(scope_start);
+                result
+            }
             ExprKind::Array(elements) => {
                 if matches!(self.ty(expr), Some(Type::List(_))) {
                     return self.emit(expr.span, InstructionKind::EmptyList, self.ty(expr));
@@ -1708,6 +1784,11 @@ impl<'a> Builder<'a> {
                 };
                 self.constant(expr.span, value, ty)
             }
+            ExprKind::CharLiteral(value) => self.constant(
+                expr.span,
+                Constant::Integer((*value as u32).to_string()),
+                Type::Primitive(Primitive::Char),
+            ),
             ExprKind::StringLiteral(text) => {
                 self.constant(expr.span, Constant::String(text.clone()), Type::String)
             }
@@ -1755,6 +1836,28 @@ impl<'a> Builder<'a> {
                     self.ty(expr),
                 )
             }
+            ExprKind::Cast { value, .. } => {
+                let source = self.lower_expr(value)?;
+                let source = self.scalar(source)?;
+                let source_ty = self.ty(value).expect("checked cast source type");
+                let target_ty = self.ty(expr).expect("checked cast target type");
+                self.emit(
+                    expr.span,
+                    InstructionKind::Cast {
+                        value: read(source),
+                        source: primitive_type(&source_ty).expect("checked numeric source"),
+                        target: primitive_type(&target_ty).expect("checked numeric target"),
+                    },
+                    self.ty(expr),
+                )
+            }
+            ExprKind::Binary {
+                operator,
+                left,
+                right,
+            } if self.selected_operators.contains_key(&self.id(expr)) => {
+                self.lower_selected_operator(expr, left, right)
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -1790,8 +1893,66 @@ impl<'a> Builder<'a> {
                 self.emit(expr.span, InstructionKind::DropLocal { value }, None);
                 self.unit(expr.span)
             }
-            ExprKind::Call { callee, arguments } => {
+            ExprKind::Call {
+                callee, arguments, ..
+            } if self.selected_calls.contains_key(&self.id(expr)) => {
+                self.lower_selected_call(expr, callee, arguments)
+            }
+            ExprKind::Call {
+                callee, arguments, ..
+            } => {
                 if let ExprKind::Field { base, name } = &callee.kind {
+                    if name == "to_u32" {
+                        let source = self.lower_expr(base)?;
+                        let source = self.scalar(source)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::Cast {
+                                value: read(source),
+                                source: Primitive::U8,
+                                target: Primitive::U32,
+                            },
+                            self.ty(expr),
+                        );
+                    }
+                    if matches!(name.as_str(), "wrapping_add" | "wrapping_mul") {
+                        let left = self.lower_expr(base)?;
+                        let left = self.scalar(left)?;
+                        let right = self.lower_expr(&arguments[0])?;
+                        let right = self.scalar(right)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::Binary {
+                                op: if name == "wrapping_add" {
+                                    BinaryOp::WrappingAdd
+                                } else {
+                                    BinaryOp::WrappingMultiply
+                                },
+                                left: read(left),
+                                right: read(right),
+                            },
+                            self.ty(expr),
+                        );
+                    }
+                    if matches!(name.as_str(), "bit_and" | "bit_xor" | "bit_or") {
+                        let left = self.lower_expr(base)?;
+                        let left = self.scalar(left)?;
+                        let right = self.lower_expr(&arguments[0])?;
+                        let right = self.scalar(right)?;
+                        return self.emit(
+                            expr.span,
+                            InstructionKind::Binary {
+                                op: match name.as_str() {
+                                    "bit_and" => BinaryOp::BitwiseAnd,
+                                    "bit_xor" => BinaryOp::BitwiseXor,
+                                    _ => BinaryOp::BitwiseOr,
+                                },
+                                left: read(left),
+                                right: read(right),
+                            },
+                            self.ty(expr),
+                        );
+                    }
                     if name == "copy" {
                         // Read the receiver (loading through a reference or
                         // element address) and produce a fresh owned value.
@@ -1890,6 +2051,9 @@ impl<'a> Builder<'a> {
                         let direct = matches!(callee.source, Source::Function(_));
                         let direct_string = direct && parameter.ty == Type::String;
                         let direct_list = direct && matches!(parameter.ty, Type::List(_));
+                        let direct_string_tuple = direct
+                            && parameter.access == Access::Owned
+                            && self.is_string_tuple(&parameter.ty);
                         let temporary_receiver = match &argument.kind {
                             ExprKind::Call { .. }
                                 if (direct_string || direct_list)
@@ -1924,7 +2088,7 @@ impl<'a> Builder<'a> {
                             let mut reference = self.borrow(value, parameter.access)?;
                             reference.mode = access_mode(parameter.access);
                             reference
-                        } else if direct_string || direct_list {
+                        } else if direct_string || direct_list || direct_string_tuple {
                             let owned = self.owned_to(value, &parameter.ty)?;
                             if index + 1 < arguments.len()
                                 && temporary_receiver.is_none()
@@ -2037,6 +2201,85 @@ impl<'a> Builder<'a> {
                 else_branch,
             } => self.lower_if(expr, condition, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => self.lower_match(expr, scrutinee, arms),
+        }
+    }
+    fn lower_selected_call(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[Expr],
+    ) -> Option<Operand> {
+        let selected = self.selected_calls[&self.id(expr)].clone();
+        let ExprKind::Field { base, .. } = &callee.kind else {
+            unreachable!("selected call has a receiver method callee")
+        };
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let mut values = Vec::with_capacity(arguments.len() + 1);
+            let receiver = self.lower_expr(base)?;
+            values.push(self.lower_selected_argument(receiver, &selected.signature.parameters[0])?);
+            for (argument, parameter) in arguments
+                .iter()
+                .zip(selected.signature.parameters.iter().skip(1))
+            {
+                let value = self.lower_expr(argument)?;
+                values.push(self.lower_selected_argument(value, parameter)?);
+            }
+            self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(op(Source::Function(selected.function), expr.span)),
+                    arguments: values,
+                },
+                self.ty(expr),
+            )
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+    fn lower_selected_operator(
+        &mut self,
+        expr: &Expr,
+        left: &Expr,
+        right: &Expr,
+    ) -> Option<Operand> {
+        let selected = self.selected_operators[&self.id(expr)].clone();
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let lhs = self.lower_expr(left)?;
+            let lhs = self.lower_selected_argument(lhs, &selected.signature.parameters[0])?;
+            let rhs = self.lower_expr(right)?;
+            let rhs = self.lower_selected_argument(rhs, &selected.signature.parameters[1])?;
+            self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(op(Source::Function(selected.function), expr.span)),
+                    arguments: vec![lhs, rhs],
+                },
+                self.ty(expr),
+            )
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+
+    fn lower_selected_argument(
+        &mut self,
+        value: Operand,
+        parameter: &memobits_ir::ParameterType,
+    ) -> Option<Operand> {
+        if parameter.access != Access::Owned {
+            let mut reference = self.borrow(value, parameter.access)?;
+            reference.mode = access_mode(parameter.access);
+            Some(reference)
+        } else {
+            self.owned_captured(value, &parameter.ty)
         }
     }
     /// `match` on an owned enum. The scrutinee is consumed once, into a hidden

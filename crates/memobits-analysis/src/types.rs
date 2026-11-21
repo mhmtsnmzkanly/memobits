@@ -3,6 +3,7 @@
 //! assignment, array parameters, results and `if`/block results); every other array form is
 //! gated with TE017.
 //! Name resolution across modules and ownership checking are separate passes.
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -14,13 +15,17 @@ use memobits_ir::{
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
-    Access, Block, Expr, ExprKind, FieldPattern, ItemKind, MatchArm, Module, Parameter,
-    PatternKind, Statement, StatementKind, Type,
+    Access, Block, Expr, ExprKind, FieldPattern, GenericParameter, GenericParameterKind, ItemKind,
+    MatchArm, Module, Parameter, PatternKind, Statement, StatementKind, Type, WhereBound,
 };
 
+mod arrays;
+mod lists;
+mod operations;
 mod templates;
 mod typetable;
 use memobits_syntax::templates::{self as registry, Template};
+use operations::{floating, int_limit, integer, numeric};
 use templates::ResolvedArgument;
 use typetable::{StructInfo, TypeTable};
 
@@ -38,6 +43,9 @@ enum Ty {
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
+    /// A tuple occurrence with recursively scoped aliases. The id remains the
+    /// canonical identity of its ordered element types.
+    Tuple(u32, Rc<str>, TupleAliases),
     /// An enum, by index in the same table as structs, with its name.
     Enum(u32, Rc<str>),
     Reference {
@@ -50,6 +58,11 @@ enum Ty {
     Error,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TupleAliases {
+    pub(super) labels: Vec<Option<String>>,
+    pub(super) nested: Vec<Option<Box<TupleAliases>>>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ReferenceOrigin {
     Binding(usize),
     Temporary,
@@ -59,16 +72,174 @@ struct FunctionParameter {
     access: IrAccess,
     ty: Ty,
 }
+#[derive(Clone)]
+struct ExtensionCandidate {
+    module: String,
+    span: Span,
+    visible: bool,
+    local: bool,
+    target: Ty,
+    interface: Option<String>,
+    associated_types: HashMap<String, Ty>,
+    methods: HashMap<String, (Access, Vec<FunctionParameter>, Ty, Span, FunctionId)>,
+    public_methods: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct GenericFunctionTemplate {
+    module: String,
+    name: String,
+    span: Span,
+    generic_parameters: Vec<GenericParameter>,
+    bounds: Vec<WhereBound>,
+    bound_interfaces: Vec<String>,
+    parameters: Vec<Parameter>,
+    result: Option<Type>,
+}
+
+#[derive(Clone)]
+struct GenericSpecialization {
+    template: GenericFunctionTemplate,
+    substitution: HashMap<String, Ty>,
+    const_substitution: HashMap<String, u32>,
+    evidence: Vec<GenericEvidence>,
+    signature: Signature,
+    id: FunctionId,
+    key: String,
+}
+
+#[derive(Clone)]
+struct GenericEvidence {
+    interface: String,
+    candidate: ExtensionCandidate,
+}
+
+#[derive(Default)]
+struct SpecializationRegistry {
+    next_id: u32,
+    by_key: HashMap<String, FunctionId>,
+    requests: Vec<GenericSpecialization>,
+}
 const UNIT: Ty = Ty::Primitive("Unit");
 const BOOL: Ty = Ty::Primitive("Bool");
 const I32: Ty = Ty::Primitive("i32");
 const F64: Ty = Ty::Primitive("f64");
+const U8: Ty = Ty::Primitive("u8");
+const U32: Ty = Ty::Primitive("u32");
 fn ir_access(access: Access) -> IrAccess {
     match access {
         Access::Owned => IrAccess::Owned,
         Access::Borrow => IrAccess::Borrow,
         Access::Share => IrAccess::Share,
     }
+}
+
+fn is_plain_type_parameter(ty: &Type, name: &str) -> bool {
+    ty.path == [name] && ty.arguments.is_empty()
+}
+
+fn is_associated_projection(ty: &Type, name: &str) -> bool {
+    ty.path.len() == 2 && ty.path[0] == name && ty.arguments.is_empty()
+}
+
+fn supported_generic_function(template: &GenericFunctionTemplate) -> bool {
+    if template.bounds.len() > 1
+        || template.bounds.iter().any(|bound| {
+            bound.parameter
+                != template
+                    .generic_parameters
+                    .first()
+                    .map_or("", |p| p.name.as_str())
+                || !bound.interface.arguments.is_empty()
+        })
+    {
+        return false;
+    }
+    let (type_name, const_name, array_mode) = match template.generic_parameters.as_slice() {
+        [generic] if matches!(generic.kind, GenericParameterKind::Type) => {
+            (&generic.name, None, false)
+        }
+        [generic, constant]
+            if matches!(generic.kind, GenericParameterKind::Type)
+                && matches!(&constant.kind, GenericParameterKind::Const(ty) if ty.path == ["u32"] && ty.arguments.is_empty()) =>
+        {
+            (&generic.name, Some(constant.name.as_str()), true)
+        }
+        _ => return false,
+    };
+    if template.parameters.is_empty() {
+        return false;
+    }
+    if template.parameters.iter().any(|parameter| {
+        parameter.access != Access::Owned
+            || (if array_mode {
+                !is_array_generic_pattern(&parameter.ty, type_name, const_name.unwrap())
+                    && (type_mentions_parameter(&parameter.ty, type_name)
+                        || type_mentions_const(&parameter.ty, const_name.unwrap()))
+            } else {
+                type_mentions_parameter(&parameter.ty, type_name)
+                    && !is_plain_type_parameter(&parameter.ty, type_name)
+                    && !is_associated_projection(&parameter.ty, type_name)
+            })
+    }) {
+        return false;
+    }
+    if !template.parameters.iter().any(|parameter| {
+        if array_mode {
+            is_array_generic_pattern(&parameter.ty, type_name, const_name.unwrap())
+        } else {
+            is_plain_type_parameter(&parameter.ty, type_name)
+        }
+    }) {
+        return false;
+    }
+    let Some(result) = &template.result else {
+        return false;
+    };
+    let valid_result = if array_mode {
+        is_array_generic_pattern(result, type_name, const_name.unwrap())
+    } else {
+        is_plain_type_parameter(result, type_name)
+            || is_associated_projection(result, type_name)
+            || !type_mentions_parameter(result, type_name)
+    };
+    if !valid_result {
+        return false;
+    }
+    valid_result
+}
+
+fn is_array_generic_pattern(ty: &Type, type_name: &str, const_name: &str) -> bool {
+    ty.path.as_slice() == ["Array"]
+        && matches!(ty.arguments.as_slice(), [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Const(length)]
+            if is_plain_type_parameter(element, type_name) && length == const_name)
+}
+
+fn type_mentions_const(ty: &Type, name: &str) -> bool {
+    ty.arguments.iter().any(|argument| match argument {
+        memobits_syntax::TypeArgument::Const(found) => found == name,
+        memobits_syntax::TypeArgument::Type(ty) => type_mentions_const(ty, name),
+        memobits_syntax::TypeArgument::TupleField { ty, .. } => type_mentions_const(ty, name),
+        memobits_syntax::TypeArgument::Reference { referent, .. } => {
+            type_mentions_const(referent, name)
+        }
+        memobits_syntax::TypeArgument::Integer(_) => false,
+    })
+}
+
+fn type_mentions_parameter(ty: &Type, name: &str) -> bool {
+    ((ty.path.as_slice() == [name] || ty.path.first().is_some_and(|segment| segment == name))
+        && ty.arguments.is_empty())
+        || ty.arguments.iter().any(|argument| match argument {
+            memobits_syntax::TypeArgument::Type(ty) => type_mentions_parameter(ty, name),
+            memobits_syntax::TypeArgument::TupleField { ty, .. } => {
+                type_mentions_parameter(ty, name)
+            }
+            memobits_syntax::TypeArgument::Reference { referent, .. } => {
+                type_mentions_parameter(referent, name)
+            }
+            _ => false,
+        })
 }
 fn access_name(access: IrAccess) -> &'static str {
     match access {
@@ -77,39 +248,17 @@ fn access_name(access: IrAccess) -> &'static str {
         IrAccess::Share => "share",
     }
 }
-fn numeric(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Primitive("i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64")
-    )
-}
 fn read_type(ty: Ty) -> Ty {
     match ty {
         Ty::Reference { inner, .. } => *inner,
         other => other,
     }
 }
-fn integer(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Primitive("i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
-    )
-}
-fn int_limit(kind: &str) -> Option<u128> {
-    match kind {
-        "i8" => Some(127),
-        "i16" => Some(32767),
-        "i32" => Some(2147483647),
-        "i64" => Some(9223372036854775807),
-        "u8" => Some(255),
-        "u16" => Some(65535),
-        "u32" => Some(4294967295),
-        "u64" => Some(u64::MAX as u128),
-        _ => None,
+fn with_tuple_aliases(ty: Ty, aliases: Option<&TupleAliases>) -> Ty {
+    match (ty, aliases) {
+        (Ty::Tuple(id, name, _), Some(aliases)) => Ty::Tuple(id, name, aliases.clone()),
+        (ty, _) => ty,
     }
-}
-fn floating(ty: &Ty) -> bool {
-    matches!(ty, Ty::Primitive("f32" | "f64"))
 }
 fn compatible(actual: &Ty, expected: &Ty) -> bool {
     match (actual, expected) {
@@ -134,6 +283,7 @@ fn compatible(actual: &Ty, expected: &Ty) -> bool {
                     IrAccess::Share => *actual_access == IrAccess::Share,
                 }
         }
+        (Ty::Tuple(actual, _, _), Ty::Tuple(expected, _, _)) => actual == expected,
         _ => {
             actual == expected
                 || matches!(actual, Ty::Error | Ty::Never)
@@ -165,7 +315,7 @@ fn name(ty: &Ty) -> String {
         Ty::String => "String".into(),
         Ty::List(element) => format!("List<{element}>"),
         Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
-        Ty::Struct(_, name) | Ty::Enum(_, name) => name.to_string(),
+        Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
         Ty::Reference { access, inner, .. } => {
             format!("{} {}", access_name(*access), name(inner))
@@ -261,11 +411,15 @@ fn flow_expr(expr: &Expr) -> Flow {
     match &expr.kind {
         ExprKind::Number(_)
         | ExprKind::StringLiteral(_)
+        | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
         | ExprKind::Path(_) => Flow::NEXT,
         ExprKind::Array(elements) => elements
             .iter()
             .fold(Flow::NEXT, |flow, element| flow.then(flow_expr(element))),
+        ExprKind::Tuple(elements) => elements.iter().fold(Flow::NEXT, |flow, element| {
+            flow.then(flow_expr(&element.value))
+        }),
         ExprKind::RepeatArray { value, count } => {
             if count.raw.bytes().all(|byte| byte == b'0' || byte == b'_') {
                 Flow::NEXT
@@ -274,7 +428,9 @@ fn flow_expr(expr: &Expr) -> Flow {
             }
         }
         ExprKind::Index { base, index } => flow_expr(base).then(flow_expr(index)),
-        ExprKind::Unary { operand, .. } => flow_expr(operand),
+        ExprKind::Unary { operand, .. } | ExprKind::Cast { value: operand, .. } => {
+            flow_expr(operand)
+        }
         ExprKind::Binary {
             operator,
             left,
@@ -291,7 +447,9 @@ fn flow_expr(expr: &Expr) -> Flow {
                 left_flow.then(right_flow)
             }
         }
-        ExprKind::Call { callee, arguments } => arguments
+        ExprKind::Call {
+            callee, arguments, ..
+        } => arguments
             .iter()
             .fold(flow_expr(callee), |flow, arg| flow.then(flow_expr(arg))),
         ExprKind::Field { base, .. } => flow_expr(base),
@@ -368,6 +526,14 @@ pub struct PathUse {
     pub access: Option<IrAccess>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedCall {
+    pub expression: ExprId,
+    pub function: FunctionId,
+    pub receiver_access: Access,
+    pub signature: Signature,
+}
+
 /// A construction of an enum variant. `expression` is the path expression of a
 /// unit variant, or the call expression of a payload variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,12 +564,31 @@ pub struct MatchArmFact {
     pub bindings: Vec<Option<LocalId>>,
 }
 
+/// Local-to-this-expression tuple alias resolutions used by lowering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TupleProjectionFact {
+    pub(crate) node_addr: usize,
+    pub slot: u32,
+}
+
+/// Destination slot for each tuple initializer element, in source order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TupleInitializerFact {
+    pub(crate) node_addr: usize,
+    pub slots: Vec<u32>,
+}
+
 /// Facts are indexed by function, then by fresh expression/local identities.
 /// The syntax module is deliberately not relabeled as checked syntax.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionFacts {
     pub id: FunctionId,
     pub span: Span,
+    /// Original module and declaration name. A specialized function keeps
+    /// this source identity while receiving its own collision-free IR name.
+    pub(crate) source_module: String,
+    pub(crate) source_name: String,
+    pub(crate) specialization_key: Option<String>,
     pub signature: Signature,
     pub locals: Vec<LocalFact>,
     pub expressions: Vec<ExpressionFact>,
@@ -411,8 +596,14 @@ pub struct FunctionFacts {
     /// Enum variant constructions: a unit variant path or a payload call.
     pub variant_uses: Vec<VariantUse>,
     pub explicit_drops: Vec<ExprId>,
+    /// Interface extension selected for each explicitly constrained call.
+    pub selected_calls: Vec<SelectedCall>,
+    /// User-defined binary operator implementations selected for lowering.
+    pub selected_operators: Vec<SelectedCall>,
     /// `match` expressions over owned enums, with the pattern facts lowering needs.
     pub matches: Vec<MatchFact>,
+    pub tuple_projections: Vec<TupleProjectionFact>,
+    pub tuple_initializers: Vec<TupleInitializerFact>,
     next_expr: u32,
 }
 
@@ -498,6 +689,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
         Ty::Primitive(name) => IrType::Primitive(match *name {
             "Unit" => Primitive::Unit,
             "Bool" => Primitive::Bool,
+            "Char" => Primitive::Char,
             "i8" => Primitive::I8,
             "i16" => Primitive::I16,
             "i32" => Primitive::I32,
@@ -533,7 +725,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             element: Box::new(ir_type(element)?),
             len: *len,
         },
-        Ty::Struct(id, _) => IrType::Struct(TypeId(*id)),
+        Ty::Struct(id, _) | Ty::Tuple(id, _, _) => IrType::Struct(TypeId(*id)),
         Ty::Enum(id, _) => IrType::Enum(TypeId(*id)),
         Ty::String => IrType::String,
         Ty::Never | Ty::Error => return None,
@@ -560,6 +752,8 @@ struct Checker {
     /// such a position.
     allowed_arrays: HashSet<usize>,
     concat_destination: Option<usize>,
+    share_field_assignment: bool,
+    parameter_origins: HashSet<usize>,
     temporary_borrow_argument: Option<usize>,
     /// Field reads that already failed; they are not also reported as extractions.
     failed_fields: HashSet<usize>,
@@ -568,108 +762,393 @@ struct Checker {
     /// Module whose names and field visibility are being checked.
     module: String,
     table: Rc<TypeTable>,
+    /// Concrete semantic substitutions for a generic function body. These are
+    /// populated only by call-site inference; declaration spelling is never
+    /// used to guess a runtime argument type.
+    generic_types: HashMap<String, Ty>,
+    generic_consts: HashMap<String, u32>,
+    generic_evidence: Vec<GenericEvidence>,
+    generic_functions: HashMap<String, GenericFunctionTemplate>,
+    specialization_registry: Option<Rc<RefCell<SpecializationRegistry>>>,
+    generic_path_targets: HashMap<usize, (FunctionId, Ty)>,
     functions: HashMap<String, Ty>,
     function_ids: HashMap<String, FunctionId>,
     facts: Option<FunctionFacts>,
     qualified_functions: HashMap<String, Ty>,
     qualified_function_ids: HashMap<String, FunctionId>,
     imports: HashMap<String, String>,
+    extension_candidates: Vec<ExtensionCandidate>,
     scopes: Vec<HashMap<String, Binding>>,
     result: Ty,
 }
 impl Checker {
+    fn generic_identity_call(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let ExprKind::Path(path) = &callee.kind else {
+            unreachable!("guarded generic function path")
+        };
+        let template = if path.len() == 1 {
+            self.generic_functions.get(&path[0]).cloned()
+        } else {
+            let expanded = self.imports.get(&path[0]).map_or_else(
+                || path.join("::"),
+                |target| format!("{}::{}", target, path[1..].join("::")),
+            );
+            self.generic_functions
+                .get(expanded.strip_prefix("self::").unwrap_or(&expanded))
+                .cloned()
+        };
+        let Some(template) = template else {
+            return Ty::Error;
+        };
+        if !supported_generic_function(&template) {
+            self.error(
+                7,
+                template.span,
+                format!(
+                    "generic function '{}::{}' uses a generic form outside the supported unconstrained direct-type-parameter specialization subset",
+                    template.module, template.name
+                ),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        }
+        if arguments.len() != template.parameters.len() {
+            self.error(
+                10,
+                expr.span,
+                format!(
+                    "expected {} arguments, found {}",
+                    template.parameters.len(),
+                    arguments.len()
+                ),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        }
+        let type_name = &template.generic_parameters[0].name;
+        let const_name = match &template.generic_parameters[1..] {
+            [constant] => Some(constant.name.as_str()),
+            _ => None,
+        };
+        let generic_index = template
+            .parameters
+            .iter()
+            .position(|parameter| {
+                is_plain_type_parameter(&parameter.ty, type_name)
+                    || const_name.is_some_and(|const_name| {
+                        is_array_generic_pattern(&parameter.ty, type_name, const_name)
+                    })
+            })
+            .expect("supported generic template contains an inference parameter");
+        // Check every written argument before the inference argument in source
+        // order. Generic-shaped parameters cannot receive a concrete expected
+        // type yet, so infer their expression type and validate it after the
+        // specialization has been formed.
+        let mut checked_argument_types = vec![None; arguments.len()];
+        let mut diverges = false;
+        for index in 0..generic_index {
+            let argument = &arguments[index];
+            let parameter = &template.parameters[index];
+            let is_generic_shape = type_mentions_parameter(&parameter.ty, type_name)
+                || const_name.is_some_and(|name| type_mentions_const(&parameter.ty, name));
+            if !is_generic_shape {
+                let expected = self.type_path(&parameter.ty);
+                if matches!(
+                    expected,
+                    Ty::String
+                        | Ty::List(_)
+                        | Ty::Array(..)
+                        | Ty::Struct(..)
+                        | Ty::Tuple(..)
+                        | Ty::Enum(..)
+                ) {
+                    self.allow_array_value(argument);
+                }
+                let actual = self.expr(argument, Some(&expected));
+                self.ensure(&actual, &expected, argument.span);
+                diverges |= actual == Ty::Never;
+                checked_argument_types[index] = Some(actual);
+            } else {
+                self.allow_array_value(argument);
+                let actual = self.expr(argument, None);
+                diverges |= actual == Ty::Never;
+                checked_argument_types[index] = Some(actual);
+            }
+        }
+        self.allow_array_value(&arguments[generic_index]);
+        let actual = self.expr(&arguments[generic_index], None);
+        if actual == Ty::Error {
+            return Ty::Error;
+        }
+        let mut substitution = HashMap::new();
+        let mut const_substitution = HashMap::new();
+        let array_pattern = const_name.is_some_and(|const_name| {
+            is_array_generic_pattern(
+                &template.parameters[generic_index].ty,
+                type_name,
+                const_name,
+            )
+        });
+        let inferred = if actual == Ty::Never {
+            // A diverging argument has no value type to infer from. A
+            // surrounding expected result can still select the specialization
+            // (as with an ordinary diverging call); without one, report the
+            // actual unresolved type instead of silently producing Error.
+            match expected.filter(|ty| !matches!(ty, Ty::Error | Ty::Never)) {
+                Some(Ty::Array(element, length)) if array_pattern => {
+                    substitution.insert(type_name.clone(), element.as_ref().clone());
+                    const_substitution.insert(
+                        const_name
+                            .expect("array pattern has a const parameter")
+                            .to_owned(),
+                        *length,
+                    );
+                    true
+                }
+                Some(ty) if !array_pattern => {
+                    substitution.insert(type_name.clone(), ty.clone());
+                    true
+                }
+                _ => false,
+            }
+        } else if array_pattern {
+            let const_name = const_name.expect("array pattern has a const parameter");
+            match &actual {
+                Ty::Array(element, length) => {
+                    substitution.insert(type_name.clone(), element.as_ref().clone());
+                    const_substitution.insert(const_name.to_owned(), *length);
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            infer_direct_type_parameter(
+                &HashSet::from([type_name.clone()]),
+                &template.parameters[generic_index].ty,
+                &actual,
+                &mut substitution,
+            )
+            .is_ok()
+        };
+        if !inferred {
+            self.error(
+                2,
+                arguments[generic_index].span,
+                if actual == Ty::Never {
+                    "cannot infer the generic function type from a diverging argument without an expected result type"
+                } else {
+                    "cannot infer a consistent type for the generic function parameter"
+                },
+            );
+            return Ty::Error;
+        }
+        let mut specialization_evidence = Vec::new();
+        for (bound_index, bound) in template.bounds.iter().enumerate() {
+            let interface = &template.bound_interfaces[bound_index];
+            let target = substitution.get(&bound.parameter).unwrap_or(&actual);
+            let forwarded = self
+                .generic_evidence
+                .iter()
+                .find(|evidence| {
+                    evidence.interface == *interface && evidence.candidate.target == *target
+                })
+                .cloned();
+            let candidate = if let Some(evidence) = forwarded {
+                evidence.candidate
+            } else {
+                let matching = self
+                    .extension_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.visible
+                            && candidate.target == *target
+                            && candidate.interface.as_deref() == Some(interface.as_str())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    self.error(7, expr.span, format!("no visible implementation of '{interface}' for {} satisfies generic bound", name(target)));
+                    return Ty::Error;
+                }
+                if matching.len() > 1 {
+                    let locations = matching
+                        .iter()
+                        .map(|candidate| {
+                            format!(
+                                "{}:{}..{}",
+                                candidate.module, candidate.span.start, candidate.span.end
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.error(
+                        7,
+                        expr.span,
+                        format!(
+                            "ambiguous generic evidence for '{interface}'; candidates: {locations}"
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                matching[0].clone()
+            };
+            specialization_evidence.push(GenericEvidence {
+                interface: interface.clone(),
+                candidate,
+            });
+        }
+        let previous_generic_evidence =
+            std::mem::replace(&mut self.generic_evidence, specialization_evidence.clone());
+        diverges |= actual == Ty::Never;
+        let previous_generic_types =
+            std::mem::replace(&mut self.generic_types, substitution.clone());
+        let previous_generic_consts =
+            std::mem::replace(&mut self.generic_consts, const_substitution.clone());
+        let parameter_types = template
+            .parameters
+            .iter()
+            .map(|parameter| FunctionParameter {
+                access: ir_access(parameter.access),
+                ty: self.type_path(&parameter.ty),
+            })
+            .collect::<Vec<_>>();
+        let result = template
+            .result
+            .as_ref()
+            .map(|result| self.type_path(result))
+            .unwrap_or(UNIT);
+        self.generic_types = previous_generic_types;
+        self.generic_consts = previous_generic_consts;
+        self.generic_evidence = previous_generic_evidence;
+        if result == Ty::Error
+            || parameter_types
+                .iter()
+                .any(|parameter| parameter.ty == Ty::Error)
+        {
+            return Ty::Error;
+        }
+        for (index, (argument, parameter)) in arguments.iter().zip(&parameter_types).enumerate() {
+            if index < generic_index {
+                if let Some(actual) = &checked_argument_types[index] {
+                    self.ensure(actual, &parameter.ty, argument.span);
+                }
+                continue;
+            }
+            if index == generic_index {
+                self.ensure(&actual, &parameter.ty, argument.span);
+                continue;
+            }
+            if matches!(
+                parameter.ty,
+                Ty::String
+                    | Ty::List(_)
+                    | Ty::Array(..)
+                    | Ty::Struct(..)
+                    | Ty::Tuple(..)
+                    | Ty::Enum(..)
+            ) {
+                self.allow_array_value(argument);
+            }
+            let argument_ty = self.expr(argument, Some(&parameter.ty));
+            self.ensure(&argument_ty, &parameter.ty, argument.span);
+            diverges |= argument_ty == Ty::Never;
+        }
+        let function_ty = Ty::Function(parameter_types, Box::new(result.clone()));
+        let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
+            self.error(
+                7,
+                expr.span,
+                "generic specialization has a type outside the executable function subset",
+            );
+            return Ty::Error;
+        };
+        if let Some(expected) = expected {
+            self.ensure(&result, expected, expr.span);
+        }
+        let result = result;
+        let evidence_key = specialization_evidence
+            .iter()
+            .map(|evidence| {
+                format!(
+                    "{}@{}..{}",
+                    evidence.candidate.module,
+                    evidence.candidate.span.start,
+                    evidence.candidate.span.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!(
+            "{}::{}@{}..{}<{function_ty:?}>[{evidence_key}]",
+            template.module, template.name, template.span.start, template.span.end
+        );
+        let registry = self
+            .specialization_registry
+            .as_ref()
+            .expect("generic specialization registry is present")
+            .clone();
+        let specialization_id = {
+            let mut registry = registry.borrow_mut();
+            if let Some(id) = registry.by_key.get(&key).copied() {
+                id
+            } else {
+                let id = FunctionId(registry.next_id);
+                registry.next_id += 1;
+                registry.by_key.insert(key.clone(), id);
+                registry.requests.push(GenericSpecialization {
+                    template: template.clone(),
+                    substitution,
+                    const_substitution,
+                    evidence: specialization_evidence,
+                    signature,
+                    id,
+                    key,
+                });
+                id
+            }
+        };
+        self.generic_path_targets.insert(
+            callee as *const Expr as usize,
+            (specialization_id, function_ty),
+        );
+        self.expr(callee, None);
+        if diverges { Ty::Never } else { result }
+    }
+
+    fn contains_reference(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Ty::Reference { .. } => true,
+            Ty::Array(element, _) => self.contains_reference(element, visited),
+            Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
+                if !visited.insert(*id) {
+                    return false;
+                }
+                let info = self.table.info(*id);
+                info.fields
+                    .iter()
+                    .any(|field| self.contains_reference(&field.ty, visited))
+                    || info
+                        .variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
+                        .any(|payload| self.contains_reference(payload, visited))
+            }
+            _ => false,
+        }
+    }
+
     fn error(&mut self, n: u16, span: Span, message: impl Into<String>) {
         self.diagnostics.push(diagnostic(n, span, message));
-    }
-    fn array_count(&mut self, count: &memobits_syntax::IntegerLiteral) -> Option<u32> {
-        let value = count.raw.replace('_', "").parse::<u32>().ok();
-        if value.is_none() {
-            self.error(
-                8,
-                count.span,
-                "array length exceeds implementation limit u32::MAX",
-            );
-        }
-        value
-    }
-    /// Executable arrays hold non-Unit primitive, struct or nested array elements.
-    fn check_element_support(&mut self, element: &Ty, span: Span) {
-        if self.table.is_borrow_option(element) {
-            self.error(17, span, "Option<borrow T> cannot be stored in an array");
-        } else if self.lowering
-            && !matches!(
-                element,
-                Ty::Error | Ty::Never | Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
-            )
-            && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
-        {
-            self.error(
-                17,
-                span,
-                "executable arrays support non-Unit primitive, struct and nested array elements only",
-            );
-        }
-    }
-    /// Whole aggregate values (arrays and structs) are produced by a literal,
-    /// repetition, call or named local in an owned-value position. The position propagates into the tails
-    /// of `if` and block expressions, which therefore may produce arrays too.
-    fn allow_array_value(&mut self, value: &Expr) {
-        match &value.kind {
-            ExprKind::Array(_)
-            | ExprKind::RepeatArray { .. }
-            | ExprKind::Struct { .. }
-            | ExprKind::Path(_) => {
-                self.allowed_arrays.insert(value as *const Expr as usize);
-            }
-            ExprKind::Block(block) => {
-                if let Some(tail) = &block.tail {
-                    self.allow_array_value(tail);
-                }
-            }
-            ExprKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if let Some(tail) = &then_branch.tail {
-                    self.allow_array_value(tail);
-                }
-                if let Some(other) = else_branch {
-                    self.allow_array_value(other);
-                }
-            }
-            ExprKind::Match { arms, .. } => {
-                for arm in arms {
-                    self.allow_array_value(&arm.body);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn array_allowed(&self, expr: &Expr) -> bool {
-        self.allowed_arrays
-            .contains(&(expr as *const Expr as usize))
-    }
-    /// TE022: an aggregate element or field read is not an owned value; it may
-    /// not feed a binding, assignment, return, call argument, array element or
-    /// block result. Primitive reads are copied implicitly and are allowed.
-    fn reject_extraction(&mut self, expr: &Expr, ty: &Ty) {
-        if self.lowering
-            && !matches!(ty, Ty::Primitive(_))
-            && !self.failed_fields.contains(&(expr as *const Expr as usize))
-            && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
-        {
-            let what = if matches!(expr.kind, ExprKind::Field { .. }) {
-                "a struct or array field cannot be moved out by field access"
-            } else {
-                "a struct or array element cannot be moved out by indexing"
-            };
-            self.error(
-                22,
-                expr.span,
-                format!("{what}; only primitive values are copied implicitly and partial moves are deferred, so borrow or share the aggregate, or read a primitive inside it"),
-            );
-        }
     }
     /// TE004: a write through a projection chain (`a[i].x`, `l.pts[j]`) needs
     /// the root binding to be a `var` owner or a share reference.
@@ -677,11 +1156,11 @@ impl Checker {
         let writable = binding.mutable || binding.access == IrAccess::Share;
         let aggregate = |ty: &Ty| match ty {
             Ty::Array(..) => Some("an element of immutable array"),
-            Ty::Struct(..) => Some("a field of immutable struct"),
+            Ty::Struct(..) | Ty::Tuple(..) => Some("a field of immutable struct"),
             _ => None,
         };
         match &binding.ty {
-            ty @ (Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)) if !writable => {
+            ty @ (Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)) if !writable => {
                 let what = aggregate(ty).expect("aggregate root");
                 self.error(
                     4,
@@ -695,7 +1174,7 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
             ) =>
             {
                 self.error(
@@ -710,7 +1189,7 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
             ) && !writable =>
             {
                 self.error(
@@ -723,7 +1202,65 @@ impl Checker {
         }
     }
     fn type_path(&mut self, ty: &Type) -> Ty {
+        if ty.path.len() == 2 {
+            if let Some(target) = self.generic_types.get(&ty.path[0]).cloned() {
+                let matches = self
+                    .generic_evidence
+                    .iter()
+                    .filter(|evidence| {
+                        evidence.candidate.target == target
+                            && evidence
+                                .candidate
+                                .associated_types
+                                .contains_key(&ty.path[1])
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() == 1 {
+                    return matches[0].candidate.associated_types[&ty.path[1]].clone();
+                }
+                self.error(
+                    8,
+                    ty.span,
+                    format!(
+                        "associated type projection '{}' is unresolved in this generic context",
+                        ty.path.join("::")
+                    ),
+                );
+                return Ty::Error;
+            }
+        }
+        if ty.path.len() == 1 && ty.arguments.is_empty() {
+            if let Some(concrete) = self.generic_types.get(&ty.path[0]) {
+                return concrete.clone();
+            }
+        }
+        if ty.path.as_slice() == ["Array"] {
+            if let [
+                memobits_syntax::TypeArgument::Type(element),
+                memobits_syntax::TypeArgument::Const(length),
+            ] = ty.arguments.as_slice()
+            {
+                if let (Some(element), Some(length)) = (
+                    self.generic_types.get(&element.path.join("::")),
+                    self.generic_consts.get(length),
+                ) {
+                    return Ty::Array(Box::new(element.clone()), *length);
+                }
+                if let Some(length) = self.generic_consts.get(length).copied() {
+                    let element = self.type_path(element);
+                    return Ty::Array(Box::new(element), length);
+                }
+            }
+        }
         self.report_type_resolution(ty, self.table.resolve(&self.module, ty))
+    }
+    fn cast_u8_to_u32(&mut self, source: Ty, span: Span) -> Ty {
+        if read_type(source) == U8 {
+            U32
+        } else {
+            self.error(7, span, "this cast requires a u8 value and the target u32");
+            Ty::Error
+        }
     }
     fn report_type_resolution(
         &mut self,
@@ -812,7 +1349,7 @@ impl Checker {
         let target = self.type_path(&pattern_type);
         let table = Rc::clone(&self.table);
         let info_storage = match &target {
-            Ty::Struct(id, _) => Some(table.info(*id)),
+            Ty::Struct(id, _) | Ty::Tuple(id, _, _) => Some(table.info(*id)),
             Ty::Error => None,
             other => {
                 self.error(
@@ -1078,6 +1615,20 @@ impl Checker {
                         self.allow_array_value(value);
                     }
                     let previous = self.concat_destination;
+                    let previous_share_field = self.share_field_assignment;
+                    let share_field_target = match &target.kind {
+                        ExprKind::Field { base, .. } if target_ty == Ty::String => {
+                            matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
+                            && self.scopes.iter().rev()
+                                .find_map(|scope| scope.get(&path[0]))
+                                .is_some_and(|binding| {
+                                    self.parameter_origins.contains(&binding.origin)
+                                        && binding.access == IrAccess::Share
+                                        && matches!(read_type(binding.ty.clone()), Ty::Struct(..) | Ty::Tuple(..))
+                                }))
+                        }
+                        _ => false,
+                    };
                     let concat_target = match &target.kind {
                         ExprKind::Path(path) if path.len() == 1 => {
                             self.lookup(&path[0]).is_some_and(|binding| {
@@ -1089,18 +1640,26 @@ impl Checker {
                         ExprKind::Field { base, .. } if target_ty == Ty::String => {
                             // The outermost scope contains function parameters.
                             matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
-                                && self.scopes.iter().skip(1).rev()
-                                    .find_map(|scope| scope.get(&path[0]))
-                                    .is_some_and(|binding| binding.mutable
-                                        && matches!(binding.ty, Ty::Struct(..))))
+                            && self.scopes.iter().rev()
+                                .find_map(|scope| scope.get(&path[0]))
+                                .is_some_and(|binding| {
+                                    matches!(read_type(binding.ty.clone()), Ty::Struct(..) | Ty::Tuple(..))
+                                        && ((binding.mutable
+                                            && binding.access == IrAccess::Owned
+                                            && !self.parameter_origins.contains(&binding.origin))
+                                            || (binding.access == IrAccess::Share
+                                                && self.parameter_origins.contains(&binding.origin)))
+                                }))
                         }
                         _ => false,
                     };
                     if operator == "=" && concat_target {
                         self.concat_destination = Some(value as *const Expr as usize);
+                        self.share_field_assignment = share_field_target;
                     }
                     let value_ty = self.expr(value, Some(&target_ty));
                     self.concat_destination = previous;
+                    self.share_field_assignment = previous_share_field;
                     if operator == "=" {
                         self.reject_extraction(value, &value_ty);
                     }
@@ -1134,7 +1693,7 @@ impl Checker {
                     self.concat_destination = previous;
                     if matches!(
                         ty,
-                        Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                        Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
                     ) {
                         self.reject_extraction(expr, &ty);
                     }
@@ -1301,14 +1860,6 @@ impl Checker {
             if path.len() != 1 || self.lookup(&path[0]).is_none())
     }
 
-    fn list_read_receiver(&self, base: &Expr) -> bool {
-        match &base.kind {
-            ExprKind::Path(path) => path.len() == 1,
-            ExprKind::Call { callee, .. } => self.direct_callee(callee),
-            _ => false,
-        }
-    }
-
     fn string_read(
         &mut self,
         expression: &Expr,
@@ -1338,7 +1889,9 @@ impl Checker {
             return Ty::Primitive("u32");
         }
         let offset_type = Ty::Primitive("u32");
-        if method == "concat" && self.concat_destination != Some(expression as *const Expr as usize)
+        if method == "concat"
+            && self.concat_destination != Some(expression as *const Expr as usize)
+            && !self.share_field_assignment
         {
             self.error(
                 17,
@@ -1488,99 +2041,6 @@ impl Checker {
         }
     }
 
-    fn list_get(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
-        self.allow_array_value(base);
-        let receiver = self.expr(base, None);
-        let Ty::List(element) = read_type(receiver) else {
-            self.error(
-                17,
-                base.span,
-                "get() requires a whole List local or a direct internal List call",
-            );
-            return Ty::Error;
-        };
-        if !self.list_read_receiver(base) {
-            self.error(
-                17,
-                base.span,
-                "get() requires a whole List local or a direct internal List call",
-            );
-        }
-        if arguments.len() != 1 {
-            self.error(10, expr.span, "get() expects one index");
-            return Ty::Error;
-        }
-        let index_type = Ty::Primitive("u32");
-        let index = read_type(self.expr(&arguments[0], Some(&index_type)));
-        self.ensure(&index, &index_type, arguments[0].span);
-        if index == Ty::Never {
-            return Ty::Never;
-        }
-        self.table.instantiate_enum(
-            registry::by_id(registry::TemplateId::Option),
-            vec![ResolvedArgument::Type(Ty::Primitive(element))],
-            expr.span,
-        )
-    }
-
-    fn list_mutation(&mut self, expr: &Expr, base: &Expr, method: &str, arguments: &[Expr]) -> Ty {
-        self.allow_array_value(base);
-        let receiver = self.expr(base, None);
-        let mutable_receiver = matches!(
-            receiver,
-            Ty::List(_)
-                | Ty::Reference {
-                    access: IrAccess::Share,
-                    ..
-                }
-        );
-        let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
-            && self.lookup(&path[0]).is_some_and(|binding| mutable_receiver && (binding.mutable || binding.access == IrAccess::Share)));
-        let Ty::List(element) = read_type(receiver) else {
-            self.error(
-                17,
-                base.span,
-                format!("{method}() requires a mutable List local, mutable share handle, or share parameter"),
-            );
-            return Ty::Error;
-        };
-        if !writable {
-            self.error(
-                17,
-                base.span,
-                format!("{method}() requires a mutable List local, mutable share handle, or share parameter"),
-            );
-        }
-        let pop = method == "pop";
-        if arguments.len() != usize::from(method == "push") {
-            let message = match method {
-                "pop" => "pop() takes no arguments",
-                "clear" => "clear() takes no arguments",
-                _ => "push() expects one element",
-            };
-            self.error(10, expr.span, message);
-            return Ty::Error;
-        }
-        if pop {
-            return self.table.instantiate_enum(
-                registry::by_id(registry::TemplateId::Option),
-                vec![ResolvedArgument::Type(Ty::Primitive(element))],
-                expr.span,
-            );
-        }
-        if method == "clear" {
-            return UNIT;
-        }
-        let element = Ty::Primitive(element);
-        let value = read_type(self.expr(&arguments[0], Some(&element)));
-        self.ensure(&value, &element, arguments[0].span);
-        if value == Ty::Never {
-            Ty::Never
-        } else {
-            UNIT
-        }
-    }
-
     fn string_push_str(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
         && self.lookup(&path[0]).is_some_and(|binding| {
@@ -1710,7 +2170,13 @@ impl Checker {
         if is_row
             && !matches!(
                 base_ty,
-                Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) | Ty::Error | Ty::Never
+                Ty::String
+                    | Ty::Array(..)
+                    | Ty::Struct(..)
+                    | Ty::Tuple(..)
+                    | Ty::Enum(..)
+                    | Ty::Error
+                    | Ty::Never
             )
         {
             self.error(
@@ -1721,7 +2187,9 @@ impl Checker {
             return Ty::Error;
         }
         let (inner, origin, current_access) = match base_ty {
-            Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..) if is_row => {
+            Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                if is_row =>
+            {
                 let binding = owner_binding.as_ref().expect("row root checked above");
                 let access = match &binding.ty {
                     Ty::Reference { access, .. } => *access,
@@ -1743,6 +2211,7 @@ impl Checker {
             | Ty::List(_)
             | Ty::Array(..)
             | Ty::Struct(..)
+            | Ty::Tuple(..)
             | Ty::Enum(..)) => {
                 let origin = owner_binding
                     .as_ref()
@@ -1770,6 +2239,7 @@ impl Checker {
                 | Ty::List(_)
                 | Ty::Array(..)
                 | Ty::Struct(..)
+                | Ty::Tuple(..)
                 | Ty::Enum(..)
         ) {
             self.error(
@@ -1868,14 +2338,58 @@ impl Checker {
         // A struct reference (`borrow`/`share` parameter or binding) reads
         // its fields like its owner.
         let base_ty = match base_ty {
-            Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Struct(..)) => *inner,
+            Ty::Reference { inner, .. }
+                if matches!(inner.as_ref(), Ty::Struct(..) | Ty::Tuple(..)) =>
+            {
+                *inner
+            }
             other => other,
         };
         match base_ty {
+            Ty::Tuple(id, tuple_name, aliases) => {
+                let info = self.table.info(id);
+                let index = field_name
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|i| *i < info.fields.len())
+                    .or_else(|| {
+                        aliases
+                            .labels
+                            .iter()
+                            .position(|label| label.as_deref() == Some(field_name))
+                    });
+                let Some(index) = index else {
+                    self.error(
+                        24,
+                        expr.span,
+                        format!("tuple '{tuple_name}' has no field '{field_name}'"),
+                    );
+                    return Ty::Error;
+                };
+                if let Some(facts) = &mut self.facts {
+                    facts.tuple_projections.push(TupleProjectionFact {
+                        node_addr: expr as *const Expr as usize,
+                        slot: index as u32,
+                    });
+                }
+                with_tuple_aliases(
+                    info.fields[index].ty.clone(),
+                    aliases.nested[index].as_deref(),
+                )
+            }
             Ty::Struct(id, struct_name) => {
                 let table = Rc::clone(&self.table);
                 let info = &table.info(id);
-                match info.fields.iter().find(|field| field.name == field_name) {
+                match info
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find(|(index, field)| {
+                        field.name == field_name
+                            || (info.module == "\0tuple" && index.to_string() == field_name)
+                    })
+                    .map(|(_, field)| field)
+                {
                     None => {
                         self.error(
                             24,
@@ -1961,6 +2475,31 @@ impl Checker {
                     .is_some_and(|expected| expected.id == template.id)
                 {
                     return Some((as_ty.clone(), Some(index as u32)));
+                }
+            }
+        }
+        if let (Some(as_ty @ Ty::Enum(id, _)), Some((variant, type_path))) =
+            (expected, path.split_last())
+        {
+            if !type_path.is_empty() {
+                let written = Type {
+                    span,
+                    path: type_path.to_vec(),
+                    arguments: Vec::new(),
+                };
+                if self
+                    .table
+                    .generic_origin(*id)
+                    .zip(self.table.generic_definition_key(&self.module, &written))
+                    .is_some_and(|(expected, written)| expected == written)
+                {
+                    let info = self.table.info(*id);
+                    let index = info
+                        .variants
+                        .iter()
+                        .position(|candidate| &candidate.name == variant)
+                        .map(|index| index as u32);
+                    return Some((as_ty.clone(), index));
                 }
             }
         }
@@ -2218,7 +2757,7 @@ impl Checker {
             if want.is_some_and(|ty| {
                 matches!(
                     ty,
-                    Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                    Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
                 )
             }) {
                 self.allow_array_value(argument);
@@ -2248,11 +2787,7 @@ impl Checker {
             diverges |= actual == Ty::Never;
         }
         self.record_variant(id, Some(TypeId(*enum_id)), variant);
-        if diverges {
-            Ty::Never
-        } else {
-            enum_ty
-        }
+        if diverges { Ty::Never } else { enum_ty }
     }
     /// `match scrutinee { pattern => body, ... }`. Patterns are flat
     /// (`Enum::Variant`, `Enum::Variant(a, _)`, `_`). An owned scrutinee is
@@ -2435,7 +2970,11 @@ impl Checker {
                         let slot_ty = if borrowed
                             && matches!(
                                 slot_ty,
-                                Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                                Ty::String
+                                    | Ty::Array(..)
+                                    | Ty::Struct(..)
+                                    | Ty::Tuple(..)
+                                    | Ty::Enum(..)
                             ) {
                             Ty::Reference {
                                 access: IrAccess::Borrow,
@@ -2539,6 +3078,23 @@ impl Checker {
     }
     fn expr_impl(&mut self, expr: &Expr, expected: Option<&Ty>, id: Option<ExprId>) -> Ty {
         match &expr.kind {
+            ExprKind::Call {
+                callee,
+                arguments,
+                interface: None,
+            } if matches!(&callee.kind, ExprKind::Path(path)
+            if (path.len() == 1 && self.generic_functions.contains_key(&path[0]))
+                || (path.len() > 1 && {
+                    let expanded = self.imports.get(&path[0]).map_or_else(
+                        || path.join("::"),
+                        |target| format!("{}::{}", target, path[1..].join("::")),
+                    );
+                    self.generic_functions
+                        .contains_key(expanded.strip_prefix("self::").unwrap_or(&expanded))
+                })) =>
+            {
+                self.generic_identity_call(expr, callee, arguments, expected)
+            }
             ExprKind::Path(path)
                 if self.contextual_variant(path, expr.span, expected).is_some() =>
             {
@@ -2547,8 +3103,9 @@ impl Checker {
                     .expect("checked variant path");
                 self.unit_variant(expr, id, path, enum_ty, variant)
             }
-            ExprKind::Call { callee, arguments }
-                if matches!(&callee.kind, ExprKind::Path(path)
+            ExprKind::Call {
+                callee, arguments, ..
+            } if matches!(&callee.kind, ExprKind::Path(path)
                     if self.contextual_variant(path, callee.span, expected).is_some()) =>
             {
                 let ExprKind::Path(path) = &callee.kind else {
@@ -2609,6 +3166,135 @@ impl Checker {
                             "array length exceeds implementation limit u32::MAX",
                         );
                         Ty::Error
+                    }
+                }
+            }
+            ExprKind::Tuple(elements) => {
+                let labeled = elements
+                    .iter()
+                    .filter(|element| element.label.is_some())
+                    .count();
+                let mut seen = HashSet::new();
+                let expected_fields = match expected {
+                    Some(Ty::Tuple(id, _, aliases)) => {
+                        let info = self.table.info(*id);
+                        (info.module == "\0tuple").then_some((info.fields, aliases.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some((fields, aliases)) = expected_fields {
+                    if fields.len() != elements.len() {
+                        self.error(2, expr.span, "tuple arity does not match its expected type");
+                        return Ty::Error;
+                    }
+                    for (position, element) in elements.iter().enumerate() {
+                        let index = if let Some(label) = &element.label {
+                            aliases
+                                .labels
+                                .iter()
+                                .position(|alias| alias.as_deref() == Some(label))
+                        } else {
+                            (labeled == 0).then_some(position)
+                        };
+                        let Some(index) = index else {
+                            self.error(
+                                2,
+                                element.span,
+                                format!(
+                                    "unknown tuple label '{}'",
+                                    element.label.as_deref().unwrap_or("")
+                                ),
+                            );
+                            continue;
+                        };
+                        if !seen.insert(index) {
+                            self.error(2, element.span, "duplicate tuple initializer label");
+                            continue;
+                        }
+                        let field = &fields[index];
+                        let field_ty =
+                            with_tuple_aliases(field.ty.clone(), aliases.nested[index].as_deref());
+                        self.allow_array_value(&element.value);
+                        let actual = self.expr(&element.value, Some(&field_ty));
+                        self.ensure(&actual, &field_ty, element.value.span);
+                    }
+                    if seen.len() != fields.len() {
+                        self.error(2, expr.span, "tuple initializer must provide every element");
+                    }
+                    if let Some(facts) = &mut self.facts {
+                        facts.tuple_initializers.push(TupleInitializerFact {
+                            node_addr: expr as *const Expr as usize,
+                            slots: elements
+                                .iter()
+                                .map(|element| {
+                                    if let Some(label) = &element.label {
+                                        aliases
+                                            .labels
+                                            .iter()
+                                            .position(|alias| alias.as_deref() == Some(label))
+                                            .unwrap_or(0)
+                                            as u32
+                                    } else {
+                                        elements
+                                            .iter()
+                                            .position(|candidate| std::ptr::eq(candidate, element))
+                                            .unwrap_or(0)
+                                            as u32
+                                    }
+                                })
+                                .collect(),
+                        });
+                    }
+                    expected.cloned().unwrap_or(Ty::Error)
+                } else {
+                    if labeled != 0 && labeled != elements.len() {
+                        self.error(
+                            2,
+                            expr.span,
+                            "tuple elements must be either all labeled or all positional",
+                        );
+                        return Ty::Error;
+                    }
+                    if labeled != 0 {
+                        let mut seen_labels = HashSet::new();
+                        for element in elements {
+                            let label = element.label.as_deref().expect("all elements are labeled");
+                            if !seen_labels.insert(label) {
+                                self.error(
+                                    2,
+                                    element.span,
+                                    format!("duplicate tuple initializer label '{label}'"),
+                                );
+                                return Ty::Error;
+                            }
+                        }
+                    }
+                    let element_types = elements
+                        .iter()
+                        .map(|element| {
+                            self.allow_array_value(&element.value);
+                            (element.label.clone(), self.expr(&element.value, None))
+                        })
+                        .collect::<Vec<_>>();
+                    if element_types
+                        .iter()
+                        .any(|(_, ty)| matches!(ty, Ty::Error | Ty::Never))
+                    {
+                        return Ty::Error;
+                    }
+                    let has_embedded_reference = element_types
+                        .iter()
+                        .any(|(_, ty)| self.contains_reference(ty, &mut HashSet::new()));
+                    if has_embedded_reference {
+                        self.error(17, expr.span, "tuple elements cannot contain direct or nested references until embedded tuple loans are supported");
+                        return Ty::Error;
+                    }
+                    match self.table.instantiate_tuple(element_types, expr.span) {
+                        Ok(ty) => ty,
+                        Err(failure) => {
+                            self.error(failure.code, failure.span, failure.message);
+                            Ty::Error
+                        }
                     }
                 }
             }
@@ -2714,11 +3400,7 @@ impl Checker {
                     if (float_literal && floating(want)) || (!float_literal && integer(want)) {
                         want.clone()
                     } else {
-                        if float_literal {
-                            F64
-                        } else {
-                            I32
-                        }
+                        if float_literal { F64 } else { I32 }
                     }
                 } else if float_literal {
                     F64
@@ -2748,8 +3430,23 @@ impl Checker {
                 chosen
             }
             ExprKind::StringLiteral(_) => Ty::String,
+            ExprKind::CharLiteral(_) => Ty::Primitive("Char"),
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {
+                if let Some((function, signature)) = self
+                    .generic_path_targets
+                    .get(&(expr as *const Expr as usize))
+                    .cloned()
+                {
+                    if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                        facts.path_uses.push(PathUse {
+                            expression,
+                            target: PathTarget::Function(function),
+                            access: None,
+                        });
+                    }
+                    return signature;
+                }
                 if let Some((template, variant)) = self.prelude_variant(path) {
                     return self.infer_variant(expr, id, template, variant, None, expected);
                 }
@@ -2800,7 +3497,11 @@ impl Checker {
                     if self.lowering
                         && matches!(
                             binding.ty,
-                            Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                            Ty::String
+                                | Ty::Array(..)
+                                | Ty::Struct(..)
+                                | Ty::Tuple(..)
+                                | Ty::Enum(..)
                         )
                         && self.index_base != expr as *const Expr as usize
                         && !self.array_allowed(expr)
@@ -2896,13 +3597,39 @@ impl Checker {
                     }
                 }
             }
+            ExprKind::Cast { value, target } => {
+                let source = self.expr(value, None);
+                let target = self.type_path(target);
+                if numeric(&source) && numeric(&target) {
+                    target
+                } else {
+                    self.error(
+                        7,
+                        expr.span,
+                        "numeric casts require an integer or floating-point source and target",
+                    );
+                    Ty::Error
+                }
+            }
             ExprKind::Binary {
                 operator,
                 left,
                 right,
             } => {
+                if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%") {
+                    if !matches!(&left.kind, ExprKind::Path(path) if path.len() > 1) {
+                        self.allow_array_value(left);
+                    }
+                    if !matches!(&right.kind, ExprKind::Path(path) if path.len() > 1) {
+                        self.allow_array_value(right);
+                    }
+                }
                 let bool_op = matches!(operator.as_str(), "&&" | "||");
-                let expected_num = expected.filter(|t| numeric(t));
+                let expected_num = if matches!(operator.as_str(), "&" | "^" | "|" | "<<" | ">>") {
+                    Some(&U32)
+                } else {
+                    expected.filter(|t| numeric(t))
+                };
                 let left_is_literal = matches!(left.kind, ExprKind::Number(_))
                     || matches!(&left.kind, ExprKind::Unary { operator, operand }
                         if (operator == "+" || operator == "-")
@@ -2917,19 +3644,153 @@ impl Checker {
                     let left_ty = read_type(
                         self.expr(left, if bool_op { Some(&BOOL) } else { expected_num }),
                     );
-                    let right_ty = read_type(
-                        self.expr(right, if bool_op { Some(&BOOL) } else { Some(&left_ty) }),
-                    );
+                    let overloaded_arithmetic = matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+                        && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..));
+                    let right_ty = read_type(self.expr(
+                        right,
+                        if bool_op {
+                            Some(&BOOL)
+                        } else if overloaded_arithmetic {
+                            None
+                        } else {
+                            Some(&left_ty)
+                        },
+                    ));
                     (left_ty, right_ty)
                 };
                 if left_ty == Ty::Never || (right_ty == Ty::Never && !bool_op) {
                     return Ty::Never;
+                }
+                if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+                    && (matches!(left_ty, Ty::Array(..)) || matches!(right_ty, Ty::Array(..)))
+                {
+                    self.error(
+                        17,
+                        expr.span,
+                        "arrays do not support user-defined arithmetic",
+                    );
+                    return Ty::Error;
+                }
+                if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+                    && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..))
+                    && left_ty != Ty::Error
+                {
+                    let (interface_name, method_name, operator_name) = if operator == "+" {
+                        ("Add", "add", "Add")
+                    } else if operator == "-" {
+                        ("Sub", "sub", "Sub")
+                    } else if operator == "*" {
+                        ("Mul", "mul", "Mul")
+                    } else if operator == "/" {
+                        ("Div", "div", "Div")
+                    } else {
+                        ("Rem", "rem", "Rem")
+                    };
+                    let add_interface = qualified_interface(
+                        &self.module,
+                        &self.imports,
+                        &Type {
+                            span: expr.span,
+                            path: vec![
+                                "core".to_owned(),
+                                "ops".to_owned(),
+                                interface_name.to_owned(),
+                            ],
+                            arguments: Vec::new(),
+                        },
+                    );
+                    let forwarded = self.generic_evidence.iter().find(|evidence| {
+                        evidence.interface == add_interface && evidence.candidate.target == left_ty
+                    });
+                    let matching = if let Some(evidence) = forwarded {
+                        vec![evidence.candidate.clone()]
+                    } else {
+                        self.extension_candidates
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.interface.as_deref() == Some(add_interface.as_str())
+                                    && candidate.target == left_ty
+                                    && candidate.methods.contains_key(method_name)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
+                    let applicable = matching
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.visible
+                                && (candidate.local
+                                    || candidate.public_methods.contains(method_name))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if applicable.len() > 1 {
+                        self.error(
+                            7,
+                            expr.span,
+                            format!("ambiguous {operator_name} implementation for `{operator}`"),
+                        );
+                        return Ty::Error;
+                    }
+                    if let Some(candidate) = applicable.first() {
+                        let (receiver_access, parameters, result, _, function) =
+                            candidate.methods.get(method_name).cloned().unwrap();
+                        if receiver_access != Access::Owned
+                            || parameters.len() != 1
+                            || parameters[0].access != IrAccess::Owned
+                            || parameters[0].ty != right_ty
+                        {
+                            self.error(7, expr.span, format!("{operator_name} requires an owned receiver and an owned operand matching its associated Rhs"));
+                            return Ty::Error;
+                        }
+                        if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                            let signature = match ir_type(&Ty::Function(
+                                vec![
+                                    FunctionParameter {
+                                        access: IrAccess::Owned,
+                                        ty: left_ty.clone(),
+                                    },
+                                    parameters[0].clone(),
+                                ],
+                                Box::new(result.clone()),
+                            )) {
+                                Some(IrType::Function(signature)) => signature,
+                                _ => return Ty::Error,
+                            };
+                            facts.selected_operators.push(SelectedCall {
+                                expression,
+                                function,
+                                receiver_access,
+                                signature,
+                            });
+                        }
+                        return result;
+                    }
+                    self.error(
+                        7,
+                        expr.span,
+                        if matching.is_empty() {
+                            format!(
+                                "no visible {operator_name} implementation for this operand type"
+                            )
+                        } else {
+                            format!(
+                                "matching {operator_name} implementation is private or inactive"
+                            )
+                        },
+                    );
+                    return Ty::Error;
                 }
                 match operator.as_str() {
                     "&&" | "||" => {
                         self.ensure(&left_ty, &BOOL, left.span);
                         self.ensure(&right_ty, &BOOL, right.span);
                         BOOL
+                    }
+                    "&" | "^" | "|" | "<<" | ">>" => {
+                        self.ensure(&left_ty, &U32, left.span);
+                        self.ensure(&right_ty, &U32, right.span);
+                        U32
                     }
                     "+" | "-" | "*" | "/" | "%" => {
                         if !numeric(&left_ty) && left_ty != Ty::Error {
@@ -2959,7 +3820,11 @@ impl Checker {
                                 left.span,
                                 "enums cannot be compared with `==` or `!=` yet; use `match` to inspect the variant",
                             );
-                        } else if !numeric(&left_ty) && left_ty != BOOL && left_ty != Ty::Error {
+                        } else if !numeric(&left_ty)
+                            && left_ty != BOOL
+                            && left_ty != Ty::Primitive("Char")
+                            && left_ty != Ty::Error
+                        {
                             self.error(7, left.span, "equality requires numeric or Bool operands");
                         }
                         self.ensure(&right_ty, &left_ty, right.span);
@@ -2975,7 +3840,146 @@ impl Checker {
                     }
                 }
             }
-            ExprKind::Call { callee, arguments } => {
+            ExprKind::Call {
+                callee,
+                arguments,
+                interface,
+            } => {
+                if let Some(interface) = interface {
+                    let interface_key = qualified_interface(&self.module, &self.imports, interface);
+                    let ExprKind::Field {
+                        base,
+                        name: method_name,
+                    } = &callee.kind
+                    else {
+                        self.error(
+                            7,
+                            expr.span,
+                            "interface selection requires a receiver method call",
+                        );
+                        return Ty::Error;
+                    };
+                    self.allow_array_value(base);
+                    let receiver = read_type(self.expr(base, None));
+                    let mut matching = self
+                        .extension_candidates
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.target == receiver
+                                && candidate.interface.as_deref() == Some(interface_key.as_str())
+                                && candidate.methods.contains_key(method_name)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if let Some(evidence) = self.generic_evidence.iter().find(|evidence| {
+                        evidence.interface == interface_key && evidence.candidate.target == receiver
+                    }) {
+                        if evidence.candidate.methods.contains_key(method_name) {
+                            matching = vec![evidence.candidate.clone()];
+                        }
+                    }
+                    let applicable = matching
+                        .iter()
+                        .filter(|candidate| candidate.visible)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if applicable.is_empty() && !matching.is_empty() {
+                        let locations = matching
+                            .iter()
+                            .map(|candidate| {
+                                format!(
+                                    "{}:{}..{}",
+                                    candidate.module, candidate.span.start, candidate.span.end
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.error(
+                            7,
+                            expr.span,
+                            format!("matching extension is private or inactive: {locations}"),
+                        );
+                        return Ty::Error;
+                    }
+                    if applicable.is_empty() {
+                        self.error(
+                            7,
+                            expr.span,
+                            format!(
+                                "no visible extension implements '{}::{}' for {}",
+                                interface_key,
+                                method_name,
+                                name(&receiver)
+                            ),
+                        );
+                        return Ty::Error;
+                    }
+                    if applicable.len() > 1 {
+                        let locations = applicable
+                            .iter()
+                            .map(|candidate| {
+                                format!(
+                                    "{}:{}..{}",
+                                    candidate.module, candidate.span.start, candidate.span.end
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.error(
+                            7,
+                            expr.span,
+                            format!("ambiguous extension selection; candidates: {locations}"),
+                        );
+                        return Ty::Error;
+                    }
+                    let candidate = &applicable[0];
+                    let (receiver_access, parameters, result, _method_span, function) =
+                        candidate.methods.get(method_name).cloned().unwrap();
+                    self.ensure(&receiver, &candidate.target, base.span);
+                    if parameters.len() != arguments.len() {
+                        self.error(
+                            10,
+                            expr.span,
+                            format!(
+                                "expected {} method arguments, found {}",
+                                parameters.len(),
+                                arguments.len()
+                            ),
+                        );
+                    }
+                    for (argument, parameter) in arguments.iter().zip(&parameters) {
+                        let actual = self.expr(argument, Some(&parameter.ty));
+                        self.ensure(&actual, &parameter.ty, argument.span);
+                    }
+                    if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
+                        let mut function_parameters = vec![FunctionParameter {
+                            access: ir_access(receiver_access),
+                            ty: candidate.target.clone(),
+                        }];
+                        function_parameters.extend(parameters.clone());
+                        let signature = match ir_type(&Ty::Function(
+                            function_parameters,
+                            Box::new(result.clone()),
+                        )) {
+                            Some(IrType::Function(signature)) => signature,
+                            _ => {
+                                self.error(
+                                    7,
+                                    expr.span,
+                                    "selected extension signature is outside the executable type subset",
+                                );
+                                return Ty::Error;
+                            }
+                        };
+                        facts.selected_calls.push(SelectedCall {
+                            expression,
+                            function,
+                            receiver_access,
+                            signature,
+                        });
+                    }
+                    return result;
+                }
                 if let ExprKind::Path(path) = &callee.kind {
                     if path.as_slice() == ["drop"]
                         && self.lookup("drop").is_none()
@@ -2996,6 +4000,40 @@ impl Checker {
                     }
                 }
                 if let ExprKind::Field { base, name } = &callee.kind {
+                    if name == "to_u32" {
+                        if !arguments.is_empty() {
+                            self.error(7, expr.span, "to_u32() takes no arguments");
+                            return Ty::Error;
+                        }
+                        let source = self.expr(base, None);
+                        return self.cast_u8_to_u32(source, expr.span);
+                    }
+                    if matches!(name.as_str(), "wrapping_add" | "wrapping_mul") {
+                        if arguments.len() != 1 {
+                            self.error(7, expr.span, "wrapping arithmetic takes one u32 argument");
+                            return Ty::Error;
+                        }
+                        let receiver = self.expr(base, Some(&U32));
+                        let argument = self.expr(&arguments[0], Some(&U32));
+                        if read_type(receiver) == U32 && read_type(argument) == U32 {
+                            return U32;
+                        }
+                        self.error(7, expr.span, "wrapping arithmetic requires u32 operands");
+                        return Ty::Error;
+                    }
+                    if matches!(name.as_str(), "bit_and" | "bit_xor" | "bit_or") {
+                        if arguments.len() != 1 {
+                            self.error(7, expr.span, "bitwise methods take one u32 argument");
+                            return Ty::Error;
+                        }
+                        let receiver = self.expr(base, Some(&U32));
+                        let argument = self.expr(&arguments[0], Some(&U32));
+                        if read_type(receiver) == U32 && read_type(argument) == U32 {
+                            return U32;
+                        }
+                        self.error(7, expr.span, "bitwise methods require u32 operands");
+                        return Ty::Error;
+                    }
                     let access = match name.as_str() {
                         "borrow" => Some(IrAccess::Borrow),
                         "share" => Some(IrAccess::Share),
@@ -3028,6 +4066,106 @@ impl Checker {
                     ) {
                         return self.string_read(expr, base, name, arguments);
                     }
+                    if self.extension_candidates.iter().any(|candidate| {
+                        candidate.interface.is_none() && candidate.methods.contains_key(name)
+                    }) {
+                        self.allow_array_value(base);
+                        let receiver = read_type(self.expr(base, None));
+                        let matching = self
+                            .extension_candidates
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.interface.is_none()
+                                    && candidate.target == receiver
+                                    && candidate.methods.contains_key(name)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let applicable = matching
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.visible
+                                    && (candidate.local
+                                        || candidate.interface.is_some()
+                                        || candidate.public_methods.contains(name))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if applicable.is_empty() && !matching.is_empty() {
+                            self.error(
+                                7,
+                                expr.span,
+                                "matching inherent extension is private or inactive",
+                            );
+                            return Ty::Error;
+                        }
+                        if applicable.is_empty() {
+                            self.error(
+                                7,
+                                expr.span,
+                                format!(
+                                    "no visible inherent method '{}' for {}",
+                                    name,
+                                    self::name(&receiver)
+                                ),
+                            );
+                            return Ty::Error;
+                        }
+                        if applicable.len() > 1 {
+                            self.error(
+                                7,
+                                expr.span,
+                                format!("ambiguous inherent method '{}'", name),
+                            );
+                            return Ty::Error;
+                        }
+                        let candidate = &applicable[0];
+                        let (receiver_access, parameters, result, _, function) =
+                            candidate.methods.get(name).cloned().unwrap();
+                        if parameters.len() != arguments.len() {
+                            self.error(
+                                10,
+                                expr.span,
+                                format!(
+                                    "expected {} method arguments, found {}",
+                                    parameters.len(),
+                                    arguments.len()
+                                ),
+                            );
+                        }
+                        for (argument, parameter) in arguments.iter().zip(&parameters) {
+                            let actual = self.expr(argument, Some(&parameter.ty));
+                            self.ensure(&actual, &parameter.ty, argument.span);
+                        }
+                        if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
+                            let mut function_parameters = vec![FunctionParameter {
+                                access: ir_access(receiver_access),
+                                ty: candidate.target.clone(),
+                            }];
+                            function_parameters.extend(parameters.clone());
+                            let signature = match ir_type(&Ty::Function(
+                                function_parameters,
+                                Box::new(result.clone()),
+                            )) {
+                                Some(IrType::Function(signature)) => signature,
+                                _ => {
+                                    self.error(
+                                        7,
+                                        expr.span,
+                                        "inherent method signature is outside the executable type subset",
+                                    );
+                                    return Ty::Error;
+                                }
+                            };
+                            facts.selected_calls.push(SelectedCall {
+                                expression,
+                                function,
+                                receiver_access,
+                                signature,
+                            });
+                        }
+                        return result;
+                    }
                 }
                 let ty = self.expr(callee, None);
                 if let Ty::Function(params, result) = ty {
@@ -3053,6 +4191,7 @@ impl Checker {
                                         | Ty::List(_)
                                         | Ty::Array(..)
                                         | Ty::Struct(..)
+                                        | Ty::Tuple(..)
                                         | Ty::Enum(..)
                                 )
                         }) {
@@ -3134,11 +4273,7 @@ impl Checker {
                         }
                         diverges |= actual == Ty::Never;
                     }
-                    if diverges {
-                        Ty::Never
-                    } else {
-                        *result
-                    }
+                    if diverges { Ty::Never } else { *result }
                 } else {
                     for arg in arguments {
                         self.expr(arg, None);
@@ -3159,7 +4294,11 @@ impl Checker {
                 }
                 ty
             }
-            ExprKind::Struct { path, fields } => {
+            ExprKind::Struct {
+                path,
+                type_arguments,
+                fields,
+            } => {
                 if self.lowering && !self.array_allowed(expr) {
                     self.error(
                         17,
@@ -3170,12 +4309,12 @@ impl Checker {
                 let literal_type = Type {
                     span: expr.span,
                     path: path.clone(),
-                    arguments: Vec::new(),
+                    arguments: type_arguments.clone(),
                 };
                 let target = self.type_path(&literal_type);
                 let table = Rc::clone(&self.table);
                 let info_storage = match &target {
-                    Ty::Struct(id, _) => Some(table.info(*id)),
+                    Ty::Struct(id, _) | Ty::Tuple(id, _, _) => Some(table.info(*id)),
                     Ty::Error => None,
                     other => {
                         self.error(
@@ -3187,6 +4326,16 @@ impl Checker {
                     }
                 };
                 let info = info_storage.as_ref();
+                if info.is_some_and(|info| info.bodyless) {
+                    self.error(
+                        23,
+                        expr.span,
+                        format!(
+                            "bodyless nominal type '{}' cannot be constructed",
+                            name(&target)
+                        ),
+                    );
+                }
                 let mut seen: Vec<&str> = Vec::new();
                 // Field initialisers are checked (and later evaluated) in source order.
                 for init in fields {
@@ -3308,11 +4457,7 @@ impl Checker {
                     }
                 } else {
                     self.ensure(&then_ty, &UNIT, then_branch.span);
-                    if cond == Ty::Never {
-                        Ty::Never
-                    } else {
-                        UNIT
-                    }
+                    if cond == Ty::Never { Ty::Never } else { UNIT }
                 }
             }
         }
@@ -3339,6 +4484,191 @@ pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic
     }
 }
 
+fn extension_candidates_for(
+    caller: &str,
+    project: &Project,
+    resolution: &Resolution,
+    table: &Rc<TypeTable>,
+    extension_ids: &HashMap<(String, usize, String), FunctionId>,
+) -> Vec<ExtensionCandidate> {
+    let mut candidates = Vec::new();
+    let direct_imports = resolution.module_imports.get(caller);
+    let interface_declarations =
+        resolution
+            .all_extension_candidates()
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.module,
+                    candidate.public,
+                    candidate.span,
+                    candidate.target,
+                    Some(candidate.interface),
+                    candidate.associated_types,
+                    candidate.methods,
+                )
+            });
+    let inherent_declarations = resolution
+        .all_inherent_extension_candidates()
+        .into_iter()
+        .map(|candidate| {
+            (
+                candidate.module,
+                candidate.public,
+                candidate.span,
+                candidate.target,
+                None,
+                Vec::new(),
+                candidate.methods,
+            )
+        });
+    for (
+        declaration_module,
+        public,
+        declaration_span,
+        declaration_target,
+        declaration_interface,
+        declaration_associated_types,
+        declaration_methods,
+    ) in interface_declarations.chain(inherent_declarations)
+    {
+        let local = declaration_module == caller;
+        let direct = direct_imports.is_some_and(|imports| imports.contains(&declaration_module));
+        if !local && !direct {
+            continue;
+        }
+        let Some(source) = resolution.modules.get(&declaration_module) else {
+            continue;
+        };
+        let mut imports = HashMap::new();
+        for item in &source.syntax.items {
+            if let ItemKind::Use { path, alias, .. } = &item.kind {
+                if path.len() == 1 && project.modules.iter().any(|module| module.name == path[0]) {
+                    continue;
+                }
+                if let Some(local) = alias.as_ref().or(path.last()) {
+                    imports.insert(local.clone(), path.join("::"));
+                }
+            }
+        }
+        for (alias, path) in &project.manifest.prelude {
+            imports.entry(alias.clone()).or_insert_with(|| path.clone());
+        }
+        let mut checker = Checker {
+            module: declaration_module.clone(),
+            table: Rc::clone(table),
+            imports: imports.clone(),
+            ..checker()
+        };
+        let target = checker.type_path(&declaration_target);
+        let interface = declaration_interface
+            .as_ref()
+            .map(|ty| qualified_interface(&declaration_module, &imports, ty));
+        let public_methods = if interface.is_some() {
+            declaration_methods
+                .iter()
+                .map(|method| method.name.clone())
+                .collect()
+        } else {
+            declaration_methods
+                .iter()
+                .filter(|method| method.public)
+                .map(|method| method.name.clone())
+                .collect()
+        };
+        let methods = declaration_methods
+            .iter()
+            .map(|method| {
+                let parameters = method
+                    .parameters
+                    .iter()
+                    .map(|parameter| FunctionParameter {
+                        access: ir_access(parameter.access),
+                        ty: checker.type_path(&parameter.ty),
+                    })
+                    .collect();
+                let result = method
+                    .result
+                    .as_ref()
+                    .map(|ty| checker.type_path(ty))
+                    .unwrap_or(UNIT);
+                (
+                    method.name.clone(),
+                    (
+                        method.receiver,
+                        parameters,
+                        result,
+                        method.span,
+                        extension_ids[&(
+                            declaration_module.clone(),
+                            declaration_span.start,
+                            method.name.clone(),
+                        )],
+                    ),
+                )
+            })
+            .collect();
+        let associated_types = declaration_associated_types
+            .iter()
+            .filter_map(|binding| {
+                binding
+                    .ty
+                    .as_ref()
+                    .map(|ty| (binding.name.clone(), checker.type_path(ty)))
+            })
+            .collect();
+        candidates.push(ExtensionCandidate {
+            module: declaration_module,
+            span: declaration_span,
+            visible: local || public,
+            local,
+            target,
+            interface,
+            associated_types,
+            methods,
+            public_methods,
+        });
+    }
+    candidates
+}
+
+fn qualified_interface(module: &str, imports: &HashMap<String, String>, ty: &Type) -> String {
+    let path = if ty.path.len() == 1 {
+        imports
+            .get(&ty.path[0])
+            .cloned()
+            .unwrap_or_else(|| format!("{module}::{}", ty.path[0]))
+    } else if let Some(import) = imports.get(&ty.path[0]) {
+        format!("{import}::{}", ty.path[1..].join("::"))
+    } else {
+        ty.path.join("::")
+    };
+    path.strip_prefix("self::").unwrap_or(&path).to_owned()
+}
+
+fn imports_for_module(module: &Module, project: &Project) -> HashMap<String, String> {
+    let mut imports = HashMap::new();
+    for item in &module.items {
+        if let ItemKind::Use { path, alias, .. } = &item.kind {
+            if path.len() == 1
+                && project
+                    .modules
+                    .iter()
+                    .any(|candidate| candidate.name == path[0])
+            {
+                continue;
+            }
+            if let Some(local) = alias.as_ref().or(path.last()) {
+                imports.insert(local.clone(), path.join("::"));
+            }
+        }
+    }
+    for (alias, path) in &project.manifest.prelude {
+        imports.entry(alias.clone()).or_insert_with(|| path.clone());
+    }
+    imports
+}
+
 fn check_standalone(
     module: &Module,
     mode: CheckMode,
@@ -3350,17 +4680,26 @@ fn check_standalone(
         lowering: capture,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
+        share_field_assignment: false,
+        parameter_origins: HashSet::new(),
         temporary_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
         table: Rc::new(table),
+        generic_types: HashMap::new(),
+        generic_consts: HashMap::new(),
+        generic_evidence: Vec::new(),
+        generic_functions: HashMap::new(),
+        specialization_registry: None,
+        generic_path_targets: HashMap::new(),
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,
         qualified_functions: HashMap::new(),
         qualified_function_ids: HashMap::new(),
         imports: HashMap::new(),
+        extension_candidates: Vec::new(),
         scopes: Vec::new(),
         result: UNIT,
     };
@@ -3392,7 +4731,10 @@ fn check_standalone(
                 }
             }
             ItemKind::Use { .. } => c.error(15, item.span, "imports require module resolution"),
-            ItemKind::Type { .. } => {}
+            ItemKind::Type { .. }
+            | ItemKind::Interface { .. }
+            | ItemKind::Extension { .. }
+            | ItemKind::InherentExtension { .. } => {}
         }
     }
     let mut functions = Vec::new();
@@ -3411,6 +4753,9 @@ fn check_standalone(
                 c.facts = Some(FunctionFacts {
                     id: c.function_ids[name],
                     span: item.span,
+                    source_module: String::new(),
+                    source_name: name.clone(),
+                    specialization_key: None,
                     signature: match ir_type(&Ty::Function(params.clone(), result.clone())) {
                         Some(IrType::Function(signature)) => signature,
                         _ => Signature {
@@ -3423,7 +4768,11 @@ fn check_standalone(
                     path_uses: Vec::new(),
                     variant_uses: Vec::new(),
                     explicit_drops: Vec::new(),
+                    selected_calls: Vec::new(),
+                    selected_operators: Vec::new(),
                     matches: Vec::new(),
+                    tuple_projections: Vec::new(),
+                    tuple_initializers: Vec::new(),
                     next_expr: 0,
                 });
             }
@@ -3447,6 +4796,7 @@ fn check_function_body(
     params: Vec<FunctionParameter>,
     result: Ty,
 ) {
+    let previous_parameter_origins = std::mem::take(&mut c.parameter_origins);
     c.result = result;
     c.scopes.push(HashMap::new());
     for (p, parameter) in parameters.iter().zip(params) {
@@ -3464,6 +4814,7 @@ fn check_function_body(
         );
     }
     c.scopes.pop();
+    c.parameter_origins = previous_parameter_origins;
 }
 
 /// Check primitive and fixed-array types in the modules loaded by `resolve`.
@@ -3485,6 +4836,75 @@ pub fn check_resolved_types(project: &Project, resolution: &Resolution) -> Vec<D
         .collect()
 }
 
+fn install_function_environment(
+    checker: &mut Checker,
+    module_name: &str,
+    syntax: &Module,
+    project: &Project,
+    generic_templates: &HashMap<String, GenericFunctionTemplate>,
+    signatures: &HashMap<String, Ty>,
+    ids: &HashMap<String, FunctionId>,
+) {
+    for item in &syntax.items {
+        match &item.kind {
+            ItemKind::Function {
+                name,
+                generic_parameters,
+                ..
+            } => {
+                let key = format!("{module_name}::{name}");
+                if !generic_parameters.is_empty() {
+                    if let Some(template) = generic_templates.get(&key) {
+                        checker
+                            .generic_functions
+                            .insert(name.clone(), template.clone());
+                    }
+                }
+                if let Some(signature) = signatures.get(&key) {
+                    checker.functions.insert(name.clone(), signature.clone());
+                    checker.function_ids.insert(name.clone(), ids[&key]);
+                }
+            }
+            ItemKind::Use { path, alias, .. } => {
+                let module_only = path.len() == 1
+                    && project
+                        .modules
+                        .iter()
+                        .any(|candidate| candidate.name == path[0]);
+                if !module_only {
+                    if let Some(local) = alias.as_ref().or(path.last()) {
+                        checker.imports.insert(local.clone(), path.join("::"));
+                    }
+                }
+            }
+            ItemKind::Type { .. }
+            | ItemKind::Interface { .. }
+            | ItemKind::Extension { .. }
+            | ItemKind::InherentExtension { .. } => {}
+        }
+    }
+    for (alias, path) in &project.manifest.prelude {
+        checker
+            .imports
+            .entry(alias.clone())
+            .or_insert_with(|| path.clone());
+    }
+    for (alias, path) in &checker.imports {
+        let key = path.strip_prefix("self::").unwrap_or(path);
+        if let Some(template) = generic_templates.get(key) {
+            checker
+                .generic_functions
+                .insert(alias.clone(), template.clone());
+        }
+        if let Some(signature) = signatures.get(key) {
+            checker.functions.insert(alias.clone(), signature.clone());
+            if let Some(id) = ids.get(key) {
+                checker.function_ids.insert(alias.clone(), *id);
+            }
+        }
+    }
+}
+
 pub(crate) fn check_resolved_mode(
     project: &Project,
     resolution: &Resolution,
@@ -3500,6 +4920,14 @@ pub(crate) fn check_resolved_mode(
         let imports = module_imports.entry(module_name.clone()).or_default();
         for item in &source.syntax.items {
             if let ItemKind::Use { path, alias, .. } = &item.kind {
+                if path.len() == 1
+                    && project
+                        .modules
+                        .iter()
+                        .any(|candidate| candidate.name == path[0])
+                {
+                    continue;
+                }
                 if let Some(local) = alias.as_ref().or(path.last()) {
                     imports.insert(local.clone(), path.join("::"));
                 }
@@ -3517,16 +4945,90 @@ pub(crate) fn check_resolved_mode(
     let (table, table_diagnostics) = TypeTable::build(&modules, module_imports);
     let table = Rc::new(table);
     diagnostics.extend(table_diagnostics);
+    let mut generic_templates = HashMap::new();
+    for (module_name, source) in &resolution.modules {
+        for item in &source.syntax.items {
+            if let ItemKind::Function {
+                name,
+                generic_parameters,
+                bounds,
+                parameters,
+                result,
+                ..
+            } = &item.kind
+            {
+                if !generic_parameters.is_empty() {
+                    let imports = imports_for_module(&source.syntax, project);
+                    let bound_interfaces = bounds
+                        .iter()
+                        .map(|bound| qualified_interface(module_name, &imports, &bound.interface))
+                        .collect();
+                    generic_templates.insert(
+                        format!("{module_name}::{name}"),
+                        GenericFunctionTemplate {
+                            module: module_name.clone(),
+                            name: name.clone(),
+                            span: item.span,
+                            generic_parameters: generic_parameters.clone(),
+                            bounds: bounds.clone(),
+                            bound_interfaces,
+                            parameters: parameters.clone(),
+                            result: result.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    for template in generic_templates.values() {
+        if !supported_generic_function(template) {
+            diagnostics.push(diagnostic(
+                7,
+                template.span,
+                format!(
+                    "generic function '{}::{}' is outside the supported unconstrained direct-type-parameter specialization subset",
+                    template.module, template.name
+                ),
+            ));
+        }
+    }
     let mut ids = HashMap::new();
     let mut next_id = 0;
     for (module_name, source) in &resolution.modules {
         for item in &source.syntax.items {
-            if let ItemKind::Function { name, .. } = &item.kind {
-                ids.insert(format!("{module_name}::{name}"), FunctionId(next_id));
-                next_id += 1;
+            if let ItemKind::Function {
+                name,
+                generic_parameters,
+                ..
+            } = &item.kind
+            {
+                if generic_parameters.is_empty() {
+                    ids.insert(format!("{module_name}::{name}"), FunctionId(next_id));
+                    next_id += 1;
+                }
             }
         }
     }
+    let mut extension_ids = HashMap::new();
+    for (module_name, source) in &resolution.modules {
+        for item in &source.syntax.items {
+            if let ItemKind::Extension { methods, .. }
+            | ItemKind::InherentExtension { methods, .. } = &item.kind
+            {
+                for method in methods {
+                    extension_ids.insert(
+                        (module_name.clone(), item.span.start, method.name.clone()),
+                        FunctionId(next_id),
+                    );
+                    next_id += 1;
+                }
+            }
+        }
+    }
+    let specialization_registry = Rc::new(RefCell::new(SpecializationRegistry {
+        next_id,
+        ..SpecializationRegistry::default()
+    }));
     let mut signatures = HashMap::new();
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
@@ -3539,10 +5041,14 @@ pub(crate) fn check_resolved_mode(
             match &item.kind {
                 ItemKind::Function {
                     name,
+                    generic_parameters,
                     parameters,
                     result,
                     ..
                 } => {
+                    if !generic_parameters.is_empty() {
+                        continue;
+                    }
                     let params = parameters
                         .iter()
                         .map(|p| FunctionParameter {
@@ -3556,8 +5062,11 @@ pub(crate) fn check_resolved_mode(
                         Ty::Function(params, Box::new(result)),
                     );
                 }
-                ItemKind::Type { .. } => {}
-                ItemKind::Use { .. } => {}
+                ItemKind::Type { .. }
+                | ItemKind::Use { .. }
+                | ItemKind::Interface { .. }
+                | ItemKind::Extension { .. }
+                | ItemKind::InherentExtension { .. } => {}
             }
         }
         diagnostics.extend(c.diagnostics);
@@ -3569,41 +5078,28 @@ pub(crate) fn check_resolved_mode(
             lowering,
             module: module_name.clone(),
             table: Rc::clone(&table),
+            generic_functions: generic_templates.clone(),
+            specialization_registry: Some(Rc::clone(&specialization_registry)),
+            extension_candidates: extension_candidates_for(
+                module_name,
+                project,
+                resolution,
+                &table,
+                &extension_ids,
+            ),
             qualified_functions: signatures.clone(),
             qualified_function_ids: ids.clone(),
             ..checker()
         };
-        for item in &source.syntax.items {
-            match &item.kind {
-                ItemKind::Function { name, .. } => {
-                    let key = format!("{module_name}::{name}");
-                    if let Some(signature) = signatures.get(&key) {
-                        c.functions.insert(name.clone(), signature.clone());
-                        c.function_ids.insert(name.clone(), ids[&key]);
-                    }
-                }
-                ItemKind::Use { path, alias, .. } => {
-                    if let Some(local) = alias.as_ref().or(path.last()) {
-                        c.imports.insert(local.clone(), path.join("::"));
-                    }
-                }
-                ItemKind::Type { .. } => {}
-            }
-        }
-        for (alias, path) in &project.manifest.prelude {
-            c.imports
-                .entry(alias.clone())
-                .or_insert_with(|| path.clone());
-        }
-        for (alias, path) in &c.imports {
-            let key = path.strip_prefix("self::").unwrap_or(path);
-            if let Some(signature) = signatures.get(key) {
-                c.functions.insert(alias.clone(), signature.clone());
-                if let Some(id) = ids.get(key) {
-                    c.function_ids.insert(alias.clone(), *id);
-                }
-            }
-        }
+        install_function_environment(
+            &mut c,
+            module_name,
+            &source.syntax,
+            project,
+            &generic_templates,
+            &signatures,
+            &ids,
+        );
         for item in &source.syntax.items {
             if let ItemKind::Function {
                 name,
@@ -3625,13 +5121,20 @@ pub(crate) fn check_resolved_mode(
                         c.facts = Some(FunctionFacts {
                             id: *id,
                             span: item.span,
+                            source_module: module_name.clone(),
+                            source_name: name.clone(),
+                            specialization_key: None,
                             signature,
                             locals: Vec::new(),
                             expressions: Vec::new(),
                             path_uses: Vec::new(),
                             variant_uses: Vec::new(),
                             explicit_drops: Vec::new(),
+                            selected_calls: Vec::new(),
+                            selected_operators: Vec::new(),
                             matches: Vec::new(),
+                            tuple_projections: Vec::new(),
+                            tuple_initializers: Vec::new(),
                             next_expr: 0,
                         });
                     }
@@ -3642,9 +5145,197 @@ pub(crate) fn check_resolved_mode(
                 }
             }
         }
+        for item in &source.syntax.items {
+            let (target, methods) = match &item.kind {
+                ItemKind::Extension {
+                    target, methods, ..
+                }
+                | ItemKind::InherentExtension {
+                    target, methods, ..
+                } => (target, methods),
+                _ => continue,
+            };
+            let target_ty = c.type_path(target);
+            for method in methods {
+                let Some(body) = &method.body else {
+                    continue;
+                };
+                let function =
+                    extension_ids[&(module_name.clone(), item.span.start, method.name.clone())];
+                let mut parameters = vec![Parameter {
+                    span: method.span,
+                    mutable: false,
+                    name: "self".to_owned(),
+                    access: method.receiver,
+                    ty: target.clone(),
+                }];
+                parameters.extend(method.parameters.iter().cloned());
+                let params = parameters
+                    .iter()
+                    .map(|parameter| FunctionParameter {
+                        access: ir_access(parameter.access),
+                        ty: if parameter.name == "self" {
+                            target_ty.clone()
+                        } else {
+                            c.type_path(&parameter.ty)
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                let result = method
+                    .result
+                    .as_ref()
+                    .map(|ty| c.type_path(ty))
+                    .unwrap_or(UNIT);
+                if lowering {
+                    if let Some(IrType::Function(signature)) =
+                        ir_type(&Ty::Function(params.clone(), Box::new(result.clone())))
+                    {
+                        c.facts = Some(FunctionFacts {
+                            id: function,
+                            span: method.span,
+                            source_module: module_name.clone(),
+                            source_name: method.name.clone(),
+                            specialization_key: None,
+                            signature,
+                            locals: Vec::new(),
+                            expressions: Vec::new(),
+                            path_uses: Vec::new(),
+                            variant_uses: Vec::new(),
+                            explicit_drops: Vec::new(),
+                            selected_calls: Vec::new(),
+                            selected_operators: Vec::new(),
+                            matches: Vec::new(),
+                            tuple_projections: Vec::new(),
+                            tuple_initializers: Vec::new(),
+                            next_expr: 0,
+                        });
+                    }
+                }
+                check_function_body(&mut c, &parameters, body, params, result);
+                if let Some(facts) = c.facts.take() {
+                    all_facts.push(facts);
+                }
+            }
+        }
+        diagnostics.extend(c.diagnostics);
+    }
+    let mut specialization_index = 0usize;
+    loop {
+        let request = specialization_registry
+            .borrow()
+            .requests
+            .get(specialization_index)
+            .cloned();
+        let Some(request) = request else {
+            break;
+        };
+        if specialization_index >= 256 {
+            diagnostics.push(diagnostic(
+                7,
+                request.template.span,
+                "generic specialization limit exceeded (maximum 256 distinct functions)",
+            ));
+            break;
+        }
+        specialization_index += 1;
+        let Some(source) = resolution.modules.get(&request.template.module) else {
+            diagnostics.push(diagnostic(
+                7,
+                request.template.span,
+                "generic specialization source module is unavailable",
+            ));
+            continue;
+        };
+        let Some(item) = source
+            .syntax
+            .items
+            .iter()
+            .find(|item| item.span == request.template.span)
+        else {
+            diagnostics.push(diagnostic(
+                7,
+                request.template.span,
+                "generic specialization source declaration is unavailable",
+            ));
+            continue;
+        };
+        let ItemKind::Function {
+            parameters, body, ..
+        } = &item.kind
+        else {
+            unreachable!("generic template points to a function item")
+        };
+        let mut c = Checker {
+            lowering,
+            module: request.template.module.clone(),
+            table: Rc::clone(&table),
+            generic_types: request.substitution.clone(),
+            generic_consts: request.const_substitution.clone(),
+            generic_evidence: request.evidence.clone(),
+            generic_functions: generic_templates.clone(),
+            specialization_registry: Some(Rc::clone(&specialization_registry)),
+            extension_candidates: extension_candidates_for(
+                &request.template.module,
+                project,
+                resolution,
+                &table,
+                &extension_ids,
+            ),
+            qualified_functions: signatures.clone(),
+            qualified_function_ids: ids.clone(),
+            ..checker()
+        };
+        install_function_environment(
+            &mut c,
+            &request.template.module,
+            &source.syntax,
+            project,
+            &generic_templates,
+            &signatures,
+            &ids,
+        );
+        let params = parameters
+            .iter()
+            .map(|parameter| FunctionParameter {
+                access: ir_access(parameter.access),
+                ty: c.type_path(&parameter.ty),
+            })
+            .collect::<Vec<_>>();
+        let result = request
+            .template
+            .result
+            .as_ref()
+            .map(|ty| c.type_path(ty))
+            .unwrap_or(UNIT);
+        if lowering {
+            c.facts = Some(FunctionFacts {
+                id: request.id,
+                span: request.template.span,
+                source_module: request.template.module.clone(),
+                source_name: request.template.name.clone(),
+                specialization_key: Some(request.key.clone()),
+                signature: request.signature,
+                locals: Vec::new(),
+                expressions: Vec::new(),
+                path_uses: Vec::new(),
+                variant_uses: Vec::new(),
+                explicit_drops: Vec::new(),
+                selected_calls: Vec::new(),
+                selected_operators: Vec::new(),
+                matches: Vec::new(),
+                tuple_projections: Vec::new(),
+                tuple_initializers: Vec::new(),
+                next_expr: 0,
+            });
+        }
+        check_function_body(&mut c, parameters, body, params, result);
+        if let Some(facts) = c.facts.take() {
+            all_facts.push(facts);
+        }
         diagnostics.extend(c.diagnostics);
     }
     if diagnostics.is_empty() {
+        all_facts.sort_by_key(|facts| facts.id.0);
         Ok(TypedModule {
             functions: all_facts,
             types: if lowering {
@@ -3664,19 +5355,56 @@ fn checker() -> Checker {
         lowering: true,
         allowed_arrays: HashSet::new(),
         concat_destination: None,
+        share_field_assignment: false,
+        parameter_origins: HashSet::new(),
         temporary_borrow_argument: None,
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
         table: Rc::new(TypeTable::empty()),
+        generic_types: HashMap::new(),
+        generic_consts: HashMap::new(),
+        generic_evidence: Vec::new(),
+        generic_functions: HashMap::new(),
+        specialization_registry: None,
+        generic_path_targets: HashMap::new(),
         functions: HashMap::new(),
         function_ids: HashMap::new(),
         facts: None,
         qualified_functions: HashMap::new(),
         qualified_function_ids: HashMap::new(),
         imports: HashMap::new(),
+        extension_candidates: Vec::new(),
         scopes: Vec::new(),
         result: UNIT,
+    }
+}
+
+/// Bind a direct, unconstrained type parameter from an already checked
+/// argument. The argument's `Ty` is the source of truth (so aliases and
+/// literal defaulting have already been resolved by expression checking).
+/// This first inference primitive intentionally rejects compound parameter
+/// patterns; those require recursive semantic substitution and remain gated.
+fn infer_direct_type_parameter(
+    generic_parameters: &HashSet<String>,
+    written: &Type,
+    actual: &Ty,
+    substitutions: &mut HashMap<String, Ty>,
+) -> Result<(), ()> {
+    if written.path.len() != 1
+        || !written.arguments.is_empty()
+        || !generic_parameters.contains(&written.path[0])
+        || matches!(actual, Ty::Error | Ty::Never)
+    {
+        return Err(());
+    }
+    match substitutions.get(&written.path[0]) {
+        Some(previous) if previous != actual => Err(()),
+        Some(_) => Ok(()),
+        None => {
+            substitutions.insert(written.path[0].clone(), actual.clone());
+            Ok(())
+        }
     }
 }
 fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
@@ -3689,6 +5417,7 @@ fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
     }
     let access = ir_access(p.access);
     let origin = p as *const _ as usize;
+    c.parameter_origins.insert(origin);
     let local_ty = match access {
         IrAccess::Owned => ty.clone(),
         _ => Ty::Reference {
@@ -3728,7 +5457,64 @@ fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
 mod access_tests {
     use super::*;
     use memobits_diagnostics::SourceId;
-    use memobits_syntax::{parse, StatementKind};
+    use memobits_syntax::{StatementKind, parse};
+
+    #[test]
+    fn generic_parameter_inference_uses_semantic_types_and_rejects_conflicts() {
+        let parameter = Type {
+            span: Span {
+                source: SourceId(0),
+                start: 0,
+                end: 1,
+            },
+            path: vec!["T".to_owned()],
+            arguments: Vec::new(),
+        };
+        let generics = HashSet::from(["T".to_owned()]);
+        let mut substitutions = HashMap::new();
+        assert!(
+            infer_direct_type_parameter(
+                &generics,
+                &parameter,
+                &Ty::Primitive("i32"),
+                &mut substitutions,
+            )
+            .is_ok()
+        );
+        assert_eq!(substitutions.get("T"), Some(&Ty::Primitive("i32")));
+        assert!(
+            infer_direct_type_parameter(
+                &generics,
+                &parameter,
+                &Ty::Primitive("u32"),
+                &mut substitutions,
+            )
+            .is_err()
+        );
+        assert!(
+            infer_direct_type_parameter(&generics, &parameter, &Ty::Error, &mut HashMap::new(),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn generic_body_type_resolution_uses_concrete_semantic_substitutions() {
+        let parameter = Type {
+            span: Span {
+                source: SourceId(0),
+                start: 0,
+                end: 1,
+            },
+            path: vec!["T".to_owned()],
+            arguments: Vec::new(),
+        };
+        let mut checker = checker();
+        checker
+            .generic_types
+            .insert("T".to_owned(), Ty::Primitive("u32"));
+        assert_eq!(checker.type_path(&parameter), Ty::Primitive("u32"));
+        assert!(checker.diagnostics.is_empty());
+    }
 
     #[test]
     fn internal_function_types_preserve_non_owned_access_metadata() {
@@ -3827,12 +5613,16 @@ mod access_tests {
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let diagnostics = check_types(&parsed.module);
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("does not match the share parameter access")));
-        assert!(!diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("does not match the borrow parameter access")));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("does not match the share parameter access")
+        }));
+        assert!(!diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("does not match the borrow parameter access")
+        }));
     }
 
     #[test]
@@ -3844,9 +5634,11 @@ mod access_tests {
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let diagnostics = check_types(&parsed.module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(!diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("cannot assign to immutable binding")));
+        assert!(!diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("cannot assign to immutable binding")
+        }));
     }
 
     #[test]

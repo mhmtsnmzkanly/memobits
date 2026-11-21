@@ -629,6 +629,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::ListLen { source: operand }
         | InstructionKind::StringLen { source: operand }
         | InstructionKind::Unary { operand, .. }
+        | InstructionKind::Cast { value: operand, .. }
         | InstructionKind::Borrow { owner: operand, .. }
         | InstructionKind::Load { reference: operand } => vec![operand],
         InstructionKind::ListGet {
@@ -1581,8 +1582,21 @@ fn check_instruction(
             }
         }
         InstructionKind::ReplaceStringField { target, field, .. } => {
+            let local = &function.locals[target.0 as usize];
+            let root = if matches!(
+                local.ty,
+                Type::Reference {
+                    access: Access::Share,
+                    ..
+                }
+            ) && function.parameter_locals.contains(target)
+            {
+                Root::Parameter(target.0)
+            } else {
+                Root::Local(target.0)
+            };
             let roots = BTreeSet::from([Place {
-                root: Root::Local(target.0),
+                root,
                 path: vec![Step::Field(*field)],
             }]);
             if let Some(conflict) =

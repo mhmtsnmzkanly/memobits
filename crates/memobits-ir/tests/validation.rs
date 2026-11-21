@@ -98,6 +98,30 @@ fn accepts_well_formed_function_and_join() {
 }
 
 #[test]
+fn rejects_non_scalar_char_constants() {
+    for invalid in ["55296", "1114112"] {
+        let mut f = function();
+        let char_ty = Type::Primitive(Primitive::Char);
+        f.signature.result = Box::new(char_ty.clone());
+        f.values[0] = char_ty;
+        f.blocks[0].instructions[0].kind =
+            InstructionKind::Constant(Constant::Integer(invalid.into()));
+        let errors = Program {
+            functions: vec![f],
+            ..Program::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("constant")),
+            "{invalid}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn rejects_eager_logical_binary_operations() {
     let mut f = function();
     f.values.extend([bool_ty(), bool_ty()]);

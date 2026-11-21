@@ -1,0 +1,28 @@
+type TextLabel {
+    number: u32,
+    text: String,
+}
+
+fn add_bang(value: borrow String) -> String {
+    let text := value.concat("!");
+    text
+}
+
+fn add_question(value: share String) {
+    value.push_str("?");
+}
+
+fn main() -> i32 {
+    let text := "hello";
+    let joined := text.concat(" world");
+    let moved := text;
+    var suffixed := add_bang(joined.borrow());
+    add_question(suffixed.share());
+    suffixed.push_str("!");
+    let suffix_length := suffixed.len();
+    var label := TextLabel { text: "hi", number: 1 };
+    label.text = label.text.concat(" there");
+    let label_moved := label;
+    let label_length := label_moved.text.len();
+    if moved.len() == 5 && suffix_length == 14 && label_length == 8 { 0 } else { 1 }
+}

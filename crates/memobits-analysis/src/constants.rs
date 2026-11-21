@@ -6,11 +6,13 @@ use std::collections::HashMap;
 
 use crate::types::FunctionFacts;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Value {
     Integer(i128),
+    Float(f64),
     Overflow,
     DivisionByZero,
+    ShiftCountOutOfRange,
     Unknown,
 }
 
@@ -38,15 +40,37 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             .parse::<i128>()
             .map(Value::Integer)
             .unwrap_or(Value::Unknown),
+        ExprKind::CharLiteral(_) => Value::Unknown,
+        ExprKind::Number(raw) => raw
+            .replace('_', "")
+            .parse::<f64>()
+            .map(Value::Float)
+            .unwrap_or(Value::Unknown),
         ExprKind::Unary { operator, operand } if operator == "+" || operator == "-" => {
-            let Some((min, max)) = types
+            let Some(ty) = types
                 .get(&(expr as *const Expr as usize))
                 .and_then(Option::as_ref)
-                .and_then(integer_type)
             else {
                 return Value::Unknown;
             };
-            let Value::Integer(value) = evaluate(operand, types) else {
+            let evaluated = evaluate(operand, types);
+            if matches!(ty, Type::Primitive(Primitive::F32 | Primitive::F64)) {
+                return match evaluated {
+                    Value::Float(value) => {
+                        Value::Float(if operator == "-" { -value } else { value })
+                    }
+                    Value::Integer(value) => Value::Float(if operator == "-" {
+                        -(value as f64)
+                    } else {
+                        value as f64
+                    }),
+                    _ => Value::Unknown,
+                };
+            }
+            let Some((min, max)) = integer_type(ty) else {
+                return Value::Unknown;
+            };
+            let Value::Integer(value) = evaluated else {
                 return Value::Unknown;
             };
             let value = if operator == "-" {
@@ -63,11 +87,121 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
                 Value::Integer(value)
             }
         }
+        ExprKind::Cast {
+            value: source_expr,
+            target,
+        } => {
+            let integer_cast = |value: i128, name: &str| -> Option<i128> {
+                let (bits, signed) = match name {
+                    "i8" => (8, true),
+                    "i16" => (16, true),
+                    "i32" => (32, true),
+                    "i64" => (64, true),
+                    "u8" => (8, false),
+                    "u16" => (16, false),
+                    "u32" => (32, false),
+                    "u64" => (64, false),
+                    _ => return None,
+                };
+                let mask = if bits == 64 {
+                    u64::MAX as u128
+                } else {
+                    (1u128 << bits) - 1
+                };
+                let wrapped = (value as u128) & mask;
+                if signed && wrapped & (1u128 << (bits - 1)) != 0 {
+                    Some((wrapped as i128) - (1i128 << bits))
+                } else {
+                    Some(wrapped as i128)
+                }
+            };
+            let Some(target_name) = target.path.last().map(String::as_str) else {
+                return Value::Unknown;
+            };
+            match evaluate(source_expr, types) {
+                Value::Integer(value) => {
+                    if matches!(target_name, "f32" | "f64") {
+                        let number = match types
+                            .get(&(source_expr.as_ref() as *const Expr as usize))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(Type::Primitive(Primitive::I8)) => (value as i8) as f64,
+                            Some(Type::Primitive(Primitive::I16)) => (value as i16) as f64,
+                            Some(Type::Primitive(Primitive::I32)) => (value as i32) as f64,
+                            Some(Type::Primitive(Primitive::I64)) => (value as i64) as f64,
+                            Some(Type::Primitive(Primitive::U8)) => (value as u8) as f64,
+                            Some(Type::Primitive(Primitive::U16)) => (value as u16) as f64,
+                            Some(Type::Primitive(Primitive::U32)) => (value as u32) as f64,
+                            Some(Type::Primitive(Primitive::U64)) => (value as u64) as f64,
+                            _ => value as f64,
+                        };
+                        if target_name == "f32" {
+                            Value::Float((number as f32) as f64)
+                        } else {
+                            Value::Float(number)
+                        }
+                    } else {
+                        integer_cast(value, target_name)
+                            .map(Value::Integer)
+                            .unwrap_or(Value::Unknown)
+                    }
+                }
+                Value::Float(value) => match target_name {
+                    "f32" => Value::Float((value as f32) as f64),
+                    "f64" => Value::Float(value),
+                    "i8" => Value::Integer(value as i8 as i128),
+                    "i16" => Value::Integer(value as i16 as i128),
+                    "i32" => Value::Integer(value as i32 as i128),
+                    "i64" => Value::Integer(value as i64 as i128),
+                    "u8" => Value::Integer(value as u8 as i128),
+                    "u16" => Value::Integer(value as u16 as i128),
+                    "u32" => Value::Integer(value as u32 as i128),
+                    "u64" => Value::Integer(value as u64 as i128),
+                    _ => Value::Unknown,
+                },
+                _ => Value::Unknown,
+            }
+        }
+        ExprKind::Call {
+            callee, arguments, ..
+        } => {
+            let ExprKind::Field { base, name } = &callee.kind else {
+                return Value::Unknown;
+            };
+            if arguments.len() != 1
+                || !matches!(
+                    name.as_str(),
+                    "wrapping_add" | "wrapping_mul" | "bit_and" | "bit_xor" | "bit_or"
+                )
+            {
+                return Value::Unknown;
+            }
+            let (Value::Integer(left), Value::Integer(right)) =
+                (evaluate(base, types), evaluate(&arguments[0], types))
+            else {
+                return Value::Unknown;
+            };
+            let (Ok(left), Ok(right)) = (u32::try_from(left), u32::try_from(right)) else {
+                return Value::Unknown;
+            };
+            Value::Integer(match name.as_str() {
+                "wrapping_add" => left.wrapping_add(right) as i128,
+                "wrapping_mul" => left.wrapping_mul(right) as i128,
+                "bit_and" => (left & right) as i128,
+                "bit_xor" => (left ^ right) as i128,
+                "bit_or" => (left | right) as i128,
+                _ => unreachable!(),
+            })
+        }
         ExprKind::Binary {
             operator,
             left,
             right,
-        } if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%") => {
+        } if matches!(
+            operator.as_str(),
+            "+" | "-" | "*" | "/" | "%" | "&" | "^" | "|" | "<<" | ">>"
+        ) =>
+        {
             let Some((min, max)) = types
                 .get(&(expr as *const Expr as usize))
                 .and_then(Option::as_ref)
@@ -79,6 +213,13 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             if matches!(operator.as_str(), "/" | "%") && evaluate(right, types) == Value::Integer(0)
             {
                 return Value::DivisionByZero;
+            }
+            if matches!(operator.as_str(), "<<" | ">>") {
+                if let Value::Integer(count) = evaluate(right, types) {
+                    if !(0..32).contains(&count) {
+                        return Value::ShiftCountOutOfRange;
+                    }
+                }
             }
             let (Value::Integer(left), Value::Integer(right)) =
                 (evaluate(left, types), evaluate(right, types))
@@ -93,6 +234,26 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
                 "%" if right == 0 => return Value::DivisionByZero,
                 "/" => left.checked_div(right),
                 "%" => left.checked_rem(right),
+                "<<" => u32::try_from(left)
+                    .ok()
+                    .zip(u32::try_from(right).ok())
+                    .map(|(value, count)| value.wrapping_shl(count) as i128),
+                ">>" => u32::try_from(left)
+                    .ok()
+                    .zip(u32::try_from(right).ok())
+                    .map(|(value, count)| value.wrapping_shr(count) as i128),
+                "&" => u32::try_from(left)
+                    .ok()
+                    .zip(u32::try_from(right).ok())
+                    .map(|(left, right)| (left & right) as i128),
+                "^" => u32::try_from(left)
+                    .ok()
+                    .zip(u32::try_from(right).ok())
+                    .map(|(left, right)| (left ^ right) as i128),
+                "|" => u32::try_from(left)
+                    .ok()
+                    .zip(u32::try_from(right).ok())
+                    .map(|(left, right)| (left | right) as i128),
                 _ => unreachable!(),
             };
             let Some(result) = result else {
@@ -116,11 +277,17 @@ fn check_expr(
     match &expr.kind {
         ExprKind::Number(_)
         | ExprKind::StringLiteral(_)
+        | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
         ExprKind::Array(elements) => {
             for element in elements {
                 check_expr(element, types, diagnostics);
+            }
+        }
+        ExprKind::Tuple(elements) => {
+            for element in elements {
+                check_expr(&element.value, types, diagnostics);
             }
         }
         ExprKind::RepeatArray { value, .. } => check_expr(value, types, diagnostics),
@@ -129,11 +296,14 @@ fn check_expr(
             check_expr(index, types, diagnostics);
         }
         ExprKind::Unary { operand, .. } => check_expr(operand, types, diagnostics),
+        ExprKind::Cast { value, .. } => check_expr(value, types, diagnostics),
         ExprKind::Binary { left, right, .. } => {
             check_expr(left, types, diagnostics);
             check_expr(right, types, diagnostics);
         }
-        ExprKind::Call { callee, arguments } => {
+        ExprKind::Call {
+            callee, arguments, ..
+        } => {
             check_expr(callee, types, diagnostics);
             for argument in arguments {
                 check_expr(argument, types, diagnostics);
@@ -175,7 +345,12 @@ fn check_expr(
             expr.span,
             "division or remainder by zero in statically known expression",
         )),
-        Value::Integer(_) | Value::Unknown => {}
+        Value::ShiftCountOutOfRange => diagnostics.push(diagnostic(
+            3,
+            expr.span,
+            "u32 shift count must be less than 32",
+        )),
+        Value::Integer(_) | Value::Float(_) | Value::Unknown => {}
     }
 }
 
@@ -220,20 +395,79 @@ fn diagnostic(number: u16, span: memobits_diagnostics::Span, message: &str) -> D
 /// Check one syntax module against facts already captured by its type pass.
 pub(crate) fn check_module(module: &Module, facts: &[FunctionFacts]) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let mut function_index = 0;
     for item in &module.items {
-        if let ItemKind::Function { body, .. } = &item.kind {
-            let Some(facts) = facts.get(function_index) else {
-                continue;
-            };
-            function_index += 1;
-            let types = facts
-                .expressions
+        if let ItemKind::Function { name, body, .. } = &item.kind {
+            for facts in facts
                 .iter()
-                .map(|fact| (fact.node_addr, fact.ty.clone()))
-                .collect::<HashMap<_, _>>();
-            check_block(body, &types, &mut diagnostics);
+                .filter(|facts| facts.span == item.span && facts.source_name == *name)
+            {
+                let types = facts
+                    .expressions
+                    .iter()
+                    .map(|fact| (fact.node_addr, fact.ty.clone()))
+                    .collect::<HashMap<_, _>>();
+                check_block(body, &types, &mut diagnostics);
+            }
         }
     }
     diagnostics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evaluate, Value};
+    use memobits_diagnostics::{SourceId, Span};
+    use memobits_ir::{Primitive, Type as IrType};
+    use memobits_syntax::{Expr, ExprKind, Type as SyntaxType};
+    use std::collections::HashMap;
+
+    fn span() -> Span {
+        Span {
+            source: SourceId(0),
+            start: 0,
+            end: 1,
+        }
+    }
+
+    fn widened_sum(right: &str) -> (Box<Expr>, HashMap<usize, Option<IrType>>) {
+        let cast = Expr {
+            span: span(),
+            kind: ExprKind::Cast {
+                value: Box::new(Expr {
+                    span: span(),
+                    kind: ExprKind::Number("255".into()),
+                }),
+                target: SyntaxType {
+                    span: span(),
+                    path: vec!["u32".into()],
+                    arguments: vec![],
+                },
+            },
+        };
+        let sum = Box::new(Expr {
+            span: span(),
+            kind: ExprKind::Binary {
+                operator: "+".into(),
+                left: Box::new(cast),
+                right: Box::new(Expr {
+                    span: span(),
+                    kind: ExprKind::Number(right.into()),
+                }),
+            },
+        });
+        let types = HashMap::from([(
+            &*sum as *const Expr as usize,
+            Some(IrType::Primitive(Primitive::U32)),
+        )]);
+        (sum, types)
+    }
+
+    #[test]
+    fn widened_casts_preserve_constants_and_detect_u32_overflow() {
+        let (valid, types) = widened_sum("1");
+        assert_eq!(evaluate(&valid, &types), Value::Integer(256));
+
+        let (overflow, types) = widened_sum("4294967295");
+        assert_eq!(evaluate(&overflow, &types), Value::Overflow);
+    }
 }

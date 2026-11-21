@@ -17,10 +17,10 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
     f.write(
         "src/main.mb",
         r#"
-        fn byte_is(s: borrow String, offset: u32, expected: u8) -> Bool {
+        fn byte_is(s: borrow string, offset: u32, expected: u8) -> Bool {
             match s.byte_at(offset) { Some(byte) => byte == expected, None => false }
         }
-        fn doubled(input: borrow String, descend: Bool) -> Bool {
+        fn doubled(input: borrow string, descend: Bool) -> Bool {
             let joined := input.concat(input);
             if descend && !doubled(joined.borrow(), false) { return false; }
             // The callee's released region can be reused while joined is live.
@@ -99,9 +99,9 @@ fn heap_strings_reject_unbound_results_and_conflicting_loans() {
         f.write(
             "src/main.mb",
             &format!(
-                "fn returns(s: String) -> String {{ s }}
-                 fn earlier(s: String, size: u32) {{}}
-                 fn alias(view: borrow String, s: String) {{ view.len(); }}
+                "fn returns(s: string) -> string {{ s }}
+                 fn earlier(s: string, size: u32) {{}}
+                 fn alias(view: borrow string, s: string) {{ view.len(); }}
                  fn main() {{ {body} }}"
             ),
         );
@@ -122,10 +122,10 @@ fn string_push_str_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn append(text: share String, suffix: borrow String) {
+        fn append(text: share string, suffix: borrow string) {
             text.push_str(suffix)
         }
-        fn early(text: share String, stop: Bool) {
+        fn early(text: share string, stop: Bool) {
             text.push_str({ if stop { return; } "wrong" });
         }
         fn main() -> Result<Bool, Error> {
@@ -199,12 +199,12 @@ fn share_string_replacement_preserves_caller_owned_storage() {
     f.write(
         "src/main.mb",
         r#"
-        fn extend(text: share String, early: Bool) {
+        fn extend(text: share string, early: Bool) {
             text = text.concat({ if early { return; } "😀" });
         }
-        fn read_exclusive(text: share String) -> u32 { text.len() }
-        fn clear(text: share String) { text = "ok"; }
-        fn into_len(text: String) -> u32 { text.len() }
+        fn read_exclusive(text: share string) -> u32 { text.len() }
+        fn clear(text: share string) { text = "ok"; }
+        fn into_len(text: string) -> u32 { text.len() }
         fn main() -> Result<Bool, Error> {
             var text := "é";
             extend(text.share(), false);
@@ -248,7 +248,7 @@ fn share_string_replacement_rejects_aliases_and_conflicting_loans() {
         ),
     ] {
         let forwarding = if body.starts_with("forward(") {
-            "fn forward(text: share String) { replace(text.share()); }"
+            "fn forward(text: share string) { replace(text.share()); }"
         } else {
             ""
         };
@@ -256,9 +256,9 @@ fn share_string_replacement_rejects_aliases_and_conflicting_loans() {
             "text.mb",
             &format!(
                 r#"
-            fn replace(text: share String) {{ text = text.concat("!"); }}
+            fn replace(text: share string) {{ text = text.concat("!"); }}
             {forwarding}
-            fn two(left: share String, right: share String) {{ left.len(); right.len(); }}
+            fn two(left: share string, right: share string) {{ left.len(); right.len(); }}
             fn main() {{ var text := "a"; {body} }}
         "#
             ),
@@ -280,8 +280,8 @@ fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
     f.write(
         "src/main.mb",
         r#"
-        fn use_owner(value: String) -> u32 { value.len() }
-        fn add(value: borrow String) -> String {
+        fn use_owner(value: string) -> u32 { value.len() }
+        fn add(value: borrow string) -> string {
             let result := value.concat("😀");
             result
         }
@@ -307,7 +307,7 @@ fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
             text = text.concat({ return use_owner_before_exit(text.borrow()); "unreachable" });
             text.len()
         }
-        fn use_owner_before_exit(value: borrow String) -> u32 { value.len() }
+        fn use_owner_before_exit(value: borrow string) -> u32 { value.len() }
         fn main() -> Result<Bool, Error> { Ok(check(true) && check(false) && early() == 3) }
         "#,
     );
@@ -331,7 +331,7 @@ fn multiple_heap_arguments_keep_order_and_can_return_an_owner() {
     f.write(
         "src/main.mb",
         r#"
-        fn select(first: String, order: i32, second: String, last: i32) -> String {
+        fn select(first: string, order: i32, second: string, last: i32) -> string {
             if first.len() == 3 && order == 1 && last == 2 { return second; }
             first
         }
@@ -368,13 +368,13 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
     f.write(
         "src/text.mb",
         r#"
-        pub fn choose(early: Bool) -> String {
+        pub fn choose(early: Bool) -> string {
             let joined := "é".concat("😀");
             if early { return joined; }
             "ok"
         }
-        fn identity(owned: String) -> String { owned }
-        pub fn forward(early: Bool) -> String {
+        fn identity(owned: string) -> string { owned }
+        pub fn forward(early: Bool) -> string {
             let owned := choose(early);
             let forwarded := identity(owned);
             forwarded
@@ -385,7 +385,7 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
         "src/main.mb",
         r#"
         use self::text::forward;
-        fn byte_is(s: borrow String, index: u32, expected: u8) -> Bool {
+        fn byte_is(s: borrow string, index: u32, expected: u8) -> Bool {
             match s.byte_at(index) { Some(byte) => byte == expected, None => false }
         }
         fn main() -> Result<Bool, Error> {
@@ -418,7 +418,7 @@ fn discarded_heap_results_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(text: String, early: Bool) -> String {
+        fn make(text: string, early: Bool) -> string {
             if early { return text; }
             let result := text.concat("!");
             result
@@ -458,7 +458,7 @@ fn discarded_heap_call_preserves_trap_diagnostics() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(text: String, divisor: i32) -> String {
+        fn make(text: string, divisor: i32) -> string {
             let quotient := 1 / divisor;
             if quotient == 0 { return "zero"; }
             text
@@ -486,7 +486,7 @@ fn immediate_heap_string_reads_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make() -> String {
+        fn make() -> string {
             let text := "é".concat("😀");
             text
         }
@@ -540,11 +540,11 @@ fn temporary_string_borrows_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make() -> String {
+        fn make() -> string {
             let result := "a".concat("😀");
             result
         }
-        fn inspect(first: borrow String, second: borrow String, order: i32) -> Bool {
+        fn inspect(first: borrow string, second: borrow string, order: i32) -> Bool {
             first.len() == 3 && second.len() == 5 && order == 2
         }
         fn early() -> Bool {
@@ -592,9 +592,9 @@ fn temporary_string_borrows_require_an_explicit_direct_argument() {
         f.write(
             "text.mb",
             &format!(
-                r#"fn make() -> String {{ let result := "é".concat("!"); result }}
-                   fn inspect(value: borrow String) {{ value.len(); }}
-                   fn mutate(value: share String) {{ value.len(); }}
+                r#"fn make() -> string {{ let result := "é".concat("!"); result }}
+                   fn inspect(value: borrow string) {{ value.len(); }}
+                   fn mutate(value: share string) {{ value.len(); }}
                    fn main() {{ {body} }}"#,
             ),
         );
@@ -613,12 +613,12 @@ fn temporary_owned_string_arguments_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(ordered: Bool) -> String {
+        fn make(ordered: Bool) -> string {
             let text := "a".concat("😀");
             if ordered { return text; }
             "wrong order"
         }
-        fn select(first: String, view: borrow String, second: String, last: i32) -> String {
+        fn select(first: string, view: borrow string, second: string, last: i32) -> string {
             if first.len() == 3 && view.len() == 2 && last == 2 { return second; }
             first
         }
@@ -660,8 +660,8 @@ fn heap_returns_reject_nested_temporaries() {
         f.write(
             "text.mb",
             &format!(
-                r#"fn make() -> String {{ let result := "é".concat("!"); result }}
-               fn take(value: String) {{ value.len(); }}
+                r#"fn make() -> string {{ let result := "é".concat("!"); result }}
+               fn take(value: string) {{ value.len(); }}
                fn main() {{ {body} }}"#,
             ),
         );
@@ -683,12 +683,12 @@ fn owned_heap_arguments_forward_and_leave_literal_only_calls_available() {
     f.write(
         "src/text.mb",
         r#"
-        pub fn consume(early: Bool, value: String) -> u32 {
+        pub fn consume(early: Bool, value: string) -> u32 {
             if early { return value.len(); }
             let moved := value;
             moved.len()
         }
-        pub fn forward(early: Bool, value: String) -> u32 {
+        pub fn forward(early: Bool, value: string) -> u32 {
             consume(early, value)
         }
     "#,
@@ -697,7 +697,7 @@ fn owned_heap_arguments_forward_and_leave_literal_only_calls_available() {
         "src/main.mb",
         r#"
         use self::text::forward;
-        fn literal_echo(value: String, extra: u32) -> String { value }
+        fn literal_echo(value: string, extra: u32) -> string { value }
         fn main() -> Result<u32, Error> {
             let first := "é".concat("!");
             let second := "a".concat("😀");
@@ -726,7 +726,7 @@ fn concat_moves_across_nested_scopes_release_once_on_either_branch() {
     f.write(
         "src/main.mb",
         r#"
-        fn first_is(value: borrow String, expected: u8) -> Bool {
+        fn first_is(value: borrow string, expected: u8) -> Bool {
             match value.byte_at(0) { Some(byte) => byte == expected, None => false }
         }
         fn check(move_inward: Bool) -> Bool {
@@ -781,7 +781,7 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn choose(outer: String, early: Bool) -> String {
+        fn choose(outer: string, early: Bool) -> string {
             var step := 0;
             loop {
                 let outer := "é";
@@ -1344,8 +1344,8 @@ fn list_returns_keep_temporary_and_abi_gates() {
         f.write(
             "list.mb",
             &format!(
-            "fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn main() {{ {body} }}"
-        ),
+                "fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn main() {{ {body} }}"
+            ),
         );
         let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
         assert!(diagnostic.contains(message), "{body}: {diagnostic}");
@@ -1902,14 +1902,42 @@ fn borrowed_list_reads_run_from_source_and_wasm() {
 fn list_borrow_conflicts_and_call_boundaries_are_checked() {
     let f = Fixture::new();
     for (body, code, message) in [
-        ("let held := items.borrow(); items.push(1); held.len();", "BE005", "while it is borrowed"),
-        ("let held := items.borrow(); held.get({ items.push(1); 0 });", "BE005", "while it is borrowed"),
-        ("let held := items.borrow(); let moved := items; held.get(0);", "BE005", "while it is borrowed"),
+        (
+            "let held := items.borrow(); items.push(1); held.len();",
+            "BE005",
+            "while it is borrowed",
+        ),
+        (
+            "let held := items.borrow(); held.get({ items.push(1); 0 });",
+            "BE005",
+            "while it is borrowed",
+        ),
+        (
+            "let held := items.borrow(); let moved := items; held.get(0);",
+            "BE005",
+            "while it is borrowed",
+        ),
         ("inspect(items);", "TE017", "explicit .borrow()"),
-        ("let indirect := inspect; indirect(items.borrow());", "TE017", "direct internal call"),
-        ("let fixed: List<u8> = []; fixed.share();", "TE017", "requires a mutable local owner"),
-        ("let view: Option<borrow List<u8>> = Some(items.borrow());", "TE017", "cannot be stored in Option"),
-        ("let dangling := { var inner: List<u8> = []; inner.push(5); inner.borrow() }; dangling.len();", "TE017", "reference-valued block results"),
+        (
+            "let indirect := inspect; indirect(items.borrow());",
+            "TE017",
+            "direct internal call",
+        ),
+        (
+            "let fixed: List<u8> = []; fixed.share();",
+            "TE017",
+            "requires a mutable local owner",
+        ),
+        (
+            "let view: Option<borrow List<u8>> = Some(items.borrow());",
+            "TE017",
+            "cannot be stored in Option",
+        ),
+        (
+            "let dangling := { var inner: List<u8> = []; inner.push(5); inner.borrow() }; dangling.len();",
+            "TE017",
+            "reference-valued block results",
+        ),
     ] {
         f.write("list.mb", &format!(
             "fn inspect(view: borrow List<u8>) {{ view.len(); }} fn main() {{ var items: List<u8> = []; {body} }}"
@@ -2143,7 +2171,7 @@ fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
     );
     f.write(
         "src/text.mb",
-        r#"pub type Text = String;
+        r#"pub type Text = string;
            pub fn make() -> Text { "é😀" }
            pub fn inspect(s: borrow Text) -> i32 {
                let byte_ok := match s.byte_at(1) { Some(byte) => byte == 169, None => false };
@@ -2231,14 +2259,14 @@ fn internal_static_string_results_run_from_source_and_wasm() {
         "src/main.mb",
         r#"
         type TextError: Error { offset: i32 }
-        fn literal() -> String { "😀" }
-        fn make(use_literal: Bool, fail: Bool) -> Result<String, TextError> {
+        fn literal() -> string { "😀" }
+        fn make(use_literal: Bool, fail: Bool) -> Result<string, TextError> {
             if fail { return Err(TextError { code: 7, offset: 2 }); }
             if use_literal { return Ok("é"); }
             let text := literal();
             Ok(text)
         }
-        fn inspect(result: Result<String, TextError>) -> u32 {
+        fn inspect(result: Result<string, TextError>) -> u32 {
             match result {
                 Ok(text) => match text.scalar_at(0) { Some(value) => value, None => 0 },
                 Err(error) => {
@@ -2274,10 +2302,10 @@ fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn into_len(value: String) -> u32 { value.len() }
+        fn into_len(value: string) -> u32 { value.len() }
         fn check(early: Bool) -> Bool {
             let text := "é".concat("😀");
-            let result: Result<String, Error> = Ok(text);
+            let result: Result<string, Error> = Ok(text);
             match result {
                 Ok(value) => {
                     if early { return value.len() == 6; }
@@ -2312,7 +2340,7 @@ fn returned_heap_string_results_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(mode: i32, text: String) -> Result<String, Error> {
+        fn make(mode: i32, text: string) -> Result<string, Error> {
             if mode == 1 { return Ok("é"); }
             if mode == 2 { return Err(Error { code: 7 }); }
             Ok(text)
@@ -2360,21 +2388,29 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
         "forward();",
     ] {
         let forward = if body == "forward();" {
-            "fn forward() -> Result<String, Error> { make() }"
+            "fn forward() -> Result<string, Error> { make() }"
         } else {
             ""
         };
-        f.write("text.mb", &format!(r#"
-            fn make() -> Result<String, Error> {{
+        f.write(
+            "text.mb",
+            &format!(
+                r#"
+            fn make() -> Result<string, Error> {{
                 let text := "é".concat("!");
                 return Ok(text);
             }}
-            fn take(result: Result<String, Error>) {{}}
+            fn take(result: Result<string, Error>) {{}}
             {forward}
             fn main() {{ {body} }}
-        "#));
+        "#
+            ),
+        );
         let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
-        assert!(diagnostic.contains("requires an immediate consuming match"), "{body}: {diagnostic}");
+        assert!(
+            diagnostic.contains("requires an immediate consuming match"),
+            "{body}: {diagnostic}"
+        );
     }
 }
 
@@ -2382,21 +2418,21 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
 fn heap_string_results_reject_escape_and_ignore_paths() {
     let f = Fixture::new();
     for body in [
-        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); match result { Err(_) => {}, _ => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text); 1 + 1; match result { Ok(text) => { text.len(); }, Err(_) => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<String, Error> = Ok(text);"#,
+        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
+        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); match result { Err(_) => {}, _ => {} };"#,
+        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); 1 + 1; match result { Ok(text) => { text.len(); }, Err(_) => {} };"#,
+        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text);"#,
         r#"let result := wrap("é".concat("!"));"#,
-        r#"let result: Result<String, Error> = Ok(heap());"#,
-        r#"var text := "é"; append(text.share()); let result: Result<String, Error> = Ok(text);"#,
+        r#"let result: Result<string, Error> = Ok(heap());"#,
+        r#"var text := "é"; append(text.share()); let result: Result<string, Error> = Ok(text);"#,
     ] {
         f.write(
             "text.mb",
             &format!(
                 r#"
-            fn wrap(text: String) -> Result<String, Error> {{ Ok(text) }}
-            fn heap() -> String {{ let text := "é".concat("!"); text }}
-            fn append(text: share String) {{ text.push_str("!"); }}
+            fn wrap(text: string) -> Result<string, Error> {{ Ok(text) }}
+            fn heap() -> string {{ let text := "é".concat("!"); text }}
+            fn append(text: share string) {{ text.push_str("!"); }}
             fn main() {{ {body} }}
         "#
             ),
@@ -2416,7 +2452,7 @@ fn internal_string_results_require_consuming_payload_matches() {
         "text.mb",
         r#"
         fn main() -> u32 {
-            let result: Result<String, Error> = Ok("é");
+            let result: Result<string, Error> = Ok("é");
             match result.borrow() { Ok(text) => text.len(), Err(_) => 0 }
         }
     "#,
@@ -2437,12 +2473,12 @@ fn wasm_gates_string_exports_and_nested_storage() {
     );
     for (source, args, message) in [
         (
-            r#"pub fn main() -> String { "é" }"#,
+            r#"pub fn main() -> string { "é" }"#,
             &["build"][..],
             "exported signatures cannot use String",
         ),
         (
-            "pub fn main(s: borrow String) {}",
+            "pub fn main(s: borrow string) {}",
             &["build", "--lib"][..],
             "exported signatures cannot use String",
         ),
@@ -2452,42 +2488,42 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "String array elements",
         ),
         (
-            "type Box [ Text(String) ] fn main() {}",
+            "type Box [ Text(string) ] fn main() {}",
             &["build"][..],
             "String fields or enum payloads",
         ),
         (
-            r#"pub fn main() -> Result<String, Error> { Ok("é") }"#,
+            r#"pub fn main() -> Result<string, Error> { Ok("é") }"#,
             &["build"][..],
             "primitive success payload",
         ),
         (
-            r#"pub fn main() -> Result<String, Error> { Ok("é") }"#,
+            r#"pub fn main() -> Result<string, Error> { Ok("é") }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
         ),
         (
-            r#"pub fn main() -> Result<String, Error> { let text := "é".concat("!"); Ok(text) }"#,
+            r#"pub fn main() -> Result<string, Error> { let text := "é".concat("!"); Ok(text) }"#,
             &["build"][..],
             "primitive success payload",
         ),
         (
-            r#"pub fn main() -> Result<String, Error> { let text := "é".concat("!"); Ok(text) }"#,
+            r#"pub fn main() -> Result<string, Error> { let text := "é".concat("!"); Ok(text) }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
         ),
         (
-            "type Box { text: Result<String, Error> } fn main() {}",
+            "type Box { text: Result<string, Error> } fn main() {}",
             &["build"][..],
             "nested Result<String, E> storage",
         ),
         (
-            r#"pub fn main() -> Result<String, Utf8Error> { let input: Bytes<1> = [65]; input.to_utf8_string(1) }"#,
+            r#"pub fn main() -> Result<string, Utf8Error> { let input: Bytes<1> = [65]; input.to_utf8_string(1) }"#,
             &["build"][..],
             "primitive success payload",
         ),
         (
-            r#"fn main() { let result: Result<String, Error> = Ok("é"); let items := [result]; }"#,
+            r#"fn main() { let result: Result<string, Error> = Ok("é"); let items := [result]; }"#,
             &["build"][..],
             "nested Result<String, E> storage",
         ),
@@ -2513,7 +2549,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "requires a direct new local binding",
         ),
         (
-            r#"fn make() -> String { let text := "a".concat("b"); text }
+            r#"fn make() -> string { let text := "a".concat("b"); text }
                 fn main() { let label := Label { text: { make() } }; }"#,
             "TE018",
             "heap String call result must be assigned directly",
@@ -2524,13 +2560,13 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "requires a direct new local binding",
         ),
         (
-            r#"fn make() -> String { "a" }
+            r#"fn make() -> string { "a" }
                 fn main() { let label := if true { Label { text: make() } } else { Label { text: "c" } }; }"#,
             "LE900",
             "requires a direct new local binding",
         ),
         (
-            r#"fn make() -> String { "a" }
+            r#"fn make() -> string { "a" }
                 fn main() { let named := make(); let label := Label { text: named }; }"#,
             "LE900",
             "requires a direct String literal",
@@ -2562,7 +2598,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
             r#"fn take(label: Label) {}
                 fn main() { let text := "a".concat("b"); take(Label { text: text }); }"#,
             "LE900",
-            "only as read-only borrow parameters",
+            "only as borrow or share parameters",
         ),
         (
             r#"fn main() { var label := Label { text: "a" }; label.text = if true { "b" } else { "c" }; }"#,
@@ -2575,24 +2611,14 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "read through a borrow",
         ),
         (
-            r#"fn replace(label: share Label) { let text := "b"; label.text = text; } fn main() {}"#,
-            "LE900",
-            "only as read-only borrow parameters",
-        ),
-        (
             r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
-            "TE017",
-            "concat requires",
-        ),
-        (
-            r#"fn replace(label: share Label) { label.text = label.text.concat("!"); } fn main() {}"#,
             "TE017",
             "concat requires",
         ),
         (
             r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
             "LE900",
-            "only as read-only borrow parameters",
+            "only as borrow or share parameters",
         ),
         (
             r#"fn main() { let label := Label { text: "a" }; let view := label.borrow(); }"#,
@@ -2619,9 +2645,12 @@ fn wasm_gates_unsupported_string_struct_uses() {
     ] {
         f.write(
             "src/main.mb",
-            &format!("type Label {{ text: String }} {source}"),
+            &format!("type Label {{ text: string }} {source}"),
         );
-        let diagnostic = err(f.run(&["build"]), code);
+        let output = f.run(&["build"]);
+        assert_eq!(output.status.code(), Some(1), "{source}: {output:?}");
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(diagnostic.contains(code), "{source}: {diagnostic}");
         assert!(diagnostic.contains(message), "{source}: {diagnostic}");
     }
 }
@@ -2633,7 +2662,7 @@ fn string_struct_call_borrow_blocks_moves_and_field_replacement() {
         f.write(
             "text.mb",
             &format!(
-                r#"type Label {{ text: String }}
+                r#"type Label {{ text: string }}
                 fn inspect(label: borrow Label, extra: u32) -> u32 {{ label.text.len() + extra }}
                 fn main() {{
                     var label := Label {{ text: "old".concat("!") }};
@@ -2646,7 +2675,158 @@ fn string_struct_call_borrow_blocks_moves_and_field_replacement() {
 }
 
 #[test]
-fn string_struct_borrow_is_not_an_exported_parameter() {
+fn string_struct_share_reads_keep_caller_ownership_and_artifact_parity() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='string-struct-share'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Label { text: string, number: u32 }
+        fn inspect(label: share Label, expected: u8) -> Bool {
+            label.number == 7 && label.text.len() == 3
+                && match label.text.byte_at(2) {
+                    Some(byte) => byte == expected,
+                    None => false,
+                }
+        }
+        pub fn main() -> Result<Bool, Error> {
+            let prefix := "é";
+            var label := Label { text: prefix.concat("!"), number: 7 };
+            let first := inspect(label.share(), 33);
+            label.text = prefix.concat("?");
+            let second := inspect(label.share(), 63);
+            let moved := label;
+            Ok(first && second && moved.text.len() == 3)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "share.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "share.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn string_struct_share_replaces_fields_with_caller_cleanup_and_parity() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='string-struct-share-write'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Record { text: string, sibling: string, number: u32 }
+        fn byte_is(value: borrow string, index: u32, expected: u8) -> Bool {
+            match value.byte_at(index) { Some(byte) => byte == expected, None => false }
+        }
+        fn direct_result() -> string { let text := "call".concat("!"); text }
+        fn replace(record: share Record, mode: u32) {
+            let sibling := record.sibling.borrow();
+            if mode == 0 {
+                record.text = "fresh".concat("!");
+            } else if mode == 1 {
+                let next := "other".concat("?");
+                record.text = next;
+            } else if mode == 2 {
+                record.text = record.text.concat("!");
+            } else if mode == 3 {
+                record.text = direct_result();
+            } else {
+                record.text = "fixed";
+            }
+            if sibling.len() != 4 { return; }
+        }
+        pub fn main() -> Result<Bool, Error> {
+            var record := Record { text: "old", sibling: "keep", number: 8 };
+            replace(record.share(), 0);
+            if record.text.len() != 6 || !byte_is(record.text.borrow(), 5, 33) { return Ok(false); }
+            replace(record.share(), 1);
+            if record.text.len() != 6 || !byte_is(record.text.borrow(), 5, 63) { return Ok(false); }
+            replace(record.share(), 2);
+            if record.text.len() != 7 || !byte_is(record.text.borrow(), 6, 33) { return Ok(false); }
+            replace(record.share(), 3);
+            if record.text.len() != 5 || !byte_is(record.text.borrow(), 4, 33) { return Ok(false); }
+            replace(record.share(), 4);
+            let moved := record;
+            Ok(moved.number == 8 && moved.text.len() == 5
+                && byte_is(moved.text.borrow(), 0, 102)
+                && byte_is(moved.sibling.borrow(), 0, 107))
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "share-write.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "share-write.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn string_struct_share_keeps_storage_alias_and_mutation_gates() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='string-struct-share-gates'\nentry='main::main'\n",
+    );
+    for (source, code, message) in [
+        (
+            "type Label { text: string } fn inspect(label: share Label) {} fn main() { let label := Label { text: \"x\" }; inspect(label.share()); }",
+            "TE017",
+            "share conversion requires a mutable local owner",
+        ),
+        (
+            "type Label { text: string } fn inspect(label: share Label) {} fn main() { var label := Label { text: \"x\" }; let view := label.share(); }",
+            "LE900",
+            "cannot be stored in local bindings",
+        ),
+        (
+            "type Label { text: string } fn inspect(left: share Label, right: share Label) {} fn main() { var label := Label { text: \"x\" }; inspect(label.share(), label.share()); }",
+            "BE005",
+            "already shares it",
+        ),
+        (
+            "type Label { text: string } fn inspect(label: share Label, extra: u32) {} fn main() { var label := Label { text: \"x\" }; inspect(label.share(), label.text.len()); }",
+            "BE005",
+            "while it is shared",
+        ),
+        (
+            "type Label { text: string } fn inspect(label: share Label, extra: u32) {} fn main() { var label := Label { text: \"x\" }; inspect(label.share(), { label.text = \"y\"; 0 }); }",
+            "BE005",
+            "while it is shared",
+        ),
+        (
+            "type Label { text: string } fn replace(label: share Label) { label.text = \"new\"; } fn main() { var label := Label { text: \"old\" }; let view := label.text.borrow(); replace(label.share()); view.len(); }",
+            "BE005",
+            "while it is borrowed",
+        ),
+        (
+            "type Label { text: string } fn inspect(label: share Label) {} fn forward(label: share Label) { inspect(label); } fn main() {}",
+            "LE900",
+            "requires a named owner and direct use",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let output = f.run(&["build"]);
+        assert_eq!(output.status.code(), Some(1), "{source}: {output:?}");
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(diagnostic.contains(code), "{source}: {diagnostic}");
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn string_struct_reference_is_not_an_exported_parameter() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -2654,7 +2834,7 @@ fn string_struct_borrow_is_not_an_exported_parameter() {
     );
     f.write(
         "src/main.mb",
-        "pub type Label { text: String } pub fn inspect(label: borrow Label) -> u32 { label.text.len() }",
+        "pub type Label { text: string } pub fn inspect(label: share Label) -> u32 { label.text.len() }",
     );
     let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -2684,8 +2864,8 @@ fn string_field_replacement_rejects_conflicting_loans_and_unavailable_owners() {
         f.write(
             "text.mb",
             &format!(
-                r#"type Label {{ text: String }}
-                fn inspect(value: borrow String) {{}}
+                r#"type Label {{ text: string }}
+                fn inspect(value: borrow string) {{}}
                 fn main() {{
                     var label := Label {{ text: "old" }};
                     let replacement := "new".concat("!");
@@ -2708,9 +2888,9 @@ fn temporary_string_field_replacement_checks_loans_during_rhs_and_write() {
         f.write(
             "text.mb",
             &format!(
-                r#"type Label {{ text: String }}
-                fn inspect(value: borrow String) {{}}
-                fn append(value: borrow String) -> String {{
+                r#"type Label {{ text: string }}
+                fn inspect(value: borrow string) {{}}
+                fn append(value: borrow string) -> string {{
                     let text := value.concat("!");
                     text
                 }}
@@ -2730,7 +2910,7 @@ fn temporary_string_field_initializer_keeps_operand_loan_live() {
     f.write(
         "text.mb",
         r#"
-        type Label { text: String }
+        type Label { text: string }
         fn main() {
             var original := Label { text: "old" };
             let label := Label {
@@ -2759,8 +2939,8 @@ fn string_struct_moves_invalidate_the_source_and_respect_field_loans() {
         f.write(
             "text.mb",
             &format!(
-                r#"type Label {{ text: String }}
-                fn inspect(text: borrow String) {{}}
+                r#"type Label {{ text: string }}
+                fn inspect(text: borrow string) {{}}
                 fn main() {{ var label := Label {{ text: "é" }}; {body} }}"#
             ),
         );
@@ -2781,8 +2961,8 @@ fn heap_string_struct_moves_respect_loans_and_invalidate_the_source() {
         f.write(
             "text.mb",
             &format!(
-                r#"type Label {{ text: String }}
-                fn inspect(text: borrow String) {{}}
+                r#"type Label {{ text: string }}
+                fn inspect(text: borrow string) {{}}
                 fn main() {{
                     let text := "é".concat("!");
                     let label := Label {{ text: text }};
@@ -2797,7 +2977,7 @@ fn heap_string_struct_moves_respect_loans_and_invalidate_the_source() {
 #[test]
 fn string_ownership_uses_last_borrow_use_and_rejects_moves_and_reads() {
     let f = Fixture::new();
-    let helpers = "fn inspect(s: borrow String) {} fn consume(s: String) {}";
+    let helpers = "fn inspect(s: borrow string) {} fn consume(s: string) {}";
     for (body, expected) in [
         (
             r#"let s := "é"; consume(s); inspect(s.borrow());"#,
@@ -2927,10 +3107,10 @@ fn strict_utf8_construction_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn convert(input: borrow Bytes<4>, length: i32) -> Result<String, Utf8Error> {
+        fn convert(input: borrow Bytes<4>, length: i32) -> Result<string, Utf8Error> {
             input.to_utf8_string(length)
         }
-        fn byte_is(text: borrow String, offset: u32, expected: u8) -> Bool {
+        fn byte_is(text: borrow string, offset: u32, expected: u8) -> Bool {
             match text.byte_at(offset) { Some(byte) => byte == expected, None => false }
         }
         fn error_is(input: borrow Bytes<4>, length: i32, code: u32, offset: i32) -> Bool {
@@ -3024,6 +3204,1952 @@ fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
 #[test]
 fn language_guide_checks_bytes_array_equivalence_in_source_and_wasm() {
     assert_example_runs_in_both_modes("language-guide", b"Result: Ok(i32(42))\n");
+}
+
+#[test]
+fn user_defined_add_selects_core_ops_interface_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-interface-identity'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        use other;
+        pub type Point { pub value: i32 }
+        pub type Counter { pub value: i32 }
+        use core::ops::Add;
+        extend Point of Add {
+            type Rhs = Point;
+            type Output = Point;
+            fn add(self, rhs: Point) -> Point {
+                Point { value: self.value + rhs.value }
+            }
+        }
+        fn make_left(counter: share Counter) -> Point {
+            counter.value = counter.value + 1;
+            Point { value: counter.value * 10 }
+        }
+        fn make_right(counter: share Counter) -> Point {
+            counter.value = counter.value + 1;
+            Point { value: counter.value }
+        }
+        fn main() -> i32 {
+            var counter := Counter { value: 0 };
+            let total := make_left(counter.share()) + make_right(counter.share());
+            if total.value == 12 && counter.value == 2 { 42 } else { 0 }
+        }
+        "#,
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Point; pub interface Add { fn add(self, rhs: Point) -> Point; } pub extend Point of Add { fn add(self, rhs: Point) -> Point { Point { value: 0 } } }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "add-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "add-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_sub_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-interface'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Left { value: i32 } type Right { value: i32 } type Difference { value: i32 } extend Left of Sub { type Rhs = Right; type Output = Difference; fn sub(self, rhs: Right) -> Difference { Difference { value: self.value - rhs.value } } } fn subtract<T>(left: T, right: T::Rhs) -> T::Output where T: Sub { left - right } fn main() -> i32 { let result: Difference = subtract(Left { value: 50 }, Right { value: 8 }); result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "sub-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_mul_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='mul-interface'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Left { value: i32 } type Right { value: i32 } type Product { value: i32 } extend Left of Mul { type Rhs = Right; type Output = Product; fn mul(self, rhs: Right) -> Product { Product { value: self.value * rhs.value } } } fn multiply<T>(left: T, right: T::Rhs) -> T::Output where T: Mul { left * right } fn main() -> i32 { let result: Product = multiply(Left { value: 6 }, Right { value: 7 }); result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "mul-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "mul-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_mul_rejects_wrong_rhs_type() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='mul-rhs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Left { value: i32 } type Right { value: i32 } type Other { value: i32 } type Difference { value: i32 } extend Left of Mul { type Rhs = Right; type Output = Difference; fn mul(self, rhs: Right) -> Difference { Difference { value: self.value * rhs.value } } } fn main() -> i32 { let result := Left { value: 50 } * Other { value: 8 }; result.value }",
+    );
+    let diagnostic = err(f.run(&["build", "--output", "mul-rhs.wasm"]), "TE007");
+    assert!(
+        diagnostic.contains("Mul requires an owned receiver"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn user_defined_mul_rejects_missing_inactive_and_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='mul-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Left {} type Right {} fn main() -> i32 { let value := Left {} * Right {}; 0 }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Mul implementation"),
+        "{missing}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use other::marker; use core::ops::Mul; pub type Left {} pub type Right {} pub type Difference { pub value: i32 } fn main() -> i32 { let value := Left {} * Right {}; value.value }",
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Left; use self::main::Right; use self::main::Difference; pub fn marker() {} pub extend Left of core::ops::Mul { type Rhs = Right; type Output = Difference; fn mul(self, rhs: Right) -> Difference { Difference { value: 42 } } }",
+    );
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Mul implementation"),
+        "{inactive}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Left {} type Right {} type Difference { value: i32 } extend Left of Mul { type Rhs = Right; type Output = Difference; fn mul(self, rhs: Right) -> Difference { Difference { value: 20 } } } extend Left of Mul { type Rhs = Right; type Output = Difference; fn mul(self, rhs: Right) -> Difference { Difference { value: 22 } } } fn main() -> i32 { let value := Left {} * Right {}; value.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Mul implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_sub_rejects_wrong_rhs_type() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-rhs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Left { value: i32 } type Right { value: i32 } type Other { value: i32 } type Difference { value: i32 } extend Left of Sub { type Rhs = Right; type Output = Difference; fn sub(self, rhs: Right) -> Difference { Difference { value: self.value - rhs.value } } } fn main() -> i32 { let result := Left { value: 50 } - Other { value: 8 }; result.value }",
+    );
+    let diagnostic = err(f.run(&["build", "--output", "sub-rhs.wasm"]), "TE007");
+    assert!(
+        diagnostic.contains("Sub requires an owned receiver"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn user_defined_sub_rejects_missing_inactive_and_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Left {} type Right {} fn main() -> i32 { let value := Left {} - Right {}; 0 }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Sub implementation"),
+        "{missing}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use other::marker; use core::ops::Sub; pub type Left {} pub type Right {} pub type Difference { pub value: i32 } fn main() -> i32 { let value := Left {} - Right {}; value.value }",
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Left; use self::main::Right; use self::main::Difference; pub fn marker() {} pub extend Left of core::ops::Sub { type Rhs = Right; type Output = Difference; fn sub(self, rhs: Right) -> Difference { Difference { value: 42 } } }",
+    );
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Sub implementation"),
+        "{inactive}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Left {} type Right {} type Difference { value: i32 } extend Left of Sub { type Rhs = Right; type Output = Difference; fn sub(self, rhs: Right) -> Difference { Difference { value: 20 } } } extend Left of Sub { type Rhs = Right; type Output = Difference; fn sub(self, rhs: Right) -> Difference { Difference { value: 22 } } } fn main() -> i32 { let value := Left {} - Right {}; value.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Sub implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_sub_consumes_both_owned_operands() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Point { value: i32 } extend Point of Sub { type Rhs = Point; type Output = Point; fn sub(self, rhs: Point) -> Point { Point { value: self.value - rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let difference := left - right; take(left); difference.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("left"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_sub_rhs_early_return_unwinds_staged_owned_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-early-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Sub; type Point { value: i32 } extend Point of Sub { type Rhs = Point; type Output = Point; fn sub(self, rhs: Point) -> Point { Point { value: self.value - rhs.value } } } fn main() -> i32 { let left := Point { value: 20 }; let difference := left - { return 42; Point { value: 22 } }; difference.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "sub-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "sub-early-return.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_mul_consumes_both_owned_operands() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='mul-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Point { value: i32 } extend Point of Mul { type Rhs = Point; type Output = Point; fn mul(self, rhs: Point) -> Point { Point { value: self.value * rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let difference := left * right; take(left); difference.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("left"), "{diagnostic}");
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Point { value: i32 } extend Point of Mul { type Rhs = Point; type Output = Point; fn mul(self, rhs: Point) -> Point { Point { value: self.value * rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let product := left * right; take(right); product.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_mul_rhs_early_return_unwinds_staged_owned_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='mul-early-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Mul; type Point { value: i32 } extend Point of Mul { type Rhs = Point; type Output = Point; fn mul(self, rhs: Point) -> Point { Point { value: self.value * rhs.value } } } fn main() -> i32 { let left := Point { value: 20 }; let difference := left * { return 42; Point { value: 22 } }; difference.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "mul-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "mul-early-return.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_div_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-interface'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Left { value: i32 } type Right { value: i32 } type Quotient { value: i32 } extend Left of Div { type Rhs = Right; type Output = Quotient; fn div(self, rhs: Right) -> Quotient { Quotient { value: self.value / rhs.value } } } fn divide<T>(left: T, right: T::Rhs) -> T::Output where T: Div { left / right } fn main() -> i32 { let result: Quotient = divide(Left { value: 84 }, Right { value: 2 }); result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "div-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "div-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_div_rejects_wrong_rhs_type() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-rhs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Left { value: i32 } type Right { value: i32 } type Other { value: i32 } type Quotient { value: i32 } extend Left of Div { type Rhs = Right; type Output = Quotient; fn div(self, rhs: Right) -> Quotient { Quotient { value: self.value / rhs.value } } } fn main() -> i32 { let result := Left { value: 84 } / Other { value: 2 }; result.value }",
+    );
+    let diagnostic = err(f.run(&["build", "--output", "div-rhs.wasm"]), "TE007");
+    assert!(
+        diagnostic.contains("Div requires an owned receiver"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn user_defined_div_rejects_missing_inactive_and_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Left {} type Right {} fn main() -> i32 { let value := Left {} / Right {}; 0 }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Div implementation"),
+        "{missing}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use other::marker; use core::ops::Div; pub type Left {} pub type Right {} pub type Quotient { pub value: i32 } fn main() -> i32 { let value := Left {} / Right {}; value.value }",
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Left; use self::main::Right; use self::main::Quotient; pub fn marker() {} pub extend Left of core::ops::Div { type Rhs = Right; type Output = Quotient; fn div(self, rhs: Right) -> Quotient { Quotient { value: 42 } } }",
+    );
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Div implementation"),
+        "{inactive}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Left {} type Right {} type Quotient { value: i32 } extend Left of Div { type Rhs = Right; type Output = Quotient; fn div(self, rhs: Right) -> Quotient { Quotient { value: 20 } } } extend Left of Div { type Rhs = Right; type Output = Quotient; fn div(self, rhs: Right) -> Quotient { Quotient { value: 22 } } } fn main() -> i32 { let value := Left {} / Right {}; value.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Div implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_div_consumes_both_owned_operands() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Point { value: i32 } extend Point of Div { type Rhs = Point; type Output = Point; fn div(self, rhs: Point) -> Point { Point { value: self.value / rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 84 }; let right := Point { value: 2 }; let quotient := left / right; take(left); quotient.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("left"), "{diagnostic}");
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Point { value: i32 } extend Point of Div { type Rhs = Point; type Output = Point; fn div(self, rhs: Point) -> Point { Point { value: self.value / rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 84 }; let right := Point { value: 2 }; let quotient := left / right; take(right); quotient.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_div_rhs_early_return_unwinds_staged_owned_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-early-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Div; type Point { value: i32 } extend Point of Div { type Rhs = Point; type Output = Point; fn div(self, rhs: Point) -> Point { Point { value: self.value / rhs.value } } } fn main() -> i32 { let left := Point { value: 84 }; let quotient := left / { return 42; Point { value: 2 } }; quotient.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "div-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "div-early-return.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_rem_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-interface'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Left { value: i32 } type Right { value: i32 } type Remainder { value: i32 } extend Left of Rem { type Rhs = Right; type Output = Remainder; fn rem(self, rhs: Right) -> Remainder { Remainder { value: self.value % rhs.value } } } fn remainder<T>(left: T, right: T::Rhs) -> T::Output where T: Rem { left % right } fn main() -> i32 { let result: Remainder = remainder(Left { value: 84 }, Right { value: 2 }); result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(0)\n");
+    let build = f.run(&["build", "--output", "rem-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "rem-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_rem_rejects_wrong_rhs_type() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-rhs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Left { value: i32 } type Right { value: i32 } type Other { value: i32 } type Remainder { value: i32 } extend Left of Rem { type Rhs = Right; type Output = Remainder; fn rem(self, rhs: Right) -> Remainder { Remainder { value: self.value % rhs.value } } } fn main() -> i32 { let result := Left { value: 84 } % Other { value: 2 }; result.value }",
+    );
+    let diagnostic = err(f.run(&["build", "--output", "rem-rhs.wasm"]), "TE007");
+    assert!(
+        diagnostic.contains("Rem requires an owned receiver"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn user_defined_rem_rejects_missing_inactive_and_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Left {} type Right {} fn main() -> i32 { let value := Left {} % Right {}; 0 }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Rem implementation"),
+        "{missing}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use other::marker; use core::ops::Rem; pub type Left {} pub type Right {} pub type Remainder { pub value: i32 } fn main() -> i32 { let value := Left {} % Right {}; value.value }",
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Left; use self::main::Right; use self::main::Remainder; pub fn marker() {} pub extend Left of core::ops::Rem { type Rhs = Right; type Output = Remainder; fn rem(self, rhs: Right) -> Remainder { Remainder { value: 42 } } }",
+    );
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Rem implementation"),
+        "{inactive}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Left {} type Right {} type Remainder { value: i32 } extend Left of Rem { type Rhs = Right; type Output = Remainder; fn rem(self, rhs: Right) -> Remainder { Remainder { value: 20 } } } extend Left of Rem { type Rhs = Right; type Output = Remainder; fn rem(self, rhs: Right) -> Remainder { Remainder { value: 22 } } } fn main() -> i32 { let value := Left {} % Right {}; value.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Rem implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_rem_consumes_both_owned_operands() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Point { value: i32 } extend Point of Rem { type Rhs = Point; type Output = Point; fn rem(self, rhs: Point) -> Point { Point { value: self.value % rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 84 }; let right := Point { value: 2 }; let remainder := left % right; take(left); remainder.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("left"), "{diagnostic}");
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Point { value: i32 } extend Point of Rem { type Rhs = Point; type Output = Point; fn rem(self, rhs: Point) -> Point { Point { value: self.value % rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 84 }; let right := Point { value: 2 }; let remainder := left % right; take(right); remainder.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_rem_rhs_early_return_unwinds_staged_owned_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-early-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Rem; type Point { value: i32 } extend Point of Rem { type Rhs = Point; type Output = Point; fn rem(self, rhs: Point) -> Point { Point { value: self.value % rhs.value } } } fn main() -> i32 { let left := Point { value: 84 }; let remainder := left % { return 42; Point { value: 2 } }; remainder.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "rem-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "rem-early-return.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_add_ignores_local_interface_named_add() {
+    let f = Fixture::new();
+    f.write(
+        "add-gate.mb",
+        "type Point { value: i32 } interface Add { fn add(self, rhs: Point) -> Point; } extend Point of Add { fn add(self, rhs: Point) -> Point { self } } fn main() -> i32 { let left := Point { value: 1 }; let right := Point { value: 2 }; let result := left + right; result.value }",
+    );
+    let diagnostic = err(f.run(&["analyze", "add-gate.mb"]), "TE007");
+    assert!(
+        diagnostic.contains("no visible Add implementation"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn core_add_extension_requires_direct_public_module_visibility() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-visibility'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use other::marker; pub type Point { pub value: i32 } use core::ops::Add; fn main() -> i32 { let a := Point { value: 1 }; let b := Point { value: 2 }; (a + b).value }");
+    f.write("src/other.mb", "use self::main::Point; pub fn marker() {} pub extend Point of core::ops::Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { Point { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Add implementation"),
+        "{inactive}"
+    );
+
+    f.write("src/main.mb", "use other; pub type Point { pub value: i32 } use core::ops::Add; fn main() -> i32 { let a := Point { value: 1 }; let b := Point { value: 2 }; (a + b).value }");
+    f.write("src/other.mb", "use self::main::Point; pub fn marker() {} extend Point of core::ops::Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { Point { value: 42 } } }");
+    let private = err(f.run(&["analyze-project"]), "TE007");
+    assert!(private.contains("private or inactive"), "{private}");
+}
+
+#[test]
+fn generic_add_bound_dispatches_through_core_evidence() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-add-bound'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Add; type Point { value: i32 } type Right { value: i32 } type Output { value: i32 } extend Point of Add { type Rhs = Right; type Output = Output; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } fn sum<T>(left: T, right: Right) -> Output where T: Add { left + right } fn main() -> i32 { let result: Output = sum(Point { value: 20 }, Right { value: 22 }); result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-add.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-add.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn heterogeneous_add_rejects_wrong_rhs_missing_bindings_and_unresolved_projection() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-associated-rejections'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Add; type Left { value: i32 } type Right { value: i32 } type Output { value: i32 } type Other { value: i32 } extend Left of Add { type Rhs = Right; type Output = Output; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } fn main() -> i32 { let left := Left { value: 20 }; let wrong := Other { value: 22 }; let result := left + wrong; result.value }");
+    let wrong_rhs = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        wrong_rhs.contains("matching its associated Rhs"),
+        "{wrong_rhs}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Add; type Left { value: i32 } type Right { value: i32 } type Output { value: i32 } extend Left of Add { type Rhs = Right; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } fn main() -> i32 { 0 }");
+    let missing_binding = err(f.run(&["analyze-project"]), "ME005");
+    assert!(
+        missing_binding.contains("missing associated type binding 'Output'"),
+        "{missing_binding}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Add; type Left { value: i32 } type Right { value: i32 } type Output { value: i32 } extend Left of Add { type Rhs = Right; type Output = Output; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } fn project<T>(left: T) -> T::Output { left } fn main() { let value := project(Left { value: 1 }); value.value }");
+    let unresolved_projection = err(f.run(&["analyze-project"]), "TE008");
+    assert!(
+        unresolved_projection.contains("associated type projection 'T::Output' is unresolved"),
+        "{unresolved_projection}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Add; type Left { value: i32 } type Right { value: i32 } type Output { value: i32 } extend Left of Add { type Rhs = Right; type Output = Output; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } extend Left of Add { type Rhs = Right; type Output = Output; fn add(self, rhs: Right) -> Output { Output { value: self.value + rhs.value } } } fn combine<T>(right: T::Rhs, left: T) -> T::Output where T: Add { left + right } fn main() -> i32 { let output := combine(Right { value: 1 }, Left { value: 2 }); output.value }");
+    let ambiguous_projection = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous_projection.contains("ambiguous generic evidence"),
+        "{ambiguous_projection}"
+    );
+}
+
+#[test]
+fn generic_heterogeneous_add_forwards_each_callers_selected_evidence() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-associated-add-evidence'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/model.mb",
+        "pub type Left {} pub type Right {} pub type Output { pub value: i32 }",
+    );
+    f.write("src/common.mb", "use model; pub fn combine<T>(right: T::Rhs, left: T) -> T::Output where T: core::ops::Add { left + right }");
+    f.write("src/left.mb", "use model; use common; use core::ops::Add; extend model::Left of Add { type Rhs = model::Right; type Output = model::Output; fn add(self, rhs: model::Right) -> model::Output { model::Output { value: 20 } } } pub fn run() -> i32 { let output: model::Output = common::combine(model::Right {}, model::Left {}); output.value }");
+    f.write("src/right.mb", "use model; use common; use core::ops::Add; extend model::Left of Add { type Rhs = model::Right; type Output = model::Output; fn add(self, rhs: model::Right) -> model::Output { model::Output { value: 22 } } } pub fn run() -> i32 { let output: model::Output = common::combine(model::Right {}, model::Left {}); output.value }");
+    f.write(
+        "src/main.mb",
+        "use left; use right; fn main() -> i32 { left::run() + right::run() }",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&[
+        "build",
+        "--output",
+        "/tmp/memobits-generic-associated-add-evidence.wasm",
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&["run", "/tmp/memobits-generic-associated-add-evidence.wasm"]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_add_consumes_both_owned_operands() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Add; type Point { value: i32 } extend Point of Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { Point { value: self.value + rhs.value } } } fn take(value: Point) {} fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let total := left + right; take(left); total.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("left"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_add_rhs_early_return_unwinds_staged_owned_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-early-return'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Add; type Point { value: i32 } extend Point of Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { Point { value: self.value + rhs.value } } } fn main() -> i32 { let left := Point { value: 20 }; let total := left + { return 42; Point { value: 22 } }; total.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "add-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "add-early-return.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn user_defined_add_rejects_wrong_signature_and_ambiguous_evidence() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-signature'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Add; type Point { value: i32 } extend Point of Add { type Rhs = Point; type Output = Point; fn add(self, rhs: i32) -> Point { self } } fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let total := left + right; total.value }",
+    );
+    let wrong_signature = err(f.run(&["analyze-project"]), "ME005");
+    assert!(
+        wrong_signature.contains("does not match interface 'core::ops::Add'"),
+        "{wrong_signature}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::Add; type Point { value: i32 } extend Point of Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { self } } extend Point of Add { type Rhs = Point; type Output = Point; fn add(self, rhs: Point) -> Point { rhs } } fn main() -> i32 { let left := Point { value: 20 }; let right := Point { value: 22 }; let total := left + right; total.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Add implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn char_and_u32_are_distinct_scalar_types() {
+    let f = Fixture::new();
+    f.write("char-mismatch.mb", "fn main() -> Bool { 'A' == 65 }");
+    let message = err(f.run(&["analyze", "char-mismatch.mb"]), "TE002");
+    assert!(message.contains("expected Char"), "{message}");
+}
+
+#[test]
+fn tuple_element_order_is_checked_by_type() {
+    let f = Fixture::new();
+    f.write(
+        "tuple.mb",
+        "fn need(pair: (i32, Bool)) {} fn main() { need((true, 1)); }",
+    );
+    err(f.run(&["analyze", "tuple.mb"]), "TE002");
+}
+
+#[test]
+fn tuple_labels_are_occurrence_local_independently_of_function_order() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-label-scope'\nentry='main::main'\n",
+    );
+    for (index, source) in [
+        "fn left(pair: (left: i32, right: i32)) -> i32 { pair.left } fn right(pair: (right: i32, left: i32)) -> i32 { pair.left } fn main() -> i32 { left((left: 40, right: 0)) + right((right: 0, left: 2)) }",
+        "fn right(pair: (right: i32, left: i32)) -> i32 { pair.left } fn left(pair: (left: i32, right: i32)) -> i32 { pair.left } fn main() -> i32 { left((left: 40, right: 0)) + right((right: 0, left: 2)) }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.write("src/main.mb", source);
+        let output = f.run(&["run"]);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"Result: i32(42)\n");
+
+        let artifact = format!("tuple-label-scope-{index}.wasm");
+        let build = f.run(&["build", "--output", &artifact]);
+        assert!(build.status.success(), "{build:?}");
+        let wasm = f.run(&["run", &artifact]);
+        assert!(wasm.status.success(), "{wasm:?}");
+        assert_eq!(wasm.stdout, output.stdout);
+    }
+}
+
+#[test]
+fn user_type_named_tuple_marker_does_not_collide_with_synthetic_tuple_identity() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-name-collision'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "type __Tuple { value: i32 } fn main() -> i32 { let value := __Tuple { value: 42 }; value.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn tuple_reference_elements_are_gated_before_ir_validation() {
+    let f = Fixture::new();
+    f.write(
+        "references.mb",
+        "fn main() -> i32 { var value := 1; let view := value.borrow(); let pair := (view,); 0 }",
+    );
+    let message = err(f.run(&["analyze", "references.mb"]), "TE017");
+    assert!(
+        message.contains("tuple elements cannot contain direct or nested references"),
+        "{message}"
+    );
+}
+
+#[test]
+fn tuple_nested_option_reference_is_gated_before_owner_can_escape() {
+    let f = Fixture::new();
+    f.write("option-reference.mb", "fn main() -> i32 { var value := 1; let maybe: Option<borrow i32> = None; let tuple := (maybe, 0); value = 2; tuple.1 }");
+    let message = err(f.run(&["analyze", "option-reference.mb"]), "TE017");
+    assert!(
+        message.contains("Option reference type arguments require embedded-loan tracking")
+            || message.contains("tuple elements cannot contain direct or nested references")
+            || message.contains("tuple types cannot contain direct or nested references"),
+        "{message}"
+    );
+}
+
+#[test]
+fn tuples_preserve_order_across_internal_arguments_results_and_projections() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuples'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn identity(pair: (i32, Bool)) -> (i32, Bool) { (pair.0, pair.1) } fn main() -> i32 { let value := identity((40, true)); if value.1 { value.0 + 2 } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuples.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuples.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn tuples_own_string_elements_locally_and_release_them() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-owners'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { let pair := (\"xy\", 40 as u32); (pair.0.len() + pair.1) as i32 }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-owners.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-owners.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn owned_string_tuples_move_through_internal_calls_and_returns() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-owner-transport'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn forward(pair: (string, u32), early: Bool) -> (string, u32) {
+            if early { return pair; }
+            pair
+        }
+        fn exact(value: borrow string) -> Bool {
+            value.len() == 3 && match value.byte_at(0) {
+                Some(a) => a == 120 && match value.byte_at(1) {
+                    Some(b) => b == 121 && match value.byte_at(2) {
+                        Some(c) => c == 33,
+                        None => false
+                    },
+                    None => false
+                },
+                None => false
+            }
+        }
+        fn main() -> i32 {
+            let text := "xy".concat("!");
+            let pair := (text, 39 as u32);
+            let forwarded := forward(pair, true);
+            if exact(forwarded.0.borrow()) && forwarded.1 == 39 { 42 } else { 0 }
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-owner-transport.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-owner-transport.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn owned_string_tuple_transport_rejects_use_after_move_and_nominal_structs() {
+    let f = Fixture::new();
+    f.write("move.mb", "fn forward(pair: (string, u32)) -> (string, u32) { pair } fn main() { let pair := (\"x\", 1 as u32); forward(pair); pair.1; }");
+    let moved = err(f.run(&["ownership", "move.mb"]), "BE001");
+    assert!(moved.contains("pair"), "{moved}");
+    f.write("project.toml", "[package]\nname='nominal-owner-gate'\nentry='main::main'\n[export]\nforward='main::forward'\n");
+    f.write("src/main.mb", "pub type Box { pub text: string } pub fn forward(value: Box) -> Box { value } fn main() {}");
+    let nominal = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        nominal.contains(
+            "structs with String fields can cross internal calls only as borrow or share parameters"
+        ),
+        "{nominal}"
+    );
+}
+
+#[test]
+fn later_argument_early_return_cleans_staged_owned_tuple() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-owner-early-argument'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn forward(pair: (string, u32), later: Bool) -> (string, u32) { pair } fn main() -> i32 { let text := \"xy\".concat(\"!\"); let pair := (text, 39 as u32); let forwarded := forward(pair, { return 42; false }); 0 }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-owner-early-argument.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-owner-early-argument.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn tuples_nest_in_struct_fields_and_enum_payloads() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='nested-tuples'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "type Holder { pair: (i32, Bool) } type Data [Pair((i32, Bool))] fn main() -> i32 { let holder := Holder { pair: (40, true) }; let data := Data::Pair((holder.pair.0, holder.pair.1)); match data { Data::Pair(pair) => if pair.1 { pair.0 + 2 } else { 0 } } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "nested-tuples.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "nested-tuples.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn labeled_tuple_initializer_reorders_written_values_to_local_alias_slots() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-labels'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn sum(pair: (left: i32, right: i32)) -> i32 { pair.left + pair.right } fn main() -> i32 { let pair := (right: 2, left: 40); sum(pair) }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-labels.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-labels.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn nested_tuple_identity_ignores_occurrence_local_labels_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='nested-tuple-labels'\nentry='main::main'\n",
+    );
+    for (index, source_text) in [
+        "fn make() -> (outer: (first: i32, second: i32), tag: i32) { (outer: (first: 40, second: 2), tag: 0) } fn consume(value: (container: (left: i32, right: i32), marker: i32)) -> i32 { value.container.left + value.container.right } fn main() -> i32 { consume(make()) }",
+        "fn consume(value: (container: (left: i32, right: i32), marker: i32)) -> i32 { value.container.left + value.container.right } fn make() -> (outer: (first: i32, second: i32), tag: i32) { (outer: (first: 40, second: 2), tag: 0) } fn main() -> i32 { consume(make()) }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.write("src/main.mb", source_text);
+        let source = f.run(&["run"]);
+        assert!(source.status.success(), "{source:?}");
+        assert_eq!(source.stdout, b"Result: i32(42)\n");
+        let artifact = format!("nested-tuple-labels-{index}.wasm");
+        let build = f.run(&["build", "--output", &artifact]);
+        assert!(build.status.success(), "{build:?}");
+        let wasm = f.run(&["run", &artifact]);
+        assert!(wasm.status.success(), "{wasm:?}");
+        assert_eq!(wasm.stdout, source.stdout);
+    }
+
+    f.write("src/main.mb", "fn make() -> (outer: (first: i32, second: i32), tag: i32) { (outer: (first: 40, second: 2), tag: 0) } fn consume(value: (container: (left: i32, right: Bool), marker: i32)) -> i32 { value.container.left } fn main() -> i32 { consume(make()) }");
+    let output = f.run(&["analyze", "src/main.mb"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("TE002"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn labeled_tuple_malformed_forms_are_rejected() {
+    let f = Fixture::new();
+    for (source, expected) in [
+        (
+            "fn take(pair: (left: i32, right: i32)) {} fn main() { take((left: 1, 2)); }",
+            "TE002",
+        ),
+        (
+            "fn take(pair: (left: i32, right: i32)) {} fn main() { take((left: 1, left: 2)); }",
+            "TE002",
+        ),
+        (
+            "fn take(pair: (left: i32, right: i32)) {} fn main() { take((first: 1, second: 2)); }",
+            "TE002",
+        ),
+        (
+            "fn take(pair: (left: i32, left: Bool)) {} fn main() -> i32 { 42 }",
+            "TE002",
+        ),
+        (
+            "fn main() { let pair := (left: 1, left: 2); }",
+            "duplicate tuple initializer label 'left'",
+        ),
+        (
+            "fn main() { let pair := (left: 1, 2); }",
+            "all labeled or all positional",
+        ),
+        (
+            "fn main() { let pair := ((left: 1, left: 2), 0); }",
+            "duplicate tuple initializer label 'left'",
+        ),
+    ] {
+        f.write("labels.mb", source);
+        let message = err(f.run(&["analyze", "labels.mb"]), "TE002");
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn generic_nominal_structs_specialize_types_and_const_lengths_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-structs'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Box<T> { value: T }
+        type Buffer<T, const N: u32> { data: Array<T, N> }
+        fn main() -> i32 {
+            let left := Box<i32> { value: 40 };
+            let right := Box<u32> { value: 1 };
+            let tail := Buffer<u8, 1> { data: [1] };
+            left.value + right.value as i32 + tail.data[0] as i32
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-structs.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-structs.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn generic_nominal_structs_reject_mismatched_and_missing_arguments() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-errors'\nentry='main::main'\n",
+    );
+    for (source, message) in [
+        (
+            "type Box<T> { value: T } fn main() -> i32 { let boxed: Box<i32> = Box<u32> { value: 1 }; boxed.value }",
+            "expected Box<i32>, found Box<u32>",
+        ),
+        (
+            "type Box<T> { value: T } fn main() -> i32 { let boxed := Box { value: 1 }; boxed.value }",
+            "requires 1 generic arguments",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["run"]), "TE002");
+        assert!(diagnostic.contains(message), "{diagnostic}");
+    }
+}
+
+#[test]
+fn generic_nominal_enums_construct_and_match_contextual_instances() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-enums'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Maybe<T> [None, Some(T)]
+        fn main() -> i32 {
+            let signed: Maybe<i32> = Maybe::Some(40);
+            let absent: Maybe<u32> = Maybe::None;
+            let unsigned: Maybe<u32> = Maybe::Some(2);
+            let first := match signed {
+                Maybe::Some(value) => value,
+                Maybe::None => 0,
+            };
+            let second := match absent {
+                Maybe::Some(value) => value as i32,
+                Maybe::None => 0,
+            };
+            let third := match unsigned {
+                Maybe::Some(value) => value as i32,
+                Maybe::None => 0,
+            };
+            first + second + third
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-enums.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-enums.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn generic_nominal_enums_substitute_const_array_payloads_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-enum-arrays'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Packet<const N: u32> [Data(Array<u8, N>)]
+        fn main() -> i32 {
+            let one: Packet<1> = Packet::Data([40]);
+            let three: Packet<3> = Packet::Data([1, 1, 1]);
+            let first := match one {
+                Packet::Data(bytes) => bytes[0] as i32,
+            };
+            let count := match three {
+                Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32 + bytes[2] as i32,
+            };
+            first + count
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(43)\n");
+    let build = f.run(&["build", "--output", "generic-enum-arrays.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-enum-arrays.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn generic_nominal_enum_constructors_reject_invalid_origins_and_payloads() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-enum-errors'\nentry='main::main'\n",
+    );
+    for (source, code, message) in [
+        (
+            "type Packet<const N: u32> [Data(Array<u8, N>)] type Other<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Other::Data([1]); }",
+            "TE009",
+            "unresolved or unsupported qualified function 'Other::Data'",
+        ),
+        (
+            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<2> = Packet::Data([1]); }",
+            "TE002",
+            "expected Array<u8, 2>, found Array<u8, 1>",
+        ),
+        (
+            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Data(); }",
+            "TE010",
+            "variant 'Packet<1>::Data' expects 1 argument(s), found 0",
+        ),
+        (
+            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Missing; }",
+            "NE004",
+            "unknown variant 'Packet::Missing'",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let output = f.run(&["run"]);
+        assert!(!output.status.success(), "unexpected acceptance: {source}");
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(diagnostic.contains(code), "{source}: {diagnostic}");
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn generic_functions_specialize_semantic_types_nested_and_recursive_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-function'
+entry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value }\nfn choose<T>(value: T, enabled: Bool, fallback: T) -> T { if enabled { value } else { fallback } }\nfn forward<T>(value: T) -> T { identity(value) }\nfn recurse<T>(value: T, again: Bool) -> T { if again { recurse(value, false) } else { value } }\nfn main() -> i32 { let enabled: Bool = identity(true); let value: i32 = identity(40); let selected: i32 = choose(value, enabled, 0); let forwarded: i32 = forward(selected); if enabled { recurse(forwarded, true) + identity(2) } else { 0 } }\n",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(source.stdout).unwrap(),
+        "Result: i32(42)\n"
+    );
+    assert!(
+        f.run(&["build", "--output", "/tmp/memobits-generic-identity.wasm"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        String::from_utf8(
+            f.run(&["run", "/tmp/memobits-generic-identity.wasm"])
+                .stdout
+        )
+        .unwrap(),
+        "Result: i32(42)\n"
+    );
+}
+
+#[test]
+fn generic_functions_forward_array_type_and_const_arguments_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-array-function'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn echo<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { value }\nfn relay<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { echo(value) }\nfn main() -> i32 { let one: Array<i32, 1> = [40]; let two: Array<i32, 2> = [1, 1]; let a := relay(one); let b := relay(two); a[0] + b[0] + b[1] }\n",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&[
+        "build",
+        "--output",
+        "/tmp/memobits-generic-array-function.wasm",
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&["run", "/tmp/memobits-generic-array-function.wasm"]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn generic_functions_forward_caller_selected_interface_evidence() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-interface-evidence'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { value: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> i32 { self.value } }\nfn render<T>(value: T) -> i32 where T: Draw { value.draw() of Draw }\nfn relay<T>(value: T) -> i32 where T: Draw { render(value) }\nfn main() -> i32 { let point := Point { value: 42 }; relay(point) }\n",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&[
+        "build",
+        "--output",
+        "/tmp/memobits-generic-interface-evidence.wasm",
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&["run", "/tmp/memobits-generic-interface-evidence.wasm"]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn generic_interface_evidence_specializations_keep_caller_selections_distinct() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-interface-specializations'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/model.mb",
+        "pub type Point { pub value: i32 } pub interface Draw { fn draw(borrow self) -> i32; }",
+    );
+    f.write("src/common.mb", "use model; pub fn render<T>(value: T) -> i32 where T: model::Draw { value.draw() of model::Draw } pub fn relay<T>(value: T) -> i32 where T: model::Draw { render(value) }");
+    f.write("src/left.mb", "use model; use common; extend model::Point of model::Draw { fn draw(borrow self) -> i32 { 20 } } pub fn run() -> i32 { let point := model::Point { value: 1 }; common::relay(point) }");
+    f.write("src/right.mb", "use model; use common; extend model::Point of model::Draw { fn draw(borrow self) -> i32 { 22 } } pub fn run() -> i32 { let point := model::Point { value: 1 }; common::relay(point) }");
+    f.write(
+        "src/main.mb",
+        "use left; use right; fn main() -> i32 { left::run() + right::run() }",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&[
+        "build",
+        "--output",
+        "/tmp/memobits-generic-interface-specializations.wasm",
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&[
+        "run",
+        "/tmp/memobits-generic-interface-specializations.wasm",
+    ]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn generic_interface_evidence_rejects_missing_and_ambiguous_candidates() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-interface-evidence-errors'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "type Point { value: i32 } interface Draw { fn draw(borrow self) -> i32; } fn render<T>(value: T) -> i32 where T: Draw { value.draw() of Draw } fn main() -> i32 { let point := Point { value: 1 }; render(point) }");
+    let missing = err(f.run(&["run"]), "TE007");
+    assert!(missing.contains("no visible implementation"), "{missing}");
+    f.write("src/main.mb", "type Point { value: i32 } interface Draw { fn draw(borrow self) -> i32; } extend Point of Draw { fn draw(borrow self) -> i32 { 1 } } extend Point of Draw { fn draw(borrow self) -> i32 { 2 } } fn render<T>(value: T) -> i32 where T: Draw { value.draw() of Draw } fn main() -> i32 { let point := Point { value: 1 }; render(point) }");
+    let ambiguous = err(f.run(&["run"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous generic evidence"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn generic_array_call_checks_written_order_and_keeps_ownership_diagnostics() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-array-order'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn tick(counter: share i32) -> i32 { counter += 1; 0 }\nfn relay<T, const N: u32>(marker: i32, value: Array<T, N>) -> Array<T, N> { value }\nfn main() -> i32 { var counter := 0; let input: Array<i32, 1> = [42]; let output := relay(tick(counter.share()), input); if counter == 1 { output[0] } else { 0 } }\n",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&[
+        "build",
+        "--output",
+        "/tmp/memobits-generic-array-order.wasm",
+    ]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&["run", "/tmp/memobits-generic-array-order.wasm"]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+
+    f.write(
+        "src/main.mb",
+        "fn consume_then_infer<T>(marker: i32, first: string, second: T) -> T { second } fn main() -> i32 { let text := \"owned\"; let result := consume_then_infer(0, text, text); result.len() as i32 }\n",
+    );
+    let diagnostic = err(f.run(&["run"]), "BE001");
+    assert!(diagnostic.contains("text"), "{diagnostic}");
+}
+
+#[test]
+fn generic_inference_suppresses_followup_error_for_invalid_inference_argument() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-array-inference-error'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value } fn main() -> i32 { identity(missing) }\n",
+    );
+    let output = f.run(&["run"]);
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !diagnostic.contains("cannot infer a consistent type"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn generic_call_preserves_diverging_inference_argument_semantics() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-divergence'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value } fn main() -> i32 { identity({ return 42; 1 }) }\n",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "/tmp/memobits-generic-divergence.wasm"]);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let wasm = f.run(&["run", "/tmp/memobits-generic-divergence.wasm"]);
+    assert!(
+        wasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(wasm.stdout, source.stdout);
+
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value } fn main() { identity({ return; 1 }); }\n",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE002");
+    assert!(
+        diagnostic.contains("diverging argument without an expected result type"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn generic_array_function_rejects_conflicting_const_arguments() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-array-function-errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn same<T, const N: u32>(first: Array<T, N>, second: Array<T, N>) -> Array<T, N> { first }\nfn main() -> i32 { let one: Array<i32, 1> = [1]; let two: Array<i32, 2> = [2, 3]; same(one, two)[0] }\n",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE002");
+    assert!(
+        diagnostic.contains("expected Array<i32, 1>, found Array<i32, 2>"),
+        "{diagnostic}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn nested<T>(value: Option<T>) -> Option<T> { value } fn main() -> i32 { 0 }\n",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE007");
+    assert!(
+        diagnostic.contains(
+            "outside the supported unconstrained direct-type-parameter specialization subset"
+        ),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn generic_functions_reject_conflicting_types_and_preserve_owned_moves() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-function-errors'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn choose<T>(first: T, second: T) -> T { first } fn main() -> i32 { choose(1, true) }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE002");
+    assert!(
+        diagnostic.contains("expected i32, found Bool"),
+        "{diagnostic}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn unsupported<T, U>(value: T) -> T { value } fn main() -> i32 { 0 }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE007");
+    assert!(
+        diagnostic.contains(
+            "outside the supported unconstrained direct-type-parameter specialization subset"
+        ),
+        "{diagnostic}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value } fn main() -> i32 { let text := \"owned\"; let returned := identity(text); returned.len() as i32 }",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert_eq!(source.stdout, b"Result: i32(5)\n");
+    let build = f.run(&["build", "--output", "generic-owned.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-owned.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+
+    f.write(
+        "src/main.mb",
+        "fn identity<T>(value: T) -> T { value } fn main() { let text := \"owned\"; let returned := identity(text); text.len(); returned.len(); }",
+    );
+    let diagnostic = err(f.run(&["run"]), "BE001");
+    assert!(diagnostic.contains("text"), "{diagnostic}");
+
+    f.write(
+        "src/generics.mb",
+        "pub fn public_identity<T>(value: T) -> T { value }",
+    );
+    f.write(
+        "src/main.mb",
+        "use self::generics::public_identity; fn main() -> i32 { public_identity(42) }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-import.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-import.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn generic_specialization_keeps_declaring_module_imports_and_prelude_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-import-env'\nentry='main::main'\n[prelude]\nprelude_normalize='ops::normalize'\n",
+    );
+    f.write(
+        "src/ops.mb",
+        "pub fn identity<T>(value: T) -> T { value } pub fn normalize(value: Bool) -> Bool { value }",
+    );
+    f.write(
+        "src/wrappers.mb",
+        "use self::ops::identity as echo; pub fn wrap<T>(value: T, enabled: Bool) -> T { if prelude_normalize(enabled) { echo(value) } else { value } }",
+    );
+    f.write(
+        "src/main.mb",
+        "use self::wrappers::wrap; fn main() -> i32 { if wrap(42, true) == 42 && wrap(true, false) { 42 } else { 0 } }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-import-env.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-import-env.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn generic_specialization_uses_declaring_module_extensions_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='generic-extension-env'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use self::wrappers::exercise; use methods; pub type Point { pub value: i32 } pub interface Measure { fn measure(borrow self) -> i32; } fn main() -> i32 { let point := Point { value: 21 }; let result := exercise(point); result.value * 2 }",
+    );
+    f.write(
+        "src/methods.mb",
+        "use self::main::{Point, Measure}; pub extend Point { pub fn doubled(borrow self) -> i32 { self.value * 2 } } pub extend Point of Measure { fn measure(borrow self) -> i32 { self.value } }",
+    );
+    f.write(
+        "src/wrappers.mb",
+        "use methods; use self::main::Measure; pub fn exercise<T>(point: T) -> T { let doubled := point.doubled(); let measured := point.measure() of Measure; point }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "generic-extension-env.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "generic-extension-env.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+
+    f.write(
+        "src/wrappers.mb",
+        "pub fn exercise<T>(point: T) -> T { let doubled := point.doubled(); point }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE024");
+    assert!(
+        diagnostic.contains("struct 'Point' has no field 'doubled'"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn postfix_optional_type_runs_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='optional-sugar'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { let present: i32? = Some(40); let absent: i32? = None; (match present { Some(value) => value, None => 0 }) + (match absent { Some(_) => 0, None => 2 }) }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "optional-sugar.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "optional-sugar.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn bodyless_nominal_types_remain_distinct_and_unconstructable() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bodyless-types'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Token; type Empty {} fn accept(token: Token) {} fn main() { let value := Empty {}; accept(value); }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE002");
+    assert!(
+        diagnostic.contains("expected Token, found Empty"),
+        "{diagnostic}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "type Token; fn main() { let value := Token {}; }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE023");
+    assert!(
+        diagnostic.contains("bodyless nominal type 'Token' cannot be constructed"),
+        "{diagnostic}"
+    );
+
+    f.write("src/main.mb", "type Token<T>; fn main() {}");
+    let diagnostic = err(f.run(&["run"]), "TE002");
+    assert!(
+        diagnostic.contains("generic bodyless types are not supported"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn inherent_extension_methods_run_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='inherent-extension'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Point { x: i32 }
+        extend {
+            fn doubled(borrow self) -> i32 { self.x + self.x }
+        }
+        fn main() -> i32 {
+            let point := Point { x: 21 };
+            point.doubled()
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "inherent-extension.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "inherent-extension.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn directly_imported_public_inherent_extension_runs_from_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='inherent-module'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/geometry.mb",
+        "pub type Point { pub x: i32 } extend { pub fn doubled(borrow self) -> i32 { self.x * 2 } }",
+    );
+    f.write(
+        "src/main.mb",
+        "use geometry; fn main() -> i32 { let point := geometry::Point { x: 21 }; point.doubled() }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "inherent-module.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "inherent-module.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn inherent_extension_selection_rejects_wrong_receivers_and_ambiguity() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='inherent-errors'\nentry='main::main'\n",
+    );
+    for (source, message) in [
+        (
+            "type Point { x: i32 } type Other { x: i32 } extend Point { fn value(borrow self) -> i32 { self.x } } fn main() -> i32 { let other := Other { x: 42 }; other.value() }",
+            "no visible inherent method 'value' for Other",
+        ),
+        (
+            "type Point { x: i32 } extend Point { fn value(borrow self) -> i32 { self.x } } extend Point { fn value(borrow self) -> i32 { self.x + 1 } } fn main() -> i32 { let point := Point { x: 41 }; point.value() }",
+            "ambiguous inherent method 'value'",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["run"]), "TE007");
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn inherent_extension_visibility_uses_direct_module_edges_and_public_declarations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='inherent-visibility'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/geometry.mb",
+        "pub type Point { pub x: i32 } extend Point { pub fn doubled(borrow self) -> i32 { self.x * 2 } }",
+    );
+    f.write(
+        "src/main.mb",
+        "use geometry::Point; fn main() -> i32 { let point := Point { x: 21 }; point.doubled() }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE024");
+    assert!(
+        diagnostic.contains("struct 'Point' has no field 'doubled'"),
+        "{diagnostic}"
+    );
+
+    f.write(
+        "src/geometry.mb",
+        "pub type Point { pub x: i32 } extend Point { fn doubled(borrow self) -> i32 { self.x * 2 } }",
+    );
+    f.write(
+        "src/main.mb",
+        "use geometry; fn main() -> i32 { let point := geometry::Point { x: 21 }; point.doubled() }",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE007");
+    assert!(
+        diagnostic.contains("matching inherent extension is private or inactive"),
+        "{diagnostic}"
+    );
+
+    for geometry in [
+        "pub type Point { pub x: i32 } pub extend Point { fn hidden(borrow self) -> i32 { self.x } }",
+        "pub type Point { pub x: i32 } extend { fn hidden(borrow self) -> i32 { self.x } }",
+    ] {
+        f.write("src/geometry.mb", geometry);
+        f.write(
+            "src/main.mb",
+            "use geometry; fn main() -> i32 { let point := geometry::Point { x: 21 }; point.hidden() }",
+        );
+        let diagnostic = err(f.run(&["run"]), "TE007");
+        assert!(
+            diagnostic.contains("matching inherent extension is private or inactive"),
+            "{geometry}: {diagnostic}"
+        );
+    }
+}
+
+#[test]
+fn postfix_optional_type_rejects_mismatched_and_uninferred_values() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='optional-errors'\nentry='main::main'\n",
+    );
+    for (source, code, message) in [
+        (
+            "fn main() { let value: i32? = Some(true); }",
+            "TE002",
+            "expected i32, found Bool",
+        ),
+        (
+            "fn main() { let value := None; }",
+            "TE002",
+            "cannot determine None's outcome type; provide an Option<T> annotation",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["run"]), code);
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn postfix_optional_some_evaluates_its_payload_once_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='optional-once'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        type Counter { calls: u32 }
+        fn payload(counter: share Counter) -> i32 {
+            counter.calls += 1;
+            40
+        }
+        fn main() -> i32 {
+            var counter := Counter { calls: 0 };
+            let value: i32? = Some(payload(counter.share()));
+            (match value { Some(number) => number, None => 0 }) + counter.calls as i32 + 1
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "optional-once.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "optional-once.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn postfix_optional_reference_grouping_keeps_current_transport_gate() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='optional-reference-forms'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn take_optional_borrow(value: borrow i32?) {} fn main() {}",
+    );
+    let result = f.run(&["run"]);
+    assert!(result.status.success(), "{result:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn take_borrowed_option(value: (borrow i32)?) {} fn main() {}",
+    );
+    let diagnostic = err(f.run(&["run"]), "TE017");
+    assert!(
+        diagnostic.contains("Option reference type arguments require embedded-loan tracking"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn option_some_value_roundtrips_through_match() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='option-roundtrip'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() -> i32 { let present: Option<i32> = Some(40); match present { Some(value) => value, None => 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(40)\n");
 }
 
 #[test]
@@ -3401,10 +5527,7 @@ fn outcome_entries_report_every_variant_from_source_and_standalone_artifacts() {
             "fn main() -> Result<u64, Error> { Ok(18446744073709551615) }",
             "Ok(u64(18446744073709551615))",
         ),
-        (
-            "fn main() -> Result<i8, Error> { Ok(-20) }",
-            "Ok(i8(-20))",
-        ),
+        ("fn main() -> Result<i8, Error> { Ok(-20) }", "Ok(i8(-20))"),
         (
             "fn main() -> Result<i32, Error> { Err(Error { code: 4294967295 }) }",
             "Err(Error, code=4294967295)",
@@ -3417,10 +5540,7 @@ fn outcome_entries_report_every_variant_from_source_and_standalone_artifacts() {
             "fn main() -> Attempt<f64, Error> { Done(2.5) }",
             "Done(f64(2.5))",
         ),
-        (
-            "fn main() -> Attempt<i32, Error> { Skipped }",
-            "Skipped",
-        ),
+        ("fn main() -> Attempt<i32, Error> { Skipped }", "Skipped"),
         (
             "type ParseError: Error {} fn main() -> Attempt<i32, ParseError> { Failed(ParseError { code: 5 }) }",
             "Failed(outcomes::main::ParseError, code=5)",
@@ -3499,7 +5619,7 @@ fn outcome_entry_traps_keep_runtime_diagnostics() {
     f.write(
         "src/main.mb",
         "fn divide(n: i32) -> i32 { 1 / n }
-         fn consume(text: String, value: i32) -> i32 { value }
+         fn consume(text: string, value: i32) -> i32 { value }
          fn main() -> Result<i32, Error> {
              let text := \"a\".concat(\"b\");
              Ok(consume(text, divide(0)))
@@ -3570,6 +5690,237 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
     );
     let message = err(f.run(&["build", "--lib"]), "LE900");
     assert!(message.contains("cannot return enums"), "{message}");
+}
+
+#[test]
+fn explicit_interface_selector_resolves_a_unique_candidate() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-selector-gate'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> i32 { self.x } }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }\n",
+    );
+    let analysis = f.run(&["analyze-project"]);
+    assert!(analysis.status.success(), "{analysis:?}");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn explicit_interface_selection_reports_all_ambiguous_candidates() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-ambiguity'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> i32 { 1 } }\nextend Point of Draw { fn draw(borrow self) -> i32 { 2 } }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }\n",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("ambiguous extension selection"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("main:70..128"), "{diagnostic}");
+    assert!(diagnostic.contains("main:129..187"), "{diagnostic}");
+    assert!(diagnostic.matches("main:").count() >= 2, "{diagnostic}");
+}
+
+#[test]
+fn imported_extensions_from_two_modules_are_ambiguous() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-two-imports'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use left; use right; pub type Point { pub x: i32 }\npub interface Draw { fn draw(borrow self) -> i32; }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    );
+    f.write(
+        "src/left.mb",
+        "use self::main::{Point, Draw}; pub extend Point of Draw { fn draw(borrow self) -> i32 { 1 } }",
+    );
+    f.write(
+        "src/right.mb",
+        "use self::main::{Point, Draw}; pub extend Point of Draw { fn draw(borrow self) -> i32 { 2 } }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("ambiguous extension selection"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("left:"), "{diagnostic}");
+    assert!(diagnostic.contains("right:"), "{diagnostic}");
+}
+
+#[test]
+fn explicit_interface_selection_reports_private_imported_extension() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-private'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use graphics; pub type Point { pub x: i32 }\npub interface Draw { fn draw(borrow self) -> i32; }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    );
+    f.write(
+        "src/graphics.mb",
+        "use self::main::Point; use self::main::Draw; extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("matching extension is private or inactive: graphics:"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn explicit_interface_selection_reports_missing_implementation() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-missing'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("no visible extension implements 'main::Draw::draw' for Point"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn symbol_import_loads_but_does_not_activate_an_extension() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-symbol-import'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use self::graphics::ping; pub type Point { pub x: i32 }\npub interface Draw { fn draw(borrow self) -> i32; }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    );
+    f.write(
+        "src/graphics.mb",
+        "use self::main::{Point, Draw}; pub fn ping() -> i32 { 0 } pub extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("no visible extension implements 'main::Draw::draw' for Point"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn interface_selection_requires_a_receiver_method_call() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-receiver-required'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "interface Draw { fn draw(borrow self) -> i32; }\nfn draw() -> i32 { 42 }\nfn main() -> i32 { draw() of Draw }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        diagnostic.contains("interface selection requires a receiver method call"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn extension_method_bodies_are_typechecked() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-body-check'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface Draw { fn draw(borrow self) -> i32; }\nextend Point of Draw { fn draw(borrow self) -> i32 { true } }\nfn main() -> i32 { 0 }",
+    );
+    let diagnostic = err(f.run(&["analyze-project"]), "TE");
+    assert!(diagnostic.contains("expected i32"), "{diagnostic}");
+}
+
+#[test]
+fn selected_extension_calls_preserve_receiver_access_modes() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-receivers'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface BorrowValue { fn value(borrow self) -> i32; }\ninterface ShareValue { fn value(share self) -> i32; }\ninterface TakeValue { fn value(self) -> i32; }\nextend Point of BorrowValue { fn value(borrow self) -> i32 { self.x } }\nextend Point of ShareValue { fn value(share self) -> i32 { self.x } }\nextend Point of TakeValue { fn value(self) -> i32 { self.x } }\nfn main() -> i32 { var point := Point { x: 42 }; point.value() of BorrowValue + point.value() of ShareValue + point.value() of TakeValue }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(126)\n");
+    let build = f.run(&["build", "--output", "receivers.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "receivers.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn borrowed_extension_receiver_remains_live_through_later_arguments() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-receiver-loan'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Point { x: i32 }\ninterface Check { fn check(borrow self, value: i32) -> i32; }\nextend Point of Check { fn check(borrow self, value: i32) -> i32 { self.x + value } }\nfn consume(point: Point) -> i32 { point.x }\nfn main() -> i32 { var point := Point { x: 42 }; point.check(consume(point)) of Check }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE");
+    assert!(
+        diagnostic.contains("borrow") || diagnostic.contains("loan"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn directly_imported_public_extension_runs_from_another_module() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-module-edge'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use graphics; pub type Point { pub x: i32 }\npub interface Draw { fn draw(borrow self) -> i32; }\nfn main() -> i32 { let point := Point { x: 42 }; point.draw() of Draw }",
+    );
+    f.write(
+        "src/graphics.mb",
+        "use self::main::{Point, Draw}; pub extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "graphics.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "graphics.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
 }
 
 struct Fixture(PathBuf);
@@ -3652,14 +6003,17 @@ fn override_uses_manifest_parent_for_sources() {
     f.write("nested/code/main.mb", "");
     let output = f.run(&["project", "--project", "nested/custom.toml"]);
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout)
-        .unwrap()
-        .contains("Modules (1):\n  main -> main.mb\n"));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Modules (1):\n  main -> main.mb\n")
+    );
     let path = f.0.join("nested/custom.toml");
-    assert!(f
-        .run(&["project", "--project", path.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        f.run(&["project", "--project", path.to_str().unwrap()])
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -4038,9 +6392,11 @@ fn syntax_reports_source_diagnostics_without_claiming_semantic_validation() {
     f.write("valid.mb", "fn main() -> i32 { unknown_name }");
     let output = f.run(&["syntax", "valid.mb"]);
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout)
-        .unwrap()
-        .contains("semantics not checked"));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("semantics not checked")
+    );
     f.write("broken.mb", "fn main() { let x = 1; }");
     let message = err(f.run(&["syntax", "broken.mb"]), "SE002");
     assert!(message.contains("broken.mb:1:"));
@@ -4085,8 +6441,10 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("supported moves, loans and aggregate access checked"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("supported moves, loans and aggregate access checked")
+    );
 
     f.write(
         "reinit.mb",
@@ -4132,6 +6490,434 @@ fn project_analysis_checks_imported_call_types() {
     let message = err(f.run(&["analyze-project"]), "TE002");
     assert!(message.contains("main.mb:1:"));
     assert!(f.run(&["analyze-project", "--lib"]).status.success());
+}
+
+#[test]
+fn u8_to_u32_cast_and_method_run_from_source_and_standalone_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u8-widening'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn main() -> Result<u32, Error> {
+            let bytes: Bytes<4> = [0, 127, 128, 255];
+            let value := bytes[0] as u32 + bytes[1].to_u32()
+                + bytes[2] as u32 + bytes[3].to_u32();
+            let precedence := bytes[2] as u32 * 2 + 1;
+            Ok(value + precedence - 257)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(510))\n");
+    let build = f.run(&["build", "--output", "widen.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "widen.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+}
+
+#[test]
+fn numeric_casts_reject_nonnumeric_types_and_to_u32_stays_u8_only() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u8-widening-errors'\nentry='main::main'\n",
+    );
+    for (source, code, message) in [
+        (
+            "fn main() -> u32 { let bytes: Bytes<1> = [42]; let value: u32 = bytes[0]; value }",
+            "TE002",
+            "expected u32, found u8",
+        ),
+        (
+            "fn main() -> u32 { true as u32 }",
+            "TE007",
+            "integer or floating-point source and target",
+        ),
+        (
+            "fn main() -> u32 { let value: u16 = 255; value.to_u32() }",
+            "TE007",
+            "requires a u8 value",
+        ),
+        (
+            "fn main() -> u32 { let bytes: Bytes<1> = [42]; bytes[0].to_u32(1) }",
+            "TE007",
+            "takes no arguments",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["build"]), code);
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
+}
+
+#[test]
+fn numeric_casts_participate_in_constant_checks() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u8-widening-constants'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { let byte: u8 = 255; byte as u32 + 1 }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(256)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> i8 { let value: u32 = 255; value as i8 }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i8(-1)\n");
+
+    f.write("src/main.mb", "fn main() -> i8 { 255 as u8 as i8 + 1 }");
+    let static_cast = f.run(&["run"]);
+    assert!(static_cast.status.success(), "{static_cast:?}");
+    assert_eq!(static_cast.stdout, b"Result: i8(0)\n");
+    let static_build = f.run(&["build", "--output", "constant-cast.wasm"]);
+    assert!(static_build.status.success(), "{static_build:?}");
+    let static_artifact = f.run(&["run", "constant-cast.wasm"]);
+    assert_eq!(static_artifact.stdout, b"Result: i32(0)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn increment(value: i8) -> i8 { value + 1 } fn main() -> i8 { increment(-1) }",
+    );
+    let dynamic_cast = f.run(&["run"]);
+    assert!(dynamic_cast.status.success(), "{dynamic_cast:?}");
+    assert_eq!(dynamic_cast.stdout, static_cast.stdout);
+    let dynamic_build = f.run(&["build", "--output", "dynamic-cast.wasm"]);
+    assert!(dynamic_build.status.success(), "{dynamic_build:?}");
+    let dynamic_artifact = f.run(&["run", "dynamic-cast.wasm"]);
+    assert_eq!(dynamic_artifact.stdout, b"Result: i32(0)\n");
+
+    f.write("src/main.mb", "fn main() -> i8 { 127 as i8 + 1 }");
+    let overflow = err(f.run(&["build"]), "LE001");
+    assert!(
+        overflow.contains("integer overflow in statically known expression"),
+        "{overflow}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn increment(value: i8) -> i8 { value + 1 } fn main() -> i8 { increment(127) }",
+    );
+    let dynamic_overflow = err(f.run(&["run"]), "RE007");
+    assert!(
+        dynamic_overflow.contains("integer overflow in addition"),
+        "{dynamic_overflow}"
+    );
+}
+
+#[test]
+fn numeric_cast_matrix_and_rust_boundaries_match_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='cast-matrix'\nentry='main::main'\n",
+    );
+    let types = [
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
+    ];
+    let boundaries: [(&str, &[&str]); 10] = [
+        ("i8", &["-128", "-1", "0", "127"]),
+        ("i16", &["-32768", "-1", "0", "32767"]),
+        ("i32", &["-2147483647", "-1", "0", "2147483647"]),
+        (
+            "i64",
+            &["-9223372036854775807", "-1", "0", "9223372036854775807"],
+        ),
+        ("u8", &["0", "1", "255"]),
+        ("u16", &["0", "1", "65535"]),
+        ("u32", &["0", "1", "4294967295"]),
+        ("u64", &["0", "1", "18446744073709551615"]),
+        ("f32", &["-3.4e38", "-1.9", "0.9", "1.9", "3.4e38"]),
+        ("f64", &["-1e300", "-1.9", "0.9", "1.9", "1e300"]),
+    ];
+    let format_float = |value: f64| {
+        if value.is_infinite() {
+            if value.is_sign_negative() {
+                "(-1.0 / 0.0)".to_owned()
+            } else {
+                "(1.0 / 0.0)".to_owned()
+            }
+        } else {
+            format!("{value:?}")
+        }
+    };
+    let mut source = String::new();
+    let mut calls = String::new();
+    let mut call_index = 0;
+    for (from, values) in boundaries {
+        let source_is_float = from.starts_with('f');
+        for (sample_index, literal) in values.iter().enumerate() {
+            let integer = (!source_is_float).then(|| literal.parse::<i128>().unwrap());
+            let mut float = source_is_float.then(|| literal.parse::<f64>().unwrap());
+            if from == "f32" {
+                float = float.map(|value| (value as f32) as f64);
+            }
+            let function = format!("check_{from}_{sample_index}");
+            source.push_str(&format!("fn {function}(value: {from}) -> Bool {{\n"));
+            for to in types {
+                let expected = match to {
+                    "i8" => integer
+                        .map(|v| format!("{}", v as i8))
+                        .or_else(|| float.map(|v| format!("{}", v as i8)))
+                        .unwrap(),
+                    "i16" => integer
+                        .map(|v| format!("{}", v as i16))
+                        .or_else(|| float.map(|v| format!("{}", v as i16)))
+                        .unwrap(),
+                    "i32" => integer
+                        .map(|v| format!("{}", v as i32))
+                        .or_else(|| float.map(|v| format!("{}", v as i32)))
+                        .unwrap(),
+                    "i64" => integer
+                        .map(|v| format!("{}", v as i64))
+                        .or_else(|| float.map(|v| format!("{}", v as i64)))
+                        .unwrap(),
+                    "u8" => integer
+                        .map(|v| format!("{}", v as u8))
+                        .or_else(|| float.map(|v| format!("{}", v as u8)))
+                        .unwrap(),
+                    "u16" => integer
+                        .map(|v| format!("{}", v as u16))
+                        .or_else(|| float.map(|v| format!("{}", v as u16)))
+                        .unwrap(),
+                    "u32" => integer
+                        .map(|v| format!("{}", v as u32))
+                        .or_else(|| float.map(|v| format!("{}", v as u32)))
+                        .unwrap(),
+                    "u64" => integer
+                        .map(|v| format!("{}", v as u64))
+                        .or_else(|| float.map(|v| format!("{}", v as u64)))
+                        .unwrap(),
+                    "f32" => integer
+                        .map(|v| format_float(v as f32 as f64))
+                        .or_else(|| float.map(|v| format_float(v as f32 as f64)))
+                        .unwrap(),
+                    "f64" => integer
+                        .map(|v| format_float(v as f64))
+                        .or_else(|| float.map(format_float))
+                        .unwrap(),
+                    _ => unreachable!(),
+                };
+                source.push_str(&format!("    value as {to} == {expected} &&\n"));
+            }
+            source.push_str("    true\n}\n");
+            calls.push_str(&format!(
+                "    if !{function}({literal}) {{ return Err(Error {{ code: {} }}); }}\n",
+                call_index + 1
+            ));
+            call_index += 1;
+        }
+    }
+    source.push_str("fn main() -> Result<Bool, Error> {\n");
+    source.push_str(&calls);
+    for ty in types {
+        let one = if ty.starts_with('f') { "1.0" } else { "1" };
+        source.push_str(&format!("    let source_{ty}: {ty} = {one};\n"));
+    }
+    for from in types {
+        for to in types {
+            let expected = if to.starts_with('f') { "1.0" } else { "1" };
+            source.push_str(&format!("    if source_{from} as {to} != {expected} {{ return Err(Error {{ code: 1 }}); }}\n"));
+        }
+    }
+    source.push_str(
+        r#"
+    let left: i32 = 4;
+    let right: u32 = 5;
+    let mixed_add: u32 = left as u32 + right;
+    let mixed_mul: u32 = left as u32 * right;
+    let byte: i8 = 255 as i8;
+    let all_bits: u32 = 4294967295;
+    let signed: i32 = all_bits as i32;
+    let unsigned: u64 = (-1 as i32) as u64;
+    let fraction: i32 = (-1.9) as i32;
+    let nan: u32 = (0.0 / 0.0) as u32;
+    let saturated: u64 = 1e300 as u64;
+    let rounded: u64 = 16777217 as f32 as u64;
+    let narrowed: f32 = 16777217 as f32;
+    let positive_infinity: u64 = (1.0 / 0.0) as u64;
+    let negative_infinity: u64 = (-1.0 / 0.0) as u64;
+    let high_saturated: i8 = 1e300 as i8;
+    let low_saturated: i8 = (-1e300) as i8;
+    let float_overflow: f32 = 1e300 as f32;
+    Ok(byte == -1 && signed == -1 && unsigned == 18446744073709551615
+        && mixed_add == 9 && mixed_mul == 20
+        && fraction == -1 && nan == 0 && saturated == 18446744073709551615
+        && rounded == 16777216 && narrowed == 16777216.0
+        && positive_infinity == 18446744073709551615 && negative_infinity == 0
+        && high_saturated == 127 && low_saturated == -128
+        && float_overflow == (1.0 / 0.0))
+}
+"#,
+    );
+    f.write("src/main.mb", &source);
+    let run = f.run(&["run"]);
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(run.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "casts.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "casts.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, run.stdout);
+}
+
+#[test]
+fn u32_wrapping_add_and_mul_match_source_and_standalone_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u32-wrapping'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn main() -> Result<u32, Error> {
+            let constant: u32 = 4294967295.wrapping_add(1);
+            if constant != 0 { return Err(Error { code: 1 }); }
+            let max: u32 = 4294967295;
+            Ok(max.wrapping_add(1).wrapping_add(max.wrapping_mul(2)).wrapping_add(2))
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(0))\n");
+    let build = f.run(&["build", "--output", "wrapping.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "wrapping.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+
+    f.write("src/main.mb", "fn main() -> u32 { 4294967295 + 1 }");
+    let static_overflow = err(f.run(&["build"]), "LE001");
+    assert!(
+        static_overflow.contains("integer overflow in statically known expression"),
+        "{static_overflow}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn add(left: u32, right: u32) -> u32 { left + right } fn main() -> u32 { add(4294967295, 1) }",
+    );
+    let dynamic_overflow = err(f.run(&["run"]), "RE007");
+    assert!(
+        dynamic_overflow.contains("integer overflow in addition"),
+        "{dynamic_overflow}"
+    );
+}
+
+#[test]
+fn u32_wrapping_methods_reject_wrong_types_and_arity() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u32-wrapping-errors'\nentry='main::main'\n",
+    );
+    for source in [
+        "fn main() -> u32 { let value: i32 = 1; value.wrapping_add(1) }",
+        "fn main() -> u32 { let value: u32 = 1; value.wrapping_mul(1, 2) }",
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["build"]), "TE007");
+        assert!(diagnostic.contains("wrapping"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn u32_bitwise_and_shifts_match_source_and_standalone_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='u32-bit-ops'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn shift_left(value: u32, count: u32) -> u32 { value << count }
+        fn shift_right(value: u32, count: u32) -> u32 { value >> count }
+        fn main() -> Result<u32, Error> {
+            let high: u32 = 2147483648;
+            let pattern: u32 = 2863311530;
+            let method_constant: u32 = 4294967295.bit_xor(0);
+            let parity := 1 | 2 ^ 3 & 7;
+            if method_constant != 4294967295 || parity != 1
+                || pattern.bit_xor(1431655765) != 4294967295
+                || pattern.bit_and(15) != 10 || pattern.bit_or(5) != 2863311535
+                || 1 << 31 != high || high >> 31 != 1 || 1 << 0 != 1
+                || shift_left(1, 0) != 1 || shift_left(1, 31) != high
+                || shift_right(high, 31) != 1
+                || 4294967295 << 1 != 4294967294 {
+                return Err(Error { code: 1 });
+            }
+            Ok(42)
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(u32(42))\n");
+    let build = f.run(&["build", "--output", "bits.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bits.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, source.stdout);
+
+    for count in [32, 33] {
+        f.write(
+            "src/main.mb",
+            &format!("fn main() -> u32 {{ 1 << {count} }}"),
+        );
+        let static_shift = err(f.run(&["build"]), "LE003");
+        assert!(
+            static_shift.contains("shift count must be less than 32"),
+            "{static_shift}"
+        );
+
+        f.write(
+            "src/main.mb",
+            &format!("fn shift(value: u32, count: u32) -> u32 {{ value >> count }} fn main() -> Result<u32, Error> {{ Ok(shift(1, {count})) }}"),
+        );
+        let dynamic_shift = err(f.run(&["run"]), "RE007");
+        assert!(
+            dynamic_shift.contains("shift count must be less than 32"),
+            "{dynamic_shift}"
+        );
+    }
+
+    for (source, diagnostic_code, message) in [
+        (
+            "fn main() -> u32 { let value: i32 = 1; value.bit_and(1) }",
+            "TE007",
+            "bitwise methods require u32 operands",
+        ),
+        (
+            "fn main() -> u32 { let value: u32 = 1; value.bit_xor(1, 2) }",
+            "TE007",
+            "bitwise methods take one u32 argument",
+        ),
+        (
+            "fn main() -> u32 { let count: i32 = 1; let value: u32 = 1; value << count }",
+            "TE002",
+            "expected u32",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let diagnostic = err(f.run(&["build"]), diagnostic_code);
+        assert!(diagnostic.contains(message), "{source}: {diagnostic}");
+    }
 }
 
 #[test]
@@ -4493,7 +7279,9 @@ fn array_parameters_run_from_source_and_artifact() {
     // A borrow parameter called twice on the same array.
     let out = run_both(
         &f,
-        &format!("{sum} fn main() -> i32 {{ let a := [1, 2, 3]; sum(a.borrow()) * 10 + sum(a.borrow()) }}"),
+        &format!(
+            "{sum} fn main() -> i32 {{ let a := [1, 2, 3]; sum(a.borrow()) * 10 + sum(a.borrow()) }}"
+        ),
     );
     assert!(out.contains("66"), "{out}");
     // The caller observes writes made through a share parameter.
@@ -4567,7 +7355,9 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
     // A repetition-built result consumed by a borrow-taking sum and an owned call.
     let out = run_both(
         &f,
-        &format!("{sum} fn make(v: i32) -> Array<i32, 3> {{ [v + 0; 3] }} fn own(a: Array<i32, 3>) -> i32 {{ a[0] + a[2] }} fn main() -> i32 {{ let a := make(4); sum(a.borrow()) * 100 + own(make(5)) }}"),
+        &format!(
+            "{sum} fn make(v: i32) -> Array<i32, 3> {{ [v + 0; 3] }} fn own(a: Array<i32, 3>) -> i32 {{ a[0] + a[2] }} fn main() -> i32 {{ let a := make(4); sum(a.borrow()) * 100 + own(make(5)) }}"
+        ),
     );
     assert!(out.contains("1210"), "{out}");
     // An if-value chosen dynamically and recursion returning arrays.
@@ -4585,7 +7375,9 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
     // Rows by borrow/share and a whole-row replacement.
     let out = run_both(
         &f,
-        &format!("{sum} fn zero(a: share Array<i32, 3>) {{ a[0] = 0; a[1] = 0; a[2] = 0; }} fn main() -> i32 {{ var m := [[1, 2, 3], [4, 5, 6]]; zero(m[0].share()); m[1] = [7, 8, 9]; sum(m[0].borrow()) * 100 + sum(m[1].borrow()) }}"),
+        &format!(
+            "{sum} fn zero(a: share Array<i32, 3>) {{ a[0] = 0; a[1] = 0; a[2] = 0; }} fn main() -> i32 {{ var m := [[1, 2, 3], [4, 5, 6]]; zero(m[0].share()); m[1] = [7, 8, 9]; sum(m[0].borrow()) * 100 + sum(m[1].borrow()) }}"
+        ),
     );
     assert!(out.contains("24"), "{out}");
     // Evaluation order of nested assignment: index, index, right-hand side.
@@ -4612,14 +7404,35 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
 
     // Compile-time diagnostics.
     for (source, code) in [
-        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; let r := m[0]; 0 }", "TE022"),
-        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[0][2] + 0 }", "TE008"),
-        ("fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[2][0] + 0 }", "TE008"),
-        ("fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m.borrow(); m[0][0] = 1; r[0][0] + 0 }", "BE005"),
-        ("fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { let a := make(); let b := a; a[0] + 0 }", "BE001"),
-        ("fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { make()[0] + 0 }", "TE017"),
+        (
+            "fn main() -> i32 { let m := [[1, 2], [3, 4]]; let r := m[0]; 0 }",
+            "TE022",
+        ),
+        (
+            "fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[0][2] + 0 }",
+            "TE008",
+        ),
+        (
+            "fn main() -> i32 { let m := [[1, 2], [3, 4]]; m[2][0] + 0 }",
+            "TE008",
+        ),
+        (
+            "fn main() -> i32 { var m := [[1, 2], [3, 4]]; let r := m.borrow(); m[0][0] = 1; r[0][0] + 0 }",
+            "BE005",
+        ),
+        (
+            "fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { let a := make(); let b := a; a[0] + 0 }",
+            "BE001",
+        ),
+        (
+            "fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { make()[0] + 0 }",
+            "TE017",
+        ),
         ("fn main() -> Array<i32, 2> { [1, 2] }", "LE900"),
-        ("fn main() -> i32 { let m: Array<Array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }", "LE900"),
+        (
+            "fn main() -> i32 { let m: Array<Array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }",
+            "LE900",
+        ),
     ] {
         f.write("src/app.mb", source);
         err(f.run(&["run"]), code);
@@ -4884,6 +7697,42 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
         "pub type P { pub x: i32 } pub fn f(p: P) -> i32 { 0 } fn main() -> i32 { 0 }",
     );
     err(f.run(&["build", "--lib"]), "LE900");
+}
+
+#[test]
+fn cross_module_extension_accepts_lowercase_string_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='string-spellings'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use text_ops;\n\
+         pub type Point { pub marker: i32 }\n\
+         pub interface Echo { fn echo(borrow self, input: string) -> string; }\n\
+         fn main() -> i32 { let point := Point { marker: 0 }; let output := (point.echo(\"hello\") of Echo); output.len() as i32 }",
+    );
+    f.write(
+        "src/text_ops.mb",
+        "use self::main::{Point, Echo};\n\
+         pub extend Point of Echo { fn echo(borrow self, input: string) -> string { input } }",
+    );
+    let source = f.run(&["run"]);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert!(String::from_utf8_lossy(&source.stdout).contains("Result: i32(5)"));
+    assert!(f.run(&["build"]).status.success());
+    let artifact = f.run(&["run", "target/memobits/app.wasm"]);
+    assert!(
+        artifact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&artifact.stderr)
+    );
+    assert_eq!(source.stdout, artifact.stdout);
 }
 
 #[test]

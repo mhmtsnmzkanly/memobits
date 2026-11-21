@@ -1,0 +1,17 @@
+use self::main::{Point, Draw};
+
+pub fn add(left: i32, right: i32) -> i32 {
+    left + right
+}
+
+pub extend Point {
+    pub fn doubled(borrow self) -> i32 {
+        self.x * 2
+    }
+}
+
+pub extend Point of Draw {
+    fn draw(borrow self) -> i32 {
+        self.x
+    }
+}

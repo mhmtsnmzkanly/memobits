@@ -67,11 +67,17 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
     match &expr.kind {
         ExprKind::Number(_)
         | ExprKind::StringLiteral(_)
+        | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
         | ExprKind::Path(_) => {}
         ExprKind::Array(elements) => {
             for element in elements {
                 check_expr(element, in_loop, diagnostics);
+            }
+        }
+        ExprKind::Tuple(elements) => {
+            for element in elements {
+                check_expr(&element.value, in_loop, diagnostics);
             }
         }
         ExprKind::RepeatArray { value, .. } => check_expr(value, in_loop, diagnostics),
@@ -80,11 +86,14 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
             check_expr(index, in_loop, diagnostics);
         }
         ExprKind::Unary { operand, .. } => check_expr(operand, in_loop, diagnostics),
+        ExprKind::Cast { value, .. } => check_expr(value, in_loop, diagnostics),
         ExprKind::Binary { left, right, .. } => {
             check_expr(left, in_loop, diagnostics);
             check_expr(right, in_loop, diagnostics);
         }
-        ExprKind::Call { callee, arguments } => {
+        ExprKind::Call {
+            callee, arguments, ..
+        } => {
             check_expr(callee, in_loop, diagnostics);
             for argument in arguments {
                 check_expr(argument, in_loop, diagnostics);

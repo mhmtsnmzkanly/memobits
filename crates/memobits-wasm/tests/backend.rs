@@ -360,6 +360,21 @@ fn checked_mul_division_negation_and_remainder_cover_boundaries() {
 }
 
 #[test]
+fn checked_primitive_remainder_preserves_value_and_zero_trap() {
+    let rem = lower("fn rem(a: i32, b: i32) -> i32 { a % b }");
+    let wasm = memobits_wasm::compile(&rem, &exports("rem", 0)).unwrap();
+    let (_engine, mut store, instance) = instantiate(&wasm);
+    let rem = instance
+        .get_export(&store, "rem")
+        .and_then(Extern::into_func)
+        .unwrap()
+        .typed::<(i32, i32), i32>(&store)
+        .unwrap();
+    assert_eq!(rem.call(&mut store, (17, 5)).unwrap(), 2);
+    assert!(rem.call(&mut store, (1, 0)).is_err());
+}
+
+#[test]
 fn imported_scalar_inputs_and_float_comparisons_are_checked() {
     let narrow = lower("fn id(x: i8) -> i8 { x }");
     let wasm = memobits_wasm::compile(&narrow, &exports("id", 0)).unwrap();

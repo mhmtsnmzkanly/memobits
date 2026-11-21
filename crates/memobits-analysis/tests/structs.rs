@@ -299,6 +299,20 @@ fn reading_a_primitive_field_into_an_owned_position_copies_it() {
 }
 
 #[test]
+fn uppercase_string_type_spelling_is_rejected_with_migration_guidance() {
+    for source in [
+        "fn main(value: String) {}",
+        "fn main(value: legacy::String) {}",
+        "type Text = String; fn main(value: Text) {}",
+        "fn main(value: Result<String, Error>) {}",
+    ] {
+        rejected(source, "TE001", "use lowercase 'string'");
+    }
+    lower("fn main(value: string) {}");
+    lower("fn main(value: Result<string, Error>) {}");
+}
+
+#[test]
 fn gated_forms_are_diagnostics_not_panics() {
     let p = "let p := P { x: 1, y: 2 };";
     for (source, text) in [

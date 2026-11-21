@@ -20,12 +20,16 @@ use wasm_encoder::{
     ValType,
 };
 
+mod arrays;
 mod list_descriptor;
 mod memory;
+mod operations;
 mod string_descriptor;
 mod string_heap;
 mod utf8;
+use arrays::{array_cell, array_cell_of, emit_array_copy};
 use memory::{LayoutError, StaticLayout};
+use operations::emit_numeric_cast;
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(
@@ -282,7 +286,7 @@ fn compile_target(
     let heap_strings = program.heap_strings();
     for (function, heap) in program.functions.iter().zip(&heap_strings) {
         let uses = value_use_counts(function);
-        validate_string_struct_borrows(function, &structs, &uses, &mut errors);
+        validate_string_struct_borrows(program, function, &structs, &uses, &mut errors);
         if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
             errors.push(diagnostic(error.message, error.span));
         }
@@ -371,6 +375,7 @@ fn compile_target(
 }
 
 fn validate_string_struct_borrows(
+    program: &Program,
     function: &Function,
     structs: &[StructLayout],
     uses: &[u32],
@@ -378,18 +383,27 @@ fn validate_string_struct_borrows(
 ) {
     use memobits_ir::Access;
 
+    let is_tuple = |ty: &Type| {
+        matches!(ty, Type::Struct(id)
+        if program.types.get(id.0 as usize).is_some_and(|definition| definition.path.module.as_slice() == ["\0tuple"]))
+    };
     let is_string_struct =
         |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
+    let is_string_tuple = |ty: &Type| is_tuple(ty) && is_string_struct(ty);
     let is_string_struct_ref =
         |ty: &Type| matches!(ty, Type::Reference { inner, .. } if is_string_struct(inner));
 
     if function.signature.parameters.iter().any(|p| {
-        (is_string_struct(&p.ty) && p.access != Access::Borrow) || is_string_struct_ref(&p.ty)
-    }) || is_string_struct(&function.signature.result)
+        (is_string_struct(&p.ty)
+            && !matches!(p.access, Access::Borrow | Access::Share)
+            && !is_string_tuple(&p.ty))
+            || is_string_struct_ref(&p.ty)
+    }) || (is_string_struct(&function.signature.result)
+        && !is_string_tuple(&function.signature.result))
         || is_string_struct_ref(&function.signature.result)
     {
         errors.push(diagnostic(
-            "structs with String fields can cross internal calls only as read-only borrow parameters",
+            "structs with String fields can cross internal calls only as borrow or share parameters",
             Some(function.span),
         ));
     }
@@ -400,7 +414,7 @@ fn validate_string_struct_borrows(
                 && matches!(
                     local.ty,
                     Type::Reference {
-                        access: Access::Borrow,
+                        access: Access::Borrow | Access::Share,
                         ..
                     }
                 ))
@@ -409,6 +423,36 @@ fn validate_string_struct_borrows(
             "whole borrows of structs with String fields cannot be stored in local bindings",
             Some(function.span),
         ));
+    }
+
+    for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+        let InstructionKind::Call {
+            callee:
+                Operand {
+                    source: Source::Function(target),
+                    ..
+                },
+            arguments,
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        let Some(callee) = program.functions.get(target.0 as usize) else {
+            continue;
+        };
+        for (parameter, argument) in callee.signature.parameters.iter().zip(arguments) {
+            if parameter.access == Access::Owned
+                && is_string_tuple(&parameter.ty)
+                && !matches!(argument.source, Source::Local(local)
+                    if function.locals.get(local.0 as usize).is_some_and(|value| value.ty == parameter.ty)
+                        && argument.mode == memobits_ir::UseMode::Consume)
+            {
+                errors.push(diagnostic(
+                    "an owned String tuple argument must move directly from a named tuple local",
+                    argument.span,
+                ));
+            }
+        }
     }
 
     if !function.values.iter().any(is_string_struct_ref)
@@ -424,14 +468,12 @@ fn validate_string_struct_borrows(
         .filter_map(|instruction| {
             let output = instruction.output?;
             let index = output.0 as usize;
-            let InstructionKind::Borrow {
-                owner,
-                access: Access::Borrow,
-                ..
-            } = &instruction.kind
-            else {
+            let InstructionKind::Borrow { owner, access, .. } = &instruction.kind else {
                 return None;
             };
+            if !matches!(access, Access::Borrow | Access::Share) {
+                return None;
+            }
             (uses[index] == 1 && is_string_struct_ref(&function.values[index]))
                 .then_some((output, owner.source))
         })
@@ -484,7 +526,7 @@ fn validate_string_struct_borrows(
         })
     {
         errors.push(diagnostic(
-            "a whole borrow of a struct with String fields requires a named owner and direct use as an internal call argument",
+            "a whole borrow or share of a struct with String fields requires a named owner and direct use as an internal call argument",
             Some(function.span),
         ));
     }
@@ -514,6 +556,7 @@ fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
         | InstructionKind::StringScalarAt { .. }
         | InstructionKind::ValidateUtf8 { .. }
         | InstructionKind::Assign { .. } => None,
+        InstructionKind::Cast { .. } => None,
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
         | InstructionKind::Store { .. }
@@ -1200,6 +1243,7 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 | InstructionKind::Borrow { owner: operand, .. }
                 | InstructionKind::Load { reference: operand }
                 | InstructionKind::Unary { operand, .. }
+                | InstructionKind::Cast { value: operand, .. }
                 | InstructionKind::Assign { value: operand, .. }
                 | InstructionKind::ReplaceStringField { value: operand, .. } => count(operand),
                 InstructionKind::ListGet {
@@ -1375,7 +1419,7 @@ fn storage_layout(ty: Primitive) -> Result<(u32, u32), String> {
         Primitive::Unit => return Err("Unit references are not supported by frame layout".into()),
         Primitive::Bool | Primitive::I8 | Primitive::U8 => 1,
         Primitive::I16 | Primitive::U16 => 2,
-        Primitive::I32 | Primitive::U32 | Primitive::F32 => 4,
+        Primitive::I32 | Primitive::U32 | Primitive::Char | Primitive::F32 => 4,
         Primitive::I64 | Primitive::U64 | Primitive::F64 => 8,
     };
     Ok((width, width))
@@ -1443,6 +1487,7 @@ fn wasm_type(ty: &Type) -> ValType {
             | Primitive::I8
             | Primitive::I16
             | Primitive::I32
+            | Primitive::Char
             | Primitive::U8
             | Primitive::U16
             | Primitive::U32,
@@ -1498,6 +1543,7 @@ pub enum TrapReason {
     IndexOutOfBounds = 8,
     ArgumentRange = 9,
     HeapAllocation = 10,
+    ShiftCount = 11,
 }
 
 impl TrapReason {
@@ -1623,6 +1669,7 @@ fn outcome_entry(
             Primitive::F32 => Some(entry_abi::Scalar::F32),
             Primitive::F64 => Some(entry_abi::Scalar::F64),
             Primitive::Unit => None,
+            Primitive::Char => None,
         },
         _ => None,
     }
@@ -2351,7 +2398,7 @@ fn emit_load(body: &mut WasmFunction, kind: Primitive) {
         Primitive::I8 => WasmInstruction::I32Load8S(arg),
         Primitive::U16 => WasmInstruction::I32Load16U(arg),
         Primitive::I16 => WasmInstruction::I32Load16S(arg),
-        Primitive::I32 | Primitive::U32 => WasmInstruction::I32Load(arg),
+        Primitive::I32 | Primitive::U32 | Primitive::Char => WasmInstruction::I32Load(arg),
         Primitive::I64 | Primitive::U64 => WasmInstruction::I64Load(arg),
         Primitive::F32 => WasmInstruction::F32Load(arg),
         Primitive::F64 => WasmInstruction::F64Load(arg),
@@ -2364,7 +2411,7 @@ fn emit_store(body: &mut WasmFunction, kind: Primitive) {
     body.instruction(&match kind {
         Primitive::Bool | Primitive::U8 | Primitive::I8 => WasmInstruction::I32Store8(arg),
         Primitive::U16 | Primitive::I16 => WasmInstruction::I32Store16(arg),
-        Primitive::I32 | Primitive::U32 => WasmInstruction::I32Store(arg),
+        Primitive::I32 | Primitive::U32 | Primitive::Char => WasmInstruction::I32Store(arg),
         Primitive::I64 | Primitive::U64 => WasmInstruction::I64Store(arg),
         Primitive::F32 => WasmInstruction::F32Store(arg),
         Primitive::F64 => WasmInstruction::F64Store(arg),
@@ -2406,48 +2453,6 @@ fn emit_operand(
         param_count,
         operand,
     )?));
-    Ok(())
-}
-
-fn array_cell(layout: &FrameLayout, operand: &Operand) -> Option<ArrayCell> {
-    let slot = match operand.source {
-        Source::Local(local) => Slot::Local(local.0),
-        Source::Value(value) => Slot::Value(value.0),
-        Source::Function(_) => return None,
-    };
-    layout.arrays.get(&slot).copied()
-}
-
-fn array_cell_of(layout: &FrameLayout, slot: Slot) -> Result<ArrayCell, String> {
-    layout
-        .arrays
-        .get(&slot)
-        .copied()
-        .ok_or_else(|| "array storage cell is missing".to_string())
-}
-
-/// Copy a whole array between two cells of identical layout.
-fn emit_array_copy(
-    body: &mut WasmFunction,
-    function: &Function,
-    param_count: u32,
-    destination: ArrayCell,
-    source: &Operand,
-    layout: &FrameLayout,
-    frame: Option<FrameState>,
-) -> Result<(), String> {
-    let frame = frame.ok_or("array cell requires frame")?;
-    if array_cell(layout, source).is_some_and(|cell| cell.offset == destination.offset) {
-        // The array was constructed in the destination cell already.
-        return Ok(());
-    }
-    emit_address(body, frame, destination.offset);
-    emit_operand(body, function, param_count, source, layout, frame.into())?;
-    body.instruction(&WasmInstruction::I32Const(destination.size as i32));
-    body.instruction(&WasmInstruction::MemoryCopy {
-        src_mem: 0,
-        dst_mem: 0,
-    });
     Ok(())
 }
 
@@ -2707,6 +2712,53 @@ fn emit_binary(
     scratch64: u32,
     site: Site,
 ) -> Result<(), String> {
+    if matches!(op, BinaryOp::WrappingAdd | BinaryOp::WrappingMultiply) {
+        if *ty != Type::Primitive(Primitive::U32) {
+            return Err("wrapping arithmetic requires u32 operands".into());
+        }
+        body.instruction(&WasmInstruction::LocalGet(left));
+        body.instruction(&WasmInstruction::LocalGet(right));
+        body.instruction(if op == BinaryOp::WrappingAdd {
+            &WasmInstruction::I32Add
+        } else {
+            &WasmInstruction::I32Mul
+        });
+        body.instruction(&WasmInstruction::LocalSet(output));
+        return Ok(());
+    }
+    if matches!(
+        op,
+        BinaryOp::BitwiseAnd
+            | BinaryOp::BitwiseXor
+            | BinaryOp::BitwiseOr
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight
+    ) {
+        if *ty != Type::Primitive(Primitive::U32) {
+            return Err("bitwise operations require u32 operands".into());
+        }
+        if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+            body.instruction(&WasmInstruction::LocalGet(right));
+            body.instruction(&WasmInstruction::I32Const(32));
+            body.instruction(&WasmInstruction::I32GeU);
+            trap_if(body, site, TrapReason::ShiftCount);
+            body.instruction(&WasmInstruction::LocalGet(left));
+            body.instruction(&WasmInstruction::LocalGet(right));
+        } else {
+            body.instruction(&WasmInstruction::LocalGet(left));
+            body.instruction(&WasmInstruction::LocalGet(right));
+        }
+        body.instruction(match op {
+            BinaryOp::BitwiseAnd => &WasmInstruction::I32And,
+            BinaryOp::BitwiseXor => &WasmInstruction::I32Xor,
+            BinaryOp::BitwiseOr => &WasmInstruction::I32Or,
+            BinaryOp::ShiftLeft => &WasmInstruction::I32Shl,
+            BinaryOp::ShiftRight => &WasmInstruction::I32ShrU,
+            _ => unreachable!(),
+        });
+        body.instruction(&WasmInstruction::LocalSet(output));
+        return Ok(());
+    }
     if matches!(
         op,
         BinaryOp::Equal
@@ -2725,6 +2777,15 @@ fn emit_binary(
     };
     match kind {
         Primitive::Bool if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) => {
+            body.instruction(&WasmInstruction::LocalGet(left));
+            body.instruction(&WasmInstruction::LocalGet(right));
+            body.instruction(if op == BinaryOp::Equal {
+                &WasmInstruction::I32Eq
+            } else {
+                &WasmInstruction::I32Ne
+            });
+        }
+        Primitive::Char if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) => {
             body.instruction(&WasmInstruction::LocalGet(left));
             body.instruction(&WasmInstruction::LocalGet(right));
             body.instruction(if op == BinaryOp::Equal {
@@ -2765,6 +2826,7 @@ fn emit_binary(
         }
         Primitive::Unit => return Err("Unit does not support binary operations".into()),
         Primitive::Bool => return Err("Bool supports equality comparisons only".into()),
+        Primitive::Char => return Err("Char supports equality comparisons only".into()),
     }
     body.instruction(&WasmInstruction::LocalSet(output));
     Ok(())
@@ -2789,6 +2851,9 @@ fn emit_compare(
     let Type::Primitive(kind) = ty else {
         return Err("comparison requires primitive operands".into());
     };
+    if *kind == Primitive::Char && !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+        return Err("Char supports equality comparisons only".into());
+    }
     body.instruction(&WasmInstruction::LocalGet(left));
     body.instruction(&WasmInstruction::LocalGet(right));
     let signed = matches!(
@@ -4013,34 +4078,73 @@ fn compile_instruction(
             field,
             value,
         } => {
-            let Type::Struct(id) = function.locals[target.0 as usize].ty else {
-                return Err("String field replacement requires a struct local".into());
-            };
-            let cell = array_cell_of(layout, Slot::Local(target.0))?;
-            let frame = frame.ok_or("struct local requires a frame")?;
-            let offset = cell.offset + layout.structs[id.0 as usize].offsets[*field as usize];
-            if heap_locals.contains(target) {
-                release_string_at(body, frame, offset, heap_copy_index)?;
+            match &function.locals[target.0 as usize].ty {
+                Type::Struct(id) => {
+                    let cell = array_cell_of(layout, Slot::Local(target.0))?;
+                    let offset =
+                        cell.offset + layout.structs[id.0 as usize].offsets[*field as usize];
+                    let frame = frame.ok_or("struct local requires a frame")?;
+                    if heap_locals.contains(target) {
+                        release_string_at(body, frame, offset, heap_copy_index)?;
+                    }
+                    emit_array_copy(
+                        body,
+                        function,
+                        param_count,
+                        ArrayCell {
+                            offset,
+                            size: string_descriptor::SIZE,
+                        },
+                        value,
+                        layout,
+                        Some(frame),
+                    )?;
+                }
+                Type::Reference {
+                    access: memobits_ir::Access::Share,
+                    inner,
+                } => {
+                    let Type::Struct(id) = inner.as_ref() else {
+                        return Err(
+                            "String field replacement requires a shared struct parameter".into(),
+                        );
+                    };
+                    let offset = layout.structs[id.0 as usize].offsets[*field as usize];
+                    let target_operand = Operand {
+                        source: Source::Local(*target),
+                        mode: memobits_ir::UseMode::Read,
+                        span: instruction.span,
+                    };
+                    emit_operand(body, function, param_count, &target_operand, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    if let Some(copy) = heap_copy_index {
+                        string_descriptor::load_allocation(body);
+                        body.instruction(&WasmInstruction::Call(copy + 1));
+                    }
+                    emit_operand(body, function, param_count, &target_operand, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(offset as i32));
+                    body.instruction(&WasmInstruction::I32Add);
+                    emit_operand(body, function, param_count, value, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32Const(string_descriptor::SIZE as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+                _ => {
+                    return Err(
+                        "String field replacement target is not an owner or share parameter".into(),
+                    )
+                }
             }
-            emit_array_copy(
-                body,
-                function,
-                param_count,
-                ArrayCell {
-                    offset,
-                    size: string_descriptor::SIZE,
-                },
-                value,
-                layout,
-                Some(frame),
-            )?;
             clear_moved_heap_source(
                 body,
                 function,
                 param_count,
                 value,
                 layout,
-                Some(frame),
+                frame,
                 heap_locals,
             )?;
         }
@@ -4156,9 +4260,31 @@ fn compile_instruction(
                 let cell = array_cell_of(layout, Slot::Value(id.0))?;
                 emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
                 body.instruction(&WasmInstruction::Call(indices[&target.0]));
+                for argument in arguments {
+                    clear_moved_heap_source(
+                        body,
+                        function,
+                        param_count,
+                        argument,
+                        layout,
+                        frame,
+                        heap_locals,
+                    )?;
+                }
                 return Ok(());
             }
             body.instruction(&WasmInstruction::Call(indices[&target.0]));
+            for argument in arguments {
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    argument,
+                    layout,
+                    frame,
+                    heap_locals,
+                )?;
+            }
             // The Program's function table is available only to the caller; a
             // Unit call leaves no Wasm stack result and receives an internal zero.
             // Determine Unit from the value's recorded type.
@@ -4188,6 +4314,17 @@ fn compile_instruction(
                 site,
             )?;
         }
+        InstructionKind::Cast {
+            value,
+            source,
+            target,
+        } => {
+            emit_operand(body, function, param_count, value, layout, frame)?;
+            emit_numeric_cast(body, *source, *target)?;
+            body.instruction(&WasmInstruction::LocalSet(
+                output.ok_or("cast lacks output")?,
+            ));
+        }
         InstructionKind::Binary { op, left, right } => {
             let output = output.ok_or("binary operation lacks an output")?;
             let ty = value_type(function, left)?;
@@ -4200,6 +4337,8 @@ fn compile_instruction(
                     | BinaryOp::Multiply
                     | BinaryOp::Divide
                     | BinaryOp::Remainder
+                    | BinaryOp::ShiftLeft
+                    | BinaryOp::ShiftRight
             ) && is_integer(&ty);
             let site = traps.site(if checked { instruction.span } else { None });
             emit_binary(
@@ -4256,12 +4395,15 @@ fn emit_constant(
                 }
                 body.instruction(&WasmInstruction::I32Const(value));
             }
-            Primitive::U8 | Primitive::U16 | Primitive::U32 => {
+            Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::Char => {
                 let value = text
                     .replace('_', "")
                     .parse::<u32>()
                     .map_err(|_| "invalid unsigned integer constant")?;
-                if !integer_fits_unsigned(kind, value as u128) {
+                if kind == Primitive::Char && char::from_u32(value).is_none() {
+                    return Err("character constant is not a Unicode scalar value".into());
+                }
+                if kind != Primitive::Char && !integer_fits_unsigned(kind, value as u128) {
                     return Err(format!("integer constant does not fit {kind:?}"));
                 }
                 body.instruction(&WasmInstruction::I32Const(value as i32));

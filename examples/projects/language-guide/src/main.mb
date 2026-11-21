@@ -2,6 +2,36 @@
 // print Result: Ok(i32(42)). Each error code identifies a failed check.
 
 /* Numbers and control flow. Block comments can /* nest */. */
+// Character literals contain exactly one Unicode scalar. `Char` remains a
+// distinct type from `u32`, though both use a 32-bit Wasm value.
+fn character_roundtrip(value: Char) -> Bool { value == '😀' }
+fn character_literals() -> Bool {
+    let ascii: Char = 'A';
+    let accented: Char = 'é';
+    ascii == 'A' && accented == 'é' && character_roundtrip('😀')
+        && '\n' == '\n' && '\\' == '\\' && '\'' == '\''
+}
+
+// Tuples preserve element order in local values and internal calls. Numeric
+// projections use `.0`, `.1`; labels are occurrence-local projection aliases.
+fn echo_pair(pair: (i32, Bool)) -> (i32, Bool) { (pair.0, pair.1) }
+fn labeled_left(pair: (left: i32, right: i32)) -> i32 { pair.left }
+fn reversed_labeled_left(pair: (right: i32, left: i32)) -> i32 { pair.left }
+fn forward_owned_pair(pair: (string, u32), early: Bool) -> (string, u32) {
+    if early { return pair; }
+    pair
+}
+fn tuple_values() -> Bool {
+    let pair := echo_pair((40, true));
+    let text := "owned".concat("!");
+    let text_pair := (text, 40 as u32);
+    let owned := forward_owned_pair(text_pair, true);
+    pair.0 == 40 && pair.1
+        && owned.0.len() == 6 && owned.1 == 40
+        && labeled_left((left: 40, right: 0))
+            + reversed_labeled_left((right: 0, left: 2)) == 42
+}
+
 fn numbers() -> Bool {
     // An annotation supplies the literal type. Without context, integers
     // default to i32 and floats to f64.
@@ -37,6 +67,278 @@ fn numbers() -> Bool {
     } else {
         false
     }
+}
+
+// Numeric `as` casts are explicit across supported integer and float types.
+// Integer casts keep low bits; float-to-int truncates and saturates, with NaN
+// becoming zero. The byte convenience method is equivalent to `as u32`.
+fn widen_byte(value: u8) -> u32 {
+    value as u32
+}
+fn widen_byte_method(value: u8) -> u32 {
+    value.to_u32()
+}
+fn widenings() -> Bool {
+    let bytes: Bytes<4> = [0, 127, 128, 255];
+    widen_byte(bytes[0]) == 0 && widen_byte_method(bytes[1]) == 127
+        && bytes[2] as u32 == 128 && bytes[3].to_u32() == 255
+}
+fn numeric_casts() -> Bool {
+    let all_bits: u32 = 4294967295;
+    let signed: i32 = all_bits as i32;
+    let fraction: i32 = (-1.9) as i32;
+    let nan: u32 = (0.0 / 0.0) as u32;
+    let saturated: u64 = 1e300 as u64;
+    let rounded: u64 = 16777217 as f32 as u64;
+    signed == -1 && fraction == -1 && nan == 0
+        && saturated == 18446744073709551615 && rounded == 16777216
+}
+// Explicit u32 wrapping methods perform arithmetic modulo 2^32. Plain `+`
+// and `*` keep their checked behavior.
+fn wrapping_arithmetic() -> Bool {
+    let max: u32 = 4294967295;
+    max.wrapping_add(1) == 0 && max.wrapping_mul(2) == 4294967294
+}
+// u32 bitwise operations preserve the bit pattern. Shift counts must be below
+// 32; left shift discards high bits and right shift fills with zeroes.
+fn bit_operations() -> Bool {
+    let high: u32 = 2147483648;
+    let pattern: u32 = 2863311530;
+    1 | 2 ^ 3 & 7 == 1 && pattern.bit_xor(1431655765) == 4294967295
+        && pattern.bit_and(15) == 10 && pattern.bit_or(5) == 2863311535
+        && 1 << 31 == high && high >> 31 == 1
+}
+
+// A direct share parameter can replace a String field. The caller retains
+// ownership and cleanup; the callee only has exclusive access during the call.
+type TextRecord { text: string, tag: u32 }
+type Box<T> { value: T }
+type Buffer<T, const N: u32> { data: Array<T, N> }
+type Maybe<T> [Empty, Present(T)]
+type Packet<const N: u32> [Data(Array<u8, N>)]
+// Bodyless declarations preserve a nominal type identity but have no value
+// constructor in this slice. An empty struct below remains a distinct type.
+type EmptyRecord {}
+// A trailing `extend` attaches methods to its nominal declaration; methods
+// use ordinary receiver calls. Generic nominal trailing extensions are gated.
+type OpaqueHandle; extend {
+    fn opaque_kind(borrow self) -> Bool { true }
+}
+type Signal [Start, Stop] extend {
+    fn is_active(borrow self) -> Bool {
+        match self {
+            Signal::Start => true,
+            Signal::Stop => false,
+        }
+    }
+}
+fn replace_record_text(record: share TextRecord) {
+    record.text = "updated";
+}
+fn accept_opaque_handle(handle: OpaqueHandle) {}
+fn shared_string_field_replacement() -> Bool {
+    var record := TextRecord { text: "before", tag: 7 };
+    replace_record_text(record.share());
+    record.text.len() == 7 && record.tag == 7
+}
+
+// Generic functions specialize one unconstrained type parameter inferred from
+// a direct owned argument. Additional parameters may use that same T or fixed
+// concrete types; the result is T. A bounded const form forwards T and N only
+// through direct Array<T, N> parameters and results. Each body is checked for
+// its concrete specialization. A single interface bound on direct owned T
+// carries caller-visible evidence through nested generic calls. Other bound
+// shapes, borrowed parameters, and nested generic type patterns remain gated.
+fn identity<T>(value: T) -> T { value }
+fn select<T>(value: T, enabled: Bool, fallback: T) -> T {
+    if enabled { value } else { fallback }
+}
+fn generic_functions() -> Bool {
+    let number := 40;
+    let selected: i32 = select(number, true, 0);
+    let flag: Bool = identity(true);
+    let again: i32 = identity(selected);
+    flag && again + identity(2) == 42
+}
+fn echo_array<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { value }
+fn relay_array<T, const N: u32>(value: Array<T, N>) -> Array<T, N> {
+    echo_array(value)
+}
+fn generic_array_forwarding() -> Bool {
+    let one: Array<i32, 1> = [40];
+    let two: Array<i32, 2> = [1, 1];
+    let first := relay_array(one);
+    let second := relay_array(two);
+    first[0] + second[0] + second[1] == 42
+}
+
+// A generic bound uses the caller-visible interface implementation. A nested
+// generic call forwards that selected evidence to the constrained function.
+type RenderPoint { value: i32 }
+interface Render { fn render(borrow self) -> i32; }
+extend RenderPoint of Render {
+    fn render(borrow self) -> i32 { self.value }
+}
+fn render_value<T>(value: T) -> i32 where T: Render {
+    value.render() of Render
+}
+fn relay_render<T>(value: T) -> i32 where T: Render {
+    render_value(value)
+}
+fn generic_interface_forwarding() -> Bool {
+    let point := RenderPoint { value: 42 };
+    relay_render(point) == 42
+}
+
+// User-defined + selects the compiler-provided core::ops::Add interface.
+// Associated Rhs and Output permit a heterogeneous owned operation. Generic
+// signatures project both types through the caller-selected Add evidence;
+// primitive arithmetic remains checked and built in.
+use core::ops::Add;
+type AddPoint { value: i32 }
+type AddRight { value: i32 }
+type AddResult { value: i32 }
+extend AddPoint of Add {
+    type Rhs = AddRight;
+    type Output = AddResult;
+    fn add(self, rhs: AddRight) -> AddResult {
+        AddResult { value: self.value + rhs.value }
+    }
+}
+fn add_points<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
+    left + right
+}
+fn user_defined_add() -> Bool {
+    let left := AddPoint { value: 20 };
+    let right := AddRight { value: 22 };
+    let total := add_points(left, right);
+    total.value == 42
+}
+
+// User-defined - follows the same owned associated-type contract through
+// core::ops::Sub. Primitive subtraction stays built in and checked.
+use core::ops::Sub;
+type SubLeft { value: i32 }
+type SubRight { value: i32 }
+type SubResult { value: i32 }
+extend SubLeft of Sub {
+    type Rhs = SubRight;
+    type Output = SubResult;
+    fn sub(self, rhs: SubRight) -> SubResult {
+        SubResult { value: self.value - rhs.value }
+    }
+}
+fn subtract<T>(left: T, right: T::Rhs) -> T::Output where T: Sub {
+    left - right
+}
+fn user_defined_sub() -> Bool {
+    let difference := subtract(SubLeft { value: 50 }, SubRight { value: 8 });
+    difference.value == 42
+}
+
+// User-defined * uses the owned associated-type contract through Mul.
+use core::ops::Mul;
+type MulLeft { value: i32 }
+type MulRight { value: i32 }
+type MulResult { value: i32 }
+extend MulLeft of Mul {
+    type Rhs = MulRight;
+    type Output = MulResult;
+    fn mul(self, rhs: MulRight) -> MulResult {
+        MulResult { value: self.value * rhs.value }
+    }
+}
+fn multiply<T>(left: T, right: T::Rhs) -> T::Output where T: Mul {
+    left * right
+}
+fn user_defined_mul() -> Bool {
+    let product := multiply(MulLeft { value: 6 }, MulRight { value: 7 });
+    product.value == 42
+}
+
+// User-defined / uses the owned associated-type contract through Div.
+use core::ops::Div;
+type DivLeft { value: i32 }
+type DivRight { value: i32 }
+type DivResult { value: i32 }
+extend DivLeft of Div {
+    type Rhs = DivRight;
+    type Output = DivResult;
+    fn div(self, rhs: DivRight) -> DivResult {
+        DivResult { value: self.value / rhs.value }
+    }
+}
+fn divide<T>(left: T, right: T::Rhs) -> T::Output where T: Div {
+    left / right
+}
+fn user_defined_div() -> Bool {
+    let quotient := divide(DivLeft { value: 84 }, DivRight { value: 2 });
+    quotient.value == 42
+}
+
+// User-defined % uses the same owned associated-type contract through Rem.
+use core::ops::Rem;
+type RemLeft { value: i32 }
+type RemRight { value: i32 }
+type RemResult { value: i32 }
+extend RemLeft of Rem {
+    type Rhs = RemRight;
+    type Output = RemResult;
+    fn rem(self, rhs: RemRight) -> RemResult {
+        RemResult { value: self.value % rhs.value }
+    }
+}
+fn remainder<T>(left: T, right: T::Rhs) -> T::Output where T: Rem {
+    left % right
+}
+fn user_defined_rem() -> Bool {
+    let result := remainder(RemLeft { value: 43 }, RemRight { value: 7 });
+    result.value == 1
+}
+
+// Generic nominal structs and enums specialize by type arguments. Const
+// arguments substitute into admitted fixed-array fields. Enum construction
+// uses the expected concrete enum type.
+fn generic_structs() -> Bool {
+    let signed := Box<i32> { value: 41 };
+    let unsigned := Box<u32> { value: 42 };
+    let bytes := Buffer<u8, 2> { data: [0, 42] };
+    let maybe_i32: Maybe<i32> = Maybe::Present(42);
+    let maybe_u32: Maybe<u32> = Maybe::Empty;
+    let packet_one: Packet<1> = Packet::Data([1]);
+    let packet_two: Packet<2> = Packet::Data([20, 21]);
+    let unwrapped := match maybe_i32 {
+        Maybe::Present(value) => value,
+        Maybe::Empty => 0,
+    };
+    let empty := match maybe_u32 {
+        Maybe::Present(_) => false,
+        Maybe::Empty => true,
+    };
+    let packet_values := match packet_one {
+        Packet::Data(bytes) => bytes[0] as i32,
+    } + match packet_two {
+        Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32,
+    };
+    signed.value + 1 == 42 && unsigned.value == 42 && bytes.data[1] == 42
+        && unwrapped == 42 && empty && packet_values == 42
+}
+fn trailing_enum_extension() -> Bool {
+    let signal := Signal::Start;
+    signal.is_active()
+}
+// Postfix `?` is the concise spelling of Option<T>; contextual Some and None
+// construction keeps the existing Option representation and match behavior.
+fn optional_sugar() -> Bool {
+    let present: i32? = Some(40);
+    let absent: i32? = None;
+    (match present {
+        Some(value) => value == 40,
+        None => false,
+    }) && (match absent {
+        Some(_) => false,
+        None => true,
+    })
 }
 // Integer arithmetic and array indexing are checked. Proven invalid cases
 // can fail compilation. Dynamic overflow, zero divisors and invalid indices
@@ -226,7 +528,7 @@ fn explicit_drop() -> Bool {
 
 type TextLabel {
     number: u32,
-    text: String,
+    text: string,
 }
 
 // A local struct can own a literal-backed String alongside primitive fields.
@@ -263,11 +565,11 @@ fn local_heap_string_fields() -> Bool {
 }
 
 type EditableLabel {
-    note: String,
-    text: String,
+    note: string,
+    text: string,
 }
 
-fn append_question(text: borrow String) -> String {
+fn append_question(text: borrow string) -> string {
     let result := text.concat("?");
     result
 }
@@ -296,14 +598,21 @@ fn inspect_text_label(label: borrow TextLabel) -> Bool {
         && byte_is(label.text.byte_at(2), 33)
 }
 
-// Pass an explicit borrow of a named owner to a direct internal call.
-// The callee reads the fields through its borrow parameter. The caller
-// still owns the struct and can move it after the call. Whole borrows
-// cannot be saved in another binding or forwarded as whole-struct borrows.
+fn inspect_shared_text_label(label: share TextLabel) -> Bool {
+    label.number == 9 && byte_length(label.text.borrow()) == 3
+        && byte_is(label.text.byte_at(2), 33)
+}
+
+// Pass an explicit borrow or share of a named owner to a direct internal call.
+// The callee reads fields through either parameter. A share is exclusive for
+// the call, while the caller still owns the struct and can move it afterwards.
+// Whole references cannot be saved in another binding or forwarded.
 fn borrow_string_struct() -> Bool {
     let prefix := "é";
-    let label := TextLabel { text: prefix.concat("!"), number: 9 };
-    if !inspect_text_label(label.borrow()) { return false; }
+    var label := TextLabel { text: prefix.concat("!"), number: 9 };
+    if !inspect_text_label(label.borrow()) || !inspect_shared_text_label(label.share()) {
+        return false;
+    }
     let moved := label;
     inspect_text_label(moved.borrow()) && moved.text.len() == 3
 }
@@ -404,11 +713,16 @@ fn primitive_lists() -> Bool {
 }
 
 // String literals are owned UTF-8. The empty literal is also a String.
-fn text() -> String {
+fn text() -> string {
     "café 😀"
 }
 
-fn byte_length(value: borrow String) -> u32 {
+// The source type has one spelling: lowercase `string`.
+fn lowercase_text() -> string {
+    "café 😀"
+}
+
+fn byte_length(value: borrow string) -> u32 {
     value.len()
 }
 
@@ -422,6 +736,8 @@ fn fixed_text() -> Bool {
     // Length counts UTF-8 bytes. The accented letter takes two and the
     // emoji takes four. Reading the length does not consume the String.
     while_borrowed == 10 && borrowed == 10 && moved.len() == 10
+        && lowercase_text().len() == 10
+        && byte_length(lowercase_text().borrow()) == 10
         && moved.len() == text().len()
         && "".len() == 0 && "abc".len() == 3 && "é".len() == 2 && "😀".len() == 4
 }
@@ -481,7 +797,7 @@ fn scalar_width(value: u32) -> u32 {
     else { 4 }
 }
 
-fn walk_text(value: borrow String) -> Bool {
+fn walk_text(value: borrow string) -> Bool {
     let starts: Array<u32, 4> = [0, 1, 3, 6];
     let scalars: Array<u32, 4> = [97, 233, 8_364, 128_512];
     let end := value.len();
@@ -516,16 +832,16 @@ fn text_boundaries() -> Bool {
         && "".is_char_boundary(0) && !"".is_char_boundary(1)
 }
 
-fn add_suffix(value: borrow String) -> String {
+fn add_suffix(value: borrow string) -> string {
     let text := value.concat("!");
     text // Ownership moves out before this scope ends.
 }
 
-fn add_question_mark(value: share String) {
+fn add_question_mark(value: share string) {
     value.push_str("?");
 }
 
-fn combined_byte_length(first: String, second: String, extra: u32) -> u32 {
+fn combined_byte_length(first: string, second: string, extra: u32) -> u32 {
     first.len() + second.len() + extra
 }
 
@@ -564,7 +880,7 @@ fn text_concat() -> Bool {
 
 // Internal Results can return static text. The match moves the String out
 // of Ok. Exported String results remain gated.
-fn static_label(found: Bool) -> Result<String, Error> {
+fn static_label(found: Bool) -> Result<string, Error> {
     if found { return Ok("é"); }
     Err(Error { code: 7 })
 }
@@ -581,7 +897,7 @@ fn static_text_result() -> Bool {
     found && missing
 }
 
-fn owned_label() -> Result<String, Error> {
+fn owned_label() -> Result<string, Error> {
     let text := "é".concat("!");
     Ok(text)
 }
@@ -590,7 +906,7 @@ fn heap_text_result() -> Bool {
     // A heap Ok must be matched immediately in the same function, with an
     // explicit Err arm and a binding for the owned String.
     let text := "é".concat("!");
-    let result: Result<String, Error> = Ok(text);
+    let result: Result<string, Error> = Ok(text);
     let local_ok := match result {
         Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
         Err(_) => false
@@ -733,6 +1049,16 @@ fn outcomes() -> Bool {
 // or a nominal descendant as their error argument.
 
 // Project features to try from the repository root:
+// - examples/projects/module-imports is the runnable multi-module setup for
+//   `use math;` and explicit `point.draw() of Draw` selection. From the repo
+//   root, run `mb run --project examples/projects/module-imports/project.toml`
+//   or build that project and run its Wasm artifact. The grouped
+//   `use self::main::{Point, Draw};` import loads symbols; only the direct
+//   module edge activates public extensions. Transitive imports and prelude
+//   aliases do not activate extensions, and external package loading is not
+//   implemented yet. Its `exercise<T>` wrapper calls both an inherent method
+//   and a selected interface method. Constrained generic evidence is selected
+//   from the caller's visible extensions and forwarded through nested calls.
 // - examples/projects/numeric imports a public function via self::math and
 //   exports it as add in project.toml. Use its manifest with mb resolve --lib,
 //   mb build --lib, or mb build --output PATH.
@@ -747,14 +1073,34 @@ fn outcomes() -> Bool {
 //   The runner calls zero-argument exports. Library exports use scalar
 //   signatures. External linking, type exports and mb check are unsupported.
 // - examples/design/language-guide.mb explores target syntax. String slicing,
-//   scalar iteration, lists, user-defined generics, try, defaults and
-//   aggregate .copy() are gated.
+//   scalar iteration, lists, try, defaults and
+//   aggregate .copy() are gated. Generic function calls and interface evidence
+//   forwarding are limited to the examples above; generic nominal structs are
+//   demonstrated above.
 
 // A zero-argument application entry can return Result or Attempt with a
 // primitive success payload. Both runners show the variant and typed value
 // or the concrete error type and code.
 fn main() -> Result<i32, Error> {
+    if !character_literals() { return Err(Error { code: 30 }); }
+    if !tuple_values() { return Err(Error { code: 31 }); }
     if !numbers() { return Err(Error { code: 1 }); }
+    if !widenings() { return Err(Error { code: 22 }); }
+    if !numeric_casts() { return Err(Error { code: 26 }); }
+    if !shared_string_field_replacement() { return Err(Error { code: 23 }); }
+    if !generic_structs() { return Err(Error { code: 27 }); }
+    if !generic_functions() { return Err(Error { code: 32 }); }
+    if !generic_array_forwarding() { return Err(Error { code: 33 }); }
+    if !generic_interface_forwarding() { return Err(Error { code: 34 }); }
+    if !user_defined_add() { return Err(Error { code: 35 }); }
+    if !user_defined_sub() { return Err(Error { code: 36 }); }
+    if !user_defined_mul() { return Err(Error { code: 37 }); }
+    if !user_defined_div() { return Err(Error { code: 38 }); }
+    if !user_defined_rem() { return Err(Error { code: 39 }); }
+    if !trailing_enum_extension() { return Err(Error { code: 29 }); }
+    if !optional_sugar() { return Err(Error { code: 28 }); }
+    if !wrapping_arithmetic() { return Err(Error { code: 24 }); }
+    if !bit_operations() { return Err(Error { code: 25 }); }
     if !stations() { return Err(Error { code: 2 }); }
     if !enums() { return Err(Error { code: 3 }); }
     if !optional_borrow() { return Err(Error { code: 4 }); }

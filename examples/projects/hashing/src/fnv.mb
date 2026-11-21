@@ -1,0 +1,42 @@
+use self::bits::bit_xor;
+use self::bits::u8_to_u32;
+use self::bits::wrapping_mul;
+
+pub fn fnv1a_slice(bytes: borrow Bytes<8>, length: i32) -> u32 {
+    let offset_basis: u32 = 2_166_136_261;
+    let prime: u32 = 16_777_619;
+    var hash: u32 = offset_basis;
+    var i: i32 = 0;
+    loop {
+        if i == length { break; }
+        let byte := u8_to_u32(bytes[i]);
+        hash = bit_xor(hash, byte);
+        hash = wrapping_mul(hash, prime);
+        i += 1;
+    }
+    hash
+}
+
+pub fn fnv1a_3(bytes: borrow Bytes<3>) -> u32 {
+    let offset_basis: u32 = 2_166_136_261;
+    let prime: u32 = 16_777_619;
+    var hash: u32 = offset_basis;
+    loop b in bytes {
+        let byte := u8_to_u32(b);
+        hash = bit_xor(hash, byte);
+        hash = wrapping_mul(hash, prime);
+    }
+    hash
+}
+
+pub fn fnv1a_8(bytes: borrow Bytes<8>) -> u32 {
+    let offset_basis: u32 = 2_166_136_261;
+    let prime: u32 = 16_777_619;
+    var hash: u32 = offset_basis;
+    loop b in bytes {
+        let byte := u8_to_u32(b);
+        hash = bit_xor(hash, byte);
+        hash = wrapping_mul(hash, prime);
+    }
+    hash
+}

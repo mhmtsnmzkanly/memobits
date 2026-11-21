@@ -26,6 +26,15 @@ range checks as well as the correct signed/unsigned comparison and division.
 Zero divisors, signed division overflow, and negation of the signed minimum need
 explicit treatment. Floating-point operations retain IEEE behavior.
 
+Explicit `as` casts cover every pair among the supported integer and
+floating-point types. The IR retains both source and target types so Wasm can
+select signed or unsigned conversion instructions. Integer narrowing keeps the
+low bits; integer widening extends according to source signedness. Float to
+integer conversion truncates toward zero, saturates, and maps NaN to zero.
+Float-width conversions use Wasm's IEEE conversion instructions. The
+`u8.to_u32()` convenience method lowers to the same typed cast. Assignment
+does not perform implicit numeric conversion.
+
 Dynamic failure is a Wasm trap preceded by a trap record (see "Trap reporting"
 below); this is not a stable error ABI. Statically proven failures should be
 diagnosed before encoding.
@@ -137,3 +146,12 @@ A constant-only test or a Wasm validator pass is insufficient evidence for these
 runtime rules. Generated modules must execute with assertions on results and
 error paths. Indirect calls and unsupported types require explicit diagnostics
 until implemented.
+
+`u32.wrapping_add` and `u32.wrapping_mul` are explicit modulo-2^32 operations.
+They emit Wasm i32 add and multiply directly, while ordinary `+` and `*` retain
+the checked numeric path.
+
+`u32` bitwise operators and `bit_and`, `bit_xor`, and `bit_or` use Wasm i32
+operations. Unsigned shifts accept `u32` counts below 32; constant invalid
+counts fail analysis, and dynamic invalid counts trap with their source site.
+The right-shift instruction is unsigned, so it fills high bits with zero.

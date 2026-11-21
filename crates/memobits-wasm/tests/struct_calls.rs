@@ -41,6 +41,61 @@ fn run(source: &str) -> i32 {
     run_as::<i32>(source).unwrap_or_else(|error| panic!("{source}: {error}"))
 }
 
+#[test]
+fn owned_string_tuple_calls_reuse_heap_under_a_memory_cap() {
+    let source = r#"
+        fn exact(value: borrow string) -> Bool {
+            value.len() == 2 && match value.byte_at(0) {
+                Some(a) => a == 97 && match value.byte_at(1) { Some(b) => b == 98, None => false },
+                None => false
+            }
+        }
+        fn forward(pair: (string, u32), early: Bool) -> (string, u32) {
+            if early { return pair; }
+            pair
+        }
+        fn main() -> i32 {
+            var rounds := 0;
+            var total := 0;
+            loop {
+                if rounds == 12000 { break; }
+                let text := "a".concat("b");
+                let pair := (text, 40 as u32);
+                let returned := forward(pair, rounds == 0);
+                if !exact(returned.0.borrow()) { return 0; }
+                total += returned.0.len() as i32 + returned.1 as i32;
+                rounds += 1;
+            }
+            total
+        }
+    "#;
+    let program = lower(source);
+    let main = program.functions.len() as u32 - 1;
+    let exports = BTreeMap::from([("main".to_string(), memobits_ir::FunctionId(main))]);
+    let wasm = memobits_wasm::compile_with(
+        &program,
+        &exports,
+        &memobits_wasm::CompileOptions {
+            stack_size: 16 * 1024,
+        },
+    )
+    .unwrap_or_else(|errors| panic!("{errors:?}"));
+    let engine = Engine::default();
+    let module = Module::new(&engine, &wasm[..]).unwrap();
+    let mut store = Store::new(
+        &engine,
+        wasmi::StoreLimitsBuilder::new()
+            .memory_size(2 * 65_536)
+            .build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_and_start(&mut store, &module)
+        .unwrap();
+    let main = instance.get_typed_func::<(), i32>(&store, "main").unwrap();
+    assert_eq!(main.call(&mut store, ()).unwrap(), 12_000 * 42);
+}
+
 const P: &str = "type P { x: i32, y: i32 } ";
 
 #[test]
