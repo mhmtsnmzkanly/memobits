@@ -34,8 +34,8 @@ fn struct_field_index(definition: &TypeFact, name: &str) -> Option<usize> {
 }
 
 use crate::types::{
-    CheckMode, ExprId, FunctionFacts, MatchFact, PathTarget, SelectedCall, TypeFact, VariantUse,
-    check_resolved_mode, check_typed_module,
+    check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
+    PathTarget, SelectedCall, TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -612,12 +612,10 @@ fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
                 Type::String => Shape::String,
                 Type::Primitive(_) => Shape::Primitive,
                 Type::Struct(child) if admitted(types, child.0, visited) => Shape::Owner,
-                Type::Array { element, len } if *len != 0 => {
-                    match shape(types, element, visited) {
-                        Shape::Owner => Shape::Owner,
-                        _ => Shape::Other,
-                    }
-                }
+                Type::Array { element, len } if *len != 0 => match shape(types, element, visited) {
+                    Shape::Owner => Shape::Owner,
+                    _ => Shape::Other,
+                },
                 _ => Shape::Other,
             }
         }
@@ -647,8 +645,14 @@ fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
                 if !visited.insert(id.0) {
                     return false;
                 }
-                let result = info.fields.iter().any(|field| owns(types, &field.ty, visited))
-                    || info.variants.iter().flat_map(|variant| &variant.payload)
+                let result = info
+                    .fields
+                    .iter()
+                    .any(|field| owns(types, &field.ty, visited))
+                    || info
+                        .variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
                         .any(|field| owns(types, field, visited));
                 visited.remove(&id.0);
                 result
@@ -722,7 +726,7 @@ impl<'a> Builder<'a> {
                 (parameter.access == Access::Owned
                     && (matches!(ty, Type::String | Type::List(_))
                         || is_string_owner_aggregate_type(types, ty)))
-                    .then_some(local)
+                .then_some(local)
             })
             .collect();
         Self {
@@ -1081,8 +1085,7 @@ impl<'a> Builder<'a> {
             None,
         );
         let ty = &self.function.locals[local.0 as usize].ty;
-        if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty)
-        {
+        if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty) {
             self.owned_locals.push(local);
         }
     }
@@ -2771,11 +2774,8 @@ impl<'a> Builder<'a> {
                 self.owned_to(value, ty)?
             } else if self.is_string_tuple(ty) {
                 let owned = self.owned_to(value, ty)?;
-                let staged = self.hidden_local(
-                    "enum String tuple payload",
-                    ty.clone(),
-                    argument.span,
-                );
+                let staged =
+                    self.hidden_local("enum String tuple payload", ty.clone(), argument.span);
                 self.initialize_local(staged, owned, argument.span);
                 consume(op(Source::Local(staged), argument.span))
             } else {

@@ -2331,7 +2331,8 @@ fn borrowed_payload_program(
     let loaded = (f.values.len() - 1) as u32;
     assert_eq!(f.values[loaded as usize], enum_ty);
     let extracted = f.values.len() as u32;
-    f.values.push(if variant == 0 { Type::String } else { i32_ty() });
+    f.values
+        .push(if variant == 0 { Type::String } else { i32_ty() });
     instructions.push(ins(
         Some(extracted),
         InstructionKind::VariantExtract {
@@ -2347,7 +2348,12 @@ fn borrowed_payload_program(
         vec![("S", vec![Type::String]), ("N", vec![i32_ty()])],
     )];
     types.extend(holder_def);
-    match (Program { functions: vec![f], types }).validate() {
+    match (Program {
+        functions: vec![f],
+        types,
+    })
+    .validate()
+    {
         Ok(()) => vec![],
         Err(errors) => errors.into_iter().map(|e| e.message).collect(),
     }
@@ -2428,7 +2434,8 @@ fn rejects_heap_payload_extraction_from_borrowed_enum() {
 #[test]
 fn rejects_heap_payload_extraction_from_struct_field() {
     let holder = struct_def("H", vec![("e", Type::Enum(TypeId(0)))]);
-    let errors = borrowed_payload_program(Type::Struct(TypeId(1)), Some(holder), field_load_chain, 0);
+    let errors =
+        borrowed_payload_program(Type::Struct(TypeId(1)), Some(holder), field_load_chain, 0);
     assert!(has(&errors, BORROWED_PAYLOAD), "{errors:?}");
 }
 

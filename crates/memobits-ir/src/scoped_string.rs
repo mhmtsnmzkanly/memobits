@@ -1,9 +1,9 @@
 //! Validate lexical heap String ownership and cleanup across CFG edges.
 
 use super::{
-    outgoing_edges, push, Access, ArrayInit, Block, EntryOutcome, Function, FunctionId, Instruction,
-    InstructionKind, LocalId, Operand, Source, TerminatorKind, Type, UseMode, ValidationError,
-    ValueId,
+    outgoing_edges, push, Access, ArrayInit, Block, EntryOutcome, Function, FunctionId,
+    Instruction, InstructionKind, LocalId, Operand, Source, TerminatorKind, Type, UseMode,
+    ValidationError, ValueId,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -39,7 +39,9 @@ impl super::Program {
                     .parameters
                     .get(position)
                     .is_some_and(|parameter| parameter.access == Access::Owned)
-                    && function.locals.get(local.0 as usize)
+                    && function
+                        .locals
+                        .get(local.0 as usize)
                         .is_some_and(|local| owns_string_aggregate(self, &local.ty))
                 {
                     pending.push(Slot::Local(index, local));
@@ -81,26 +83,24 @@ impl super::Program {
                         InstructionKind::ArrayNew {
                             init: ArrayInit::Elements(elements),
                         } => {
-                            let destination = array_binding(
-                                function,
-                                &block.instructions[position..],
-                            )
-                            .map(|target| Slot::Local(index, target))
-                            .or_else(|| {
-                                let output = instruction.output?;
-                                matches!(&block.terminator.kind,
+                            let destination =
+                                array_binding(function, &block.instructions[position..])
+                                    .map(|target| Slot::Local(index, target))
+                                    .or_else(|| {
+                                        let output = instruction.output?;
+                                        matches!(&block.terminator.kind,
                                     TerminatorKind::Return(Some(Operand {
                                         source: Source::Value(returned),
                                         mode: UseMode::Consume,
                                         ..
                                     })) if *returned == output)
-                                .then_some(Slot::Return(index))
-                            });
+                                        .then_some(Slot::Return(index))
+                                    });
                             if let (Some(destination), Some(Type::Array { element, .. })) = (
                                 destination,
-                                instruction.output.and_then(|output| {
-                                    function.values.get(output.0 as usize)
-                                }),
+                                instruction
+                                    .output
+                                    .and_then(|output| function.values.get(output.0 as usize)),
                             ) {
                                 for operand in elements {
                                     for source in owned_storage_sources(
@@ -146,8 +146,10 @@ impl super::Program {
                                                     && later_base.mode == UseMode::Consume)
                                     });
                                 if final_extract_consumes_owner
-                                    && function.values.get(output.0 as usize)
-                                    .is_some_and(|ty| owns_string_storage(self, ty))
+                                    && function
+                                        .values
+                                        .get(output.0 as usize)
+                                        .is_some_and(|ty| owns_string_storage(self, ty))
                                 {
                                     let target = block.instructions[position + 1..]
                                         .iter()
@@ -158,11 +160,16 @@ impl super::Program {
                                                 value,
                                                 initialize: true,
                                             } if value.source == Source::Value(output)
-                                                && value.mode == UseMode::Consume => Some(*target),
+                                                && value.mode == UseMode::Consume =>
+                                            {
+                                                Some(*target)
+                                            }
                                             _ => None,
                                         });
                                     if let Some(target) = target {
-                                        moves.entry(Slot::Local(index, source)).or_default()
+                                        moves
+                                            .entry(Slot::Local(index, source))
+                                            .or_default()
                                             .push(Slot::Local(index, target));
                                     }
                                 }
@@ -173,18 +180,14 @@ impl super::Program {
                             value,
                             initialize,
                         } => {
-                            if let Some(source) = local_move_source(
-                                function,
-                                *target,
-                                value,
-                                *initialize,
-                            )
-                            .or_else(|| {
-                                struct_move_source(function, *target, value, *initialize)
-                            })
-                            .or_else(|| {
-                                array_move_source(function, *target, value, *initialize)
-                            })
+                            if let Some(source) =
+                                local_move_source(function, *target, value, *initialize)
+                                    .or_else(|| {
+                                        struct_move_source(function, *target, value, *initialize)
+                                    })
+                                    .or_else(|| {
+                                        array_move_source(function, *target, value, *initialize)
+                                    })
                             {
                                 moves
                                     .entry(Slot::Local(index, source))
@@ -198,21 +201,19 @@ impl super::Program {
                         }
                         | InstructionKind::EnumNew { .. } => {
                             if matches!(instruction.kind, InstructionKind::EnumNew { .. }) {
-                                let enum_destination = enum_binding(
-                                    function,
-                                    &block.instructions[position..],
-                                )
-                                .map(|target| Slot::Local(index, target))
-                                .or_else(|| {
-                                    let output = instruction.output?;
-                                    matches!(block.terminator.kind,
+                                let enum_destination =
+                                    enum_binding(function, &block.instructions[position..])
+                                        .map(|target| Slot::Local(index, target))
+                                        .or_else(|| {
+                                            let output = instruction.output?;
+                                            matches!(block.terminator.kind,
                                         TerminatorKind::Return(Some(Operand {
                                             source: Source::Value(value),
                                             mode: UseMode::Consume,
                                             ..
                                         })) if value == output)
-                                    .then_some(Slot::Return(index))
-                                });
+                                            .then_some(Slot::Return(index))
+                                        });
                                 if let Some(destination) = enum_destination {
                                     if let InstructionKind::EnumNew { payload, .. } =
                                         &instruction.kind
@@ -231,26 +232,32 @@ impl super::Program {
                                                         .find(|candidate| {
                                                             candidate.output == Some(value)
                                                         });
-                                                    match producer.map(|candidate| &candidate.kind) {
-                                                        Some(InstructionKind::Capture(Operand {
-                                                            source: Source::Local(source),
-                                                            mode: UseMode::Consume,
-                                                            ..
-                                                        })) => {
+                                                    match producer.map(|candidate| &candidate.kind)
+                                                    {
+                                                        Some(InstructionKind::Capture(
+                                                            Operand {
+                                                                source: Source::Local(source),
+                                                                mode: UseMode::Consume,
+                                                                ..
+                                                            },
+                                                        )) => {
                                                             moves
                                                                 .entry(Slot::Local(index, *source))
                                                                 .or_default()
                                                                 .push(destination);
                                                         }
                                                         Some(InstructionKind::Call {
-                                                            callee: Operand {
-                                                                source: Source::Function(callee),
-                                                                ..
-                                                            },
+                                                            callee:
+                                                                Operand {
+                                                                    source: Source::Function(callee),
+                                                                    ..
+                                                                },
                                                             ..
                                                         }) => {
                                                             moves
-                                                                .entry(Slot::Return(callee.0 as usize))
+                                                                .entry(Slot::Return(
+                                                                    callee.0 as usize,
+                                                                ))
                                                                 .or_default()
                                                                 .push(destination);
                                                         }
@@ -808,9 +815,7 @@ fn call_binding_result(
         .signature
         .result
         .as_ref();
-    if !matches!(result, Type::String)
-        && !owns_string_aggregate(program, result)
-    {
+    if !matches!(result, Type::String) && !owns_string_aggregate(program, result) {
         return None;
     }
     call_binding(program, function, instructions, result)
@@ -870,7 +875,9 @@ pub fn is_string_owner_transport(types: &[super::TypeDef], ty: &Type) -> bool {
         }
         let result = is_string_owner_struct(
             definition.error_ancestry.is_some(),
-            fields.iter().map(|field| field_shape(types, &field.ty, visited)),
+            fields
+                .iter()
+                .map(|field| field_shape(types, &field.ty, visited)),
         );
         visited.remove(&id);
         result
@@ -945,9 +952,9 @@ pub(super) fn owns_string_aggregate(program: &super::Program, ty: &Type) -> bool
                     return false;
                 }
                 let result = match &definition.kind {
-                    super::TypeDefKind::Struct { fields } => fields
-                        .iter()
-                        .any(|field| owns(program, &field.ty, visited)),
+                    super::TypeDefKind::Struct { fields } => {
+                        fields.iter().any(|field| owns(program, &field.ty, visited))
+                    }
                     super::TypeDefKind::Enum { variants } => variants
                         .iter()
                         .flat_map(|variant| &variant.payload)
@@ -1020,8 +1027,10 @@ pub(super) fn array_binding(function: &Function, instructions: &[Instruction]) -
     else {
         return None;
     };
-    (matches!(function.locals.get(target.0 as usize)?.ty, Type::Array { .. })
-        && value.source == Source::Value(output)
+    (matches!(
+        function.locals.get(target.0 as usize)?.ty,
+        Type::Array { .. }
+    ) && value.source == Source::Value(output)
         && value.mode == UseMode::Consume)
         .then_some(*target)
 }
@@ -1032,7 +1041,11 @@ pub(super) fn owned_aggregate_call_argument(
     producer_position: usize,
     result: &Type,
 ) -> bool {
-    let Some(output) = block.instructions.get(producer_position).and_then(|inst| inst.output) else {
+    let Some(output) = block
+        .instructions
+        .get(producer_position)
+        .and_then(|inst| inst.output)
+    else {
         return false;
     };
     if !owns_string_aggregate(program, result) {
@@ -1044,23 +1057,33 @@ pub(super) fn owned_aggregate_call_argument(
     {
         return false;
     }
-    block.instructions[producer_position + 1..].iter().any(|instruction| {
-        let InstructionKind::Call {
-            callee: Operand { source: Source::Function(callee), .. },
-            arguments,
-        } = &instruction.kind else {
-            return false;
-        };
-        let Some(target) = program.functions.get(callee.0 as usize) else {
-            return false;
-        };
-        arguments.iter().zip(&target.signature.parameters).any(|(argument, parameter)| {
-            argument.source == Source::Value(output)
-                && argument.mode == UseMode::Consume
-                && parameter.access == Access::Owned
-                && parameter.ty == *result
+    block.instructions[producer_position + 1..]
+        .iter()
+        .any(|instruction| {
+            let InstructionKind::Call {
+                callee:
+                    Operand {
+                        source: Source::Function(callee),
+                        ..
+                    },
+                arguments,
+            } = &instruction.kind
+            else {
+                return false;
+            };
+            let Some(target) = program.functions.get(callee.0 as usize) else {
+                return false;
+            };
+            arguments
+                .iter()
+                .zip(&target.signature.parameters)
+                .any(|(argument, parameter)| {
+                    argument.source == Source::Value(output)
+                        && argument.mode == UseMode::Consume
+                        && parameter.access == Access::Owned
+                        && parameter.ty == *result
+                })
         })
-    })
 }
 
 /// Recognize the exact extraction sequence emitted for positional tuple
@@ -1111,10 +1134,11 @@ pub(super) fn tuple_destructure_extractions(
         let mut valid = true;
         for (slot, field_definition) in fields.iter().enumerate() {
             let Some(Instruction {
-                kind: InstructionKind::Extract {
-                    base: extract_base,
-                    field,
-                },
+                kind:
+                    InstructionKind::Extract {
+                        base: extract_base,
+                        field,
+                    },
                 output: Some(output),
                 ..
             }) = block.instructions.get(cursor)
@@ -1135,14 +1159,19 @@ pub(super) fn tuple_destructure_extractions(
                 valid = false;
                 break;
             }
-            let Some(target) = block.instructions.get(cursor + 1).and_then(|instruction| {
-                move_initialization(instruction, Source::Value(*output))
-            }) else {
+            let Some(target) = block
+                .instructions
+                .get(cursor + 1)
+                .and_then(|instruction| move_initialization(instruction, Source::Value(*output)))
+            else {
                 valid = false;
                 break;
             };
             if function.parameter_locals.contains(&target)
-                || function.locals.get(target.0 as usize).map(|local| &local.ty)
+                || function
+                    .locals
+                    .get(target.0 as usize)
+                    .map(|local| &local.ty)
                     != Some(&field_definition.ty)
             {
                 valid = false;
@@ -1168,8 +1197,7 @@ fn direct_string_tuple_return(
     function: &Function,
     block: &Block,
 ) -> Option<LocalId> {
-    if !owns_string_aggregate(program, function.signature.result.as_ref())
-    {
+    if !owns_string_aggregate(program, function.signature.result.as_ref()) {
         return None;
     }
     let TerminatorKind::Return(Some(Operand {
@@ -1329,7 +1357,9 @@ pub(super) fn validate(
             .is_some_and(|local| matches!(local.ty, Type::List(_)))
     };
     let struct_local = |id: LocalId| {
-        function.locals.get(id.0 as usize)
+        function
+            .locals
+            .get(id.0 as usize)
             .is_some_and(|local| owns_string_aggregate(program, &local.ty))
     };
     locals.extend(
@@ -1379,9 +1409,7 @@ pub(super) fn validate(
                     }
                     None
                 }
-                InstructionKind::VariantExtract { base, .. }
-                    if base.mode == UseMode::Consume =>
-                {
+                InstructionKind::VariantExtract { base, .. } if base.mode == UseMode::Consume => {
                     if let Source::Local(source) = base.source {
                         let owns_payload = match &instruction.kind {
                             InstructionKind::VariantExtract { variant, .. } => function
@@ -1392,10 +1420,7 @@ pub(super) fn validate(
                                 }),
                             _ => false,
                         };
-                        if locals.contains(&source)
-                            && !in_scope.remove(&source)
-                            && owns_payload
-                        {
+                        if locals.contains(&source) && !in_scope.remove(&source) && owns_payload {
                             push(
                                 errors,
                                 id,

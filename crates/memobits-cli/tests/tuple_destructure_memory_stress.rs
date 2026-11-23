@@ -387,7 +387,8 @@ fn unused_string_result_payloads_are_released_under_wasm_cap() {
 }
 
 #[test]
-fn enum_arrays_with_nested_string_tuple_arrays_release_on_normal_and_early_returns_under_wasm_cap() {
+fn enum_arrays_with_nested_string_tuple_arrays_release_on_normal_and_early_returns_under_wasm_cap()
+{
     const ITERATIONS: u32 = 8_192;
     const TEXT_BYTES: usize = 4_096;
     let text = "x".repeat(TEXT_BYTES);

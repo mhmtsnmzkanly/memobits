@@ -1,7 +1,7 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_syntax::{
-    Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, TupleBinding, Type,
-    TypeArgument, TypeDefinition, templates,
+    templates, Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, TupleBinding,
+    Type, TypeArgument, TypeDefinition,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -131,7 +131,9 @@ pub(crate) fn check(
                     .map(|parameter| parameter.name.clone())
                     .collect(),
             );
-            checker.const_parameters.push(const_names(generic_parameters));
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
             for bound in bounds {
                 checker.ty(&bound.interface);
             }
@@ -179,7 +181,9 @@ pub(crate) fn check(
                     .map(|parameter| parameter.name.clone())
                     .collect(),
             );
-            checker.const_parameters.push(const_names(generic_parameters));
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
             for bound in bounds {
                 checker.ty(&bound.interface);
             }
@@ -249,7 +253,9 @@ pub(crate) fn check(
                     .map(|parameter| parameter.name.clone())
                     .collect(),
             );
-            checker.const_parameters.push(const_names(generic_parameters));
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
         }
         let (target, interface, methods) = match &item.kind {
             ItemKind::Interface { methods, .. } => (None, None, methods.as_slice()),

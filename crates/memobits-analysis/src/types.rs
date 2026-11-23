@@ -26,8 +26,8 @@ mod lists;
 mod operations;
 mod templates;
 mod typetable;
-use memobits_syntax::templates::{self as registry, Template};
 use interfaces::qualified_interface;
+use memobits_syntax::templates::{self as registry, Template};
 use operations::{floating, int_limit, integer, numeric};
 use templates::ResolvedArgument;
 use typetable::{StructInfo, TypeTable, VariantInfo};
@@ -1244,7 +1244,11 @@ impl Checker {
             (specialization_id, function_ty),
         );
         self.expr(callee, None);
-        if diverges { Ty::Never } else { result }
+        if diverges {
+            Ty::Never
+        } else {
+            result
+        }
     }
 
     fn contains_reference(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
@@ -1479,10 +1483,8 @@ impl Checker {
             }
         }
         if ty.path.as_slice() == ["Array"] {
-            if let [
-                memobits_syntax::TypeArgument::Type(element),
-                memobits_syntax::TypeArgument::Const(length),
-            ] = ty.arguments.as_slice()
+            if let [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Const(length)] =
+                ty.arguments.as_slice()
             {
                 if let (Some(element), Some(length)) = (
                     self.generic_types.get(&element.path.join("::")),
@@ -2439,7 +2441,11 @@ impl Checker {
                             Ty::Primitive("Char")
                         }
                         Ty::String => {
-                            self.error(17, items.span, "string iteration requires a named string local or parameter");
+                            self.error(
+                                17,
+                                items.span,
+                                "string iteration requires a named string local or parameter",
+                            );
                             Ty::Error
                         }
                         Ty::List(_) => {
@@ -3607,7 +3613,11 @@ impl Checker {
             diverges |= actual == Ty::Never;
         }
         self.record_variant(id, Some(TypeId(*enum_id)), variant);
-        if diverges { Ty::Never } else { enum_ty }
+        if diverges {
+            Ty::Never
+        } else {
+            enum_ty
+        }
     }
     /// `match scrutinee { pattern => body, ... }`. Patterns are flat
     /// (`Enum::Variant`, `Enum::Variant(a, _)`, `_`). An owned scrutinee is
@@ -4220,7 +4230,11 @@ impl Checker {
                     if (float_literal && floating(want)) || (!float_literal && integer(want)) {
                         want.clone()
                     } else {
-                        if float_literal { F64 } else { I32 }
+                        if float_literal {
+                            F64
+                        } else {
+                            I32
+                        }
                     }
                 } else if float_literal {
                     F64
@@ -5279,8 +5293,7 @@ impl Checker {
                         if params.get(i).is_some_and(|parameter| {
                             parameter.access == IrAccess::Owned
                                 && self.tuple_has_unsupported_nested_string_owner(&parameter.ty)
-                        })
-                        {
+                        }) {
                             self.error(
                                 17,
                                 arg.span,
@@ -5344,7 +5357,11 @@ impl Checker {
                         }
                         diverges |= actual == Ty::Never;
                     }
-                    if diverges { Ty::Never } else { *result }
+                    if diverges {
+                        Ty::Never
+                    } else {
+                        *result
+                    }
                 } else {
                     for arg in arguments {
                         self.expr(arg, None);
@@ -5531,7 +5548,11 @@ impl Checker {
                     }
                 } else {
                     self.ensure(&then_ty, &UNIT, then_branch.span);
-                    if cond == Ty::Never { Ty::Never } else { UNIT }
+                    if cond == Ty::Never {
+                        Ty::Never
+                    } else {
+                        UNIT
+                    }
                 }
             }
         }
@@ -6738,7 +6759,7 @@ fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
 mod access_tests {
     use super::*;
     use memobits_diagnostics::SourceId;
-    use memobits_syntax::{StatementKind, parse};
+    use memobits_syntax::{parse, StatementKind};
 
     #[test]
     fn generic_parameter_inference_uses_semantic_types_and_rejects_conflicts() {
@@ -6753,29 +6774,28 @@ mod access_tests {
         };
         let generics = HashSet::from(["T".to_owned()]);
         let mut substitutions = HashMap::new();
-        assert!(
-            infer_direct_type_parameter(
-                &generics,
-                &parameter,
-                &Ty::Primitive("i32"),
-                &mut substitutions,
-            )
-            .is_ok()
-        );
+        assert!(infer_direct_type_parameter(
+            &generics,
+            &parameter,
+            &Ty::Primitive("i32"),
+            &mut substitutions,
+        )
+        .is_ok());
         assert_eq!(substitutions.get("T"), Some(&Ty::Primitive("i32")));
-        assert!(
-            infer_direct_type_parameter(
-                &generics,
-                &parameter,
-                &Ty::Primitive("u32"),
-                &mut substitutions,
-            )
-            .is_err()
-        );
-        assert!(
-            infer_direct_type_parameter(&generics, &parameter, &Ty::Error, &mut HashMap::new(),)
-                .is_err()
-        );
+        assert!(infer_direct_type_parameter(
+            &generics,
+            &parameter,
+            &Ty::Primitive("u32"),
+            &mut substitutions,
+        )
+        .is_err());
+        assert!(infer_direct_type_parameter(
+            &generics,
+            &parameter,
+            &Ty::Error,
+            &mut HashMap::new(),
+        )
+        .is_err());
     }
 
     #[test]

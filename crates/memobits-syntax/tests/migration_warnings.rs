@@ -20,10 +20,7 @@ fn option_spelling_is_accepted_silently_like_postfix_optional() {
 
 #[test]
 fn legacy_bytes_spelling_warns_and_current_spellings_do_not() {
-    let legacy = parse(
-        SourceId(0),
-        "fn f(a: Bytes<4>, c: Array<u8, 2>) {}",
-    );
+    let legacy = parse(SourceId(0), "fn f(a: Bytes<4>, c: Array<u8, 2>) {}");
     assert!(legacy.diagnostics.is_empty(), "{:?}", legacy.diagnostics);
     let codes: Vec<String> = legacy.warnings.iter().map(|w| w.code.to_string()).collect();
     assert_eq!(codes, ["MW003"]);

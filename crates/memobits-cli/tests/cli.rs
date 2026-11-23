@@ -4501,16 +4501,26 @@ fn user_defined_add_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::AddAssign; type Plain { value: u32 } fn update<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign { var value := target; value += rhs; value } fn main() -> u32 { let result := update(Plain { value: 7 }, 5); result.value }");
     let missing_evidence = f.run(&["analyze-project"]);
     assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
-    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::AddAssign'"), "{missing_evidence:?}");
+    assert!(
+        String::from_utf8_lossy(&missing_evidence.stderr)
+            .contains("no visible implementation of 'core::ops::AddAssign'"),
+        "{missing_evidence:?}"
+    );
 
-    f.write("src/main.mb", "fn main() -> u32 { var value: u32 = 7; value += 5; value }");
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 7; value += 5; value }",
+    );
     let primitive = f.run(&["run"]);
     assert!(primitive.status.success(), "{primitive:?}");
     assert_eq!(primitive.stdout, b"Result: u32(12)\n");
     let primitive_build = f.run(&["build", "--output", "add-assign-primitive.wasm"]);
     assert!(primitive_build.status.success(), "{primitive_build:?}");
     let primitive_artifact = f.run(&["run", "add-assign-primitive.wasm"]);
-    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
     assert_eq!(primitive_artifact.stdout, b"Result: i32(12)\n");
 
     f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter += { return 9; 5 }; counter.value }");
@@ -4634,7 +4644,11 @@ fn user_defined_sub_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::SubAssign; type Plain { value: u32 } fn update<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign { var value := target; value -= rhs; value } fn main() -> u32 { let result := update(Plain { value: 20 }, 7); result.value }");
     let missing_evidence = f.run(&["analyze-project"]);
     assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
-    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::SubAssign'"), "{missing_evidence:?}");
+    assert!(
+        String::from_utf8_lossy(&missing_evidence.stderr)
+            .contains("no visible implementation of 'core::ops::SubAssign'"),
+        "{missing_evidence:?}"
+    );
 
     f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn update<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign { var value := target; value -= rhs; value } fn main() -> u32 { let result := update(Counter { value: 20 }, true); result.value }");
     let generic_wrong_rhs = f.run(&["analyze-project"]);
@@ -4719,7 +4733,10 @@ fn user_defined_sub_assign_mutates_nominal_target_in_source_and_wasm() {
     let primitive_build = f.run(&["build", "--output", "sub-assign-primitive.wasm"]);
     assert!(primitive_build.status.success(), "{primitive_build:?}");
     let primitive_artifact = f.run(&["run", "sub-assign-primitive.wasm"]);
-    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
     assert_eq!(primitive_artifact.stdout, b"Result: i32(5)\n");
 
     f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn read(c: share Counter) -> u32 { c.value -= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= read(counter.share()); counter.value }");
@@ -4804,25 +4821,38 @@ fn user_defined_mul_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of MulAssign { type Rhs = Delta; fn mul_assign(share self, rhs: Delta) { self.value *= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let rhs := Delta { value: 6 }; let result := scale(Counter { value: 7 }, rhs); rhs.value + result.value }");
     let moved_rhs = f.run(&["ownership-project"]);
     assert!(!moved_rhs.status.success(), "{moved_rhs:?}");
-    assert!(String::from_utf8_lossy(&moved_rhs.stderr).contains("rhs"), "{moved_rhs:?}");
+    assert!(
+        String::from_utf8_lossy(&moved_rhs.stderr).contains("rhs"),
+        "{moved_rhs:?}"
+    );
 
     f.write("src/main.mb", "use core::ops::MulAssign; type Plain { value: u32 } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let result := scale(Plain { value: 7 }, 6); result.value }");
     let missing_generic = f.run(&["analyze-project"]);
     assert!(!missing_generic.status.success(), "{missing_generic:?}");
-    assert!(String::from_utf8_lossy(&missing_generic.stderr).contains("no visible implementation of 'core::ops::MulAssign'"), "{missing_generic:?}");
+    assert!(
+        String::from_utf8_lossy(&missing_generic.stderr)
+            .contains("no visible implementation of 'core::ops::MulAssign'"),
+        "{missing_generic:?}"
+    );
 
     f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 7 }, true); result.value }");
     let wrong_generic_rhs = f.run(&["analyze-project"]);
     assert!(!wrong_generic_rhs.status.success(), "{wrong_generic_rhs:?}");
 
-    f.write("src/main.mb", "fn main() -> u32 { var value: u32 = 7; value *= 6; value }");
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 7; value *= 6; value }",
+    );
     let primitive = f.run(&["run"]);
     assert!(primitive.status.success(), "{primitive:?}");
     assert_eq!(primitive.stdout, b"Result: u32(42)\n");
     let primitive_build = f.run(&["build", "--output", "mul-assign-primitive.wasm"]);
     assert!(primitive_build.status.success(), "{primitive_build:?}");
     let primitive_artifact = f.run(&["run", "mul-assign-primitive.wasm"]);
-    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
     assert_eq!(primitive_artifact.stdout, b"Result: i32(42)\n");
 
     f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter *= 1; counter.value }");
@@ -4941,7 +4971,10 @@ fn user_defined_div_assign_mutates_nominal_target_in_source_and_wasm() {
 
     f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let delta := Delta { value: 3 }; let result := scale(Counter { value: 81 }, delta); delta.value + result.value }");
     let moved_rhs = f.run(&["ownership-project"]);
-    assert!(!moved_rhs.status.success(), "owned generic RHS must be consumed: {moved_rhs:?}");
+    assert!(
+        !moved_rhs.status.success(),
+        "owned generic RHS must be consumed: {moved_rhs:?}"
+    );
 
     f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 81 }, 3); result.value }");
     let generic_wrong_rhs = f.run(&["analyze-project"]);
@@ -4950,7 +4983,11 @@ fn user_defined_div_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::DivAssign; type Plain { value: u32 } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let result := scale(Plain { value: 81 }, 3); result.value }");
     let missing_evidence = f.run(&["analyze-project"]);
     assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
-    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::DivAssign'"), "{missing_evidence:?}");
+    assert!(
+        String::from_utf8_lossy(&missing_evidence.stderr)
+            .contains("no visible implementation of 'core::ops::DivAssign'"),
+        "{missing_evidence:?}"
+    );
 
     f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter /= 1; counter.value }");
     let immutable = f.run(&["analyze-project"]);
@@ -4989,10 +5026,11 @@ fn user_defined_div_assign_mutates_nominal_target_in_source_and_wasm() {
     let primitive_build = f.run(&["build", "--output", "primitive-div-assign.wasm"]);
     assert!(primitive_build.status.success(), "{primitive_build:?}");
     let primitive_artifact = f.run(&["run", "primitive-div-assign.wasm"]);
-    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
     assert_eq!(primitive_artifact.stdout, b"Result: i32(2)\n");
-
-
 
     f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn read(c: share Counter) -> u32 { c.value /= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= read(counter.share()); counter.value }");
     f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
@@ -7517,13 +7555,12 @@ fn extension_receiver_loans_reject_conflicting_later_argument_access() {
         let source = format!(
             "type Point {{ x: i32 }} interface {interface} {{ fn check({receiver} self, value: i32) -> i32; }} extend Point of {interface} {{ fn check({receiver} self, value: i32) -> i32 {{ self.x + value }} }} fn main() -> i32 {{ var point := Point {{ x: 42 }}; point.check({{ {later_access} }}) of {interface} }}"
         );
-        f.write(
-            "src/main.mb",
-            &source,
-        );
+        f.write("src/main.mb", &source);
         let diagnostic = err(f.run(&["ownership-project"]), "BE");
         assert!(
-            diagnostic.contains("loan") || diagnostic.contains("borrow") || diagnostic.contains("shared"),
+            diagnostic.contains("loan")
+                || diagnostic.contains("borrow")
+                || diagnostic.contains("shared"),
             "{interface}: {diagnostic}"
         );
     }

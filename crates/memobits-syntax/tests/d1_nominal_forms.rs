@@ -1,5 +1,5 @@
 use memobits_diagnostics::SourceId;
-use memobits_syntax::{ItemKind, TypeDefinition, parse};
+use memobits_syntax::{parse, ItemKind, TypeDefinition};
 
 #[test]
 fn nominal_body_forms_parse_with_and_without_trailing_extensions() {

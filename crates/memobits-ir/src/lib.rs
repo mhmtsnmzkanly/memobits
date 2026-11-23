@@ -1663,14 +1663,20 @@ fn validate_instruction(
         }
         InstructionKind::EndStructLocal { local } => {
             if instruction.output.is_some()
-                || !function.locals.get(local.0 as usize).is_some_and(|local|
-                    scoped_string::owns_string_aggregate(program, &local.ty))
+                || !function
+                    .locals
+                    .get(local.0 as usize)
+                    .is_some_and(|local| scoped_string::owns_string_aggregate(program, &local.ty))
             {
                 let message = function.locals.get(local.0 as usize).map_or(
                     "struct scope exit requires a String-owning struct local and no output",
                     |binding| match &binding.ty {
-                        Type::Enum(_) => "enum scope exit requires a String-owning enum local and no output",
-                        _ => "struct scope exit requires a String-owning struct local and no output",
+                        Type::Enum(_) => {
+                            "enum scope exit requires a String-owning enum local and no output"
+                        }
+                        _ => {
+                            "struct scope exit requires a String-owning struct local and no output"
+                        }
                     },
                 );
                 push(errors, id, Some(block), message);
@@ -1718,11 +1724,9 @@ fn validate_instruction(
                     | (Constant::String(_), Some(Type::String))
             );
             let valid_char = match (value, out) {
-                (Constant::Integer(text), Some(Type::Primitive(Primitive::Char))) => text
-                    .parse::<u32>()
-                    .ok()
-                    .and_then(char::from_u32)
-                    .is_some(),
+                (Constant::Integer(text), Some(Type::Primitive(Primitive::Char))) => {
+                    text.parse::<u32>().ok().and_then(char::from_u32).is_some()
+                }
                 _ => true,
             };
             if out.is_some() && (!okay || !valid_char) {
@@ -2779,7 +2783,11 @@ fn validate_instruction(
                 None => {}
             }
         }
-        InstructionKind::ReplaceStringField { target, field, value } => {
+        InstructionKind::ReplaceStringField {
+            target,
+            field,
+            value,
+        } => {
             let actual = operand_type(program, function, value, errors, id, block);
             let destination = function.locals.get(target.0 as usize).is_some_and(|local| {
                 let (ty, allowed) = match &local.ty {
@@ -2811,8 +2819,11 @@ fn validate_instruction(
                             if fields.get(*field as usize).is_some_and(|field| field.ty == Type::String))
                     })
             });
-            if instruction.output.is_some() || !destination || actual != Some(Type::String)
-                || value.mode != UseMode::Consume || !matches!(value.source, Source::Local(_))
+            if instruction.output.is_some()
+                || !destination
+                || actual != Some(Type::String)
+                || value.mode != UseMode::Consume
+                || !matches!(value.source, Source::Local(_))
             {
                 push(errors, id, Some(block),
                     "String field replacement requires a mutable local or shared struct parameter and a consumed String local");
@@ -2895,13 +2906,28 @@ fn validate_instruction(
                 }
             }
         }
-        InstructionKind::Cast { value, source, target } => {
+        InstructionKind::Cast {
+            value,
+            source,
+            target,
+        } => {
             let input = operand_type(program, function, value, errors, id, block);
             let expected = Type::Primitive(*target);
-            let numeric = |primitive: Primitive| matches!(primitive,
-                Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 |
-                Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 |
-                Primitive::F32 | Primitive::F64);
+            let numeric = |primitive: Primitive| {
+                matches!(
+                    primitive,
+                    Primitive::I8
+                        | Primitive::I16
+                        | Primitive::I32
+                        | Primitive::I64
+                        | Primitive::U8
+                        | Primitive::U16
+                        | Primitive::U32
+                        | Primitive::U64
+                        | Primitive::F32
+                        | Primitive::F64
+                )
+            };
             if instruction.output.is_none()
                 || !numeric(*source)
                 || !numeric(*target)
@@ -2909,7 +2935,12 @@ fn validate_instruction(
                 || out != Some(&expected)
                 || value.mode != UseMode::Read
             {
-                push(errors, id, Some(block), "numeric cast source, target, or operand type is invalid");
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "numeric cast source, target, or operand type is invalid",
+                );
             }
         }
         InstructionKind::Binary { op, left, right } => {
@@ -2939,9 +2970,7 @@ fn validate_instruction(
                         both && is_numeric(&lhs) && output == &lhs
                     }
                     BinaryOp::WrappingAdd | BinaryOp::WrappingMultiply => {
-                        both
-                            && lhs == Type::Primitive(Primitive::U32)
-                            && output == &lhs
+                        both && lhs == Type::Primitive(Primitive::U32) && output == &lhs
                     }
                     BinaryOp::BitwiseAnd
                     | BinaryOp::BitwiseXor
@@ -2956,10 +2985,9 @@ fn validate_instruction(
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => both && is_numeric(&lhs) && output == &bool_ty,
                     BinaryOp::Equal | BinaryOp::NotEqual => {
-                        both
-                            && (is_numeric(&lhs)
-                                || lhs == bool_ty
-                                || lhs == Type::Primitive(Primitive::Char))
+                        both && (is_numeric(&lhs)
+                            || lhs == bool_ty
+                            || lhs == Type::Primitive(Primitive::Char))
                             && output == &bool_ty
                     }
                     BinaryOp::And | BinaryOp::Or => both && lhs == bool_ty && output == &bool_ty,
@@ -3293,10 +3321,7 @@ fn validate_operand_escapes(
                         )
                         .is_none()
                         && !scoped_string::owned_aggregate_call_argument(
-                            program,
-                            block,
-                            position,
-                            result,
+                            program, block, position, result,
                         )
                     {
                         let message = if matches!(result, Type::String) {
@@ -3339,9 +3364,11 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Struct(_))) {
+                if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Struct(_)))
+                {
                     "a struct owning a heap String can only move directly into a new local"
-                } else if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Enum(_))) {
+                } else if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Enum(_)))
+                {
                     "an enum owning a heap String can only move to an owned destination"
                 } else {
                     "heap String requires a whole String destination for moves and a checked loan for reference access"
@@ -3402,26 +3429,37 @@ fn validate_operand_escapes(
                         let Source::Local(source) = value.source else {
                             return false;
                         };
-                        let Some(source_ty) = function.locals.get(source.0 as usize).map(|local| &local.ty) else {
+                        let Some(source_ty) = function
+                            .locals
+                            .get(source.0 as usize)
+                            .map(|local| &local.ty)
+                        else {
                             return false;
                         };
                         block.instructions[position + 1..].iter().any(|candidate| {
                             let InstructionKind::Call {
-                                callee: Operand { source: Source::Function(callee), .. },
+                                callee:
+                                    Operand {
+                                        source: Source::Function(callee),
+                                        ..
+                                    },
                                 arguments,
-                            } = &candidate.kind else {
+                            } = &candidate.kind
+                            else {
                                 return false;
                             };
                             let Some(target) = program.functions.get(callee.0 as usize) else {
                                 return false;
                             };
-                            arguments.iter().zip(&target.signature.parameters).any(|(argument, parameter)| {
-                                argument.source == Source::Value(output)
-                                    && argument.mode == UseMode::Consume
-                                    && parameter.access == Access::Owned
-                                    && parameter.ty == *source_ty
-                                    && scoped_string::owns_string_aggregate(program, source_ty)
-                            })
+                            arguments.iter().zip(&target.signature.parameters).any(
+                                |(argument, parameter)| {
+                                    argument.source == Source::Value(output)
+                                        && argument.mode == UseMode::Consume
+                                        && parameter.access == Access::Owned
+                                        && parameter.ty == *source_ty
+                                        && scoped_string::owns_string_aggregate(program, source_ty)
+                                },
+                            )
                         })
                     });
                     let feeds_owned_array_element = instruction.output.is_some_and(|output| {
@@ -3460,8 +3498,9 @@ fn validate_operand_escapes(
                         && !feeds_owned_call_argument
                         && !feeds_owned_array_element
                         && (!return_capture.is_some_and(|(returned, source)| {
-                        returned == position && heap_locals.contains(&source)
-                    }) || (*function.signature.result != Type::String && !returns_owned_tuple))
+                            returned == position && heap_locals.contains(&source)
+                        }) || (*function.signature.result != Type::String
+                            && !returns_owned_tuple))
                     {
                         report(block_id, value, false, true);
                     }
@@ -3482,9 +3521,7 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::FieldAddr { base, .. }
                 | InstructionKind::VariantAddr { base, .. }
-                | InstructionKind::EnumTag { base } => {
-                    report(block_id, base, false, false)
-                }
+                | InstructionKind::EnumTag { base } => report(block_id, base, false, false),
                 InstructionKind::VariantExtract { base, variant, .. } => {
                     // A non-local base is a temporary. Extracting an owned
                     // String payload is only sound when that temporary owns
@@ -3495,7 +3532,9 @@ fn validate_operand_escapes(
                             .values
                             .get(base_value.0 as usize)
                             .is_some_and(|ty| {
-                                scoped_string::enum_variant_owns_string_storage(program, ty, *variant)
+                                scoped_string::enum_variant_owns_string_storage(
+                                    program, ty, *variant,
+                                )
                             });
                         if payload_owns_heap {
                             let defining = block.instructions[..position]
@@ -3505,7 +3544,9 @@ fn validate_operand_escapes(
                             let owned_temporary = match defining {
                                 Some((index, candidate)) => match &candidate.kind {
                                     InstructionKind::Load { .. } => false,
-                                    InstructionKind::Extract { .. } => tuple_extractions.contains_key(&index),
+                                    InstructionKind::Extract { .. } => {
+                                        tuple_extractions.contains_key(&index)
+                                    }
                                     _ => true,
                                 },
                                 // Defined in another block: only block parameters
@@ -3518,13 +3559,18 @@ fn validate_operand_escapes(
                         }
                     }
                     let variant_owns_heap_string = match (&base.source, &instruction.kind) {
-                        (Source::Local(local), InstructionKind::VariantExtract { variant, .. }) =>
-                            function.locals.get(local.0 as usize).is_some_and(|binding|
-                                scoped_string::enum_variant_owns_string_storage(
-                                    program,
-                                    &binding.ty,
-                                    *variant,
-                                )),
+                        (Source::Local(local), InstructionKind::VariantExtract { variant, .. }) => {
+                            function
+                                .locals
+                                .get(local.0 as usize)
+                                .is_some_and(|binding| {
+                                    scoped_string::enum_variant_owns_string_storage(
+                                        program,
+                                        &binding.ty,
+                                        *variant,
+                                    )
+                                })
+                        }
                         _ => false,
                     };
                     let extracted_owned_payload = match (base.source, &instruction.kind) {
@@ -3535,13 +3581,14 @@ fn validate_operand_escapes(
                                 ..
                             },
                         ) => {
-                            let enum_id = function.locals.get(local.0 as usize).and_then(|binding| {
-                                if let Type::Enum(id) = &binding.ty {
-                                    Some(*id)
-                                } else {
-                                    None
-                                }
-                            });
+                            let enum_id =
+                                function.locals.get(local.0 as usize).and_then(|binding| {
+                                    if let Type::Enum(id) = &binding.ty {
+                                        Some(*id)
+                                    } else {
+                                        None
+                                    }
+                                });
                             enum_id.is_some_and(|enum_id| program.types
                                 .get(enum_id.0 as usize).is_some_and(|definition| {
                             matches!(&definition.kind, TypeDefKind::Enum { variants }
@@ -3582,12 +3629,12 @@ fn validate_operand_escapes(
                     };
                     let final_extract_consumes_owner = base.mode == UseMode::Consume
                         || (matches!(base.source, Source::Local(local)
-                            if block.instructions[position + 1..].iter().any(|later| {
-                                matches!(&later.kind,
-                                    InstructionKind::VariantExtract { base: later_base, .. }
-                                        if later_base.source == Source::Local(local)
-                                            && later_base.mode == UseMode::Consume)
-                            })));
+                        if block.instructions[position + 1..].iter().any(|later| {
+                            matches!(&later.kind,
+                                InstructionKind::VariantExtract { base: later_base, .. }
+                                    if later_base.source == Source::Local(local)
+                                        && later_base.mode == UseMode::Consume)
+                        })));
                     // A non-owning variant contains no heap descriptor to
                     // transfer, even when its enum's other variants own one.
                     // Matching that branch therefore retires the enum shell
@@ -3618,21 +3665,21 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::StructNew { ty, fields } => {
-                    let struct_fields = program
-                        .types
-                        .get(ty.0 as usize)
-                        .and_then(|definition| match &definition.kind {
+                    let struct_fields = program.types.get(ty.0 as usize).and_then(|definition| {
+                        match &definition.kind {
                             TypeDefKind::Struct { fields } => Some(fields),
                             TypeDefKind::Enum { .. } => None,
-                        });
+                        }
+                    });
                     // Tuples and admitted nominal owners may hold owners moved in
                     // from named locals (nested structs, arrays of owners).
                     let enclosing_owner = scoped_string::is_string_owner_transport(
                         &program.types,
                         &Type::Struct(*ty),
-                    ) || program.types.get(ty.0 as usize).is_some_and(|definition| {
-                        definition.path.module.as_slice() == ["\0tuple"]
-                    });
+                    ) || program
+                        .types
+                        .get(ty.0 as usize)
+                        .is_some_and(|definition| definition.path.module.as_slice() == ["\0tuple"]);
                     for (index, field) in fields.iter().enumerate() {
                         let direct_string_move = field.mode == UseMode::Consume
                             && matches!(field.source, Source::Local(local)
@@ -3666,25 +3713,21 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::EnumNew { ty, payload, .. } => {
-                    let is_heap_result_enum = program
-                        .types
-                        .get(ty.0 as usize)
-                        .is_some_and(|definition| {
+                    let is_heap_result_enum =
+                        program.types.get(ty.0 as usize).is_some_and(|definition| {
                             definition.entry_outcome == Some(EntryOutcome::Result)
                         });
-                    let owned_enum_destination = scoped_string::enum_binding(
-                        function,
-                        &block.instructions[position..],
-                    )
-                    .is_some()
-                        || instruction.output.is_some_and(|output| {
-                            matches!(&block.terminator.kind,
+                    let owned_enum_destination =
+                        scoped_string::enum_binding(function, &block.instructions[position..])
+                            .is_some()
+                            || instruction.output.is_some_and(|output| {
+                                matches!(&block.terminator.kind,
                                 TerminatorKind::Return(Some(Operand {
                                     source: Source::Value(returned),
                                     mode: UseMode::Consume,
                                     ..
                                 })) if *returned == output)
-                        });
+                            });
                     if !instruction.output.is_some_and(|value| {
                         heap_strings[id.0 as usize].approved_ok.contains(&value)
                     }) {
@@ -3704,19 +3747,17 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::ArrayNew { init } => {
                     if let ArrayInit::Elements(elements) = init {
-                        let destination = scoped_string::array_binding(
-                            function,
-                            &block.instructions[position..],
-                        )
-                        .is_some()
-                            || instruction.output.is_some_and(|output| {
-                                matches!(&block.terminator.kind,
+                        let destination =
+                            scoped_string::array_binding(function, &block.instructions[position..])
+                                .is_some()
+                                || instruction.output.is_some_and(|output| {
+                                    matches!(&block.terminator.kind,
                                     TerminatorKind::Return(Some(Operand {
                                         source: Source::Value(returned),
                                         mode: UseMode::Consume,
                                         ..
                                     })) if *returned == output)
-                            });
+                                });
                         let element_ty = instruction
                             .output
                             .and_then(|output| function.values.get(output.0 as usize))
@@ -3859,8 +3900,7 @@ fn validate_operand_escapes(
                 let tuple_move = scoped_string::is_string_owner_transport(
                     &program.types,
                     function.signature.result.as_ref(),
-                )
-                    && matches!(value.source, Source::Local(_))
+                ) && matches!(value.source, Source::Local(_))
                     && value.mode == UseMode::Consume;
                 if !tuple_move {
                     report(block_id, value, true, false);

@@ -4,11 +4,11 @@
 
 use memobits_diagnostics::Span;
 use memobits_syntax::{
-    Type, TypeArgument,
     templates::{ParameterKind, Template},
+    Type, TypeArgument,
 };
 
-use super::{Ty, typetable::TypeFailure};
+use super::{typetable::TypeFailure, Ty};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ResolvedArgument {

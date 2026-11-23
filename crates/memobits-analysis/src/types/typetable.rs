@@ -13,8 +13,8 @@ use memobits_syntax::{
 
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
 
-use super::templates::{ResolvedArgument, resolve_arguments};
-use super::{TupleAliases, Ty, diagnostic};
+use super::templates::{resolve_arguments, ResolvedArgument};
+use super::{diagnostic, TupleAliases, Ty};
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldInfo {
@@ -588,13 +588,11 @@ impl TypeTable {
     pub(super) fn resolve_local(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
         if let (
             Some(template),
-            [
-                memobits_syntax::TypeArgument::Reference {
-                    access: memobits_syntax::Access::Borrow,
-                    referent,
-                    span,
-                },
-            ],
+            [memobits_syntax::TypeArgument::Reference {
+                access: memobits_syntax::Access::Borrow,
+                referent,
+                span,
+            }],
         ) = (templates::lookup_type(ty), ty.arguments.as_slice())
         {
             if template.id == TemplateId::Option {
@@ -1608,10 +1606,8 @@ impl TypeTable {
                     return Ok(self.instantiate_enum(template, arguments, ty.span));
                 }
                 TemplateId::Array => {
-                    let [
-                        ResolvedArgument::Type(element),
-                        ResolvedArgument::Integer(count),
-                    ] = arguments.as_slice()
+                    let [ResolvedArgument::Type(element), ResolvedArgument::Integer(count)] =
+                        arguments.as_slice()
                     else {
                         unreachable!("template argument contract checked above");
                     };

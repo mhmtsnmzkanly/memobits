@@ -495,8 +495,15 @@ fn extension_candidate_identity_includes_independent_package_name() {
     let first = candidate_for("first-package");
     let second = candidate_for("second-package");
     assert_eq!(first.1, second.1, "fixture module paths should collide");
-    assert_eq!((first.2, first.3), (second.2, second.3), "fixture source spans should collide");
-    assert_ne!(first.0, second.0, "package identity must distinguish candidates");
+    assert_eq!(
+        (first.2, first.3),
+        (second.2, second.3),
+        "fixture source spans should collide"
+    );
+    assert_ne!(
+        first.0, second.0,
+        "package identity must distinguish candidates"
+    );
 }
 
 #[test]

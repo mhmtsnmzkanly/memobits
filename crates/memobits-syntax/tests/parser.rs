@@ -1222,16 +1222,27 @@ fn parses_bitxor_compound_assignment_statement() {
 fn parses_shift_right_compound_assignment_statement() {
     let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 10; bits >>= 2; }");
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else { panic!("expected function body"); };
-    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else { panic!("expected assignment statement"); };
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function body");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment statement");
+    };
     assert_eq!(operator, ">>=");
 }
 
 #[test]
 fn parses_shift_right_assignment_after_nested_generic_closer() {
- let parsed = parse(SourceId(0), "fn main() { var x: Box<Box<u32>> = value; x >>= 1; }");
- assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
- let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else { panic!("expected function"); };
- let StatementKind::Assign { operator, .. } = &body.statements[1].kind else { panic!("expected assignment"); };
- assert_eq!(operator, ">>=");
+    let parsed = parse(
+        SourceId(0),
+        "fn main() { var x: Box<Box<u32>> = value; x >>= 1; }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment");
+    };
+    assert_eq!(operator, ">>=");
 }

@@ -16,9 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind,
     ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
-    ImportSection,
-    Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module, TypeSection,
-    ValType,
+    ImportSection, Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module,
+    TypeSection, ValType,
 };
 
 mod arrays;
@@ -31,12 +30,12 @@ mod string_heap;
 mod utf8;
 mod validation;
 use arrays::{array_cell, array_cell_of, emit_array_copy};
+#[cfg(test)]
+use layout::VariantLayout;
 use layout::{
     aggregate_layout, struct_layouts, type_has_string_storage, type_layout, FieldStorage,
     StructLayout, STRUCT_LAYOUT_OVERFLOW,
 };
-#[cfg(test)]
-use layout::VariantLayout;
 use memory::{LayoutError, StaticLayout};
 use operations::emit_numeric_cast;
 use validation::{
@@ -199,7 +198,10 @@ fn compile_target(
         };
         if host_import(function_body).is_some() {
             errors.push(diagnostic(
-                format!("host import function '{}' cannot be exported", function_body.path.name),
+                format!(
+                    "host import function '{}' cannot be exported",
+                    function_body.path.name
+                ),
                 Some(function_body.span),
             ));
         }
@@ -309,10 +311,8 @@ fn compile_target(
                 && name == "write_i32"
                 && function.signature.parameters.len() == 1
                 && function.signature.parameters[0].access == memobits_ir::Access::Owned
-                && function.signature.parameters[0].ty
-                    == Type::Primitive(Primitive::I32)
-                && function.signature.result.as_ref()
-                    == &Type::Primitive(Primitive::Unit);
+                && function.signature.parameters[0].ty == Type::Primitive(Primitive::I32)
+                && function.signature.result.as_ref() == &Type::Primitive(Primitive::Unit);
             if !matches_capability {
                 errors.push(diagnostic(
                     "unsupported typed host import; expected memobits:console.write_i32(i32) -> unit",
@@ -1606,7 +1606,10 @@ fn encode_frames_traced(
     }
     let mut module = Module::new();
     module.section(&types);
-    if !selected.iter().all(|function| host_import(function).is_none()) {
+    if !selected
+        .iter()
+        .all(|function| host_import(function).is_none())
+    {
         module.section(&import_section);
     }
     module.section(&functions);
@@ -1865,15 +1868,7 @@ fn emit_string_scalar(
     frame: Option<FrameState>,
     lead: u32,
 ) -> Result<(), String> {
-    emit_string_byte(
-        body,
-        function,
-        param_count,
-        source,
-        offset,
-        layout,
-        frame,
-    )?;
+    emit_string_byte(body, function, param_count, source, offset, layout, frame)?;
     body.instruction(&WasmInstruction::LocalSet(lead));
     // UTF-8 is already validated. Prefix ranges select the scalar width.
     // The 0x80..0xbf range is a continuation byte, never a scalar start.
@@ -2166,7 +2161,9 @@ fn emit_string_storage_cleanup(
             let TypeDefKind::Struct { fields } = &definition.kind else {
                 return Err("struct cleanup refers to an enum type".into());
             };
-            let layout = structs.get(id.0 as usize).ok_or("struct type is out of range")?;
+            let layout = structs
+                .get(id.0 as usize)
+                .ok_or("struct type is out of range")?;
             for (field, field_offset) in fields.iter().zip(&layout.offsets) {
                 emit_string_storage_cleanup(
                     body,
@@ -2174,7 +2171,9 @@ fn emit_string_storage_cleanup(
                     structs,
                     &field.ty,
                     base_local,
-                    offset.checked_add(*field_offset).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                    offset
+                        .checked_add(*field_offset)
+                        .ok_or(STRUCT_LAYOUT_OVERFLOW)?,
                     scratch_base,
                     array_depth,
                     heap_copy_index,
@@ -2183,14 +2182,23 @@ fn emit_string_storage_cleanup(
             }
         }
         Type::Enum(id) => {
-            let definition = types.get(id.0 as usize).ok_or("enum type is out of range")?;
+            let definition = types
+                .get(id.0 as usize)
+                .ok_or("enum type is out of range")?;
             let TypeDefKind::Enum { variants } = &definition.kind else {
                 return Err("enum cleanup refers to a struct type".into());
             };
-            let layout = structs.get(id.0 as usize).ok_or("enum type is out of range")?;
+            let layout = structs
+                .get(id.0 as usize)
+                .ok_or("enum type is out of range")?;
             let enum_layout = layout.enum_layout.as_ref().ok_or("missing enum layout")?;
             for (variant_index, variant) in variants.iter().enumerate() {
-                if !enum_layout.string_variants.get(variant_index).copied().unwrap_or(false) {
+                if !enum_layout
+                    .string_variants
+                    .get(variant_index)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 emit_relative_address(body, base_local, offset);
@@ -2280,11 +2288,14 @@ fn clear_moved_heap_source(
                     source: Source::Local(local),
                     mode: UseMode::Consume,
                     ..
-                }) => Some((*local, Operand {
-                    source: Source::Local(*local),
-                    mode: UseMode::Consume,
-                    span: operand.span,
-                })),
+                }) => Some((
+                    *local,
+                    Operand {
+                        source: Source::Local(*local),
+                        mode: UseMode::Consume,
+                        span: operand.span,
+                    },
+                )),
                 _ => None,
             }),
         Source::Function(_) => None,
@@ -3438,7 +3449,14 @@ fn compile_instruction(
                 }
             } else {
                 emit_string_scalar(
-                    body, function, param_count, source, offset, layout, frame, output,
+                    body,
+                    function,
+                    param_count,
+                    source,
+                    offset,
+                    layout,
+                    frame,
+                    output,
                 )?;
             }
             body.instruction(&WasmInstruction::LocalSet(output));
@@ -3734,10 +3752,11 @@ fn compile_instruction(
                 }
             }
             let is_owned_string_tuple = match base.source {
-                Source::Local(local) => function
-                    .locals
-                    .get(local.0 as usize)
-                    .is_some_and(|local| memobits_ir::is_string_owner_transport(type_definitions, &local.ty)),
+                Source::Local(local) => {
+                    function.locals.get(local.0 as usize).is_some_and(|local| {
+                        memobits_ir::is_string_owner_transport(type_definitions, &local.ty)
+                    })
+                }
                 _ => false,
             };
             if base.mode == UseMode::Consume && is_owned_string_tuple {
@@ -4569,7 +4588,10 @@ mod frame_layout_tests {
             len: 1_000_000,
         };
 
-        assert_eq!(type_layout(&|id| layouts.get(id as usize), &ty).unwrap(), (16_000_000, 8));
+        assert_eq!(
+            type_layout(&|id| layouts.get(id as usize), &ty).unwrap(),
+            (16_000_000, 8)
+        );
     }
 
     fn fixture(local_types: Vec<Type>, owners: Vec<Source>) -> Function {

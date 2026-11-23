@@ -1,5 +1,5 @@
 //! Type checking for the supported primitive List surface.
-use super::{Checker, IrAccess, ResolvedArgument, Ty, UNIT, read_type};
+use super::{read_type, Checker, IrAccess, ResolvedArgument, Ty, UNIT};
 use memobits_syntax::{Expr, ExprKind};
 
 impl Checker {
@@ -95,6 +95,10 @@ impl Checker {
         let element = Ty::Primitive(element);
         let value = read_type(self.expr(&arguments[0], Some(&element)));
         self.ensure(&value, &element, arguments[0].span);
-        if value == Ty::Never { Ty::Never } else { UNIT }
+        if value == Ty::Never {
+            Ty::Never
+        } else {
+            UNIT
+        }
     }
 }

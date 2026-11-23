@@ -126,7 +126,9 @@ fn bytes_warning_proves_the_channel_is_non_failing_and_prints_before_run_output(
 #[test]
 fn errors_still_fail_when_warnings_are_present() {
     let f = Fixture::new();
-    f.project("fn pick(value: Bytes<2>) -> i32 { 1 }\nfn main() -> i32 { let flag: Bool = 3; 1 }\n");
+    f.project(
+        "fn pick(value: Bytes<2>) -> i32 { 1 }\nfn main() -> i32 { let flag: Bool = 3; 1 }\n",
+    );
     for args in [&["check"][..], &["build"][..], &["run"][..]] {
         let output = f.run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
@@ -168,7 +170,10 @@ fn postfix_optional_spelling_produces_no_warning() {
     let output = f.run(&["check"]);
     assert_eq!(output.status.code(), Some(1));
     let text = stderr(&output);
-    assert!(text.contains("TE017") && !text.contains("warning"), "{text}");
+    assert!(
+        text.contains("TE017") && !text.contains("warning"),
+        "{text}"
+    );
 }
 
 #[test]

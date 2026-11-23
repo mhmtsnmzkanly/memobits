@@ -4,8 +4,8 @@ mod names;
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
 use memobits_project::Project;
 use memobits_syntax::{
-    AssociatedTypeBinding, InterfaceMethod, ItemKind, Module, Type, TypeArgument, TypeDefinition,
-    templates,
+    templates, AssociatedTypeBinding, InterfaceMethod, ItemKind, Module, Type, TypeArgument,
+    TypeDefinition,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
