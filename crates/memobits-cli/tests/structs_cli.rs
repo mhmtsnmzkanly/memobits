@@ -116,7 +116,7 @@ fn a_constructor_function_feeds_a_borrow_taking_function() {
     let f = Fixture::new();
     assert_eq!(
         f.result(
-            "type Rect { w: u8, h: u8, filled: Bool, scale: f32 }\n\
+            "type Rect { w: u8, h: u8, filled: bool, scale: f32 }\n\
              fn rect(w: u8, h: u8) -> Rect { Rect { w: w, h: h, filled: true, scale: 1.5 } }\n\
              fn area(r: borrow Rect) -> i32 {\n\
                  let a: i32 = if r.filled { 1 } else { 0 };\n\
@@ -134,7 +134,7 @@ fn struct_valued_if_and_recursion_accumulating_in_a_struct() {
     assert_eq!(
         f.result(
             "type P { x: i32, y: i32 }\n\
-             fn pick(c: Bool) -> P { if c { P { x: 1, y: 2 } } else { P { x: 3, y: 4 } } }\n\
+             fn pick(c: bool) -> P { if c { P { x: 1, y: 2 } } else { P { x: 3, y: 4 } } }\n\
              fn main() -> i32 { let a := pick(true); let b := pick(false); a.x * 1000 + a.y * 100 + b.x * 10 + b.y }"
         ),
         "Result: i32(1234)"
@@ -156,7 +156,7 @@ fn mixed_width_fields_through_parameters_and_results() {
     let f = Fixture::new();
     assert_eq!(
         f.result(
-            "type M { a: u8, b: i64, c: f32, d: Bool }\n\
+            "type M { a: u8, b: i64, c: f32, d: bool }\n\
              fn make() -> M { M { a: 200, b: -9, c: 2.5, d: true } }\n\
              fn flip(m: share M) { m.a = 100; m.b *= 3; m.c += 1.0; m.d = false; }\n\
              fn relay(m: M) -> M { m }\n\

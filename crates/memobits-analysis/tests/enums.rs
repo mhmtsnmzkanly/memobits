@@ -10,7 +10,7 @@ use memobits_ir::{
 use memobits_syntax::parse;
 
 const SHAPE: &str = "type P { x: i32, y: i32 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<u8, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<u8, 3>) ] \
     fn make(n: i32) -> Shape { if n > 0 { Shape::Rect(n, 2) } else { Shape::Empty } } \
     fn eat(s: Shape) {} \
     fn peek(s: borrow Shape) {} \
@@ -130,10 +130,10 @@ fn structs_and_enums_share_one_id_space_in_declaration_order() {
 #[test]
 fn payloads_nest_through_enums_arrays_and_structs_in_any_order() {
     lower(
-        "type Outer [ Wrap(Inner), Many(Array<Inner, 2>) ] \
+        "type Outer [ Wrap(Inner), Many(array<Inner, 2>) ] \
          type Inner [ One(Holder), Two ] \
-         type Holder { e: Array<Deep, 2> } \
-         type Deep [ D(i64), E(Array<Array<u8, 2>, 2>) ] \
+         type Holder { e: array<Deep, 2> } \
+         type Deep [ D(i64), E(array<array<u8, 2>, 2>) ] \
          fn main() {}",
     );
 }
@@ -161,10 +161,10 @@ fn an_empty_enum_is_rejected() {
 fn recursion_by_value_is_the_recursive_type_diagnostic() {
     for source in [
         "type E [ A(E) ] fn main() {}",
-        "type E [ A(i32), B(Array<E, 2>) ] fn main() {}",
+        "type E [ A(i32), B(array<E, 2>) ] fn main() {}",
         "type A [ X(B) ] type B [ Y(A) ] fn main() {}",
         "type S { e: E } type E [ A(S) ] fn main() {}",
-        "type E [ A(Array<Array<E, 2>, 3>) ] fn main() {}",
+        "type E [ A(array<array<E, 2>, 3>) ] fn main() {}",
     ] {
         rejected(source, "TE026", "recursive");
     }
@@ -179,7 +179,7 @@ fn recursion_by_value_is_the_recursive_type_diagnostic() {
 fn payload_types_must_resolve() {
     rejected("type E [ A(Missing) ] fn main() {}", "TE001", "Missing");
     rejected(
-        "type E [ A(Array<i32, 99999999999>) ] fn main() {}",
+        "type E [ A(array<i32, 99999999999>) ] fn main() {}",
         "TE008",
         "implementation limit",
     );
@@ -225,16 +225,16 @@ fn payload_arguments_are_evaluated_left_to_right_and_moved_in() {
 #[test]
 fn aggregate_payloads_are_moved_in_and_primitives_copied() {
     accepted(
-        "let p := P { x: 1, y: 2 }; let xs: Array<u8, 3> = [1, 2, 3]; let n := 5; \
+        "let p := P { x: 1, y: 2 }; let xs: array<u8, 3> = [1, 2, 3]; let n := 5; \
          let s := Shape::Poly(p, xs); let t := Shape::Rect(n, n); let u := n + 1;",
     );
     owned_error(
-        "let p := P { x: 1, y: 2 }; let xs: Array<u8, 3> = [1, 2, 3]; \
+        "let p := P { x: 1, y: 2 }; let xs: array<u8, 3> = [1, 2, 3]; \
          let s := Shape::Poly(p, xs); let q := p;",
         "BE001",
     );
     owned_error(
-        "let p := P { x: 1, y: 2 }; let xs: Array<u8, 3> = [1, 2, 3]; \
+        "let p := P { x: 1, y: 2 }; let xs: array<u8, 3> = [1, 2, 3]; \
          let s := Shape::Poly(p, xs); let ys := xs;",
         "BE001",
     );
@@ -353,7 +353,7 @@ fn return_values_and_early_returns_of_enums() {
 fn enum_fields_arrays_and_repetition() {
     accepted(
         "let h := H { s: Shape::Circle(1.0), n: 1 }; let a := [Shape::Empty, make(2)]; \
-         let r := [Shape::Rect(1, 2); 4]; let g: Array<Shape, 2> = [make(1), make(0)];",
+         let r := [Shape::Rect(1, 2); 4]; let g: array<Shape, 2> = [make(1), make(0)];",
     );
     // Repetition evaluates the element expression once per element: the
     // construction sits inside the generated loop, not outside it.

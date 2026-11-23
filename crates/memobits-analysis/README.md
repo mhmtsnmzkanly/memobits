@@ -13,7 +13,7 @@ arguments and embedded loans are pending.
 `continue` outside a loop. It traverses nested blocks and expressions.
 
 `check_types(&Module)` checks standalone source types and control-flow results.
-The supported set includes `Bool`, internal Unit, signed and unsigned integers
+The supported set includes `bool`, internal Unit, signed and unsigned integers
 through 64 bits, `f32`/`f64`, fixed arrays, structs, enums, aliases, calls,
 assignments, matches, and primitive/aggregate `borrow` and `share` parameters.
 It checks literal ranges, branch and function results, and the supported

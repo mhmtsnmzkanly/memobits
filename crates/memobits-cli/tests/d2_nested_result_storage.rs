@@ -69,11 +69,11 @@ fn assert_source_and_wasm(source_text: &str, expected: u32) {
 #[test]
 fn struct_fields_hold_literal_ok_and_err_results() {
     assert_source_and_wasm(
-        r#"type Box { text: Result<string, Error>, n: u32 }
+        r#"type Box { text: string ! Error, n: u32 }
 fn main() -> u32 {
-    let ok: Result<string, Error> = Ok("é");
+    let ok: string ! Error = Ok("é");
     let first := Box { text: ok, n: 5 };
-    let failed: Result<string, Error> = Err(Error { code: 7 });
+    let failed: string ! Error = Err(Error { code: 7 });
     let second := Box { text: failed, n: 2 };
     let code := match second.text { Ok(_) => 0 as u32, Err(error) => error.code };
     first.n + second.n + code
@@ -85,13 +85,13 @@ fn main() -> u32 {
 #[test]
 fn fixed_arrays_of_results_read_back_through_match_and_move_into_calls() {
     assert_source_and_wasm(
-        r#"fn code_at(items: Array<Result<string, Error>, 2>) -> u32 {
+        r#"fn code_at(items: array<string ! Error, 2>) -> u32 {
     match items[1] { Ok(_) => 0, Err(error) => error.code }
 }
-fn count(items: borrow Array<Result<string, Error>, 2>) -> u32 { 2 }
+fn count(items: borrow array<string ! Error, 2>) -> u32 { 2 }
 fn main() -> u32 {
-    let first: Result<string, Error> = Ok("é");
-    let second: Result<string, Error> = Err(Error { code: 9 });
+    let first: string ! Error = Ok("é");
+    let second: string ! Error = Err(Error { code: 9 });
     let items := [first, second];
     let counted := count(items.borrow());
     let direct := match items[1] { Ok(_) => 0 as u32, Err(error) => error.code };
@@ -105,15 +105,15 @@ fn main() -> u32 {
 fn heap_owning_results_stay_rejected_in_nested_storage() {
     for source in [
         // Struct field initialized from a heap String payload.
-        r#"type Box { text: Result<string, Error>, n: u32 }
+        r#"type Box { text: string ! Error, n: u32 }
 fn main() -> u32 {
     let text := "a".concat("b");
-    let result: Result<string, Error> = Ok(text);
+    let result: string ! Error = Ok(text);
     let boxed := Box { text: result, n: 1 };
     boxed.n
 }"#,
         // Array element from a heap Result returned by a call.
-        r#"fn make(text: string) -> Result<string, Error> { Ok(text) }
+        r#"fn make(text: string) -> string ! Error { Ok(text) }
 fn main() -> u32 {
     let result := make("a".concat("b"));
     let items := [result];
@@ -121,17 +121,17 @@ fn main() -> u32 {
 }"#,
         // Replacing a literal element with a heap Result.
         r#"fn main() -> u32 {
-    let first: Result<string, Error> = Ok("a");
+    let first: string ! Error = Ok("a");
     var items := [first];
     let text := "a".concat("b");
-    let heap: Result<string, Error> = Ok(text);
+    let heap: string ! Error = Ok(text);
     items[0] = heap;
     1
 }"#,
         // Reading a heap-capable nested Result without a consuming match.
-        r#"type Box { text: Result<string, Error>, n: u32 }
+        r#"type Box { text: string ! Error, n: u32 }
 fn main() -> u32 {
-    let ok: Result<string, Error> = Ok("a");
+    let ok: string ! Error = Ok("a");
     let boxed := Box { text: ok, n: 1 };
     match boxed.text { Ok(value) => value.len(), Err(error) => error.code }
 }"#,

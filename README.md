@@ -93,7 +93,7 @@ project from source and as standalone Wasm and compares the output to it. See
 | [structs](examples/topics/structs/README.md) | Constructors, `share`/`borrow` parameters, nesting, disjoint loans | `cargo run -p memobits-cli -- run --project examples/topics/structs/project.toml` | `Result: Ok(i32(63))` |
 | [astar](examples/apps/astar/README.md) | Fixed-grid A* search with an unreachable-goal case | `cargo run -p memobits-cli -- run --project examples/apps/astar/project.toml` | `Result: Ok(i32(12))` |
 | [enf-lexer](examples/apps/enf-lexer/README.md) | Bounded ENF byte lexer fixture | `cargo run -p memobits-cli -- run --project examples/apps/enf-lexer/project.toml` | `Result: Ok(i32(0))` |
-| [hashing](examples/apps/hashing/README.md) | FNV-1a, DJB2 and Adler-32 over `Array<u8, N>` | `cargo run -p memobits-cli -- run --project examples/apps/hashing/project.toml` | `Result: Ok(u32(1774777415))` |
+| [hashing](examples/apps/hashing/README.md) | FNV-1a, DJB2 and Adler-32 over `array<u8, N>` | `cargo run -p memobits-cli -- run --project examples/apps/hashing/project.toml` | `Result: Ok(u32(1774777415))` |
 | [utf8-validator](examples/apps/utf8-validator/README.md) | Unicode scalar validation with byte offsets | `cargo run -p memobits-cli -- run --project examples/apps/utf8-validator/project.toml` | `Result: Ok(i32(0))` |
 
 Build and run a standalone artifact, for example the guide:
@@ -105,9 +105,9 @@ cargo run -p memobits-cli -- run examples/guide/target/memobits/app.wasm
 
 ## Language notes
 
-- The language guide demonstrates `contains(value) -> Bool` and
-  `index_of(value) -> u32?` on fixed arrays of numbers or `Bool`
-  (including `Array<u8, N>`) and on `List<u8>` and `List<u32>`.
+- The language guide demonstrates `contains(value) -> bool` and
+  `index_of(value) -> u32?` on fixed arrays of numbers or `bool`
+  (including `array<u8, N>`) and on `List<u8>` and `List<u32>`.
   It also demonstrates `loop value in items` over those fixed arrays and Lists.
   [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
   · [List iteration](docs/design/list-slice.md#list-iteration)

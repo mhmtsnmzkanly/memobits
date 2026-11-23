@@ -1,6 +1,6 @@
 use self::math::add;
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     let answer := add(20, 22);
     if answer != 42 {
         return Err(Error { code: 1 });

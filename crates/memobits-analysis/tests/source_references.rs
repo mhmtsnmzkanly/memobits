@@ -30,7 +30,7 @@ fn primitive_reads_and_writes_use_explicit_reference_instructions() {
         .iter()
         .any(|i| matches!(i.kind, InstructionKind::Store { .. })));
     assert!(memobits_ownership::check_ownership(&program).is_empty());
-    accepted("fn f(x: borrow Bool) -> i32 { if x && !x { 1 } else { 2 } }");
+    accepted("fn f(x: borrow bool) -> i32 { if x && !x { 1 } else { 2 } }");
 }
 
 #[test]
@@ -50,9 +50,9 @@ fn moving_reference_bindings_preserves_move_checks_and_loans() {
 
 #[test]
 fn branch_uses_keep_references_live_only_as_needed() {
-    accepted("fn f(flag: Bool) { var x := 1; let r := x.borrow(); if flag { r + 1; } else { r + 2; }; x = 2; }");
+    accepted("fn f(flag: bool) { var x := 1; let r := x.borrow(); if flag { r + 1; } else { r + 2; }; x = 2; }");
     rejected(
-        "fn f(flag: Bool) { var x := 1; let r := x.borrow(); if flag { x = 2; } else {}; r + 1; }",
+        "fn f(flag: bool) { var x := 1; let r := x.borrow(); if flag { x = 2; } else {}; r + 1; }",
     );
 }
 
@@ -68,8 +68,8 @@ fn call_arguments_keep_reborrow_loans_live_across_later_arguments() {
 
 #[test]
 fn reference_loops_and_mutation_capabilities_are_checked() {
-    accepted("fn f(flag: Bool) { var x := 1; loop { let r := x.borrow(); r + 1; x = 2; if flag { break; } } }");
-    rejected("fn f(flag: Bool) { var x := 1; let r := x.borrow(); loop { x = 2; if flag { break; } } r + 1; }");
+    accepted("fn f(flag: bool) { var x := 1; loop { let r := x.borrow(); r + 1; x = 2; if flag { break; } } }");
+    rejected("fn f(flag: bool) { var x := 1; let r := x.borrow(); loop { x = 2; if flag { break; } } r + 1; }");
     let p =
         lower("fn g(x: share i32) { x += 1; } fn f() { var x := 1; let r := x.share(); g(r); }");
     let ds = memobits_ownership::check_ownership(&p);
@@ -79,8 +79,8 @@ fn reference_loops_and_mutation_capabilities_are_checked() {
 
 #[test]
 fn short_circuit_reference_reads_produce_owned_boolean_results() {
-    accepted("fn f(x: borrow Bool) -> Bool { true && x }");
-    accepted("fn f(x: borrow Bool) -> Bool { false || x }");
-    accepted("fn f(x: share Bool) -> Bool { true && x }");
-    accepted("fn f(x: borrow Bool) -> Bool { let result := false || x; result }");
+    accepted("fn f(x: borrow bool) -> bool { true && x }");
+    accepted("fn f(x: borrow bool) -> bool { false || x }");
+    accepted("fn f(x: share bool) -> bool { true && x }");
+    accepted("fn f(x: borrow bool) -> bool { let result := false || x; result }");
 }

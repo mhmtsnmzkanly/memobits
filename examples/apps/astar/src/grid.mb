@@ -1,11 +1,11 @@
 // A 5 by 5 grid indexed as grid[y][x]. True marks a wall.
-pub type Grid = Array<Array<Bool, 5>, 5>;
+pub type Grid = array<array<bool, 5>, 5>;
 
-fn inside(x: i32, y: i32) -> Bool {
+fn inside(x: i32, y: i32) -> bool {
     0 <= x && x < 5 && 0 <= y && y < 5
 }
 
-fn passable(grid: borrow Grid, x: i32, y: i32) -> Bool {
+fn passable(grid: borrow Grid, x: i32, y: i32) -> bool {
     // Short-circuit before indexing if the coordinates are outside the grid.
     inside(x, y) && !grid[y][x]
 }
@@ -21,11 +21,11 @@ fn estimate(cell: i32, goal_x: i32, goal_y: i32) -> i32 {
 }
 
 type Frontier {
-    open: Array<Bool, 25>,
-    distance: Array<i32, 25>,
+    open: array<bool, 25>,
+    distance: array<i32, 25>,
 }
 
-fn lowest(frontier: borrow Frontier, goal_x: i32, goal_y: i32) -> Option<i32> {
+fn lowest(frontier: borrow Frontier, goal_x: i32, goal_y: i32) -> i32? {
     var best := -1;
     var best_score := 0;
     var cell := 0;
@@ -45,7 +45,7 @@ fn lowest(frontier: borrow Frontier, goal_x: i32, goal_y: i32) -> Option<i32> {
 }
 
 pub fn shortest_cost(grid: borrow Grid, start_x: i32, start_y: i32,
-                     goal_x: i32, goal_y: i32) -> Option<i32> {
+                     goal_x: i32, goal_y: i32) -> i32? {
     if !passable(grid, start_x, start_y) || !passable(grid, goal_x, goal_y) {
         return None;
     }

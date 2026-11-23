@@ -1,5 +1,5 @@
 /* Numbers and control flow. Block comments can /* nest */. */
-pub fn numbers() -> Bool {
+pub fn numbers() -> bool {
     // An annotation supplies the literal type. Without context, integers
     // default to i32 and floats to f64.
     let a: i8 = -8;
@@ -46,12 +46,12 @@ fn widen_byte(value: u8) -> u32 {
 fn widen_byte_method(value: u8) -> u32 {
     value.to_u32()
 }
-pub fn widenings() -> Bool {
-    let bytes: Array<u8, 4> = [0, 127, 128, 255];
+pub fn widenings() -> bool {
+    let bytes: array<u8, 4> = [0, 127, 128, 255];
     widen_byte(bytes[0]) == 0 && widen_byte_method(bytes[1]) == 127
         && bytes[2] as u32 == 128 && bytes[3].to_u32() == 255
 }
-pub fn numeric_casts() -> Bool {
+pub fn numeric_casts() -> bool {
     let all_bits: u32 = 4294967295;
     let signed: i32 = all_bits as i32;
     let fraction: i32 = (-1.9) as i32;
@@ -63,13 +63,13 @@ pub fn numeric_casts() -> Bool {
 }
 // Explicit u32 wrapping methods perform arithmetic modulo 2^32. Plain `+`
 // and `*` keep their checked behavior.
-pub fn wrapping_arithmetic() -> Bool {
+pub fn wrapping_arithmetic() -> bool {
     let max: u32 = 4294967295;
     max.wrapping_add(1) == 0 && max.wrapping_mul(2) == 4294967294
 }
 // u32 bitwise operations preserve the bit pattern. Shift counts must be below
 // 32; left shift discards high bits and right shift fills with zeroes.
-pub fn bit_operations() -> Bool {
+pub fn bit_operations() -> bool {
     let high: u32 = 2147483648;
     let pattern: u32 = 2863311530;
     1 | 2 ^ 3 & 7 == 1 && pattern.bit_xor(1431655765) == 4294967295

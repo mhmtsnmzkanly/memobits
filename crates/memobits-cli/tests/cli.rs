@@ -17,10 +17,10 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
     f.write(
         "src/main.mb",
         r#"
-        fn byte_is(s: borrow string, offset: u32, expected: u8) -> Bool {
+        fn byte_is(s: borrow string, offset: u32, expected: u8) -> bool {
             match s.byte_at(offset) { Some(byte) => byte == expected, None => false }
         }
-        fn doubled(input: borrow string, descend: Bool) -> Bool {
+        fn doubled(input: borrow string, descend: bool) -> bool {
             let joined := input.concat(input);
             if descend && !doubled(joined.borrow(), false) { return false; }
             // The callee's released region can be reused while joined is live.
@@ -29,7 +29,7 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
                 && byte_is(joined.borrow(), input.len(), 195)
                 && byte_is(joined_again.borrow(), joined_again.len() - 1, 169)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let text := "".concat("é");
             let pair := text.concat("😀");
             Ok(doubled(text.borrow(), true)
@@ -125,10 +125,10 @@ fn string_push_str_runs_from_source_and_wasm() {
         fn append(text: share string, suffix: borrow string) {
             text.push_str(suffix)
         }
-        fn early(text: share string, stop: Bool) {
+        fn early(text: share string, stop: bool) {
             text.push_str({ if stop { return; } "wrong" });
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let suffix := "😀".concat("!");
             let view := suffix.borrow();
             var text := "";
@@ -199,13 +199,13 @@ fn share_string_replacement_preserves_caller_owned_storage() {
     f.write(
         "src/main.mb",
         r#"
-        fn extend(text: share string, early: Bool) {
+        fn extend(text: share string, early: bool) {
             text = text.concat({ if early { return; } "😀" });
         }
         fn read_exclusive(text: share string) -> u32 { text.len() }
         fn clear(text: share string) { text = "ok"; }
         fn into_len(text: string) -> u32 { text.len() }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var text := "é";
             extend(text.share(), false);
             extend(text.share(), true);
@@ -285,7 +285,7 @@ fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
             let result := value.concat("😀");
             result
         }
-        fn check(move_first: Bool) -> Bool {
+        fn check(move_first: bool) -> bool {
             var text := "é";
             text = text.concat("!");
             text = text.concat("x");
@@ -308,7 +308,7 @@ fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
             text.len()
         }
         fn use_owner_before_exit(value: borrow string) -> u32 { value.len() }
-        fn main() -> Result<Bool, Error> { Ok(check(true) && check(false) && early() == 3) }
+        fn main() -> bool ! Error { Ok(check(true) && check(false) && early() == 3) }
         "#,
     );
     let source = f.run(&["run"]);
@@ -335,7 +335,7 @@ fn multiple_heap_arguments_keep_order_and_can_return_an_owner() {
             if first.len() == 3 && order == 1 && last == 2 { return second; }
             first
         }
-        fn main() -> Result<u32, Error> {
+        fn main() -> u32 ! Error {
             let first := "é".concat("!");
             let second := "a".concat("😀");
             var order := 0;
@@ -368,13 +368,13 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
     f.write(
         "src/text.mb",
         r#"
-        pub fn choose(early: Bool) -> string {
+        pub fn choose(early: bool) -> string {
             let joined := "é".concat("😀");
             if early { return joined; }
             "ok"
         }
         fn identity(owned: string) -> string { owned }
-        pub fn forward(early: Bool) -> string {
+        pub fn forward(early: bool) -> string {
             let owned := choose(early);
             let forwarded := identity(owned);
             forwarded
@@ -385,10 +385,10 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
         "src/main.mb",
         r#"
         use self::text::forward;
-        fn byte_is(s: borrow string, index: u32, expected: u8) -> Bool {
+        fn byte_is(s: borrow string, index: u32, expected: u8) -> bool {
             match s.byte_at(index) { Some(byte) => byte == expected, None => false }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let first := forward(true);
             let literal := forward(false);
             let another := "a".concat("b");
@@ -418,17 +418,17 @@ fn discarded_heap_results_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(text: string, early: Bool) -> string {
+        fn make(text: string, early: bool) -> string {
             if early { return text; }
             let result := text.concat("!");
             result
         }
-        fn early_concat() -> Bool {
+        fn early_concat() -> bool {
             let first := "é".concat("!");
             first.concat({ return first.len() == 3; "unreachable" });
             false
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let first := "é".concat("!");
             make(first, true);
             "x".concat("😀");
@@ -490,17 +490,17 @@ fn immediate_heap_string_reads_run_from_source_and_wasm() {
             let text := "é".concat("😀");
             text
         }
-        fn byte_is(value: Option<u8>, expected: u8) -> Bool {
+        fn byte_is(value: u8?, expected: u8) -> bool {
             match value { Some(byte) => byte == expected, None => false }
         }
-        fn scalar_is(value: Option<u32>, expected: u32) -> Bool {
+        fn scalar_is(value: u32?, expected: u32) -> bool {
             match value { Some(scalar) => scalar == expected, None => false }
         }
-        fn early() -> Bool {
+        fn early() -> bool {
             make().byte_at({ return true; 0 });
             false
         }
-        fn order() -> Bool {
+        fn order() -> bool {
             var step := 0;
             let result := "é".concat({ step = 1; "😀" }).scalar_at({
                 if step != 1 { return false; }
@@ -509,7 +509,7 @@ fn immediate_heap_string_reads_run_from_source_and_wasm() {
             });
             scalar_is(result, 128_512) && step == 2
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             Ok("é".concat("😀").len() == 6 && make().len() == 6
                 && byte_is("é".concat("😀").byte_at(1), 169)
                 && byte_is(make().byte_at(5), 128)
@@ -544,14 +544,14 @@ fn temporary_string_borrows_run_from_source_and_wasm() {
             let result := "a".concat("😀");
             result
         }
-        fn inspect(first: borrow string, second: borrow string, order: i32) -> Bool {
+        fn inspect(first: borrow string, second: borrow string, order: i32) -> bool {
             first.len() == 3 && second.len() == 5 && order == 2
         }
-        fn early() -> Bool {
+        fn early() -> bool {
             let unused := "unused";
             inspect(make().borrow(), { return true; unused.borrow() }, 0)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var order := 0;
             let read := inspect("é".concat({ order = 1; "!" }).borrow(),
                 make().borrow(), {
@@ -613,7 +613,7 @@ fn temporary_owned_string_arguments_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(ordered: Bool) -> string {
+        fn make(ordered: bool) -> string {
             let text := "a".concat("😀");
             if ordered { return text; }
             "wrong order"
@@ -622,14 +622,14 @@ fn temporary_owned_string_arguments_run_from_source_and_wasm() {
             if first.len() == 3 && view.len() == 2 && last == 2 { return second; }
             first
         }
-        fn early() -> Bool {
+        fn early() -> bool {
             select(make(true), "v".concat("w").borrow(), "a".concat("b"), {
                 return true;
                 0
             });
             false
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var order := 0;
             let result := select("é".concat({ order = 1; "!" }),
                 "v".concat("w").borrow(), make(order == 1), {
@@ -683,12 +683,12 @@ fn owned_heap_arguments_forward_and_leave_literal_only_calls_available() {
     f.write(
         "src/text.mb",
         r#"
-        pub fn consume(early: Bool, value: string) -> u32 {
+        pub fn consume(early: bool, value: string) -> u32 {
             if early { return value.len(); }
             let moved := value;
             moved.len()
         }
-        pub fn forward(early: Bool, value: string) -> u32 {
+        pub fn forward(early: bool, value: string) -> u32 {
             consume(early, value)
         }
     "#,
@@ -698,7 +698,7 @@ fn owned_heap_arguments_forward_and_leave_literal_only_calls_available() {
         r#"
         use self::text::forward;
         fn literal_echo(value: string, extra: u32) -> string { value }
-        fn main() -> Result<u32, Error> {
+        fn main() -> u32 ! Error {
             let first := "é".concat("!");
             let second := "a".concat("😀");
             let echoed := literal_echo("ok", 0);
@@ -726,10 +726,10 @@ fn concat_moves_across_nested_scopes_release_once_on_either_branch() {
     f.write(
         "src/main.mb",
         r#"
-        fn first_is(value: borrow string, expected: u8) -> Bool {
+        fn first_is(value: borrow string, expected: u8) -> bool {
             match value.byte_at(0) { Some(byte) => byte == expected, None => false }
         }
-        fn check(move_inward: Bool) -> Bool {
+        fn check(move_inward: bool) -> bool {
             let joined := "a".concat("b");
             let size := if move_inward {
                 let inner := joined;
@@ -741,7 +741,7 @@ fn concat_moves_across_nested_scopes_release_once_on_either_branch() {
             let second := "m".concat("n");
             size == 2 && first_is(first.borrow(), 120) && first_is(second.borrow(), 109)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             Ok(check(true) && check(false) && check(true))
         }
     "#,
@@ -761,7 +761,7 @@ fn concat_move_on_one_branch_invalidates_the_original_at_the_join() {
     let f = Fixture::new();
     f.write(
         "text.mb",
-        r#"fn main(flag: Bool) -> u32 {
+        r#"fn main(flag: bool) -> u32 {
         let joined := "é".concat("😀");
         if flag { let moved := joined; moved.len(); }
         joined.len()
@@ -781,7 +781,7 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn choose(outer: string, early: Bool) -> string {
+        fn choose(outer: string, early: bool) -> string {
             var step := 0;
             loop {
                 let outer := "é";
@@ -792,7 +792,7 @@ fn string_scope_exits_preserve_values_in_source_and_wasm() {
             }
             { let moved := outer; moved }
         }
-        fn main() -> Result<u32, Error> {
+        fn main() -> u32 ! Error {
             Ok(choose("outer", true).len() + choose("outer", false).len())
         }
     "#,
@@ -826,7 +826,7 @@ fn list_replacement_runs_from_source_and_wasm() {
         }
         fn consume(items: List<u32>) -> u32 { items.len() }
         fn pass(items: List<u32>) -> List<u32> { items }
-        fn check(move_old: Bool) -> Bool {
+        fn check(move_old: bool) -> bool {
             var items: List<u32> = [];
             items.push(40);
             items = rebuild(items.borrow());
@@ -841,13 +841,13 @@ fn list_replacement_runs_from_source_and_wasm() {
             items = [];
             old_ok && moved_ok && items.len() == 0
         }
-        fn early() -> Bool {
+        fn early() -> bool {
             var items: List<u8> = [];
             items.push(255);
             items = { return items.len() == 1; [] };
             false
         }
-        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true) && early()) }
+        fn main() -> bool ! Error { Ok(check(false) && check(true) && early()) }
     "#,
     );
     let source = f.run(&["run"]);
@@ -895,7 +895,7 @@ fn owned_list_returns_run_from_source_and_wasm() {
         "[package]\nname='list-return'\nentry='main::main'\n",
     );
     f.write("src/main.mb", r#"
-        fn bytes(empty: Bool) -> List<u8> {
+        fn bytes(empty: bool) -> List<u8> {
             var result: List<u8> = [];
             if empty { return result; }
             result.push(255);
@@ -910,7 +910,7 @@ fn owned_list_returns_run_from_source_and_wasm() {
             result
         }
         fn forward(items: List<u32>, marker: u32) -> List<u32> { items }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let empty := bytes(true);
             let byte_list := bytes(false);
             let original := grown();
@@ -942,7 +942,7 @@ fn discarded_list_returns_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make_bytes(log: share List<u8>, empty: Bool) -> List<u8> {
+        fn make_bytes(log: share List<u8>, empty: bool) -> List<u8> {
             log.push(7);
             var result: List<u8> = [];
             if empty { return result; }
@@ -958,13 +958,13 @@ fn discarded_list_returns_run_from_source_and_wasm() {
             log.push(9);
             items
         }
-        fn check_early_exit() -> Bool {
+        fn check_early_exit() -> bool {
             let staged := make_words();
             var log: List<u8> = [];
             forward(staged, { return log.len() == 0; log.share() });
             false
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var log: List<u8> = [];
             make_bytes(log.share(), true);
             make_bytes(log.share(), false);
@@ -996,17 +996,17 @@ fn collection_contains_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type Rows { flags: Array<Bool, 2> }
+        type Rows { flags: array<bool, 2> }
         fn make(log: share List<u8>) -> List<u32> {
             log.push(1);
             var words: List<u32> = [];
             words.push(4_294_967_295);
             words
         }
-        fn reads(bytes: borrow Bytes<2>, words: share List<u32>) -> Bool {
+        fn reads(bytes: borrow array<u8, 2>, words: share List<u32>) -> bool {
             bytes.contains(bytes[1]) && words.contains(4_294_967_295)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var log: List<u8> = [];
             let empty := !log.contains({ log.len(); 0 });
             let found := make(log.share()).contains({
@@ -1021,18 +1021,18 @@ fn collection_contains_runs_from_source_and_wasm() {
             let mutating_after_read := log.contains(2) && !log.contains(3);
             log.clear();
             let cleared := !log.contains(2);
-            let bytes: Bytes<2> = [0, 255];
+            let bytes: array<u8, 2> = [0, 255];
             var words := make(log.share());
             let borrowed := reads(bytes.borrow(), words.share());
             words.clear();
             let rows := Rows { flags: [false, true] };
-            let nested: Array<Array<i8, 2>, 1> = [[-2, 3]];
-            let no_values: Array<i32, 0> = [];
-            let wide: Array<u64, 1> = [4_294_967_296];
-            let floats: Array<f32, 2> = [0.0, 1.0];
+            let nested: array<array<i8, 2>, 1> = [[-2, 3]];
+            let no_values: array<i32, 0> = [];
+            let wide: array<u64, 1> = [4_294_967_296];
+            let floats: array<f32, 2> = [0.0, 1.0];
             let zero: f32 = 0.0;
             let nan := zero / zero;
-            let doubles: Array<f64, 1> = [0.0];
+            let doubles: array<f64, 1> = [0.0];
             Ok(empty && found && early && mutating_after_read && cleared && borrowed
                 && rows.flags.contains(true) && nested[0].contains(-2)
                 && !no_values.contains(0) && wide.contains(4_294_967_296)
@@ -1061,12 +1061,12 @@ fn collection_index_of_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type Flags { values: Array<Bool, 2> }
+        type Flags { values: array<bool, 2> }
 
-        fn at(result: Option<u32>, expected: u32) -> Bool {
+        fn at(result: u32?, expected: u32) -> bool {
             match result { Some(index) => index == expected, None => false }
         }
-        fn missing(result: Option<u32>) -> Bool {
+        fn missing(result: u32?) -> bool {
             match result { Some(_) => false, None => true }
         }
         fn make(log: share List<u8>) -> List<u32> {
@@ -1077,10 +1077,10 @@ fn collection_index_of_runs_from_source_and_wasm() {
             words.push(4_294_967_295);
             words
         }
-        fn reads(bytes: borrow Bytes<3>, words: share List<u32>) -> Bool {
+        fn reads(bytes: borrow array<u8, 3>, words: share List<u32>) -> bool {
             at(bytes.index_of(bytes[2]), 0) && at(words.index_of(4_294_967_295), 1)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var log: List<u8> = [];
             var evaluations: u32 = 0;
             let empty := missing(log.index_of({ evaluations = evaluations + 1; 1 }))
@@ -1096,17 +1096,17 @@ fn collection_index_of_runs_from_source_and_wasm() {
             let order := log.len() == 3 && at(log.index_of(2), 1);
             log.clear();
             let cleared := missing(log.index_of(2));
-            let bytes: Bytes<3> = [255, 0, 255];
+            let bytes: array<u8, 3> = [255, 0, 255];
             var words := make(log.share());
             let borrowed := reads(bytes.borrow(), words.share());
             let flags := Flags { values: [false, true] };
-            let rows: Array<Array<i8, 2>, 1> = [[-2, 3]];
-            let empty_array: Array<i32, 0> = [];
-            let wide: Array<u64, 2> = [0, 4_294_967_296];
-            let floats: Array<f32, 2> = [1.0, 0.0];
+            let rows: array<array<i8, 2>, 1> = [[-2, 3]];
+            let empty_array: array<i32, 0> = [];
+            let wide: array<u64, 2> = [0, 4_294_967_296];
+            let floats: array<f32, 2> = [1.0, 0.0];
             let zero: f32 = 0.0;
             let nan := zero / zero;
-            let doubles: Array<f64, 1> = [0.0];
+            let doubles: array<f64, 1> = [0.0];
             Ok(empty && at(found, 1) && order && cleared && borrowed
                 && at(flags.values.index_of(true), 1) && at(rows[0].index_of(-2), 0)
                 && missing(empty_array.index_of(0)) && at(wide.index_of(4_294_967_296), 1)
@@ -1129,9 +1129,9 @@ fn collection_index_of_runs_from_source_and_wasm() {
 fn collection_search_checks_types_and_preserves_the_receiver_loan() {
     let f = Fixture::new();
     for (body, code) in [
-        ("let a: Bytes<1> = [1]; a.contains(true);", "TE002"),
-        ("let a: Bytes<1> = [1]; a.contains();", "TE010"),
-        ("let a: Bytes<1> = [1]; a.contains(1, 2);", "TE010"),
+        ("let a: array<u8, 1> = [1]; a.contains(true);", "TE002"),
+        ("let a: array<u8, 1> = [1]; a.contains();", "TE010"),
+        ("let a: array<u8, 1> = [1]; a.contains(1, 2);", "TE010"),
         ("let a := [[1]]; a.contains([1]);", "TE017"),
         ("let a := \"text\"; a.contains(1);", "TE017"),
         ("let a: List<u32> = []; a.contains(true);", "TE002"),
@@ -1175,7 +1175,7 @@ fn temporary_list_reads_run_from_source_and_wasm() {
             items.push(4_294_967_295);
             items
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var log: List<u8> = [];
             let length := bytes(log.share()).len();
             let byte := bytes(log.share()).get({
@@ -1229,18 +1229,18 @@ fn temporary_list_borrows_run_from_source_and_wasm() {
             items.push(log.len() + 1000);
             items
         }
-        fn inspect(first: borrow List<u8>, second: borrow List<u32>, order: u32) -> Bool {
+        fn inspect(first: borrow List<u8>, second: borrow List<u32>, order: u32) -> bool {
             let byte_ok := match first.get(0) { Some(value) => value == 255, None => false };
             let word_ok := match second.get(0) { Some(value) => value == 1002, None => false };
             byte_ok && word_ok && order == 3
         }
-        fn early() -> Bool {
+        fn early() -> bool {
             var log: List<u8> = [];
             inspect(bytes(log.share()).borrow(), words(log.share()).borrow(), {
                 return log.len() == 2;
             })
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var log: List<u8> = [];
             let inspected := inspect(bytes(log.share()).borrow(), words(log.share()).borrow(), {
                 log.push(3);
@@ -1378,10 +1378,10 @@ fn owned_list_arguments_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn finish(words: List<u32>) -> Bool {
+        fn finish(words: List<u32>) -> bool {
             match words.get(1) { Some(word) => word == 100, None => false }
         }
-        fn take(bytes: List<u8>, proceed: Bool, var words: List<u32>) -> Bool {
+        fn take(bytes: List<u8>, proceed: bool, var words: List<u32>) -> bool {
             if !proceed { return false; }
             words.push(100);
             let valid := match bytes.get(0) { Some(byte) => byte == 255, None => false };
@@ -1399,7 +1399,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
             words.push(99);
             words
         }
-        fn run_temporary(skip: Bool) -> Bool {
+        fn run_temporary(skip: bool) -> bool {
             var log: List<u8> = [];
             let check := take(make_bytes(log.share()), {
                 if skip { return log.len() == 1; }
@@ -1409,7 +1409,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
             }, make_words(log.borrow()));
             check && log.len() == 2
         }
-        fn run(skip: Bool) -> Bool {
+        fn run(skip: bool) -> bool {
             var bytes: List<u8> = [];
             bytes.push(255);
             var words: List<u32> = [];
@@ -1422,7 +1422,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
             }, words);
             check && evaluations == 1
         }
-        fn main() -> Result<Bool, Error> { Ok(run(false) && run(true) && run_temporary(false) && run_temporary(true)) }
+        fn main() -> bool ! Error { Ok(run(false) && run(true) && run_temporary(false) && run_temporary(true)) }
     "#,
     );
     let source = f.run(&["run"]);
@@ -1489,10 +1489,10 @@ fn shared_list_push_updates_caller_from_source_and_wasm() {
             let value := held.len() + 1000;
             words.push(value);
         }
-        fn last(words: share List<u32>) -> Option<u32> {
+        fn last(words: share List<u32>) -> u32? {
             words.get(words.len() - 1)
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             var index: u32 = 0;
@@ -1536,12 +1536,12 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
             result.push(old + 1);
             result
         }
-        fn rebuild(items: share List<u32>, early: Bool) {
+        fn rebuild(items: share List<u32>, early: bool) {
             items = { if early { return; } fresh(items.borrow()) };
         }
         fn install(items: share List<u8>, replacement: List<u8>) { items = replacement; }
         fn clear(items: share List<u8>) { items = []; }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var words: List<u32> = [];
             words.push(40);
             rebuild(words.share(), true);
@@ -1581,7 +1581,7 @@ fn list_clear_runs_from_source_and_wasm() {
         "src/main.mb",
         r#"
         fn reset(words: share List<u32>) { words.clear() }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             bytes.clear();
             bytes.push(255);
@@ -1653,8 +1653,8 @@ fn list_pop_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn take(items: share List<u32>) -> Option<u32> { items.pop() }
-        fn main() -> Result<Bool, Error> {
+        fn take(items: share List<u32>) -> u32? { items.pop() }
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             let empty := match bytes.pop() { None => true, Some(_) => false };
             bytes.push(255);
@@ -1732,7 +1732,7 @@ fn stored_list_share_updates_run_from_source_and_wasm() {
             next.push(old + 1);
             next
         }
-        fn check(early: Bool) -> Bool {
+        fn check(early: bool) -> bool {
             var items: List<u32> = [];
             items.push(40);
             var handle := items.share();
@@ -1745,7 +1745,7 @@ fn stored_list_share_updates_run_from_source_and_wasm() {
             let pushed := match moved.get(2) { Some(value) => value == 42, None => false };
             old_ok && pushed
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             bytes.push(7);
             var next: List<u8> = [];
@@ -1852,18 +1852,18 @@ fn borrowed_list_reads_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
+        fn word_at(items: borrow List<u32>, index: u32) -> u32? {
             if index < items.len() { return items.get(index); }
             None
         }
-        fn byte_at(items: borrow List<u8>, index: u32) -> Option<u8> {
+        fn byte_at(items: borrow List<u8>, index: u32) -> u8? {
             if index < items.len() { return items.get(index); }
             None
         }
-        fn word_is(value: Option<u32>, expected: u32) -> Bool {
+        fn word_is(value: u32?, expected: u32) -> bool {
             match value { Some(word) => word == expected, None => false }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var words: List<u32> = [];
             var index: u32 = 0;
             loop {
@@ -1929,7 +1929,7 @@ fn list_borrow_conflicts_and_call_boundaries_are_checked() {
             "requires a mutable local owner",
         ),
         (
-            "let view: Option<borrow List<u8>> = Some(items.borrow());",
+            "let view: (borrow List<u8>)? = Some(items.borrow());",
             "TE017",
             "cannot be stored in Option",
         ),
@@ -1971,19 +1971,19 @@ fn list_get_reads_copied_values_after_growth_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn byte_is(value: Option<u8>, expected: u8) -> Bool {
+        fn byte_is(value: u8?, expected: u8) -> bool {
             match value { Some(byte) => byte == expected, None => false }
         }
-        fn word_is(value: Option<u32>, expected: u32) -> Bool {
+        fn word_is(value: u32?, expected: u32) -> bool {
             match value { Some(word) => word == expected, None => false }
         }
-        fn no_word(value: Option<u32>) -> Bool {
+        fn no_word(value: u32?) -> bool {
             match value { Some(_) => false, None => true }
         }
-        fn no_byte(value: Option<u8>) -> Bool {
+        fn no_byte(value: u8?) -> bool {
             match value { Some(_) => false, None => true }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             let empty := no_word(words.get(0)) && no_byte(bytes.get(4_294_967_295));
@@ -2048,7 +2048,7 @@ fn list_push_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn check(move_it: Bool) -> Bool {
+        fn check(move_it: bool) -> bool {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             var calls := 0;
@@ -2064,7 +2064,7 @@ fn list_push_runs_from_source_and_wasm() {
             }
             words.len() == 20 && bytes.len() == 20
         }
-        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true)) }
+        fn main() -> bool ! Error { Ok(check(false) && check(true)) }
     "#,
     );
     let source = f.run(&["run"]);
@@ -2105,7 +2105,7 @@ fn empty_lists_and_local_moves_run_from_source_and_wasm() {
         r#"
         type List { count: u32 }
         type Words = List<u32>;
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let existing: List = List { count: 7 };
             let bytes: List<u8> = [];
             var words: Words = [];
@@ -2187,7 +2187,7 @@ fn strings_execute_from_source_and_artifact_with_private_utf8_data() {
            use self::text::make;
            use self::text::inspect;
            fn consume(s: Text) {}
-           fn main() -> Result<i32, Error> {
+           fn main() -> i32 ! Error {
                let s := make();
                let view := s.borrow();
                let checked := inspect(view);
@@ -2260,13 +2260,13 @@ fn internal_static_string_results_run_from_source_and_wasm() {
         r#"
         type TextError: Error { offset: i32 }
         fn literal() -> string { "😀" }
-        fn make(use_literal: Bool, fail: Bool) -> Result<string, TextError> {
+        fn make(use_literal: bool, fail: bool) -> string ! TextError {
             if fail { return Err(TextError { code: 7, offset: 2 }); }
             if use_literal { return Ok("é"); }
             let text := literal();
             Ok(text)
         }
-        fn inspect(result: Result<string, TextError>) -> u32 {
+        fn inspect(result: string ! TextError) -> u32 {
             match result {
                 Ok(text) => match text.scalar_at(0) { Some(value) => value, None => 0 },
                 Err(error) => {
@@ -2275,7 +2275,7 @@ fn internal_static_string_results_run_from_source_and_wasm() {
                 }
             }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let first := make(true, false);
             Ok(inspect(first) == 233 && inspect(make(false, false)) == 128_512
                 && inspect(make(false, true)) == 7)
@@ -2303,9 +2303,9 @@ fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
         "src/main.mb",
         r#"
         fn into_len(value: string) -> u32 { value.len() }
-        fn check(early: Bool) -> Bool {
+        fn check(early: bool) -> bool {
             let text := "é".concat("😀");
-            let result: Result<string, Error> = Ok(text);
+            let result: string ! Error = Ok(text);
             match result {
                 Ok(value) => {
                     if early { return value.len() == 6; }
@@ -2317,7 +2317,7 @@ fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
                 Err(_) => false
             }
         }
-        fn main() -> Result<Bool, Error> { Ok(check(false) && check(true)) }
+        fn main() -> bool ! Error { Ok(check(false) && check(true)) }
     "#,
     );
     let source = f.run(&["run"]);
@@ -2340,7 +2340,7 @@ fn returned_heap_string_results_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make(mode: i32, text: string) -> Result<string, Error> {
+        fn make(mode: i32, text: string) -> string ! Error {
             if mode == 1 { return Ok("é"); }
             if mode == 2 { return Err(Error { code: 7 }); }
             Ok(text)
@@ -2355,7 +2355,7 @@ fn returned_heap_string_results_run_from_source_and_wasm() {
                 Err(error) => error.code
             }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let empty := match make(0, "".concat("")) {
                 Ok(value) => value.len() == 0,
                 Err(_) => false
@@ -2388,7 +2388,7 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
         "forward();",
     ] {
         let forward = if body == "forward();" {
-            "fn forward() -> Result<string, Error> { make() }"
+            "fn forward() -> string ! Error { make() }"
         } else {
             ""
         };
@@ -2396,11 +2396,11 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
             "text.mb",
             &format!(
                 r#"
-            fn make() -> Result<string, Error> {{
+            fn make() -> string ! Error {{
                 let text := "é".concat("!");
                 return Ok(text);
             }}
-            fn take(result: Result<string, Error>) {{}}
+            fn take(result: string ! Error) {{}}
             {forward}
             fn main() {{ {body} }}
         "#
@@ -2418,19 +2418,19 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
 fn heap_string_results_reject_escape_and_ignore_paths() {
     let f = Fixture::new();
     for body in [
-        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); match result { Err(_) => {}, _ => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text); 1 + 1; match result { Ok(text) => { text.len(); }, Err(_) => {} };"#,
-        r#"let text := "é".concat("!"); let result: Result<string, Error> = Ok(text);"#,
+        r#"let text := "é".concat("!"); let result: string ! Error = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
+        r#"let text := "é".concat("!"); let result: string ! Error = Ok(text); match result { Err(_) => {}, _ => {} };"#,
+        r#"let text := "é".concat("!"); let result: string ! Error = Ok(text); 1 + 1; match result { Ok(text) => { text.len(); }, Err(_) => {} };"#,
+        r#"let text := "é".concat("!"); let result: string ! Error = Ok(text);"#,
         r#"let result := wrap("é".concat("!"));"#,
-        r#"let result: Result<string, Error> = Ok(heap());"#,
-        r#"var text := "é"; append(text.share()); let result: Result<string, Error> = Ok(text);"#,
+        r#"let result: string ! Error = Ok(heap());"#,
+        r#"var text := "é"; append(text.share()); let result: string ! Error = Ok(text);"#,
     ] {
         f.write(
             "text.mb",
             &format!(
                 r#"
-            fn wrap(text: string) -> Result<string, Error> {{ Ok(text) }}
+            fn wrap(text: string) -> string ! Error {{ Ok(text) }}
             fn heap() -> string {{ let text := "é".concat("!"); text }}
             fn append(text: share string) {{ text.push_str("!"); }}
             fn main() {{ {body} }}
@@ -2452,7 +2452,7 @@ fn internal_string_results_require_consuming_payload_matches() {
         "text.mb",
         r#"
         fn main() -> u32 {
-            let result: Result<string, Error> = Ok("é");
+            let result: string ! Error = Ok("é");
             match result.borrow() { Ok(text) => text.len(), Err(_) => 0 }
         }
     "#,
@@ -2488,27 +2488,27 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "String array elements",
         ),
         (
-            r#"pub fn main() -> Result<string, Error> { Ok("é") }"#,
+            r#"pub fn main() -> string ! Error { Ok("é") }"#,
             &["build"][..],
             "primitive success payload",
         ),
         (
-            r#"pub fn main() -> Result<string, Error> { Ok("é") }"#,
+            r#"pub fn main() -> string ! Error { Ok("é") }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
         ),
         (
-            r#"pub fn main() -> Result<string, Error> { let text := "é".concat("!"); Ok(text) }"#,
+            r#"pub fn main() -> string ! Error { let text := "é".concat("!"); Ok(text) }"#,
             &["build"][..],
             "primitive success payload",
         ),
         (
-            r#"pub fn main() -> Result<string, Error> { let text := "é".concat("!"); Ok(text) }"#,
+            r#"pub fn main() -> string ! Error { let text := "é".concat("!"); Ok(text) }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
         ),
         (
-            r#"pub fn main() -> Result<string, Utf8Error> { let input: Bytes<1> = [65]; input.to_utf8_string(1) }"#,
+            r#"pub fn main() -> string ! Utf8Error { let input: array<u8, 1> = [65]; input.to_utf8_string(1) }"#,
             &["build"][..],
             "primitive success payload",
         ),
@@ -2660,14 +2660,14 @@ fn string_struct_share_reads_keep_caller_ownership_and_artifact_parity() {
         "src/main.mb",
         r#"
         type Label { text: string, number: u32 }
-        fn inspect(label: share Label, expected: u8) -> Bool {
+        fn inspect(label: share Label, expected: u8) -> bool {
             label.number == 7 && label.text.len() == 3
                 && match label.text.byte_at(2) {
                     Some(byte) => byte == expected,
                     None => false,
                 }
         }
-        pub fn main() -> Result<Bool, Error> {
+        pub fn main() -> bool ! Error {
             let prefix := "é";
             var label := Label { text: prefix.concat("!"), number: 7 };
             let first := inspect(label.share(), 33);
@@ -2699,7 +2699,7 @@ fn string_struct_share_replaces_fields_with_caller_cleanup_and_parity() {
         "src/main.mb",
         r#"
         type Record { text: string, sibling: string, number: u32 }
-        fn byte_is(value: borrow string, index: u32, expected: u8) -> Bool {
+        fn byte_is(value: borrow string, index: u32, expected: u8) -> bool {
             match value.byte_at(index) { Some(byte) => byte == expected, None => false }
         }
         fn direct_result() -> string { let text := "call".concat("!"); text }
@@ -2719,7 +2719,7 @@ fn string_struct_share_replaces_fields_with_caller_cleanup_and_parity() {
             }
             if sibling.len() != 4 { return; }
         }
-        pub fn main() -> Result<Bool, Error> {
+        pub fn main() -> bool ! Error {
             var record := Record { text: "old", sibling: "keep", number: 8 };
             replace(record.share(), 0);
             if record.text.len() != 6 || !byte_is(record.text.borrow(), 5, 33) { return Ok(false); }
@@ -3082,13 +3082,13 @@ fn strict_utf8_construction_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn convert(input: borrow Bytes<4>, length: i32) -> Result<string, Utf8Error> {
+        fn convert(input: borrow array<u8, 4>, length: i32) -> string ! Utf8Error {
             input.to_utf8_string(length)
         }
-        fn byte_is(text: borrow string, offset: u32, expected: u8) -> Bool {
+        fn byte_is(text: borrow string, offset: u32, expected: u8) -> bool {
             match text.byte_at(offset) { Some(byte) => byte == expected, None => false }
         }
-        fn error_is(input: borrow Bytes<4>, length: i32, code: u32, offset: i32) -> Bool {
+        fn error_is(input: borrow array<u8, 4>, length: i32, code: u32, offset: i32) -> bool {
             match input.to_utf8_string(length) {
                 Ok(text) => false,
                 Err(error) => {
@@ -3099,19 +3099,19 @@ fn strict_utf8_construction_runs_from_source_and_wasm() {
                 }
             }
         }
-        fn main() -> Result<Bool, Error> {
-            let input: Bytes<4> = [195, 169, 0, 255];
+        fn main() -> bool ! Error {
+            let input: array<u8, 4> = [195, 169, 0, 255];
             let result := convert(input.borrow(), 3);
             let exact := match result {
                 Ok(text) => text.len() == 3 && byte_is(text.borrow(), 0, 195)
                     && byte_is(text.borrow(), 1, 169) && byte_is(text.borrow(), 2, 0),
                 Err(_) => false
             };
-            let empty_input: Bytes<2> = [255, 255];
+            let empty_input: array<u8, 2> = [255, 255];
             let empty := match empty_input.to_utf8_string(0) {
                 Ok(text) => text.len() == 0, Err(_) => false
             };
-            let malformed: Bytes<4> = [65, 237, 160, 128];
+            let malformed: array<u8, 4> = [65, 237, 160, 128];
             Ok(exact && empty && input[3] == 255
                 && error_is(input.borrow(), 4, 2, 3)
                 && error_is(input.borrow(), 1, 3, 1)
@@ -3140,7 +3140,7 @@ fn utf8_constructor_rejects_unclaimed_results() {
     ] {
         f.write(
             "utf8.mb",
-            &format!("fn main() {{ let input: Bytes<1> = [65]; {body} }}"),
+            &format!("fn main() {{ let input: array<u8, 1> = [65]; {body} }}"),
         );
         let diagnostic = err(f.run(&["ownership", "utf8.mb"]), "TE018");
         assert!(
@@ -3160,7 +3160,7 @@ fn utf8_validation_checks_receiver_type_and_borrows_through_length_evaluation() 
             "requires a fixed byte array",
         ),
         (
-            "fn main() { var bytes: Bytes<2> = [1, 2]; bytes.validate_utf8({ bytes[0] = 0; 1 }); }",
+            "fn main() { var bytes: array<u8, 2> = [1, 2]; bytes.validate_utf8({ bytes[0] = 0; 1 }); }",
             "BE005",
             "borrowed",
         ),
@@ -3207,7 +3207,7 @@ fn scalar_traversal_counts_scalars_separately_from_utf8_bytes_in_source_and_wasm
             }
             count
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             let text := "aé€😀";
             let ascii_text := "abc";
             let supplementary_text := "😀";
@@ -4424,7 +4424,7 @@ fn user_defined_ordering_borrows_receiver_and_runs_in_source_and_wasm() {
         "project.toml",
         "[package]\nname='partial-ord'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } type Other { value: u32 } extend Key of PartialOrd { type Rhs = Other; fn lt(borrow self, rhs: Other) -> Bool { self.value < rhs.value } fn le(borrow self, rhs: Other) -> Bool { self.value <= rhs.value } fn gt(borrow self, rhs: Other) -> Bool { self.value > rhs.value } fn ge(borrow self, rhs: Other) -> Bool { self.value >= rhs.value } } fn before<T>(lhs: T, rhs: T::Rhs) -> Bool where T: PartialOrd { lhs < rhs } fn main() -> u32 { var order: u32 = 0; let base := { order = 1; Key { value: 10 } }; let gt_left := Key { value: 11 }; let rhs11 := Other { value: 11 }; let rhs10 := Other { value: 10 }; let rhs10d := Other { value: 10 }; let rhs10b := Other { value: 10 }; let rhs9 := Other { value: 9 }; let rhs11b := Other { value: 11 }; let rhs10c := Other { value: 10 }; let rhs11c := Other { value: 11 }; let one := Key { value: 1 }; let two := Other { value: 2 }; let tests := base < rhs11 && !(base < rhs10) && base <= rhs10b && !(base <= rhs9) && gt_left > rhs10d && !(gt_left > rhs11b) && base >= rhs10c && !(base >= rhs11c) && before(one, two); if !tests { return 0; } if order != 1 || base.value != 10 { return 0; } 42 }");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } type Other { value: u32 } extend Key of PartialOrd { type Rhs = Other; fn lt(borrow self, rhs: Other) -> bool { self.value < rhs.value } fn le(borrow self, rhs: Other) -> bool { self.value <= rhs.value } fn gt(borrow self, rhs: Other) -> bool { self.value > rhs.value } fn ge(borrow self, rhs: Other) -> bool { self.value >= rhs.value } } fn before<T>(lhs: T, rhs: T::Rhs) -> bool where T: PartialOrd { lhs < rhs } fn main() -> u32 { var order: u32 = 0; let base := { order = 1; Key { value: 10 } }; let gt_left := Key { value: 11 }; let rhs11 := Other { value: 11 }; let rhs10 := Other { value: 10 }; let rhs10d := Other { value: 10 }; let rhs10b := Other { value: 10 }; let rhs9 := Other { value: 9 }; let rhs11b := Other { value: 11 }; let rhs10c := Other { value: 10 }; let rhs11c := Other { value: 11 }; let one := Key { value: 1 }; let two := Other { value: 2 }; let tests := base < rhs11 && !(base < rhs10) && base <= rhs10b && !(base <= rhs9) && gt_left > rhs10d && !(gt_left > rhs11b) && base >= rhs10c && !(base >= rhs11c) && before(one, two); if !tests { return 0; } if order != 1 || base.value != 10 { return 0; } 42 }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: u32(42)\n");
@@ -4434,41 +4434,41 @@ fn user_defined_ordering_borrows_receiver_and_runs_in_source_and_wasm() {
     assert!(artifact.status.success(), "{artifact:?}");
     assert_eq!(artifact.stdout, b"Result: i32(42)\n");
 
-    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} type Other {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} < Other {} }");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} type Other {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> bool { true } } fn main() -> bool { Key {} < Other {} }");
     let wrong_rhs = err(f.run(&["analyze-project"]), "TE007");
     assert!(wrong_rhs.contains("PartialOrd requires"), "{wrong_rhs}");
     f.write(
         "src/main.mb",
-        "type Key {} fn main() -> Bool { Key {} < Key {} }",
+        "type Key {} fn main() -> bool { Key {} < Key {} }",
     );
     let missing = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         missing.contains("no visible PartialOrd implementation"),
         "{missing}"
     );
-    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 2 }; let _less := left < right; right.value }");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> bool { true } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 2 }; let _less := left < right; right.value }");
     let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
     assert!(moved_rhs.contains("right"), "{moved_rhs}");
-    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { false } fn le(borrow self, rhs: Key) -> Bool { false } fn gt(borrow self, rhs: Key) -> Bool { false } fn ge(borrow self, rhs: Key) -> Bool { false } } fn main() -> Bool { Key {} < Key {} }");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> bool { true } } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { false } fn le(borrow self, rhs: Key) -> bool { false } fn gt(borrow self, rhs: Key) -> bool { false } fn ge(borrow self, rhs: Key) -> bool { false } } fn main() -> bool { Key {} < Key {} }");
     let ambiguous = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         ambiguous.contains("ambiguous PartialOrd implementation for `<`"),
         "{ambiguous}"
     );
-    f.write("src/main.mb", "use other; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> Bool { Key { value: 1 } < Key { value: 2 } }");
-    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } }");
+    f.write("src/main.mb", "use other; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> bool { Key { value: 1 } < Key { value: 2 } }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> bool { true } }");
     let private = err(f.run(&["analyze-project"]), "TE007");
     assert!(private.contains("private or inactive"), "{private}");
-    f.write("src/main.mb", "use other::marker; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> Bool { Key { value: 1 } < Key { value: 2 } }");
-    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } }");
+    f.write("src/main.mb", "use other::marker; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> bool { Key { value: 1 } < Key { value: 2 } }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> bool { true } }");
     let inactive = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         inactive.contains("no visible PartialOrd implementation"),
         "{inactive}"
     );
-    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> Bool { Key {} < Key {} }");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> bool { true } fn le(borrow self, rhs: Key) -> bool { true } fn gt(borrow self, rhs: Key) -> bool { true } fn ge(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> bool { Key {} < Key {} }");
     let wrong_signature = err(f.run(&["analyze-project"]), "ME005");
-    assert!(wrong_signature.contains("Bool"), "{wrong_signature}");
+    assert!(wrong_signature.contains("bool"), "{wrong_signature}");
 }
 
 #[test]
@@ -5205,7 +5205,7 @@ fn user_defined_equality_borrows_receiver_and_runs_in_source_and_wasm() {
         "project.toml",
         "[package]\nname='partial-eq'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn same<T>(lhs: T, rhs: T::Rhs) -> Bool where T: PartialEq { lhs == rhs } fn main() -> u32 { let left := Key { value: 12 }; let same_key := Key { value: 12 }; let different := Key { value: 13 }; if !(left == same_key) { return 0; } if left != different { return left.value; } if !same(Key { value: 5 }, Key { value: 5 }) { return 0; } left.value }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { self.value == rhs.value } } fn same<T>(lhs: T, rhs: T::Rhs) -> bool where T: PartialEq { lhs == rhs } fn main() -> u32 { let left := Key { value: 12 }; let same_key := Key { value: 12 }; let different := Key { value: 13 }; if !(left == same_key) { return 0; } if left != different { return left.value; } if !same(Key { value: 5 }, Key { value: 5 }) { return 0; } left.value }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: u32(12)\n");
@@ -5214,41 +5214,41 @@ fn user_defined_equality_borrows_receiver_and_runs_in_source_and_wasm() {
     let artifact = f.run(&["run", "partial-eq.wasm"]);
     assert!(artifact.status.success(), "{artifact:?}");
     assert_eq!(artifact.stdout, b"Result: i32(12)\n");
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 1 }; let _equal := left == right; right.value }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { self.value == rhs.value } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 1 }; let _equal := left == right; right.value }");
     let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
     assert!(moved_rhs.contains("right"), "{moved_rhs}");
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} type Other {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} == Other {} }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} type Other {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { true } } fn main() -> bool { Key {} == Other {} }");
     let wrong_rhs = err(f.run(&["analyze-project"]), "TE007");
     assert!(wrong_rhs.contains("PartialEq requires"), "{wrong_rhs}");
     f.write(
         "src/main.mb",
-        "type Key {} fn main() -> Bool { Key {} == Key {} }",
+        "type Key {} fn main() -> bool { Key {} == Key {} }",
     );
     let missing = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         missing.contains("no visible PartialEq implementation"),
         "{missing}"
     );
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { false } } fn main() -> Bool { Key {} != Key {} }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { true } } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { false } } fn main() -> bool { Key {} != Key {} }");
     let ambiguous = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         ambiguous.contains("ambiguous PartialEq implementation for `!=`"),
         "{ambiguous}"
     );
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} == Key {} }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(self, rhs: Key) -> bool { true } } fn main() -> bool { Key {} == Key {} }");
     let wrong_receiver = err(f.run(&["analyze-project"]), "ME005");
     assert!(
         wrong_receiver.contains("does not match interface"),
         "{wrong_receiver}"
     );
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> Bool { Key {} == Key {} }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> bool { Key {} == Key {} }");
     let wrong_result = err(f.run(&["analyze-project"]), "ME005");
-    assert!(wrong_result.contains("Bool"), "{wrong_result}");
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } fn main() -> u32 { let lhs := Key {}; let result := lhs == { return 42; Key {} }; 0 }");
+    assert!(wrong_result.contains("bool"), "{wrong_result}");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { true } } fn main() -> u32 { let lhs := Key {}; let result := lhs == { return 42; Key {} }; 0 }");
     let early_return = f.run(&["run"]);
     assert!(early_return.status.success(), "{early_return:?}");
     assert_eq!(early_return.stdout, b"Result: u32(42)\n");
-    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn main() -> u32 { var order: u32 = 0; let equal := { order = 1; Key { value: 9 } } == { if order != 1 { return 0; } order = 12; Key { value: 9 } }; if order != 12 || !equal { return 0; } 42 }");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { self.value == rhs.value } } fn main() -> u32 { var order: u32 = 0; let equal := { order = 1; Key { value: 9 } } == { if order != 1 { return 0; } order = 12; Key { value: 9 } }; if order != 12 || !equal { return 0; } 42 }");
     let order_source = f.run(&["run"]);
     assert!(order_source.status.success(), "{order_source:?}");
     assert_eq!(order_source.stdout, b"Result: u32(42)\n");
@@ -5257,12 +5257,12 @@ fn user_defined_equality_borrows_receiver_and_runs_in_source_and_wasm() {
     let order_artifact = f.run(&["run", "partial-eq-order.wasm"]);
     assert!(order_artifact.status.success(), "{order_artifact:?}");
     assert_eq!(order_artifact.stdout, b"Result: i32(42)\n");
-    f.write("src/main.mb", "use other; use core::ops::PartialEq; pub type Key {} fn main() -> Bool { Key {} == Key {} }");
-    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } }");
+    f.write("src/main.mb", "use other; use core::ops::PartialEq; pub type Key {} fn main() -> bool { Key {} == Key {} }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { true } }");
     let private = err(f.run(&["analyze-project"]), "TE007");
     assert!(private.contains("private or inactive"), "{private}");
-    f.write("src/main.mb", "use other::marker; use core::ops::PartialEq; pub type Key {} fn main() -> Bool { Key {} == Key {} }");
-    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } }");
+    f.write("src/main.mb", "use other::marker; use core::ops::PartialEq; pub type Key {} fn main() -> bool { Key {} == Key {} }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> bool { true } }");
     let inactive = err(f.run(&["analyze-project"]), "TE007");
     assert!(
         inactive.contains("no visible PartialEq implementation"),
@@ -5470,7 +5470,7 @@ fn user_defined_add_rejects_wrong_signature_and_ambiguous_evidence() {
 #[test]
 fn char_and_u32_are_distinct_scalar_types() {
     let f = Fixture::new();
-    f.write("char-mismatch.mb", "fn main() -> Bool { 'A' == 65 }");
+    f.write("char-mismatch.mb", "fn main() -> bool { 'A' == 65 }");
     let message = err(f.run(&["analyze", "char-mismatch.mb"]), "TE002");
     assert!(message.contains("expected Char"), "{message}");
 }
@@ -5480,7 +5480,7 @@ fn tuple_element_order_is_checked_by_type() {
     let f = Fixture::new();
     f.write(
         "tuple.mb",
-        "fn need(pair: (i32, Bool)) {} fn main() { need((true, 1)); }",
+        "fn need(pair: (i32, bool)) {} fn main() { need((true, 1)); }",
     );
     err(f.run(&["analyze", "tuple.mb"]), "TE002");
 }
@@ -5543,7 +5543,7 @@ fn tuple_reference_elements_are_gated_before_ir_validation() {
 #[test]
 fn tuple_nested_option_reference_is_gated_before_owner_can_escape() {
     let f = Fixture::new();
-    f.write("option-reference.mb", "fn main() -> i32 { var value := 1; let maybe: Option<borrow i32> = None; let tuple := (maybe, 0); value = 2; tuple.1 }");
+    f.write("option-reference.mb", "fn main() -> i32 { var value := 1; let maybe: (borrow i32)? = None; let tuple := (maybe, 0); value = 2; tuple.1 }");
     let message = err(f.run(&["analyze", "option-reference.mb"]), "TE017");
     assert!(
         message.contains("Option reference type arguments require embedded-loan tracking")
@@ -5560,7 +5560,7 @@ fn tuples_preserve_order_across_internal_arguments_results_and_projections() {
         "project.toml",
         "[package]\nname='tuples'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "fn identity(pair: (i32, Bool)) -> (i32, Bool) { (pair.0, pair.1) } fn main() -> i32 { let value := identity((40, true)); if value.1 { value.0 + 2 } else { 0 } }");
+    f.write("src/main.mb", "fn identity(pair: (i32, bool)) -> (i32, bool) { (pair.0, pair.1) } fn main() -> i32 { let value := identity((40, true)); if value.1 { value.0 + 2 } else { 0 } }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: i32(42)\n");
@@ -5708,11 +5708,11 @@ fn owned_string_tuples_move_through_internal_calls_and_returns() {
     f.write(
         "src/main.mb",
         r#"
-        fn forward(pair: (string, u32), early: Bool) -> (string, u32) {
+        fn forward(pair: (string, u32), early: bool) -> (string, u32) {
             if early { return pair; }
             pair
         }
-        fn exact(value: borrow string) -> Bool {
+        fn exact(value: borrow string) -> bool {
             value.len() == 3 && match value.byte_at(0) {
                 Some(a) => a == 120 && match value.byte_at(1) {
                     Some(b) => b == 121 && match value.byte_at(2) {
@@ -5758,7 +5758,7 @@ fn owned_string_tuple_transport_rejects_use_after_move_and_nominal_structs() {
 
     f.write(
         "src/main.mb",
-        "pub type Box { pub text: string, pub nested: (i32, Bool) } pub fn forward(value: Box) -> Box { value } fn main() {}",
+        "pub type Box { pub text: string, pub nested: (i32, bool) } pub fn forward(value: Box) -> Box { value } fn main() {}",
     );
     let nominal_nested = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -5775,7 +5775,7 @@ fn later_argument_early_return_cleans_staged_owned_tuple() {
         "project.toml",
         "[package]\nname='tuple-owner-early-argument'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "fn forward(pair: (string, u32), later: Bool) -> (string, u32) { pair } fn main() -> i32 { let text := \"xy\".concat(\"!\"); let pair := (text, 39 as u32); let forwarded := forward(pair, { return 42; false }); 0 }");
+    f.write("src/main.mb", "fn forward(pair: (string, u32), later: bool) -> (string, u32) { pair } fn main() -> i32 { let text := \"xy\".concat(\"!\"); let pair := (text, 39 as u32); let forwarded := forward(pair, { return 42; false }); 0 }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: i32(42)\n");
@@ -5793,7 +5793,7 @@ fn tuples_nest_in_struct_fields_and_enum_payloads() {
         "project.toml",
         "[package]\nname='nested-tuples'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "type Holder { pair: (i32, Bool) } type Data [Pair((i32, Bool))] fn main() -> i32 { let holder := Holder { pair: (40, true) }; let data := Data::Pair((holder.pair.0, holder.pair.1)); match data { Data::Pair(pair) => if pair.1 { pair.0 + 2 } else { 0 } } }");
+    f.write("src/main.mb", "type Holder { pair: (i32, bool) } type Data [Pair((i32, bool))] fn main() -> i32 { let holder := Holder { pair: (40, true) }; let data := Data::Pair((holder.pair.0, holder.pair.1)); match data { Data::Pair(pair) => if pair.1 { pair.0 + 2 } else { 0 } } }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: i32(42)\n");
@@ -5848,7 +5848,7 @@ fn nested_tuple_identity_ignores_occurrence_local_labels_in_source_and_wasm() {
         assert_eq!(wasm.stdout, source.stdout);
     }
 
-    f.write("src/main.mb", "fn make() -> (outer: (first: i32, second: i32), tag: i32) { (outer: (first: 40, second: 2), tag: 0) } fn consume(value: (container: (left: i32, right: Bool), marker: i32)) -> i32 { value.container.left } fn main() -> i32 { consume(make()) }");
+    f.write("src/main.mb", "fn make() -> (outer: (first: i32, second: i32), tag: i32) { (outer: (first: 40, second: 2), tag: 0) } fn consume(value: (container: (left: i32, right: bool), marker: i32)) -> i32 { value.container.left } fn main() -> i32 { consume(make()) }");
     let output = f.run(&["analyze", "src/main.mb"]);
     assert!(!output.status.success(), "{output:?}");
     assert!(
@@ -5874,7 +5874,7 @@ fn labeled_tuple_malformed_forms_are_rejected() {
             "TE002",
         ),
         (
-            "fn take(pair: (left: i32, left: Bool)) {} fn main() -> i32 { 42 }",
+            "fn take(pair: (left: i32, left: bool)) {} fn main() -> i32 { 42 }",
             "TE002",
         ),
         (
@@ -5907,7 +5907,7 @@ fn generic_nominal_structs_specialize_types_and_const_lengths_in_source_and_wasm
         "src/main.mb",
         r#"
         type Box<T> { value: T }
-        type Buffer<T, const N: u32> { data: Array<T, N> }
+        type Buffer<T, const N: u32> { data: array<T, N> }
         fn main() -> i32 {
             let left := Box<i32> { value: 40 };
             let right := Box<u32> { value: 1 };
@@ -6000,7 +6000,7 @@ fn generic_nominal_enums_substitute_const_array_payloads_in_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type Packet<const N: u32> [Data(Array<u8, N>)]
+        type Packet<const N: u32> [Data(array<u8, N>)]
         fn main() -> i32 {
             let one: Packet<1> = Packet::Data([40]);
             let three: Packet<3> = Packet::Data([1, 1, 1]);
@@ -6033,22 +6033,22 @@ fn generic_nominal_enum_constructors_reject_invalid_origins_and_payloads() {
     );
     for (source, code, message) in [
         (
-            "type Packet<const N: u32> [Data(Array<u8, N>)] type Other<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Other::Data([1]); }",
+            "type Packet<const N: u32> [Data(array<u8, N>)] type Other<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<1> = Other::Data([1]); }",
             "TE009",
             "unresolved or unsupported qualified function 'Other::Data'",
         ),
         (
-            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<2> = Packet::Data([1]); }",
+            "type Packet<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<2> = Packet::Data([1]); }",
             "TE002",
             "expected Array<u8, 2>, found Array<u8, 1>",
         ),
         (
-            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Data(); }",
+            "type Packet<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Data(); }",
             "TE010",
             "variant 'Packet<1>::Data' expects 1 argument(s), found 0",
         ),
         (
-            "type Packet<const N: u32> [Data(Array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Missing; }",
+            "type Packet<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Missing; }",
             "NE004",
             "unknown variant 'Packet::Missing'",
         ),
@@ -6072,7 +6072,7 @@ entry='main::main'\n",
     );
     f.write(
         "src/main.mb",
-        "fn identity<T>(value: T) -> T { value }\nfn choose<T>(value: T, enabled: Bool, fallback: T) -> T { if enabled { value } else { fallback } }\nfn forward<T>(value: T) -> T { identity(value) }\nfn recurse<T>(value: T, again: Bool) -> T { if again { recurse(value, false) } else { value } }\nfn main() -> i32 { let enabled: Bool = identity(true); let value: i32 = identity(40); let selected: i32 = choose(value, enabled, 0); let forwarded: i32 = forward(selected); if enabled { recurse(forwarded, true) + identity(2) } else { 0 } }\n",
+        "fn identity<T>(value: T) -> T { value }\nfn choose<T>(value: T, enabled: bool, fallback: T) -> T { if enabled { value } else { fallback } }\nfn forward<T>(value: T) -> T { identity(value) }\nfn recurse<T>(value: T, again: bool) -> T { if again { recurse(value, false) } else { value } }\nfn main() -> i32 { let enabled: bool = identity(true); let value: i32 = identity(40); let selected: i32 = choose(value, enabled, 0); let forwarded: i32 = forward(selected); if enabled { recurse(forwarded, true) + identity(2) } else { 0 } }\n",
     );
     let source = f.run(&["run"]);
     assert!(
@@ -6107,7 +6107,7 @@ fn generic_functions_forward_array_type_and_const_arguments_in_source_and_wasm()
     );
     f.write(
         "src/main.mb",
-        "fn echo<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { value }\nfn relay<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { echo(value) }\nfn main() -> i32 { let one: Array<i32, 1> = [40]; let two: Array<i32, 2> = [1, 1]; let a := relay(one); let b := relay(two); a[0] + b[0] + b[1] }\n",
+        "fn echo<T, const N: u32>(value: array<T, N>) -> array<T, N> { value }\nfn relay<T, const N: u32>(value: array<T, N>) -> array<T, N> { echo(value) }\nfn main() -> i32 { let one: array<i32, 1> = [40]; let two: array<i32, 2> = [1, 1]; let a := relay(one); let b := relay(two); a[0] + b[0] + b[1] }\n",
     );
     let source = f.run(&["run"]);
     assert!(
@@ -6246,7 +6246,7 @@ fn generic_array_call_checks_written_order_and_keeps_ownership_diagnostics() {
     );
     f.write(
         "src/main.mb",
-        "fn tick(counter: share i32) -> i32 { counter += 1; 0 }\nfn relay<T, const N: u32>(marker: i32, value: Array<T, N>) -> Array<T, N> { value }\nfn main() -> i32 { var counter := 0; let input: Array<i32, 1> = [42]; let output := relay(tick(counter.share()), input); if counter == 1 { output[0] } else { 0 } }\n",
+        "fn tick(counter: share i32) -> i32 { counter += 1; 0 }\nfn relay<T, const N: u32>(marker: i32, value: array<T, N>) -> array<T, N> { value }\nfn main() -> i32 { var counter := 0; let input: array<i32, 1> = [42]; let output := relay(tick(counter.share()), input); if counter == 1 { output[0] } else { 0 } }\n",
     );
     let source = f.run(&["run"]);
     assert!(
@@ -6353,7 +6353,7 @@ fn generic_array_function_rejects_conflicting_const_arguments() {
     );
     f.write(
         "src/main.mb",
-        "fn same<T, const N: u32>(first: Array<T, N>, second: Array<T, N>) -> Array<T, N> { first }\nfn main() -> i32 { let one: Array<i32, 1> = [1]; let two: Array<i32, 2> = [2, 3]; same(one, two)[0] }\n",
+        "fn same<T, const N: u32>(first: array<T, N>, second: array<T, N>) -> array<T, N> { first }\nfn main() -> i32 { let one: array<i32, 1> = [1]; let two: array<i32, 2> = [2, 3]; same(one, two)[0] }\n",
     );
     let diagnostic = err(f.run(&["run"]), "TE002");
     assert!(
@@ -6363,7 +6363,7 @@ fn generic_array_function_rejects_conflicting_const_arguments() {
 
     f.write(
         "src/main.mb",
-        "fn nested<T>(value: Option<T>) -> Option<T> { value } fn main() -> i32 { 0 }\n",
+        "fn nested<T>(value: T?) -> T? { value } fn main() -> i32 { 0 }\n",
     );
     let diagnostic = err(f.run(&["run"]), "TE007");
     assert!(
@@ -6454,11 +6454,11 @@ fn generic_specialization_keeps_declaring_module_imports_and_prelude_in_source_a
     );
     f.write(
         "src/ops.mb",
-        "pub fn identity<T>(value: T) -> T { value } pub fn normalize(value: Bool) -> Bool { value }",
+        "pub fn identity<T>(value: T) -> T { value } pub fn normalize(value: bool) -> bool { value }",
     );
     f.write(
         "src/wrappers.mb",
-        "use self::ops::identity as echo; pub fn wrap<T>(value: T, enabled: Bool) -> T { if prelude_normalize(enabled) { echo(value) } else { value } }",
+        "use self::ops::identity as echo; pub fn wrap<T>(value: T, enabled: bool) -> T { if prelude_normalize(enabled) { echo(value) } else { value } }",
     );
     f.write(
         "src/main.mb",
@@ -6788,7 +6788,7 @@ fn option_some_value_roundtrips_through_match() {
         "project.toml",
         "[package]\nname='option-roundtrip'\nentry='main::main'\n",
     );
-    f.write("src/main.mb", "fn main() -> i32 { let present: Option<i32> = Some(40); match present { Some(value) => value, None => 0 } }");
+    f.write("src/main.mb", "fn main() -> i32 { let present: i32? = Some(40); match present { Some(value) => value, None => 0 } }");
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: i32(40)\n");
@@ -6803,10 +6803,10 @@ fn applied_bytes_coexists_with_a_bare_bytes_import_and_moves_like_an_array() {
     );
     f.write("src/model.mb", "pub type Bytes = u8;");
     let source = "use self::model::Bytes;
-        fn consume(data: Array<u8, 1>) -> u8 { data[0] }
+        fn consume(data: array<u8, 1>) -> u8 { data[0] }
         fn main() -> u8 {
             let value: Bytes = 42;
-            let data: Bytes<1> = [value];
+            let data: array<u8, 1> = [value];
             consume(data)
         }";
     f.write("src/main.mb", source);
@@ -6882,7 +6882,7 @@ fn inferred_options_execute_payload_once_in_source_and_artifact() {
         fn main() -> i32 {
             var count := 0;
             let value := Some(Some(bump(count.share())));
-            let empty: Option<i32> = None;
+            let empty: i32? = None;
             let result := match value {
                 Some(inner) => match inner { Some(n) => n, None => 0 },
                 None => 0
@@ -6930,9 +6930,9 @@ fn owned_outcomes_execute_once_through_imported_aliases_in_source_and_artifact()
     );
     f.write(
         "src/model.mb",
-        "pub type Maybe = Option<u32>;
+        "pub type Maybe = u32?;
          pub type Failure = Error;
-         pub type Read = Result<u32, Failure>;
+         pub type Read = u32 ! Failure;
          pub type Work = Attempt<Read, Failure>;
          pub fn bump(n: share u32) -> u32 { n += 1; n }
          pub fn fail(n: share u32) -> Failure { Error { code: bump(n) } }
@@ -7018,7 +7018,7 @@ fn derived_errors_execute_across_modules_in_source_and_artifact() {
         "src/model.mb",
         "use origin::Parent as Ancestor;
          pub type ParseError: Ancestor { pub line: u32 }
-         pub type Read = Result<u32, ParseError>;
+         pub type Read = u32 ! ParseError;
          pub type Work = Attempt<Read, ParseError>;
          pub fn wrap(e: ParseError) -> Work { Done(Err(e)) }",
     );
@@ -7166,16 +7166,16 @@ fn outcome_entries_report_every_variant_from_source_and_standalone_artifacts() {
     );
     for (source, expected) in [
         (
-            "fn main() -> Result<u64, Error> { Ok(18446744073709551615) }",
+            "fn main() -> u64 ! Error { Ok(18446744073709551615) }",
             "Ok(u64(18446744073709551615))",
         ),
-        ("fn main() -> Result<i8, Error> { Ok(-20) }", "Ok(i8(-20))"),
+        ("fn main() -> i8 ! Error { Ok(-20) }", "Ok(i8(-20))"),
         (
-            "fn main() -> Result<i32, Error> { Err(Error { code: 4294967295 }) }",
+            "fn main() -> i32 ! Error { Err(Error { code: 4294967295 }) }",
             "Err(Error, code=4294967295)",
         ),
         (
-            "fn main() -> Attempt<Bool, Error> { Done(true) }",
+            "fn main() -> Attempt<bool, Error> { Done(true) }",
             "Done(Bool(true))",
         ),
         (
@@ -7213,7 +7213,7 @@ fn whole_ancestor_share_stores_keep_the_leaf_identity_and_fields() {
         "src/errors.mb",
         "pub type Base: Error { pub stage: u8 }
          pub type Leaf: Base { pub line: u16 }
-         pub type Failure = Result<i32, Leaf>;
+         pub type Failure = i32 ! Leaf;
          fn reset(e: share Error) { e = Error { code: 17 }; }
          pub fn replace(e: share Base) {
              e = Base { code: 11, stage: 3 };
@@ -7262,7 +7262,7 @@ fn outcome_entry_traps_keep_runtime_diagnostics() {
         "src/main.mb",
         "fn divide(n: i32) -> i32 { 1 / n }
          fn consume(text: string, value: i32) -> i32 { value }
-         fn main() -> Result<i32, Error> {
+         fn main() -> i32 ! Error {
              let text := \"a\".concat(\"b\");
              Ok(consume(text, divide(0)))
          }",
@@ -7286,10 +7286,10 @@ fn outcome_entry_stack_overflow_is_a_trap() {
     );
     f.write(
         "src/main.mb",
-        "fn dive(n: i32) -> Result<i32, Error> {
+        "fn dive(n: i32) -> i32 ! Error {
              if n == 0 { Ok(1) } else { dive(n - 1) }
          }
-         fn main() -> Result<i32, Error> { dive(10000) }",
+         fn main() -> i32 ! Error { dive(10000) }",
     );
     let source = err(f.run(&["run"]), "RE008");
     let build = f.run(&["build", "--output", "entry.wasm"]);
@@ -7306,7 +7306,7 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
     );
     for (source, expected) in [
         (
-            "fn main() -> Result<Array<i32, 1>, Error> { Ok([7]) }",
+            "fn main() -> array<i32, 1> ! Error { Ok([7]) }",
             "primitive success payload",
         ),
         (
@@ -7317,10 +7317,7 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
             "type Lookalike [ Ok(i32), Err(Error) ] fn main() -> Lookalike { Lookalike::Ok(7) }",
             "cannot return enums",
         ),
-        (
-            "fn main() -> Option<i32> { Some(7) }",
-            "cannot return enums",
-        ),
+        ("fn main() -> i32? { Some(7) }", "cannot return enums"),
     ] {
         f.write("src/main.mb", source);
         let message = err(f.run(&["build"]), "LE900");
@@ -7328,7 +7325,7 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
     }
     f.write(
         "src/main.mb",
-        "pub fn work() -> Result<i32, Error> { Ok(7) } fn main() {}",
+        "pub fn work() -> i32 ! Error { Ok(7) } fn main() {}",
     );
     let message = err(f.run(&["build", "--lib"]), "LE900");
     assert!(message.contains("cannot return enums"), "{message}");
@@ -7991,7 +7988,7 @@ fn ownership_project_checks_resolved_roots_and_imported_moves() {
         "project.toml",
         "[package]\nname='demo'\nentry='main::main'\n[export]\nconsume='api::consume'\n",
     );
-    f.write("src/api.mb", "pub fn consume(value: Array<i32, 1>) {}");
+    f.write("src/api.mb", "pub fn consume(value: array<i32, 1>) {}");
     f.write(
         "src/main.mb",
         "use api::consume; fn main() { let value := [1]; consume(value); consume(value); }",
@@ -8123,7 +8120,7 @@ fn standalone_analysis_checks_types_and_loop_control() {
     let output = f.run(&["analyze", "valid.mb"]);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("ownership not checked"));
-    f.write("invalid.mb", "fn main() { break; let value: Bool = 1; }");
+    f.write("invalid.mb", "fn main() { break; let value: bool = 1; }");
     let output = f.run(&["analyze", "invalid.mb"]);
     let message = err(output, "TE020");
     assert!(message.contains("TE002"));
@@ -8165,7 +8162,7 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    f.write("types.mb", "fn main() { let x: Bool = 1; }");
+    f.write("types.mb", "fn main() { let x: bool = 1; }");
     assert!(err(f.run(&["ownership", "types.mb"]), "TE002").contains("types.mb:1:"));
     f.write("syntax.mb", "fn main( {");
     assert!(err(f.run(&["ownership", "syntax.mb"]), "SE002").contains("syntax.mb:1:"));
@@ -8210,8 +8207,8 @@ fn u8_to_u32_cast_and_method_run_from_source_and_standalone_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn main() -> Result<u32, Error> {
-            let bytes: Bytes<4> = [0, 127, 128, 255];
+        fn main() -> u32 ! Error {
+            let bytes: array<u8, 4> = [0, 127, 128, 255];
             let value := bytes[0] as u32 + bytes[1].to_u32()
                 + bytes[2] as u32 + bytes[3].to_u32();
             let precedence := bytes[2] as u32 * 2 + 1;
@@ -8238,7 +8235,7 @@ fn numeric_casts_reject_nonnumeric_types_and_to_u32_stays_u8_only() {
     );
     for (source, code, message) in [
         (
-            "fn main() -> u32 { let bytes: Bytes<1> = [42]; let value: u32 = bytes[0]; value }",
+            "fn main() -> u32 { let bytes: array<u8, 1> = [42]; let value: u32 = bytes[0]; value }",
             "TE002",
             "expected u32, found u8",
         ),
@@ -8253,7 +8250,7 @@ fn numeric_casts_reject_nonnumeric_types_and_to_u32_stays_u8_only() {
             "requires a u8 value",
         ),
         (
-            "fn main() -> u32 { let bytes: Bytes<1> = [42]; bytes[0].to_u32(1) }",
+            "fn main() -> u32 { let bytes: array<u8, 1> = [42]; bytes[0].to_u32(1) }",
             "TE007",
             "takes no arguments",
         ),
@@ -8374,7 +8371,7 @@ fn numeric_cast_matrix_and_rust_boundaries_match_source_and_wasm() {
                 float = float.map(|value| (value as f32) as f64);
             }
             let function = format!("check_{from}_{sample_index}");
-            source.push_str(&format!("fn {function}(value: {from}) -> Bool {{\n"));
+            source.push_str(&format!("fn {function}(value: {from}) -> bool {{\n"));
             for to in types {
                 let expected = match to {
                     "i8" => integer
@@ -8429,7 +8426,7 @@ fn numeric_cast_matrix_and_rust_boundaries_match_source_and_wasm() {
             call_index += 1;
         }
     }
-    source.push_str("fn main() -> Result<Bool, Error> {\n");
+    source.push_str("fn main() -> bool ! Error {\n");
     source.push_str(&calls);
     for ty in types {
         let one = if ty.starts_with('f') { "1.0" } else { "1" };
@@ -8492,7 +8489,7 @@ fn u32_wrapping_add_and_mul_match_source_and_standalone_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn main() -> Result<u32, Error> {
+        fn main() -> u32 ! Error {
             let constant: u32 = 4294967295.wrapping_add(1);
             if constant != 0 { return Err(Error { code: 1 }); }
             let max: u32 = 4294967295;
@@ -8556,7 +8553,7 @@ fn u32_bitwise_and_shifts_match_source_and_standalone_wasm() {
         r#"
         fn shift_left(value: u32, count: u32) -> u32 { value << count }
         fn shift_right(value: u32, count: u32) -> u32 { value >> count }
-        fn main() -> Result<u32, Error> {
+        fn main() -> u32 ! Error {
             let high: u32 = 2147483648;
             let pattern: u32 = 2863311530;
             let method_constant: u32 = 4294967295.bit_xor(0);
@@ -8596,7 +8593,7 @@ fn u32_bitwise_and_shifts_match_source_and_standalone_wasm() {
 
         f.write(
             "src/main.mb",
-            &format!("fn shift(value: u32, count: u32) -> u32 {{ value >> count }} fn main() -> Result<u32, Error> {{ Ok(shift(1, {count})) }}"),
+            &format!("fn shift(value: u32, count: u32) -> u32 {{ value >> count }} fn main() -> u32 ! Error {{ Ok(shift(1, {count})) }}"),
         );
         let dynamic_shift = err(f.run(&["run"]), "RE007");
         assert!(
@@ -8768,7 +8765,7 @@ fn fixed_array_syntax_is_inspectable_and_read_only_arrays_are_executable() {
     let f = Fixture::new();
     f.write(
         "arrays.mb",
-        "fn main() { let values: Array<i32, 3> = [1, 2, 3]; values[0]; }",
+        "fn main() { let values: array<i32, 3> = [1, 2, 3]; values[0]; }",
     );
     let parsed = f.run(&["syntax", "arrays.mb"]);
     assert!(
@@ -8883,7 +8880,7 @@ fn array_mutation_repetition_and_moves_run_from_source_and_artifact() {
     err(f.run(&["run"]), "TE008");
     f.write(
         "src/app.mb",
-        "fn main() -> i32 { let a: Array<i64, 65537> = [0; 65537]; 0 }",
+        "fn main() -> i32 { let a: array<i64, 65537> = [0; 65537]; 0 }",
     );
     assert!(err(f.run(&["run"]), "LE900").contains("configured stack size"));
 }
@@ -8951,7 +8948,7 @@ fn fixed_array_types_are_checked_without_enabling_execution() {
     let f = Fixture::new();
     f.write(
         "arrays.mb",
-        "fn main() { let values: Array<i8, 3> = [1, 2, 3]; let nested := [[1, 2], [3, 4]]; }",
+        "fn main() { let values: array<i8, 3> = [1, 2, 3]; let nested := [[1, 2], [3, 4]]; }",
     );
     let checked = f.run(&["analyze", "arrays.mb"]);
     assert!(
@@ -8968,7 +8965,7 @@ fn fixed_array_types_are_checked_without_enabling_execution() {
     );
     f.write(
         "invalid.mb",
-        "fn main() { let values: Array<i32, 3> = [1, 2]; }",
+        "fn main() { let values: array<i32, 3> = [1, 2]; }",
     );
     let invalid = f.run(&["analyze", "invalid.mb"]);
     assert!(!invalid.status.success());
@@ -8982,8 +8979,8 @@ fn array_parameters_run_from_source_and_artifact() {
         "project.toml",
         "[package]\nname='arrays'\nentry='app::main'\n",
     );
-    let sum = "fn sum(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
-    let fill = "fn fill(a: share Array<i32, 4>, v: i32) { var i := 0; loop { if i >= 4 { break; } a[i] = v + i; i += 1; } } ";
+    let sum = "fn sum(a: borrow array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
+    let fill = "fn fill(a: share array<i32, 4>, v: i32) { var i := 0; loop { if i >= 4 { break; } a[i] = v + i; i += 1; } } ";
     // A borrow parameter called twice on the same array.
     let out = run_both(
         &f,
@@ -9001,20 +8998,20 @@ fn array_parameters_run_from_source_and_artifact() {
     // An owned parameter moves the source and the callee sees the contents.
     let out = run_both(
         &f,
-        "fn f(a: Array<i32, 3>) -> i32 { a[0] + a[2] } fn main() -> i32 { let a := [1, 2, 3]; f(a) + f([10, 20, 30]) }",
+        "fn f(a: array<i32, 3>) -> i32 { a[0] + a[2] } fn main() -> i32 { let a := [1, 2, 3]; f(a) + f([10, 20, 30]) }",
     );
     assert!(out.contains("44"), "{out}");
     // Recursion with an array borrow parameter.
     let out = run_both(
         &f,
-        "fn rec(a: borrow Array<i32, 3>, n: i32) -> i32 { let m := n + 0; var l := [m + 0, m * 2, m * 3]; if m + 0 == 0 { a[0] + 0 } else { let r := rec(a, m - 1); r + l[2] } } fn main() -> i32 { let a := [100, 2, 3]; rec(a.borrow(), 3) }",
+        "fn rec(a: borrow array<i32, 3>, n: i32) -> i32 { let m := n + 0; var l := [m + 0, m * 2, m * 3]; if m + 0 == 0 { a[0] + 0 } else { let r := rec(a, m - 1); r + l[2] } } fn main() -> i32 { let a := [100, 2, 3]; rec(a.borrow(), 3) }",
     );
     assert!(out.contains("118"), "{out}");
 
     // A dynamic out-of-range index inside the callee traps in both runs.
     f.write(
         "src/app.mb",
-        "fn get(a: borrow Array<i32, 3>, n: i32) -> i32 { a[n] + 0 } fn main() -> i32 { let a := [1, 2, 3]; let n := 2; get(a.borrow(), n + 1) }",
+        "fn get(a: borrow array<i32, 3>, n: i32) -> i32 { a[n] + 0 } fn main() -> i32 { let a := [1, 2, 3]; let n := 2; get(a.borrow(), n + 1) }",
     );
     let source = f.run(&["run"]);
     assert_eq!(source.status.code(), Some(1));
@@ -9027,27 +9024,27 @@ fn array_parameters_run_from_source_and_artifact() {
     // Compile-time diagnostics.
     f.write(
         "src/app.mb",
-        "fn get(a: borrow Array<i32, 3>) -> i32 { a[3] + 0 } fn main() -> i32 { 0 }",
+        "fn get(a: borrow array<i32, 3>) -> i32 { a[3] + 0 } fn main() -> i32 { 0 }",
     );
     err(f.run(&["run"]), "TE008");
     f.write(
         "src/app.mb",
-        "fn get(a: borrow Array<i32, 3>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; get(a.borrow()) }",
+        "fn get(a: borrow array<i32, 3>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; get(a.borrow()) }",
     );
     err(f.run(&["run"]), "TE002");
     f.write(
         "src/app.mb",
-        "fn own(a: Array<i32, 2>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; let r := own(a); a[0] + r }",
+        "fn own(a: array<i32, 2>) -> i32 { a[0] + 0 } fn main() -> i32 { let a := [1, 2]; let r := own(a); a[0] + r }",
     );
     err(f.run(&["run"]), "BE001");
     f.write(
         "src/app.mb",
-        "fn put(a: borrow Array<i32, 2>) { a[0] = 1; } fn main() -> i32 { 0 }",
+        "fn put(a: borrow array<i32, 2>) { a[0] = 1; } fn main() -> i32 { 0 }",
     );
     err(f.run(&["run"]), "TE004");
     f.write(
         "src/app.mb",
-        "fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {} fn main() -> i32 { var a := [1, 2]; two(a.share(), a.share()); 0 }",
+        "fn two(a: share array<i32, 2>, b: share array<i32, 2>) {} fn main() -> i32 { var a := [1, 2]; two(a.share(), a.share()); 0 }",
     );
     err(f.run(&["run"]), "BE005");
 }
@@ -9059,19 +9056,19 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
         "project.toml",
         "[package]\nname='arrays'\nentry='app::main'\n",
     );
-    let sum = "fn sum(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
+    let sum = "fn sum(a: borrow array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t } ";
     // A repetition-built result consumed by a borrow-taking sum and an owned call.
     let out = run_both(
         &f,
         &format!(
-            "{sum} fn make(v: i32) -> Array<i32, 3> {{ [v + 0; 3] }} fn own(a: Array<i32, 3>) -> i32 {{ a[0] + a[2] }} fn main() -> i32 {{ let a := make(4); sum(a.borrow()) * 100 + own(make(5)) }}"
+            "{sum} fn make(v: i32) -> array<i32, 3> {{ [v + 0; 3] }} fn own(a: array<i32, 3>) -> i32 {{ a[0] + a[2] }} fn main() -> i32 {{ let a := make(4); sum(a.borrow()) * 100 + own(make(5)) }}"
         ),
     );
     assert!(out.contains("1210"), "{out}");
     // An if-value chosen dynamically and recursion returning arrays.
     let out = run_both(
         &f,
-        "fn pick(c: Bool) -> Array<i32, 2> { if c { [1, 2] } else { [3, 4] } } fn fib(n: i32) -> Array<i32, 2> { if n <= 0 { return [0, 1]; } let p := fib(n - 1); [p[1] + 0, p[0] + p[1]] } fn main() -> i32 { let a := pick(true); let b := pick(false); let c := fib(10); a[1] * 1000 + b[0] * 100 + c[0] }",
+        "fn pick(c: bool) -> array<i32, 2> { if c { [1, 2] } else { [3, 4] } } fn fib(n: i32) -> array<i32, 2> { if n <= 0 { return [0, 1]; } let p := fib(n - 1); [p[1] + 0, p[0] + p[1]] } fn main() -> i32 { let a := pick(true); let b := pick(false); let c := fib(10); a[1] * 1000 + b[0] * 100 + c[0] }",
     );
     assert!(out.contains("2355"), "{out}");
     // A 3x3 matrix filled by nested loops, then traced and summed.
@@ -9084,7 +9081,7 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
     let out = run_both(
         &f,
         &format!(
-            "{sum} fn zero(a: share Array<i32, 3>) {{ a[0] = 0; a[1] = 0; a[2] = 0; }} fn main() -> i32 {{ var m := [[1, 2, 3], [4, 5, 6]]; zero(m[0].share()); m[1] = [7, 8, 9]; sum(m[0].borrow()) * 100 + sum(m[1].borrow()) }}"
+            "{sum} fn zero(a: share array<i32, 3>) {{ a[0] = 0; a[1] = 0; a[2] = 0; }} fn main() -> i32 {{ var m := [[1, 2, 3], [4, 5, 6]]; zero(m[0].share()); m[1] = [7, 8, 9]; sum(m[0].borrow()) * 100 + sum(m[1].borrow()) }}"
         ),
     );
     assert!(out.contains("24"), "{out}");
@@ -9129,16 +9126,16 @@ fn array_results_if_values_and_nested_arrays_run_from_source_and_artifact() {
             "BE005",
         ),
         (
-            "fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { let a := make(); let b := a; a[0] + 0 }",
+            "fn make() -> array<i32, 2> { [1, 2] } fn main() -> i32 { let a := make(); let b := a; a[0] + 0 }",
             "BE001",
         ),
         (
-            "fn make() -> Array<i32, 2> { [1, 2] } fn main() -> i32 { make()[0] + 0 }",
+            "fn make() -> array<i32, 2> { [1, 2] } fn main() -> i32 { make()[0] + 0 }",
             "TE017",
         ),
-        ("fn main() -> Array<i32, 2> { [1, 2] }", "LE900"),
+        ("fn main() -> array<i32, 2> { [1, 2] }", "LE900"),
         (
-            "fn main() -> i32 { let m: Array<Array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }",
+            "fn main() -> i32 { let m: array<array<i32, 4000>, 4000> = [[0; 4000]; 4000]; 0 }",
             "LE900",
         ),
     ] {
@@ -9156,14 +9153,14 @@ fn primitive_copy_runs_from_source_and_artifact_and_is_checked() {
     );
     let out = run_both(
         &f,
-        "fn mk(v: i32) -> Array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] } \
-         fn swap(a: share Array<i32, 3>, i: i32, j: i32) { let t := a[i].copy(); a[i] = a[j].copy(); a[j] = t; } \
+        "fn mk(v: i32) -> array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] } \
+         fn swap(a: share array<i32, 3>, i: i32, j: i32) { let t := a[i].copy(); a[i] = a[j].copy(); a[j] = t; } \
          fn main() -> i32 { var a := mk(1); swap(a.share(), 0, 2); a[0] * 100 + a[1] * 10 + a[2] }",
     );
     assert!(out.contains("321"), "{out}");
     let out = run_both(
         &f,
-        "fn pick(flags: borrow Array<Bool, 2>, i: i32) -> Bool { flags[i].copy() } \
+        "fn pick(flags: borrow array<bool, 2>, i: i32) -> bool { flags[i].copy() } \
          fn main() -> i32 { let flags := [false, true]; let on := pick(flags.borrow(), 1); if on { 7 } else { 0 } }",
     );
     assert!(out.contains('7'), "{out}");
@@ -9198,9 +9195,9 @@ fn implicit_primitive_copies_run_from_source_and_artifact() {
         &f,
         "type P { x: i32, y: i32 } \
          fn bump(n: i32) -> i32 { n + 1 } \
-         fn mk(v: i32) -> Array<i32, 3> { [v, v + 1, v + 2] } \
+         fn mk(v: i32) -> array<i32, 3> { [v, v + 1, v + 2] } \
          fn get(r: borrow i32) -> i32 { r } \
-         fn swap(a: share Array<i32, 3>) { let t := a[0]; a[0] = a[2]; a[2] = t; } \
+         fn swap(a: share array<i32, 3>) { let t := a[0]; a[0] = a[2]; a[2] = t; } \
          fn main() -> i32 { \
            let x := 4; let y := x; \
            var i := 0; var acc := 0; loop { if i >= 3 { break; } acc += bump(i); i += 1; } \
@@ -9228,9 +9225,9 @@ fn array_parameters_cross_modules_and_stay_out_of_exported_signatures() {
     );
     f.write(
         "src/vec.mb",
-        "pub fn total(a: borrow Array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t }\n\
-         pub fn scale(a: share Array<i32, 3>, k: i32) { var i := 0; loop { if i >= 3 { break; } a[i] *= k; i += 1; } }\n\
-         pub fn first(a: Array<i32, 3>) -> i32 { a[0] + 0 }\n",
+        "pub fn total(a: borrow array<i32, 3>) -> i32 { var i := 0; var t := 0; loop { if i >= 3 { break; } t += a[i]; i += 1; } t }\n\
+         pub fn scale(a: share array<i32, 3>, k: i32) { var i := 0; loop { if i >= 3 { break; } a[i] *= k; i += 1; } }\n\
+         pub fn first(a: array<i32, 3>) -> i32 { a[0] + 0 }\n",
     );
     f.write(
         "src/main.mb",
@@ -9270,7 +9267,7 @@ fn array_parameters_cross_modules_and_stay_out_of_exported_signatures() {
         "[package]\nname='arrays'\nentry='main::main'\n[export]\nfirst='vec::first'\n",
     );
     err(f.run(&["build", "--lib"]), "LE900");
-    f.write("src/main.mb", "fn main(a: Array<i32, 2>) -> i32 { 0 }\n");
+    f.write("src/main.mb", "fn main(a: array<i32, 2>) -> i32 { 0 }\n");
     err(f.run(&["run"]), "LE900");
 }
 
@@ -9289,7 +9286,7 @@ fn structs_run_from_source_and_artifact() {
     // Mixed widths: every field reads back, `.copy()` yields an owned value.
     let out = run_both(
         &f,
-        "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+        "type M { a: u8, b: i64, c: bool, d: f32, e: i16 } \
          fn main() -> i64 { let m := M { e: -7, a: 200, d: 1.5, c: true, b: 5000000000 }; \
              let b := m.b.copy(); if m.c { b + 1 } else { 0 } }",
     );
@@ -9307,7 +9304,7 @@ fn structs_run_from_source_and_artifact() {
     // Bool field as a condition; alias to a struct; a parenthesised literal.
     let out = run_both(
         &f,
-        "type Flags { on: Bool, n: i32 } type F = Flags; \
+        "type Flags { on: bool, n: i32 } type F = Flags; \
          fn main() -> i32 { let f: F = F { n: 9, on: true }; if f.on { f.n + 1 } else { 0 } }",
     );
     assert!(out.contains("Result: i32(10)"), "{out}");
@@ -9381,7 +9378,7 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
             "alias cycle",
         ),
         (
-            "type A { xs: Array<A, 2> } fn main() -> i32 { 0 }",
+            "type A { xs: array<A, 2> } fn main() -> i32 { 0 }",
             "TE026",
             "recursive struct",
         ),
@@ -9518,7 +9515,7 @@ fn stack_project(f: &Fixture, build: &str, source: &str) {
 #[test]
 fn build_stack_size_controls_frame_limits() {
     let f = Fixture::new();
-    let big = "pub fn main() -> i32 { let a: Array<i32, 524288> = [1; 524288]; a[524287] }";
+    let big = "pub fn main() -> i32 { let a: array<i32, 524288> = [1; 524288]; a[524287] }";
     stack_project(&f, "", big);
     let text = err(f.run(&["run"]), "LE900");
     assert!(
@@ -9532,7 +9529,7 @@ fn build_stack_size_controls_frame_limits() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let grid = "pub fn main() -> i32 { var g: Array<Array<i32, 100>, 100> = [[0; 100]; 100]; g[99][99] = 4; g[99][99] }";
+    let grid = "pub fn main() -> i32 { var g: array<array<i32, 100>, 100> = [[0; 100]; 100]; g[99][99] = 4; g[99][99] }";
     stack_project(&f, "", grid);
     assert!(f.run(&["build"]).status.success());
 }
@@ -9540,7 +9537,7 @@ fn build_stack_size_controls_frame_limits() {
 #[test]
 fn stack_exhaustion_is_a_distinct_runtime_error() {
     let f = Fixture::new();
-    let source = "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
+    let source = "fn rec(n: i32) -> i32 { let a: array<i32, 1024> = [n; 1024]; \
         if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \
         pub fn main() -> i32 { rec(100000) }";
     stack_project(&f, "[build]\nstack_size = 65536\n", source);
@@ -9666,7 +9663,7 @@ fn list_iteration_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn bytes(calls: share u32, empty: Bool) -> List<u8> {
+        fn bytes(calls: share u32, empty: bool) -> List<u8> {
             calls += 1;
             var items: List<u8> = [];
             if !empty {
@@ -9685,7 +9682,7 @@ fn list_iteration_runs_from_source_and_wasm() {
             loop value in bytes(calls, false) { return value; }
             0
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var calls: u32 = 0;
             loop value in bytes(calls.share(), true) { return Ok(false); }
             var order: u32 = 0;
@@ -9731,7 +9728,7 @@ fn explicit_drop_releases_owners_and_allows_reinitialization() {
         "src/main.mb",
         r#"
         fn consume(value: List<u32>) { drop(value); }
-        fn check(drop_first: Bool) -> Bool {
+        fn check(drop_first: bool) -> bool {
             var text := "old".concat("!");
             var bytes: List<u8> = [];
             bytes.push(42);
@@ -9758,7 +9755,7 @@ fn explicit_drop_releases_owners_and_allows_reinitialization() {
             text.len() == 5 && other.len() == 5 && bytes.contains(7)
                 && match text.byte_at(0) { Some(byte) => byte == 107, None => false }
         }
-        fn main() -> Result<Bool, Error> { Ok(check(true) && check(false)) }
+        fn main() -> bool ! Error { Ok(check(true) && check(false)) }
         "#,
     );
     let source = f.run(&["run"]);
@@ -9817,7 +9814,7 @@ fn explicit_drop_checks_availability_loans_and_operand_shape() {
         f.write(
             "src/main.mb",
             &format!(
-                "fn check(flag: Bool) {{ let text := \"hi\".concat(\"!\"); var words: List<u32> = []; {body} }} fn main() {{ check(true); }}"
+                "fn check(flag: bool) {{ let text := \"hi\".concat(\"!\"); var words: List<u32> = []; {body} }} fn main() {{ check(true); }}"
             ),
         );
         let diagnostic = err(f.run(&["build"]), code);
@@ -9834,7 +9831,7 @@ fn user_drop_function_takes_precedence() {
     );
     f.write(
         "src/main.mb",
-        "fn drop(n: u32) -> u32 { n + 1 } fn main() -> Result<u32, Error> { Ok(drop(41)) }",
+        "fn drop(n: u32) -> u32 { n + 1 } fn main() -> u32 ! Error { Ok(drop(41)) }",
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");

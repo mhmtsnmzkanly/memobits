@@ -75,7 +75,7 @@ impl Drop for Fixture {
 }
 
 const SHAPE: &str = "type P { x: i32, y: i64 }\n\
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<u8, 3>) ]\n";
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<u8, 3>) ]\n";
 
 #[test]
 fn programs_that_build_move_and_pass_enums_run_from_source_and_artifact() {
@@ -110,10 +110,10 @@ fn enum_fields_arrays_repetition_and_joins_run() {
             "{SHAPE}\
              type H {{ n: i32, s: Shape }}\n\
              fn count(h: borrow H) -> i32 {{ h.n }}\n\
-             fn first(a: borrow Array<Shape, 3>) -> i32 {{ 5 }}\n\
+             fn first(a: borrow array<Shape, 3>) -> i32 {{ 5 }}\n\
              fn main() -> i32 {{\n\
                  let h := H {{ n: 7, s: Shape::Circle(2.0) }};\n\
-                 var grid: Array<Shape, 3> = [Shape::Empty; 3];\n\
+                 var grid: array<Shape, 3> = [Shape::Empty; 3];\n\
                  grid[1] = Shape::Rect(1, 2);\n\
                  let pick := if h.n > 3 {{ Shape::Empty }} else {{ Shape::Circle(0.0) }};\n\
                  count(h.borrow()) + first(grid.borrow())\n\
@@ -226,7 +226,7 @@ fn declaration_diagnostics() {
             "recursive enum",
         ),
         (
-            "type E [ A(Array<E, 2>) ] fn main() -> i32 { 0 }",
+            "type E [ A(array<E, 2>) ] fn main() -> i32 { 0 }",
             "TE026",
             "recursive enum",
         ),
@@ -353,7 +353,7 @@ fn an_enum_frame_over_the_configured_stack_is_le900() {
         "[package]\nname='enums'\nentry='app::main'\n[build]\nstack_size=4096\n",
     );
     let text = f.error(
-        "type Big [ A(Array<i64, 1000>), B ]\nfn main() -> i32 { let b := Big::B; 1 }",
+        "type Big [ A(array<i64, 1000>), B ]\nfn main() -> i32 { let b := Big::B; 1 }",
         "LE900",
     );
     assert!(text.contains("enum frame layout"), "{text}");

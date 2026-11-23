@@ -61,17 +61,17 @@ const TYPES: [(&str, &str); 11] = [
 fn copy_of_locals_and_parameters_keeps_the_original_for_every_primitive() {
     for (ty, value) in TYPES {
         let local = format!(
-            "fn main() -> Bool {{ let x: {ty} = {value}; let y := x.copy(); let z := x.copy(); y == {value} && z == x && x == {value} }}"
+            "fn main() -> bool {{ let x: {ty} = {value}; let y := x.copy(); let z := x.copy(); y == {value} && z == x && x == {value} }}"
         );
         assert_eq!(run(&local), 1, "{ty} local");
         let parameter = format!(
-            "fn dup(v: {ty}) -> Bool {{ let a := v.copy(); let b := v.copy(); a == b && v == a }} \
-             fn main() -> Bool {{ dup({value}) }}"
+            "fn dup(v: {ty}) -> bool {{ let a := v.copy(); let b := v.copy(); a == b && v == a }} \
+             fn main() -> bool {{ dup({value}) }}"
         );
         assert_eq!(run(&parameter), 1, "{ty} parameter");
         // A variable stays usable after being copied and then reassigned.
         let var = format!(
-            "fn main() -> Bool {{ var x: {ty} = {value}; let y := x.copy(); x = y.copy(); x == y }}"
+            "fn main() -> bool {{ var x: {ty} = {value}; let y := x.copy(); x = y.copy(); x == y }}"
         );
         assert_eq!(run(&var), 1, "{ty} var");
     }
@@ -81,11 +81,11 @@ fn copy_of_locals_and_parameters_keeps_the_original_for_every_primitive() {
 fn copy_of_array_elements_at_every_depth_for_every_primitive() {
     for (ty, value) in TYPES {
         let flat = format!(
-            "fn main() -> Bool {{ let a: Array<{ty}, 3> = [{value}; 3]; let x := a[2].copy(); x == {value} && a[1] == x }}"
+            "fn main() -> bool {{ let a: array<{ty}, 3> = [{value}; 3]; let x := a[2].copy(); x == {value} && a[1] == x }}"
         );
         assert_eq!(run(&flat), 1, "{ty} flat");
         let nested = format!(
-            "fn main() -> Bool {{ let m: Array<Array<{ty}, 2>, 3> = [[{value}; 2]; 3]; let x := m[2][1].copy(); x == {value} && m[0][0] == x }}"
+            "fn main() -> bool {{ let m: array<array<{ty}, 2>, 3> = [[{value}; 2]; 3]; let x := m[2][1].copy(); x == {value} && m[0][0] == x }}"
         );
         assert_eq!(run(&nested), 1, "{ty} nested");
     }
@@ -97,12 +97,12 @@ fn copy_through_reference_parameters_for_every_primitive() {
         for access in ["borrow", "share"] {
             let scalar = format!(
                 "fn rd(r: {access} {ty}) -> {ty} {{ r.copy() }} \
-                 fn main() -> Bool {{ var x: {ty} = {value}; let y := rd(x.{access}()); y == {value} && x == y }}"
+                 fn main() -> bool {{ var x: {ty} = {value}; let y := rd(x.{access}()); y == {value} && x == y }}"
             );
             assert_eq!(run(&scalar), 1, "{ty} {access} scalar");
             let element = format!(
-                "fn at(p: {access} Array<{ty}, 3>, i: u32) -> {ty} {{ p[i].copy() }} \
-                 fn main() -> Bool {{ var a: Array<{ty}, 3> = [{value}; 3]; let y := at(a.{access}(), 2); y == {value} && a[0] == y }}"
+                "fn at(p: {access} array<{ty}, 3>, i: u32) -> {ty} {{ p[i].copy() }} \
+                 fn main() -> bool {{ var a: array<{ty}, 3> = [{value}; 3]; let y := at(a.{access}(), 2); y == {value} && a[0] == y }}"
             );
             assert_eq!(run(&element), 1, "{ty} {access} element");
         }
@@ -113,14 +113,14 @@ fn copy_through_reference_parameters_for_every_primitive() {
 fn copy_results_work_in_every_owned_position() {
     assert_eq!(
         run(
-            "fn mk(v: i32) -> Array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] } \
+            "fn mk(v: i32) -> array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] } \
              fn main() -> i32 { let a := mk(10); a[0] * 10000 + a[1] * 100 + a[2] }"
         ),
         10 * 10000 + 11 * 100 + 12
     );
     // Swap two elements.
     assert_eq!(
-        run("fn swap(a: share Array<i32, 3>, i: u32, j: u32) { let t := a[i].copy(); a[i] = a[j].copy(); a[j] = t; } \
+        run("fn swap(a: share array<i32, 3>, i: u32, j: u32) { let t := a[i].copy(); a[i] = a[j].copy(); a[j] = t; } \
              fn main() -> i32 { var a := [1, 2, 3]; swap(a.share(), 0, 2); a[0] * 100 + a[1] * 10 + a[2] }"),
         321
     );
@@ -152,7 +152,7 @@ fn bool_element_copy_feeds_conditions() {
         2
     );
     assert_eq!(
-        run("fn main() -> Bool { let a := [true, false]; let t := a[0].copy(); t && a[1] == false }"),
+        run("fn main() -> bool { let a := [true, false]; let t := a[0].copy(); t && a[1] == false }"),
         1
     );
 }

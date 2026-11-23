@@ -1,7 +1,7 @@
 # Structs project
 
 A buildable project for the struct slices A1 to A4. `main::main` declares a
-`Size` struct with `i32`, `Bool` and `u8` fields, and uses `Point` from
+`Size` struct with `i32`, `bool` and `u8` fields, and uses `Point` from
 `src/geom.mb`, whose fields are all `pub`, through `use geom::Point;`.
 
 It demonstrates:
@@ -21,7 +21,7 @@ It demonstrates:
 - nesting (A3): `Segment { from: Point, to: Point }` holds structs by value,
   `seg.to.x += 1;` writes a field of a field, `seg.from = Point { .. };`
   replaces a whole sub-struct, `manhattan(seg.to.borrow())` lends a
-  sub-struct, and `Array<Size, 2>` is an array of structs built from a call and
+  sub-struct, and `array<Size, 2>` is an array of structs built from a call and
   a literal, written with `sizes[1].width = 3;` and read through the
   `borrow` parameter of `total_area(sizes.borrow())`.
 

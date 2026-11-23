@@ -174,12 +174,12 @@ fn nested_string_owners_run_in_source_and_wasm() {
         r#"type Label { text: string, n: u32 }
 type Outer { inner: Label, k: u32 }
 type Both { first: Label, second: Label }
-type Bag { items: Array<Label, 2>, k: u32 }
-type Slot [Empty, Full(Outer), One(Label), Many(Array<Label, 2>)]
+type Bag { items: array<Label, 2>, k: u32 }
+type Slot [Empty, Full(Outer), One(Label), Many(array<Label, 2>)]
 fn label_len(l: borrow Label) -> u32 { l.text.len() + l.n }
 fn outer_len(o: borrow Outer) -> u32 { o.inner.text.len() + o.inner.n + o.k }
 fn take(o: Outer) -> u32 { o.inner.text.len() + o.k }
-fn early(o: Outer, flag: Bool) -> u32 {
+fn early(o: Outer, flag: bool) -> u32 {
     if flag { return 1; }
     take(o)
 }
@@ -190,7 +190,7 @@ fn make() -> Outer {
     o
 }
 fn lens(b: borrow Both) -> u32 { b.first.text.len() + b.second.text.len() }
-fn array_len(a: Array<Label, 2>) -> u32 { label_len(a[0].borrow()) + label_len(a[1].borrow()) }
+fn array_len(a: array<Label, 2>) -> u32 { label_len(a[0].borrow()) + label_len(a[1].borrow()) }
 fn bag_k(b: Bag) -> u32 { b.k }
 fn slot_len(s: Slot) -> u32 {
     match s {
@@ -259,32 +259,32 @@ fn repeated_nested_string_owners_release_on_normal_and_early_returns() {
         &format!(
             r#"type Label {{ text: string, n: u32 }}
 type Outer {{ inner: Label, k: u32 }}
-type Bag {{ items: Array<Label, 2>, k: u32 }}
-type Slot [Empty, Full(Outer), One(Label), Many(Array<Label, 2>)]
+type Bag {{ items: array<Label, 2>, k: u32 }}
+type Slot [Empty, Full(Outer), One(Label), Many(array<Label, 2>)]
 fn make_outer() -> Outer {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 1 }};
     let outer := Outer {{ inner: label, k: 2 }};
     outer
 }}
-fn consume_outer(outer: Outer, flag: Bool) -> u32 {{
+fn consume_outer(outer: Outer, flag: bool) -> u32 {{
     let extra := "{text}".concat("");
     if flag {{ return 1; }}
     outer.inner.text.len() + outer.k + extra.len() - extra.len()
 }}
-fn outer_caller(flag: Bool) -> u32 {{
+fn outer_caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 1 }};
     let outer := Outer {{ inner: label, k: 2 }};
     if flag {{ return 7; }}
     consume_outer(outer, false)
 }}
-fn result_caller(flag: Bool) -> u32 {{
+fn result_caller(flag: bool) -> u32 {{
     let made := make_outer();
     if flag {{ return 5; }}
     consume_outer(made, false)
 }}
-fn bag_caller(flag: Bool) -> u32 {{
+fn bag_caller(flag: bool) -> u32 {{
     let first_heap := "{text}".concat("");
     let first := Label {{ text: first_heap, n: 0 }};
     let second_heap := "{text}".concat("");
@@ -294,7 +294,7 @@ fn bag_caller(flag: Bool) -> u32 {{
     consume_bag(bag)
 }}
 fn consume_bag(bag: Bag) -> u32 {{ bag.k }}
-fn slot_len(slot: Slot, flag: Bool) -> u32 {{
+fn slot_len(slot: Slot, flag: bool) -> u32 {{
     if flag {{ return 11; }}
     match slot {{
         Slot::Empty => 0,
@@ -303,7 +303,7 @@ fn slot_len(slot: Slot, flag: Bool) -> u32 {{
         Slot::Many(arr) => 13,
     }}
 }}
-fn slot_caller(flag: Bool, consume: Bool) -> u32 {{
+fn slot_caller(flag: bool, consume: bool) -> u32 {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 1 }};
     let outer := Outer {{ inner: label, k: 2 }};
@@ -311,7 +311,7 @@ fn slot_caller(flag: Bool, consume: Bool) -> u32 {{
     if flag {{ return 3; }}
     slot_len(slot, consume)
 }}
-fn many_caller(consume: Bool) -> u32 {{
+fn many_caller(consume: bool) -> u32 {{
     let first_heap := "{text}".concat("");
     let first := Label {{ text: first_heap, n: 0 }};
     let second := Label {{ text: "lit", n: 0 }};

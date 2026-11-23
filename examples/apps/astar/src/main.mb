@@ -1,7 +1,7 @@
 use self::grid::Grid;
 use self::grid::shortest_cost;
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     // Start and goal sit on opposite sides of a wall with one gap.
     // S.#.G
     // ..#..

@@ -14,7 +14,7 @@ type EmptyRecord {}
 // use ordinary receiver calls. Generic nominal methods specialize with their
 // receiver, as Box<T>::read_value above demonstrates.
 type OpaqueHandle; extend {
-    fn opaque_kind(borrow self) -> Bool { true }
+    fn opaque_kind(borrow self) -> bool { true }
 }
 type GuideCounter { value: i32 } extend {
     fn doubled(borrow self) -> i32 { self.value * 2 }
@@ -24,7 +24,7 @@ fn replace_record_text(record: share TextRecord) {
     record.text = "updated";
 }
 fn accept_opaque_handle(handle: OpaqueHandle) {}
-pub fn shared_string_field_replacement() -> Bool {
+pub fn shared_string_field_replacement() -> bool {
     var record := TextRecord { text: "before", tag: 7 };
     replace_record_text(record.share());
     record.text.len() == 7 && record.tag == 7
@@ -40,7 +40,7 @@ fn record_total(value: { right: u32, left: u32 }) -> u32 {
 // Annotate the binding so the field types are fixed; temporaries as arguments,
 // field or element move-out, and exported signatures stay rejected.
 type RecordSlot [NoRecord, HasRecord({ name: string, size: u32 })]
-fn record_name_total(value: { name: string, size: u32 }, early: Bool) -> u32 {
+fn record_name_total(value: { name: string, size: u32 }, early: bool) -> u32 {
     if early { return 1; }
     value.name.len() + value.size
 }
@@ -55,7 +55,7 @@ fn record_slot_total(slot: RecordSlot) -> u32 {
         RecordSlot::NoRecord => 0,
     }
 }
-fn string_owning_records() -> Bool {
+fn string_owning_records() -> bool {
     let heap := "é".concat("!");
     let named: { name: string, size: u32 } = { name: heap, size: 9 };
     let spare_heap := "é".concat("!");
@@ -69,7 +69,7 @@ fn string_owning_records() -> Bool {
 }
 fn guide_phase() -> GuidePhase { Ready }
 fn other_guide_phase() -> OtherGuidePhase { Ready }
-pub fn anonymous_shapes() -> Bool {
+pub fn anonymous_shapes() -> bool {
     var order: u32 = 0;
     let first := {
         right: { order += 1; order },
@@ -83,7 +83,7 @@ pub fn anonymous_shapes() -> Bool {
     let phase: GuidePhase = guide_phase();
     let other: OtherGuidePhase = other_guide_phase();
     let counter := guide_counter();
-    let payload: enum [GuideNumber(i32), GuideFlag(Bool), GuideAbsent] =
+    let payload: enum [GuideNumber(i32), GuideFlag(bool), GuideAbsent] =
         GuideNumber(40);
     let payload_value := match payload {
         GuideNumber(value) => value,

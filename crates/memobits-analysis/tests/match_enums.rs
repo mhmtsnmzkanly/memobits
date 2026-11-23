@@ -7,7 +7,7 @@ use memobits_ir::{InstructionKind, Program, TerminatorKind, UseMode};
 use memobits_syntax::parse;
 
 const DECLS: &str = "type P { x: i32, y: i32 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<u8, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<u8, 3>) ] \
     type Wrap [ Plain, Boxed(Shape) ] \
     type H { s: Shape, n: i32 } \
     fn make(n: i32) -> Shape { if n > 0 { Shape::Rect(n, 2) } else { Shape::Empty } } \

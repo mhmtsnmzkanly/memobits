@@ -1,6 +1,6 @@
 # Hashing Primitives & Algorithms
 
-This example implements standard non-cryptographic hashing algorithms (**FNV-1a 32-bit**, **DJB2**, and **Adler-32**) over byte arrays (`Array<u8, N>`) in Memobits, exploring how to safely implement bitwise operations and wrapping arithmetic on an engine with checked arithmetic.
+This example implements standard non-cryptographic hashing algorithms (**FNV-1a 32-bit**, **DJB2**, and **Adler-32**) over byte arrays (`array<u8, N>`) in Memobits, exploring how to safely implement bitwise operations and wrapping arithmetic on an engine with checked arithmetic.
 
 ## Implemented Algorithms
 
@@ -38,9 +38,9 @@ The project provides robust software primitives in `src/bits.mb`:
 
 ## Byte Array Iteration
 
-Memobits supports fixed-size byte buffers (`Array<u8, N>`). This project demonstrates two iteration patterns:
-- **Whole-Buffer Iteration**: `loop byte in bytes { ... }` iterates over all $N$ elements of a borrowed `Array<u8, N>`.
-- **Logical Slices**: Passing `bytes: borrow Array<u8, N>, length: i32` allows processing arbitrary input lengths up to $N$ with an indexed `loop` breaking at `i == length`.
+Memobits supports fixed-size byte buffers (`array<u8, N>`). This project demonstrates two iteration patterns:
+- **Whole-Buffer Iteration**: `loop byte in bytes { ... }` iterates over all $N$ elements of a borrowed `array<u8, N>`.
+- **Logical Slices**: Passing `bytes: borrow array<u8, N>, length: i32` allows processing arbitrary input lengths up to $N$ with an indexed `loop` breaking at `i == length`.
 
 ## Running and Building
 

@@ -64,7 +64,7 @@ fn literal_and_indexed_reads_execute() {
         8
     );
     assert_eq!(
-        run_main("fn main() -> i32 { let a: Array<i32, 0> = []; 5 }"),
+        run_main("fn main() -> i32 { let a: array<i32, 0> = []; 5 }"),
         5
     );
 }
@@ -93,7 +93,7 @@ fn every_element_type_reads_back_with_sign_and_zero_extension() {
         ("Bool", "[false, true, false]", "a[1] == true"),
     ] {
         let source = format!(
-            "fn main() -> Bool {{ let a: Array<{ty}, 3> = {elements}; {check} && a[2] == a[2] }}"
+            "fn main() -> bool {{ let a: array<{ty}, 3> = {elements}; {check} && a[2] == a[2] }}"
         );
         assert_eq!(run_main(&source), 1, "{ty}");
     }
@@ -103,7 +103,7 @@ fn every_element_type_reads_back_with_sign_and_zero_extension() {
 fn arrays_coexist_with_owner_cells_and_survive_recursion() {
     assert_eq!(
         run_typed::<i64>(
-            "fn main() -> i64 { var x: i64 = 7; let a: Array<u8, 3> = [1, 2, 3]; let b: Array<i64, 2> = [100, 200]; let r := x.borrow(); if a[2] == 3 { b[1] + b[0] + r } else { 0 } }"
+            "fn main() -> i64 { var x: i64 = 7; let a: array<u8, 3> = [1, 2, 3]; let b: array<i64, 2> = [100, 200]; let r := x.borrow(); if a[2] == 3 { b[1] + b[0] + r } else { 0 } }"
         ),
         307
     );
@@ -181,7 +181,7 @@ fn dynamic_indices_trap_outside_bounds_for_every_integer_width() {
 
 #[test]
 fn zero_length_array_traps_on_any_index() {
-    let source = "fn get(n: i32) -> i32 { let a: Array<i32, 0> = []; a[n] + 0 }";
+    let source = "fn get(n: i32) -> i32 { let a: array<i32, 0> = []; a[n] + 0 }";
     assert_eq!(call_index(source, "get", 0, wasmi::Val::I32(0)), None);
 }
 
@@ -200,7 +200,7 @@ fn array_frames_are_capped_with_a_diagnostic() {
     // 1 MiB stack.
     assert_eq!(
         run_typed::<i64>(
-            "fn main() -> i64 { let a: Array<i64, 65536> = [0; 65536]; a[65535] + 1 }"
+            "fn main() -> i64 { let a: array<i64, 65536> = [0; 65536]; a[65535] + 1 }"
         ),
         1
     );
@@ -208,15 +208,15 @@ fn array_frames_are_capped_with_a_diagnostic() {
     let literal = format!("[{}]", vec!["0"; 600].join(", "));
     assert_eq!(
         run_typed::<i64>(&format!(
-            "fn main() -> i64 {{ let a: Array<i64, 600> = {literal}; a[599] + 1 }}"
+            "fn main() -> i64 {{ let a: array<i64, 600> = {literal}; a[599] + 1 }}"
         )),
         1
     );
     for source in [
-        "fn main() { let a: Array<i64, 65537> = [0; 65537]; }",
-        "fn main() { let a: Array<i32, 300000> = [0; 300000]; }",
-        "fn main() { let a: Array<u8, 4000000000> = [0; 4000000000]; }",
-        "fn main() { let a: Array<f64, 4294967295> = [0.0; 4294967295]; }",
+        "fn main() { let a: array<i64, 65537> = [0; 65537]; }",
+        "fn main() { let a: array<i32, 300000> = [0; 300000]; }",
+        "fn main() { let a: array<u8, 4000000000> = [0; 4000000000]; }",
+        "fn main() { let a: array<f64, 4294967295> = [0.0; 4294967295]; }",
     ] {
         let program = lower(source);
         let errors = memobits_wasm::compile(&program, &exports("main", 0)).unwrap_err();
@@ -241,7 +241,7 @@ fn repetition_evaluates_the_element_per_slot_in_order() {
     // A zero count never calls the element expression; a count of one calls it once.
     assert_eq!(
         run_main(&format!(
-            "{next}fn main() -> i32 {{ var n := 0; let z: Array<i32, 0> = [next(n.share()); 0]; let o := [next(n.share()); 1]; n * 10 + o[0] }}"
+            "{next}fn main() -> i32 {{ var n := 0; let z: array<i32, 0> = [next(n.share()); 0]; let o := [next(n.share()); 1]; n * 10 + o[0] }}"
         )),
         11
     );
@@ -270,7 +270,7 @@ fn repetition_of_every_element_type_and_large_counts() {
         ("Bool", "true", "a[63] == true && a[1] == true"),
     ] {
         let source = format!(
-            "fn main() -> Bool {{ let a: Array<{ty}, 64> = [{value}; 64]; {check} && a[2] == a[2] }}"
+            "fn main() -> bool {{ let a: array<{ty}, 64> = [{value}; 64]; {check} && a[2] == a[2] }}"
         );
         assert_eq!(run_main(&source), 1, "{ty}");
     }
@@ -309,14 +309,14 @@ fn element_assignment_and_compound_assignment_execute() {
     );
     assert_eq!(
         run_typed::<i64>(
-            "fn main() -> i64 { var a: Array<i64, 2> = [1, 2]; a[0] = 5000000000; a[1] += a[0]; a[1] + 0 }"
+            "fn main() -> i64 { var a: array<i64, 2> = [1, 2]; a[0] = 5000000000; a[1] += a[0]; a[1] + 0 }"
         ),
         5_000_000_002
     );
     // Narrow element writes do not clobber their neighbours.
     assert_eq!(
         run_main(
-            "fn main() -> i32 { var a: Array<u8, 4> = [1, 2, 3, 4]; a[1] = 255; a[2] += 7; if a[0] == 1 && a[1] == 255 && a[2] == 10 && a[3] == 4 { 1 } else { 0 } }"
+            "fn main() -> i32 { var a: array<u8, 4> = [1, 2, 3, 4]; a[1] = 255; a[2] += 7; if a[0] == 1 && a[1] == 255 && a[2] == 10 && a[3] == 4 { 1 } else { 0 } }"
         ),
         1
     );
@@ -584,13 +584,13 @@ fn oversized_or_overflowing_array_layouts_are_diagnostics() {
 fn fixed_iteration_preserves_order_and_control_flow() {
     assert_eq!(
         run_main(
-            "fn make(calls: share i32) -> Array<i32, 4> {
+            "fn make(calls: share i32) -> array<i32, 4> {
                 calls += 1; [1, 2, 3, 4]
             }
-            fn empty(calls: share i32) -> Array<i32, 0> {
+            fn empty(calls: share i32) -> array<i32, 0> {
                 calls += 1; []
             }
-            fn select(items: share Bytes<3>) -> u8 {
+            fn select(items: share array<u8, 3>) -> u8 {
                 loop value in items {
                     if value == 0 { continue; }
                     return value;
@@ -607,7 +607,7 @@ fn fixed_iteration_preserves_order_and_control_flow() {
                     if value == 3 { break; }
                 }
                 loop value in empty(calls.share()) { return -1; }
-                var items: Bytes<3> = [0, 7, 8];
+                var items: array<u8, 3> = [0, 7, 8];
                 if select(items.share()) != 7 { return -2; }
                 let items := [[4, 5], [6, 7]];
                 var row := 0;

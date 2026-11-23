@@ -23,7 +23,7 @@ extend Vec2 of Sub {
 // Equality borrows its left receiver and consumes the right operand.
 extend Vec2 of PartialEq {
     type Rhs = Vec2;
-    fn eq(borrow self, rhs: Vec2) -> Bool { self.x == rhs.x && self.y == rhs.y }
+    fn eq(borrow self, rhs: Vec2) -> bool { self.x == rhs.x && self.y == rhs.y }
 }
 
 // A user interface that a generic function can require.
@@ -43,7 +43,7 @@ fn combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
     left + right
 }
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
     if sum.x != 11 || sum.y != 22 {
         return Err(Error { code: 1 });

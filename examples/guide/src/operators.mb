@@ -16,7 +16,7 @@ extend AddPoint of Add {
 fn add_points<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
     left + right
 }
-pub fn user_defined_add() -> Bool {
+pub fn user_defined_add() -> bool {
     let left := AddPoint { value: 20 };
     let right := AddRight { value: 22 };
     let total := add_points(left, right);
@@ -38,7 +38,7 @@ extend SubLeft of Sub {
 fn subtract<T>(left: T, right: T::Rhs) -> T::Output where T: Sub {
     left - right
 }
-pub fn user_defined_sub() -> Bool {
+pub fn user_defined_sub() -> bool {
     let difference := subtract(SubLeft { value: 50 }, SubRight { value: 8 });
     difference.value == 42
 }
@@ -57,7 +57,7 @@ extend MulLeft of Mul {
 fn multiply<T>(left: T, right: T::Rhs) -> T::Output where T: Mul {
     left * right
 }
-pub fn user_defined_mul() -> Bool {
+pub fn user_defined_mul() -> bool {
     let product := multiply(MulLeft { value: 6 }, MulRight { value: 7 });
     product.value == 42
 }
@@ -76,7 +76,7 @@ extend DivLeft of Div {
 fn divide<T>(left: T, right: T::Rhs) -> T::Output where T: Div {
     left / right
 }
-pub fn user_defined_div() -> Bool {
+pub fn user_defined_div() -> bool {
     let quotient := divide(DivLeft { value: 84 }, DivRight { value: 2 });
     quotient.value == 42
 }
@@ -95,7 +95,7 @@ extend RemLeft of Rem {
 fn remainder<T>(left: T, right: T::Rhs) -> T::Output where T: Rem {
     left % right
 }
-pub fn user_defined_rem() -> Bool {
+pub fn user_defined_rem() -> bool {
     let result := remainder(RemLeft { value: 43 }, RemRight { value: 7 });
     result.value == 1
 }
@@ -115,7 +115,7 @@ extend MaskLeft of BitAnd {
 fn mask<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitAnd {
     lhs & operand
 }
-pub fn user_defined_bitand() -> Bool {
+pub fn user_defined_bitand() -> bool {
     let lhs := MaskLeft { value: 12 };
     let operand := MaskRight { value: 10 };
     let result := mask(lhs, operand);
@@ -137,7 +137,7 @@ extend MergeLeft of BitOr {
 fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitOr {
     lhs | operand
 }
-pub fn user_defined_bitor() -> Bool {
+pub fn user_defined_bitor() -> bool {
     let lhs := MergeLeft { value: 12 };
     let operand := MergeRight { value: 10 };
     let result := merge(lhs, operand);
@@ -159,7 +159,7 @@ extend XorLeft of BitXor {
 fn xor<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitXor {
     lhs ^ operand
 }
-pub fn user_defined_bitxor() -> Bool {
+pub fn user_defined_bitxor() -> bool {
     let result := xor(XorLeft { value: 12 }, XorRight { value: 10 });
     result.value == 6
 }
@@ -173,7 +173,7 @@ extend NegInput of Neg {
     fn neg(self) -> NegResult { NegResult { value: 0 - self.value } }
 }
 fn negate<T>(value: T) -> T::Output where T: Neg { -value }
-pub fn user_defined_negation() -> Bool {
+pub fn user_defined_negation() -> bool {
     let result := negate(NegInput { value: 42 });
     result.value == -42
 }
@@ -182,9 +182,9 @@ use core::ops::PartialEq;
 type EqKey { value: u32 }
 extend EqKey of PartialEq {
     type Rhs = EqKey;
-    fn eq(borrow self, rhs: EqKey) -> Bool { self.value == rhs.value }
+    fn eq(borrow self, rhs: EqKey) -> bool { self.value == rhs.value }
 }
-pub fn user_defined_equality() -> Bool {
+pub fn user_defined_equality() -> bool {
     let left := EqKey { value: 12 };
     let same := EqKey { value: 12 };
     let different := EqKey { value: 13 };
@@ -197,13 +197,13 @@ use core::ops::PartialOrd;
 type OrderedKey { value: u32 }
 extend OrderedKey of PartialOrd {
     type Rhs = OrderedKey;
-    fn lt(borrow self, rhs: OrderedKey) -> Bool { self.value < rhs.value }
-    fn le(borrow self, rhs: OrderedKey) -> Bool { self.value <= rhs.value }
-    fn gt(borrow self, rhs: OrderedKey) -> Bool { self.value > rhs.value }
-    fn ge(borrow self, rhs: OrderedKey) -> Bool { self.value >= rhs.value }
+    fn lt(borrow self, rhs: OrderedKey) -> bool { self.value < rhs.value }
+    fn le(borrow self, rhs: OrderedKey) -> bool { self.value <= rhs.value }
+    fn gt(borrow self, rhs: OrderedKey) -> bool { self.value > rhs.value }
+    fn ge(borrow self, rhs: OrderedKey) -> bool { self.value >= rhs.value }
 }
-fn ordered_before<T>(left: T, right: T::Rhs) -> Bool where T: PartialOrd { left < right }
-pub fn user_defined_ordering() -> Bool {
+fn ordered_before<T>(left: T, right: T::Rhs) -> bool where T: PartialOrd { left < right }
+pub fn user_defined_ordering() -> bool {
     let left := OrderedKey { value: 12 };
     let right := OrderedKey { value: 13 };
     let same := OrderedKey { value: 12 };
@@ -230,7 +230,7 @@ fn generic_add_assign<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign {
     value += rhs;
     value
 }
-pub fn user_defined_add_assign() -> Bool {
+pub fn user_defined_add_assign() -> bool {
     var tally := Tally { value: 7 };
     tally += TallyDelta { value: 5 };
     let generic := generic_add_assign(Tally { value: 10 }, TallyDelta { value: 2 });
@@ -252,7 +252,7 @@ fn generic_sub_assign<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign {
     value -= rhs;
     value
 }
-pub fn user_defined_sub_assign() -> Bool {
+pub fn user_defined_sub_assign() -> bool {
     var balance := Balance { value: 19 };
     balance -= BalanceDelta { value: 7 };
     let generic := generic_sub_assign(Balance { value: 20 }, BalanceDelta { value: 8 });
@@ -274,7 +274,7 @@ fn generic_mul_assign<T>(target: T, rhs: T::Rhs) -> T where T: MulAssign {
     value *= rhs;
     value
 }
-pub fn user_defined_mul_assign() -> Bool {
+pub fn user_defined_mul_assign() -> bool {
     var scale := Scale { value: 6 };
     scale *= ScaleFactor { value: 7 };
     let generic := generic_mul_assign(Scale { value: 6 }, ScaleFactor { value: 7 });
@@ -296,7 +296,7 @@ fn generic_div_assign<T>(target: T, rhs: T::Rhs) -> T where T: DivAssign {
     value /= rhs;
     value
 }
-pub fn user_defined_div_assign() -> Bool {
+pub fn user_defined_div_assign() -> bool {
     var portion := Portion { value: 24 };
     portion /= PortionDelta { value: 3 };
     let generic := generic_div_assign(Portion { value: 81 }, PortionDelta { value: 3 });
@@ -309,7 +309,7 @@ pub fn user_defined_div_assign() -> Bool {
 use core::ops::RemAssign;
 type Remainder { value: u32 }
 type Modulus { value: u32 }
-type RemainderHolder { items: Array<Remainder, 1> }
+type RemainderHolder { items: array<Remainder, 1> }
 extend Remainder of RemAssign {
     type Rhs = Modulus;
     fn rem_assign(share self, rhs: Modulus) { self.value %= rhs.value; }
@@ -319,7 +319,7 @@ fn generic_rem_assign<T>(target: T, rhs: T::Rhs) -> T where T: RemAssign {
     value %= rhs;
     value
 }
-fn generic_rem_array_assign<T, const N: u32>(var values: Array<T, N>, index: u32, rhs: T::Rhs) -> Array<T, N>
+fn generic_rem_array_assign<T, const N: u32>(var values: array<T, N>, index: u32, rhs: T::Rhs) -> array<T, N>
     where T: RemAssign {
     values[index] %= rhs;
     values
@@ -329,7 +329,7 @@ fn generic_rem_projected_assign<T>(var holder: RemainderHolder, witness: T, rhs:
     holder.items[0] %= rhs;
     holder
 }
-pub fn user_defined_rem_assign() -> Bool {
+pub fn user_defined_rem_assign() -> bool {
     var remainder := Remainder { value: 23 };
     let modulus := Modulus { value: 5 };
     remainder %= modulus;
@@ -350,7 +350,7 @@ fn generic_bitand_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitAndAssign {
     value &= rhs;
     value
 }
-pub fn user_defined_bitand_assign() -> Bool {
+pub fn user_defined_bitand_assign() -> bool {
     var permissions := PermissionBits { value: 15 };
     let mask := PermissionMask { value: 6 };
     permissions &= mask;
@@ -370,7 +370,7 @@ fn generic_bitor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitOrAssign {
     value |= rhs;
     value
 }
-pub fn user_defined_bitor_assign() -> Bool {
+pub fn user_defined_bitor_assign() -> bool {
     var features := FeatureBits { value: 8 };
     let mask := FeatureMask { value: 3 };
     features |= mask;
@@ -389,7 +389,7 @@ fn generic_bitxor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitXorAssign {
     value ^= rhs;
     value
 }
-pub fn user_defined_bitxor_assign() -> Bool {
+pub fn user_defined_bitxor_assign() -> bool {
     var features := FeatureBits { value: 10 };
     let delta := FeatureDelta { value: 3 };
     features ^= delta;
@@ -412,7 +412,7 @@ extend ShiftLeft of Shl {
 fn shift<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shl {
     lhs << count
 }
-pub fn user_defined_shl() -> Bool {
+pub fn user_defined_shl() -> bool {
     let result := shift(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
     result.value == 48
 }
@@ -427,7 +427,7 @@ fn generic_shl_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShlAssign {
     value <<= rhs;
     value
 }
-pub fn user_defined_shl_assign() -> Bool {
+pub fn user_defined_shl_assign() -> bool {
     var value := ShiftLeft { value: 3 };
     let count := ShiftCount { value: 4 };
     value <<= count;
@@ -447,7 +447,7 @@ fn generic_shr_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShrAssign {
     value >>= rhs;
     value
 }
-pub fn user_defined_shr_assign() -> Bool {
+pub fn user_defined_shr_assign() -> bool {
     var value := ShiftRight { value: 48 };
     let count := ShiftAmount { value: 2 };
     value >>= count;
@@ -457,8 +457,8 @@ pub fn user_defined_shr_assign() -> Bool {
     value.value == 12 && primitive == 12 && generic.value == 12
 }
 // A single generic bound forwards selected assignment evidence through owned
-// locals, indexed Array<T, N> elements and a field-then-index projected place.
-pub fn generic_compound_assignments() -> Bool {
+// locals, indexed array<T, N> elements and a field-then-index projected place.
+pub fn generic_compound_assignments() -> bool {
     let remainder := generic_rem_assign(Remainder { value: 23 }, Modulus { value: 5 });
     let remainder_items := generic_rem_array_assign(
         [Remainder { value: 23 }, Remainder { value: 19 }], 1, Modulus { value: 7 }
@@ -491,7 +491,7 @@ extend ShiftRight of Shr {
 fn shift_right<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shr {
     lhs >> count
 }
-pub fn user_defined_shr() -> Bool {
+pub fn user_defined_shr() -> bool {
     let result := shift_right(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
     result.value == 12
 }

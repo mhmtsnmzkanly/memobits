@@ -214,7 +214,7 @@ fn field_write_type_and_privacy_errors() {
         "no field 'z'",
     );
     rejected(
-        "type B { on: Bool } fn main() { var b := B { on: true }; b.on += 1; }",
+        "type B { on: bool } fn main() { var b := B { on: true }; b.on += 1; }",
         "TE007",
         "numeric",
     );

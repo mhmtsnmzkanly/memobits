@@ -1,12 +1,10 @@
 # Fixed-array implementation sequence
 
-`Bytes<N>` is a built-in spelling for `Array<u8, N>`. It accepts the same
-nonnegative integer literal lengths, including zero, and uses ordinary array
-literals. The two spellings have identical type identity, ownership, borrowing,
-layout and ABI restrictions. Bare `Bytes` still resolves as a user-defined
-type or import. Dynamic byte buffers are outside this slice.
+`array<u8, N>` is the byte-buffer type. It accepts nonnegative integer literal
+lengths, including zero, and uses ordinary array literals, with the usual
+type identity, ownership, borrowing, layout and ABI restrictions. Dynamic byte buffers are outside this slice.
 
-The accepted design uses homogeneous `Array<T, N>`, array literals `[a, b]`,
+The accepted design uses homogeneous `array<T, N>`, array literals `[a, b]`,
 repetition `[expression; N]`, and checked indexing. This document separates
 syntax support from executable collection semantics.
 
@@ -30,13 +28,13 @@ existing array operations fall short. Check bounds, loan lifetimes, and
 aliasing where relevant. Typed views also need layout, alignment and value
 validity checks. Verify behavior in source and Wasm, and benchmark against
 ordinary array code when reduced copying or faster access is the motivation.
-These themes leave the current `Bytes<N>` array equivalence in place.
+These themes leave the current `array<u8, N>` array equivalence in place.
 
 ## Syntax foundation
 
 Represent element lists, repetitions, and indexing explicitly in the AST.
 Repetition retains one expression and a source-located count; the parser must
-not clone its expression or evaluate it. `Array<T, N>` retains structured type
+not clone its expression or evaluate it. `array<T, N>` retains structured type
 arguments so nested element types and constant lengths cannot be silently lost.
 The initial syntax accepts nonnegative integer literal lengths; general constant
 expressions and const generics require later design work.
@@ -221,8 +219,8 @@ signatures remain rejected by the backend.
 
 WP3 lets arrays of primitive elements cross internal function calls.
 
-- Signatures: `a: Array<T, N>` (owned), `a: borrow Array<T, N>` and
-  `a: share Array<T, N>`. In IR a parameter names its pointee type, so the
+- Signatures: `a: array<T, N>` (owned), `a: borrow array<T, N>` and
+  `a: share array<T, N>`. In IR a parameter names its pointee type, so the
   parameter local of a `borrow`/`share` array is `Reference { access, inner:
   Array }`, exactly like primitives; the validator now allows an array (never a
   nested reference) as the referent, accepts `Borrow` of an array owner or array
@@ -288,7 +286,7 @@ WP4 finishes fixed arrays for primitive and nested-array elements.
   position propagates into the tails of `if` and block expressions, so
   `let a := if c { [1, 2] } else { [3, 4] };`, `{ [5, 6] }`, and a named array
   moved in a branch are accepted. Array results use the same positions
-  (`-> Array<i32, 3> { [1, 2, 3] }`, `return a;`, `a` an owned local or
+  (`-> array<i32, 3> { [1, 2, 3] }`, `return a;`, `a` an owned local or
   parameter). A call returning an array is accepted wherever an owned array is.
   Indexing accepts a named local or a row chain rooted at one; a call result
   or other temporary (`make()[0]`) is TE017 ("bind the array to a local
@@ -356,11 +354,11 @@ elements (TE017); arrays and array references in exported signatures
 
 ## Primitive collection search
 
-`array.contains(value) -> Bool` checks for an element equal to `value`.
-`array.index_of(value) -> Option<u32>` returns `Some(index)` for the first
+`array.contains(value) -> bool` checks for an element equal to `value`.
+`array.index_of(value) -> u32?` returns `Some(index)` for the first
 zero-based match or `None` if no element matches. Both use `==` and
-require a search value of the element type. Supported element types are `Bool`, `i8`, `i16`, `i32`, `i64`,
-`u8`, `u16`, `u32`, `u64`, `f32`, and `f64`. This includes `Bytes<N>`.
+require a search value of the element type. Supported element types are `bool`, `i8`, `i16`, `i32`, `i64`,
+`u8`, `u16`, `u32`, `u64`, `f32`, and `f64`. This includes `array<u8, N>`.
 For an empty array, `contains` returns false and `index_of` returns
 `None`. With float elements, signed zeros compare equal and NaN never
 matches.
@@ -375,7 +373,7 @@ value such as a literal or a function result.
 
 `loop value in items { ... }` evaluates the iterable once and visits its
 elements in increasing index order. It supports fixed arrays with numeric or
-`Bool` elements, including `Bytes<N>`. The iterable can be an array value,
+`bool` elements, including `array<u8, N>`. The iterable can be an array value,
 an array reference, or a field or row reached through a local binding. An
 empty array evaluates the iterable and skips the body.
 

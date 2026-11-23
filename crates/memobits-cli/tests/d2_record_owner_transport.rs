@@ -173,7 +173,7 @@ fn string_owning_records_run_in_source_and_wasm() {
         "record-owner",
         r#"fn name_len(r: borrow { name: string, n: u32 }) -> u32 { r.name.len() + r.n }
 fn take(r: { name: string, n: u32 }) -> u32 { r.name.len() + r.n }
-fn early(r: { name: string, n: u32 }, flag: Bool) -> u32 {
+fn early(r: { name: string, n: u32 }, flag: bool) -> u32 {
     if flag { return 1; }
     take(r)
 }
@@ -214,7 +214,7 @@ fn string_owning_records_compose_as_fields_elements_and_payloads() {
 type Slot [Empty, Rec({ name: string, n: u32 })]
 fn rec_len(r: borrow { name: string, n: u32 }) -> u32 { r.name.len() + r.n }
 fn holder_len(h: Holder) -> u32 { h.r.name.len() + h.k }
-fn arr_len(a: Array<{ name: string, n: u32 }, 2>) -> u32 { rec_len(a[0].borrow()) + rec_len(a[1].borrow()) }
+fn arr_len(a: array<{ name: string, n: u32 }, 2>) -> u32 { rec_len(a[0].borrow()) + rec_len(a[1].borrow()) }
 fn row_len(row: borrow ({ name: string, n: u32 }, u32)) -> u32 { row.0.name.len() + row.1 }
 fn slot_len(s: Slot) -> u32 { match s { Slot::Empty => 0, Slot::Rec(r) => r.name.len() + r.n } }
 fn nested(o: { l: { name: string, n: u32 }, k: u32 }) -> u32 { o.l.name.len() + o.k }
@@ -266,44 +266,44 @@ fn make() -> {{ name: string, n: u32 }} {{
     let r: {{ name: string, n: u32 }} = {{ name: heap, n: 1 }};
     r
 }}
-fn consume(r: {{ name: string, n: u32 }}, flag: Bool) -> u32 {{
+fn consume(r: {{ name: string, n: u32 }}, flag: bool) -> u32 {{
     let extra := "{text}".concat("");
     if flag {{ return 1; }}
     r.name.len() + extra.len() - extra.len()
 }}
-fn local_caller(flag: Bool) -> u32 {{
+fn local_caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let r: {{ name: string, n: u32 }} = {{ name: heap, n: 1 }};
     if flag {{ return 7; }}
     consume(r, false)
 }}
-fn result_caller(flag: Bool) -> u32 {{
+fn result_caller(flag: bool) -> u32 {{
     let made := make();
     if flag {{ return 5; }}
     consume(made, false)
 }}
-fn holder_caller(flag: Bool) -> u32 {{
+fn holder_caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let r: {{ name: string, n: u32 }} = {{ name: heap, n: 1 }};
     let holder := Holder {{ r: r, k: 3 }};
     if flag {{ return 9; }}
     holder.k
 }}
-fn slot_len(slot: Slot, flag: Bool) -> u32 {{
+fn slot_len(slot: Slot, flag: bool) -> u32 {{
     if flag {{ return 11; }}
     match slot {{
         Slot::Empty => 0,
         Slot::Rec(r) => r.name.len(),
     }}
 }}
-fn slot_caller(flag: Bool, consume_it: Bool) -> u32 {{
+fn slot_caller(flag: bool, consume_it: bool) -> u32 {{
     let heap := "{text}".concat("");
     let r: {{ name: string, n: u32 }} = {{ name: heap, n: 1 }};
     let slot := Slot::Rec(r);
     if flag {{ return 3; }}
     slot_len(slot, consume_it)
 }}
-fn array_caller(flag: Bool) -> u32 {{
+fn array_caller(flag: bool) -> u32 {{
     let first_heap := "{text}".concat("");
     let first: {{ name: string, n: u32 }} = {{ name: first_heap, n: 1 }};
     let second: {{ name: string, n: u32 }} = {{ name: "lit", n: 1 }};

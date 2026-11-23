@@ -14,7 +14,7 @@ target/debug/mb run target/host-capability.wasm --project examples/topics/host-c
 ```
 
 Each invocation calls the typed host import, prints `Host i32: 42`, and reports
-`Result: i32(7)`. This project is exempt from the `Result<i32, Error>` convention
+`Result: i32(7)`. This project is exempt from the `i32 ! Error` convention
 used by the other examples: `main` returns a bare `i32` because the H1 host
 capability acceptance evidence pins that exact `Result: i32(7)` output. The current source declaration supports this one owned `i32`
 argument and unit result. The CLI profile rejects undeclared, unknown, or

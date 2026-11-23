@@ -107,7 +107,7 @@ impl Drop for Fixture {
 
 const SHAPES: &str = "\
 pub type Pair<T> { pub first: T, pub second: T }
-pub type Packet<const N: u32> { pub values: Array<u32, N> }
+pub type Packet<const N: u32> { pub values: array<u32, N> }
 pub type Duo<T> { pub a: i32, pub b: i32 }
 pub type Wrap<T> { pub value: T } extend {
     pub fn read(borrow self) -> T { self.value }

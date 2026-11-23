@@ -189,7 +189,7 @@ fn scalar_traversal_counts_scalars_not_bytes() {
 #[test]
 fn scalar_traversal_binds_exact_chars_in_order() {
     // Fold the scalar sequence into an order-sensitive number.
-    let source = "fn code(ch: Char) -> u32 {\n\
+    let source = "fn code(ch: char) -> u32 {\n\
         if ch == 'a' { 1 } else if ch == '\u{e9}' { 2 } else if ch == '\u{20ac}' { 3 }\n\
         else if ch == '\u{1F600}' { 4 } else { 9 }\n}\n\
         fn main() -> u32 {\n\
@@ -260,7 +260,7 @@ fn early_exits_with_heap_text_release_it_under_a_capped_wasm_memory() {
             "fn first_wide(text: borrow string) -> u32 {{\n\
                  loop ch in text {{ if ch == '€' {{ return 2; }} }}\n\
                  0\n}}\n\
-             fn scan(flag: Bool) -> u32 {{\n\
+             fn scan(flag: bool) -> u32 {{\n\
                  let heap := \"é€{filler}\".concat(\"\");\n\
                  let other := \"{filler}\".concat(\"\");\n\
                  loop ch in heap {{\n\
@@ -389,7 +389,7 @@ fn current_spellings_produce_no_warnings() {
     let f = Fixture::new();
     f.project(
         "fn length(text: borrow string) -> u32 { text.len() }\n\
-         fn main() -> u32 { let bytes: Array<u8, 2> = [1, 2]; let text := \"ab\"; if bytes[1] == 2 { length(text.borrow()) + 2 } else { 0 } }\n",
+         fn main() -> u32 { let bytes: array<u8, 2> = [1, 2]; let text := \"ab\"; if bytes[1] == 2 { length(text.borrow()) + 2 } else { 0 } }\n",
     );
     for args in [&["check"][..], &["run"][..]] {
         let output = f.run(args);

@@ -1,8 +1,8 @@
 # Guest UTF-8 validator
 
 [The example](src/main.mb) exercises `bytes.validate_utf8(length)`. This
-built-in operation borrows the logical prefix of a fixed `Array<u8, N>` and
-returns `Result<i32, Utf8Error>` with the Unicode scalar count on success.
+built-in operation borrows the logical prefix of a fixed `array<u8, N>` and
+returns `i32 ! Utf8Error` with the Unicode scalar count on success.
 The length is an `i32`, and the receiver supplies the bound `N`.
 Validation allocates no heap storage and leaves the buffer intact.
 Lead-byte and continuation ranges cover one- through four-byte sequences and exclude
@@ -10,7 +10,7 @@ overlong encodings, surrogates, and values above U+10FFFF.
 [RFC 3629, section 4](https://www.rfc-editor.org/rfc/rfc3629#section-4)
 
 Validation stops at the first error. `Utf8Error` derives from `Error` and
-adds `offset: Option<i32>`. Offsets are zero-based byte positions.
+adds `offset: i32?`. Offsets are zero-based byte positions.
 
 | Code | Error | Offset |
 | --- | --- | --- |

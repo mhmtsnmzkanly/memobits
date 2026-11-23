@@ -796,7 +796,23 @@ impl Parser {
         }
         Ok(path)
     }
+    /// A type including the `T ! E` fallible operator (`Result<T, E>`).
+    /// `?` binds tighter than `!`; the error side is a single postfix type.
     fn ty(&mut self) -> PResult<Type> {
+        let start = self.current().span.start;
+        let value = self.ty_postfix()?;
+        if !self.eat("!") {
+            return Ok(value);
+        }
+        let error = self.ty_postfix()?;
+        Ok(Type {
+            span: self.span(start),
+            path: vec!["Result".into()],
+            arguments: vec![TypeArgument::Type(value), TypeArgument::Type(error)],
+        })
+    }
+    /// A type without the `!` operator: optional suffixes bind here.
+    fn ty_postfix(&mut self) -> PResult<Type> {
         let start = self.current().span.start;
         if self.at("{") {
             self.expect("{")?;
@@ -883,6 +899,7 @@ impl Parser {
             let access_start = self.current().span.start;
             let access = self.access();
             let referent = self.ty()?;
+            let reference_span = self.span(access_start);
             if access == Access::Owned && self.eat(",") {
                 let mut elements = vec![TypeArgument::TupleField {
                     label: first_label,
@@ -923,7 +940,7 @@ impl Parser {
                     span: self.span(start),
                     path: vec!["Option".into()],
                     arguments: vec![TypeArgument::Reference {
-                        span: self.span(access_start),
+                        span: reference_span,
                         access,
                         referent,
                     }],
@@ -939,7 +956,16 @@ impl Parser {
             }
             return Ok(ty);
         }
-        let path = self.path()?;
+        let mut path = self.path()?;
+        if path.len() == 1 {
+            // Lowercase built-in spellings map onto the existing built-in types.
+            match path[0].as_str() {
+                "bool" => path[0] = "Bool".into(),
+                "char" => path[0] = "Char".into(),
+                "array" => path[0] = "Array".into(),
+                _ => {}
+            }
+        }
         let mut arguments = Vec::new();
         if self.eat("<") {
             let template = templates::lookup_applied(&path);
@@ -1739,7 +1765,7 @@ impl Parser {
         };
         loop {
             if minimum <= 12 && self.eat("as") {
-                let target = self.ty()?;
+                let target = self.ty_postfix()?;
                 left = Node {
                     span: self.span(start),
                     kind: ExprKind::Cast {

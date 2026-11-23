@@ -24,9 +24,9 @@ fn numeric_literal_on_left_uses_right_operand_type() {
 
 #[test]
 fn boolean_operators_check_both_operands() {
-    let good = check("fn f(x: Bool) -> Bool { true && x || false }");
+    let good = check("fn f(x: bool) -> bool { true && x || false }");
     assert!(good.is_empty(), "{good:?}");
-    let bad = check("fn f() -> Bool { true && 1 }");
+    let bad = check("fn f() -> bool { true && 1 }");
     assert!(bad.iter().any(|d| d.code.to_string() == "TE002"), "{bad:?}");
 }
 

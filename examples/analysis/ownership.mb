@@ -1,5 +1,5 @@
 // Run with `mb ownership examples/analysis/ownership.mb`.
-fn consume_pair(first: Array<i32, 2>, second: i32) {}
+fn consume_pair(first: array<i32, 2>, second: i32) {}
 
 fn main() -> i32 {
     var values := [10, 11];

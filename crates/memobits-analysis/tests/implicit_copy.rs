@@ -31,17 +31,17 @@ fn primitive_uses_never_move() {
     for source in [
         "fn main() -> i32 { let x := 1; let y := x; x + y }",
         "fn f(n: i32) {} fn main() { var i := 0; loop { if i >= 3 { break; } f(i); i += 1; } }",
-        "fn mk(v: i32) -> Array<i32, 3> { [v, v + 1, v + 2] } fn main() {}",
+        "fn mk(v: i32) -> array<i32, 3> { [v, v + 1, v + 2] } fn main() {}",
         "fn main() { let x := 2; let a := [x; 3]; let b := [x; 3]; }",
         "fn main() -> i32 { let x := 1.5; let y := x; let z := x; 0 }",
-        "fn main() -> Bool { let b := true; let c := b; b && c }",
+        "fn main() -> bool { let b := true; let c := b; b && c }",
         "fn main() -> i32 { var a := [1, 2, 3]; let t := a[0]; a[0] = a[2]; a[2] = t; a[0] }",
         "type P { x: i32, y: i32 } fn f(v: i32) -> i32 { v } \
          fn main() -> i32 { let p := P { x: 1, y: 2 }; f(p.x) + f(p.x) + p.y }",
         "fn get(r: borrow i32) -> i32 { r }",
         "fn get(r: share i32) -> i32 { let a: i32 = r; a }",
-        "fn main() -> Bool { let flags := [false, true]; let on := flags[1]; on }",
-        "fn pick(c: Bool) -> i32 { let a := [1, 2]; if c { a[0] } else { a[1] } }",
+        "fn main() -> bool { let flags := [false, true]; let on := flags[1]; on }",
+        "fn pick(c: bool) -> i32 { let a := [1, 2]; if c { a[0] } else { a[1] } }",
     ] {
         accepted(source);
     }
@@ -64,7 +64,7 @@ fn implicit_copies_are_reads_that_respect_live_shares() {
 fn aggregates_still_move() {
     for source in [
         "fn main() -> i32 { let a := [1, 2]; let b := a; a[0] }",
-        "fn f(a: Array<i32, 2>) {} fn main() { let a := [1, 2]; f(a); f(a); }",
+        "fn f(a: array<i32, 2>) {} fn main() { let a := [1, 2]; f(a); f(a); }",
         "fn main() { let x := [1, 2]; let a := [x; 3]; }",
         "fn main() { var x := [1]; loop { let y := x; } }",
     ] {

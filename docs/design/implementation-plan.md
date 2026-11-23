@@ -103,7 +103,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   Nominal `==`/`!=` use `PartialEq`; nominal `<`, `<=`, `>`, and `>=` select
   `PartialOrd`'s matching `eq`, `lt`, `le`, `gt`, or `ge` member. Comparison
   receivers are borrowed, their associated `Rhs` is owned, and each result is
-  `Bool`; primitive comparisons remain built in.
+  `bool`; primitive comparisons remain built in.
   Nominal unary `-` selects `core::ops::Neg` with an owned receiver and
   associated `Output`; primitive negation keeps its existing checked behavior.
 - **Compound assignment**: nominal `+=` selects compiler-provided
@@ -258,7 +258,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   of a field or element is gated, while whole-struct destructuring consumes its
   owner. See [fixed arrays](fixed-array-implementation.md) and
   [structs](struct-implementation.md) for supported projections and operations.
-  `Bytes<N>` resolves to `Array<u8, N>` with the same fixed-length, ownership,
+  `array<u8, N>` is the byte buffer type with the usual fixed-length, ownership,
   lowering and ABI rules. [Future Bytes API ideas](fixed-array-implementation.md#future-bytes-api-inspirations)
   follow the first executable String slice and depend on a concrete consumer.
 - Borrow and share support internal primitive and aggregate parameters.
@@ -314,9 +314,9 @@ the implemented subset; a milestone is not complete merely because its crate exi
   owned `String` transfers and internal borrows using private Wasm data.
   `.len()` reads the stored UTF-8 byte length as `u32`, and
   `.is_char_boundary(offset)` checks scalar boundaries. `.byte_at(index)`
-  returns a raw byte as `Option<u8>`, and `.scalar_at(index)` decodes a
-  Unicode scalar at a byte offset as `Option<u32>`. Internal
-  `Result<string, E>` supports static success payloads and consuming matches.
+  returns a raw byte as `u8?`, and `.scalar_at(index)` decodes a
+  Unicode scalar at a byte offset as `u32?`. Internal
+  `string ! E` supports static success payloads and consuming matches.
   A heap `Ok` supports immediate consuming matches in the same function
   or after a direct internal return. Both require an explicit success
   binding. Other escapes remain gated.
@@ -330,7 +330,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   scalar iterator remain gated. The runnable guide demonstrates scalar
   traversal with an explicit loop.
   [Fallible construction from fixed bytes](utf8-text-slice.md#fallible-construction-from-fixed-bytes)
-  uses the same trusted validator as `Bytes<N>.validate_utf8`. The
+  uses the same trusted validator as `array<u8, N>.validate_utf8`. The
   `to_utf8_string(length)` method copies the prefix only after validation
   and returns an owned String through the internal Result path.
 - Local and remote package dependencies,
@@ -347,14 +347,14 @@ from a standalone Wasm build.
 
 ### Compiler-known outcome types
 
-Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` use the enum pipeline
+Owned `T?`, `T ! E`, and `Attempt<T, E>` use the enum pipeline
 for construction, internal calls, and `match`. The compiler-known `Error`
 root has a public `code: u32` field. Derived error types inherit fields in
 ancestor-first order and carry a hidden concrete type tag. Zero-argument
 application entries can return `Result` or `Attempt` with primitive success
 payloads. The runtime reports the same outcome in source and artifact runs.
 The [outcome implementation plan](outcome-implementation.md) describes the
-adapter and the function-local `Option<borrow T>` slice. Explicit local
+adapter and the function-local `(borrow T)?` slice. Explicit local
 annotations enable construction, consuming local moves and matches with
 last-use loan tracking. Other reference type arguments remain gated with
 TE017.

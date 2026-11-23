@@ -68,7 +68,7 @@ includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. `List<u8>` and `List<u32>` support
 contextual empty `[]`, local moves, and non-consuming `.len()`.
 `.push(value)` appends through a whole mutable local. Empty construction
-allocates no heap block. `.get(index)` copies an element into `Option<T>`
+allocates no heap block. `.get(index)` copies an element into `T?`
 and returns `None` when the `u32` index is outside the List. Direct internal
 `borrow List<T>` parameters accept explicit read-only borrows and support
 `.len()` and `.get()`. Direct `share List<T>` parameters and stored `var`
@@ -94,9 +94,9 @@ sharing a temporary, other temporary uses, subscript syntax,
 indirect calls, and exported List signatures remain gated. Ordinary UTF-8 `String` literals execute
 with owned transfers and internal references. Use `.len()` for the UTF-8
 byte length, `.is_char_boundary(offset)` to test a byte offset, and
-`.byte_at(index)` to read a raw byte as `Option<u8>`. Use `.scalar_at(index)`
-to decode a Unicode scalar at a byte offset as `Option<u32>`.
-`bytes.validate_utf8(length)` borrows a fixed `Bytes<N>` prefix and returns
+`.byte_at(index)` to read a raw byte as `u8?`. Use `.scalar_at(index)`
+to decode a Unicode scalar at a byte offset as `u32?`.
+`bytes.validate_utf8(length)` borrows a fixed `array<u8, N>` prefix and returns
 a scalar count or a typed error with a byte offset.
 `bytes.to_utf8_string(length)` validates the same prefix and copies it
 into an owned String on success. Its Result uses the immediate consuming
@@ -122,7 +122,7 @@ whole local or direct `share String` parameter, and returns unit. It uses
 checked concat followed by replacement.
 Installing heap text through forwarded shares or share aliases, other
 nested heap uses and exported String signatures are gated. An internal
-`Result<String, E>` can return a static String to a consuming match.
+`String ! E` can return a static String to a consuming match.
 A heap-backed `Ok` can be bound and immediately matched in the same
 function with explicit `Ok(value)` and `Err` arms. A direct internal call
 can also return a heap-backed Result to an immediate consuming match, with
@@ -141,8 +141,8 @@ direct concat, or a direct internal String-returning call. See the
 and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 
 Application builds export the manifest entry as
-`main`. A zero-argument application entry can return `Result<T, E>` or
-`Attempt<T, E>` with `Bool`, an integer, or a float as its success payload.
+`main`. A zero-argument application entry can return `T ! E` or
+`Attempt<T, E>` with `bool`, an integer, or a float as its success payload.
 The private adapter applies to `main` and uses the `memobits.entry` custom
 section. Library builds preserve export aliases and support scalar function
 signatures.

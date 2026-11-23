@@ -174,10 +174,10 @@ fn flat_string_structs_work_as_tuple_and_array_elements() {
         r#"type Label { text: string, n: u32 }
 fn label_len(l: borrow Label) -> u32 { l.text.len() + l.n }
 fn row_len(row: borrow (Label, u32)) -> u32 { row.0.text.len() + row.0.n + row.1 }
-fn sum(labels: Array<Label, 2>) -> u32 {
+fn sum(labels: array<Label, 2>) -> u32 {
     label_len(labels[0].borrow()) + label_len(labels[1].borrow())
 }
-fn early(labels: Array<Label, 2>, flag: Bool) -> u32 {
+fn early(labels: array<Label, 2>, flag: bool) -> u32 {
     if flag { return 1; }
     2
 }
@@ -241,12 +241,12 @@ fn repeated_string_owner_elements_release_on_normal_and_early_returns() {
             r#"type Label {{ text: string, n: u32 }}
 fn label_len(l: borrow Label) -> u32 {{ l.text.len() + l.n }}
 fn row_len(row: borrow (Label, u32)) -> u32 {{ row.0.text.len() + row.0.n + row.1 }}
-fn consume(labels: Array<Label, 2>, flag: Bool) -> u32 {{
+fn consume(labels: array<Label, 2>, flag: bool) -> u32 {{
     let extra := "{text}".concat("");
     if flag {{ return 1; }}
     label_len(labels[0].borrow()) + label_len(labels[1].borrow()) + extra.len() - extra.len()
 }}
-fn caller(flag: Bool) -> u32 {{
+fn caller(flag: bool) -> u32 {{
     let first_heap := "{text}".concat("");
     let first := Label {{ text: first_heap, n: 1 }};
     let second_heap := "{text}".concat("");
@@ -255,14 +255,14 @@ fn caller(flag: Bool) -> u32 {{
     if flag {{ return 7; }}
     consume(labels, false)
 }}
-fn tuple_caller(flag: Bool) -> u32 {{
+fn tuple_caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 0 }};
     let row: (Label, u32) = (label, 3);
     if flag {{ return 5; }}
     row_len(row.borrow())
 }}
-fn nested_caller(flag: Bool) -> u32 {{
+fn nested_caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 0 }};
     let inner := [label];
@@ -275,7 +275,7 @@ fn make_label() -> Label {{
     let label := Label {{ text: heap, n: 0 }};
     label
 }}
-fn tuple_temporary_caller(flag: Bool) -> u32 {{
+fn tuple_temporary_caller(flag: bool) -> u32 {{
     let from_call: (Label, u32) = (make_label(), 1);
     let heap := "{text}".concat("");
     let inline: (Label, u32) = (Label {{ text: heap, n: 0 }}, 2);

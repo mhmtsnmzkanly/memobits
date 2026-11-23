@@ -150,7 +150,7 @@ fn field_initialisers_are_evaluated_in_source_order_even_when_declared_different
 #[test]
 fn literals_are_typed_by_the_declared_field_types() {
     let program = lower(
-        "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+        "type M { a: u8, b: i64, c: bool, d: f32, e: i16 } \
          fn main() -> i32 { let m := M { e: -7, a: 200, d: 1.5, c: true, b: 5 }; let e := m.e.copy(); 1 }",
     );
     let Some(memobits_ir::TypeDefKind::Struct { fields }) = program.types.first().map(|t| &t.kind)
@@ -174,14 +174,14 @@ fn literals_are_typed_by_the_declared_field_types() {
 fn field_reads_work_in_arithmetic_comparison_conditions_and_indices() {
     for source in [
         "fn main() -> i32 { let p := P { x: 3, y: 4 }; p.x * p.y + 1 }",
-        "fn main() -> Bool { let p := P { x: 3, y: 4 }; p.x < p.y }",
+        "fn main() -> bool { let p := P { x: 3, y: 4 }; p.x < p.y }",
         "fn main() -> i32 { let p := P { x: 3, y: 4 }; if p.x == 3 { 1 } else { 2 } }",
         "fn main() -> i32 { let p := P { x: 1, y: 4 }; let a := [10, 20, 30]; a[p.x] + 0 }",
         "fn main() -> i32 { let p := P { x: 3, y: 4 }; -p.x }",
         "fn main() -> i32 { let p := P { x: 3, y: 4 }; let q := p.x.copy(); q + p.y.copy() }",
-        "type F { on: Bool } fn main() -> i32 { let f := F { on: true }; if f.on { 1 } else { 2 } }",
-        "type F { on: Bool } fn main() -> Bool { let f := F { on: true }; f.on && !f.on }",
-        "type F { on: Bool } fn main() -> Bool { let f := F { on: false }; true && f.on }",
+        "type F { on: bool } fn main() -> i32 { let f := F { on: true }; if f.on { 1 } else { 2 } }",
+        "type F { on: bool } fn main() -> bool { let f := F { on: true }; f.on && !f.on }",
+        "type F { on: bool } fn main() -> bool { let f := F { on: false }; true && f.on }",
         "fn main() -> i32 { let p: P = P { x: 3, y: 4 }; p.x + 0 }",
         "type E {} fn main() -> i32 { let e := E {}; 1 }",
     ] {
@@ -304,12 +304,12 @@ fn uppercase_string_type_spelling_is_rejected_with_migration_guidance() {
         "fn main(value: String) {}",
         "fn main(value: legacy::String) {}",
         "type Text = String; fn main(value: Text) {}",
-        "fn main(value: Result<String, Error>) {}",
+        "fn main(value: String ! Error) {}",
     ] {
         rejected(source, "TE001", "use lowercase 'string'");
     }
     lower("fn main(value: string) {}");
-    lower("fn main(value: Result<string, Error>) {}");
+    lower("fn main(value: string ! Error) {}");
 }
 
 #[test]
@@ -398,7 +398,7 @@ fn enum_types_are_value_types_and_misuse_is_diagnosed_without_panics() {
 #[test]
 fn aliases_resolve_wherever_a_type_is_named() {
     let program = lower(
-        "type Num = i32; type Pair = P; type Row = Array<Num, 2>; \
+        "type Num = i32; type Pair = P; type Row = array<Num, 2>; \
          type P { x: Num, y: Num } \
          fn id(n: Num) -> Num { n } \
          fn main() -> Num { let p: Pair = Pair { x: id(3), y: 4 }; let r: Row = [1, 2]; p.x.copy() + r[1] }",

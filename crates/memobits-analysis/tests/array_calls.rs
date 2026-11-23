@@ -36,7 +36,7 @@ fn array(len: u32) -> Type {
 #[test]
 fn array_parameters_have_access_specific_local_types() {
     let program =
-        lower("fn f(a: Array<i32, 3>, b: borrow Array<i32, 3>, c: share Array<i32, 3>) {}");
+        lower("fn f(a: array<i32, 3>, b: borrow array<i32, 3>, c: share array<i32, 3>) {}");
     let function = &program.functions[0];
     assert_eq!(function.locals[0].ty, array(3));
     assert_eq!(
@@ -59,7 +59,7 @@ fn array_parameters_have_access_specific_local_types() {
 #[test]
 fn array_call_arguments_use_the_parameter_access_mode() {
     let program = lower(
-        "fn f(a: Array<i32, 2>, b: borrow Array<i32, 2>, c: share Array<i32, 2>) {} \
+        "fn f(a: array<i32, 2>, b: borrow array<i32, 2>, c: share array<i32, 2>) {} \
          fn main() { var x := [1, 2]; var y := [3, 4]; var z := [5, 6]; f(x, y.borrow(), z.share()); }",
     );
     let call = program.functions[1]
@@ -82,7 +82,7 @@ fn array_call_arguments_use_the_parameter_access_mode() {
 #[test]
 fn element_reads_and_writes_through_references_lower() {
     let program = lower(
-        "fn f(a: borrow Array<i32, 3>, b: share Array<i32, 3>, i: i32) -> i32 { \
+        "fn f(a: borrow array<i32, 3>, b: share array<i32, 3>, i: i32) -> i32 { \
          b[0] = a[1] + 1; b[1] += b[2]; b[i + 0] = 5; a[2] + b[0] }",
     );
     let kinds = program.functions[0]
@@ -115,41 +115,41 @@ fn local_array_references_and_reborrows_lower() {
     lower("fn main() { var a := [1, 2, 3]; var r := a.share(); r[0] = 4; r[1] += 1; }");
     lower("fn main() { var a := [1, 2]; let r := a.borrow(); let q := r; q[0] + 0; }");
     lower(
-        "fn read(a: borrow Array<i32, 2>) -> i32 { a[0] + 0 } \
-         fn pass(a: borrow Array<i32, 2>) -> i32 { read(a) + read(a) } \
-         fn mutate(a: share Array<i32, 2>) { a[0] = 1; } \
-         fn forward(a: share Array<i32, 2>) { mutate(a); a[1] = 2; } \
-         fn lend(a: share Array<i32, 2>) -> i32 { read(a.borrow()) }",
+        "fn read(a: borrow array<i32, 2>) -> i32 { a[0] + 0 } \
+         fn pass(a: borrow array<i32, 2>) -> i32 { read(a) + read(a) } \
+         fn mutate(a: share array<i32, 2>) { a[0] = 1; } \
+         fn forward(a: share array<i32, 2>) { mutate(a); a[1] = 2; } \
+         fn lend(a: share array<i32, 2>) -> i32 { read(a.borrow()) }",
     );
     // A whole-array store through a share reference.
-    lower("fn put(a: share Array<i32, 2>) { a = [1, 2]; }");
+    lower("fn put(a: share array<i32, 2>) { a = [1, 2]; }");
 }
 
 #[test]
 fn owned_array_arguments_accept_literals_repetitions_and_locals() {
     lower(
-        "fn f(a: Array<i32, 2>) -> i32 { a[0] + a[1] } \
+        "fn f(a: array<i32, 2>) -> i32 { a[0] + a[1] } \
          fn main() -> i32 { let x := [1, 2]; f(x) + f([3, 4]) + f([5; 2]) }",
     );
-    lower("fn f(var a: Array<i32, 2>) -> i32 { a[0] = 9; a[0] + 0 }");
+    lower("fn f(var a: array<i32, 2>) -> i32 { a[0] = 9; a[0] + 0 }");
 }
 
 #[test]
 fn array_type_mismatches_between_argument_and_parameter_are_type_errors() {
-    assert!(codes("fn f(a: Array<i32, 3>) {} fn main() { f([1, 2]); }").contains(&"TE002".into()));
+    assert!(codes("fn f(a: array<i32, 3>) {} fn main() { f([1, 2]); }").contains(&"TE002".into()));
     assert!(
-        codes("fn f(a: Array<i32, 2>) {} fn main() { f([true, false]); }")
+        codes("fn f(a: array<i32, 2>) {} fn main() { f([true, false]); }")
             .contains(&"TE002".into())
     );
     assert!(codes(
-        "fn f(a: borrow Array<i32, 3>) {} fn main() { let x := [1, 2]; f(x.borrow()); }"
+        "fn f(a: borrow array<i32, 3>) {} fn main() { let x := [1, 2]; f(x.borrow()); }"
     )
     .contains(&"TE002".into()));
     assert!(
-        codes("fn f(a: share Array<i64, 2>) {} fn main() { var x := [1, 2]; f(x.share()); }")
+        codes("fn f(a: share array<i64, 2>) {} fn main() { var x := [1, 2]; f(x.share()); }")
             .contains(&"TE002".into())
     );
-    assert!(codes("fn f(a: Array<i32, 2>) {} fn main() { f(1); }").contains(&"TE002".into()));
+    assert!(codes("fn f(a: array<i32, 2>) {} fn main() { f(1); }").contains(&"TE002".into()));
 }
 
 #[test]
@@ -157,24 +157,24 @@ fn references_follow_the_signature_access_without_call_site_overrides() {
     // Arrays are not implicitly borrowed or shared; the explicit conversion is
     // required exactly as for primitives.
     assert!(
-        codes("fn f(a: borrow Array<i32, 2>) {} fn main() { let x := [1, 2]; f(x); }")
+        codes("fn f(a: borrow array<i32, 2>) {} fn main() { let x := [1, 2]; f(x); }")
             .contains(&"TE017".into())
     );
     assert!(
-        codes("fn f(a: share Array<i32, 2>) {} fn main() { let x := [1, 2]; f(x.borrow()); }")
+        codes("fn f(a: share array<i32, 2>) {} fn main() { let x := [1, 2]; f(x.borrow()); }")
             .contains(&"TE017".into())
     );
     assert!(
-        codes("fn f(a: share Array<i32, 2>) {} fn main() { let x := [1, 2]; f(x.share()); }")
+        codes("fn f(a: share array<i32, 2>) {} fn main() { let x := [1, 2]; f(x.share()); }")
             .contains(&"TE017".into())
     );
     assert!(
-        codes("fn f(a: share Array<i32, 2>) {} fn g(a: borrow Array<i32, 2>) { f(a); }")
+        codes("fn f(a: share array<i32, 2>) {} fn g(a: borrow array<i32, 2>) { f(a); }")
             .contains(&"TE017".into())
     );
     // A reference cannot become an owned argument.
     assert!(
-        codes("fn f(a: Array<i32, 2>) {} fn g(a: borrow Array<i32, 2>) { f(a); }")
+        codes("fn f(a: array<i32, 2>) {} fn g(a: borrow array<i32, 2>) { f(a); }")
             .contains(&"TE017".into())
     );
 }
@@ -182,9 +182,9 @@ fn references_follow_the_signature_access_without_call_site_overrides() {
 #[test]
 fn writes_require_a_mutable_path() {
     for source in [
-        "fn f(a: borrow Array<i32, 2>) { a[0] = 1; }",
-        "fn f(a: borrow Array<i32, 2>) { a[0] += 1; }",
-        "fn f(a: Array<i32, 2>) { a[0] = 1; }",
+        "fn f(a: borrow array<i32, 2>) { a[0] = 1; }",
+        "fn f(a: borrow array<i32, 2>) { a[0] += 1; }",
+        "fn f(a: array<i32, 2>) { a[0] = 1; }",
         "fn main() { var x := [1, 2]; let r := x.share(); r[0] = 1; }",
         "fn main() { var x := [1, 2]; let r := x.borrow(); r[0] = 1; }",
     ] {
@@ -192,36 +192,36 @@ fn writes_require_a_mutable_path() {
     }
     assert!(codes("fn main() { let x := [1, 2]; let r := x.share(); }").contains(&"TE017".into()));
     // `var` is rejected on reference parameters, as for primitives.
-    assert!(codes("fn f(var a: borrow Array<i32, 2>) {}").contains(&"TE017".into()));
+    assert!(codes("fn f(var a: borrow array<i32, 2>) {}").contains(&"TE017".into()));
 }
 
 #[test]
 fn constant_indices_are_checked_through_references() {
     for source in [
-        "fn f(a: borrow Array<i32, 3>) -> i32 { a[3] + 0 }",
-        "fn f(a: share Array<i32, 3>) { a[3] = 1; }",
-        "fn f(a: share Array<i32, 3>) { a[-1] += 1; }",
+        "fn f(a: borrow array<i32, 3>) -> i32 { a[3] + 0 }",
+        "fn f(a: share array<i32, 3>) { a[3] = 1; }",
+        "fn f(a: share array<i32, 3>) { a[-1] += 1; }",
     ] {
         assert!(codes(source).contains(&"TE008".into()), "{source}");
     }
-    lower("fn f(a: borrow Array<i32, 3>) -> i32 { a[2] + 0 }");
+    lower("fn f(a: borrow array<i32, 3>) -> i32 { a[2] + 0 }");
 }
 
 #[test]
 fn element_extraction_through_references_copies_primitives_and_rejects_rows() {
     for source in [
-        "fn f(a: borrow Array<i32, 2>) { let x := a[0]; }",
-        "fn f(a: borrow Array<i32, 2>) -> i32 { a[0] }",
-        "fn f(a: share Array<i32, 2>) { a[1] = a[0]; }",
-        "fn g(x: i32) {} fn f(a: borrow Array<i32, 2>) { g(a[0]); }",
+        "fn f(a: borrow array<i32, 2>) { let x := a[0]; }",
+        "fn f(a: borrow array<i32, 2>) -> i32 { a[0] }",
+        "fn f(a: share array<i32, 2>) { a[1] = a[0]; }",
+        "fn g(x: i32) {} fn f(a: borrow array<i32, 2>) { g(a[0]); }",
     ] {
         lower(source);
     }
     for source in [
-        "fn f(a: borrow Array<Array<i32, 2>, 2>) { let x := a[0]; }",
-        "fn f(a: borrow Array<Array<i32, 2>, 2>) -> Array<i32, 2> { a[0] }",
-        "fn f(a: share Array<Array<i32, 2>, 2>) { a[1] = a[0]; }",
-        "fn g(x: Array<i32, 2>) {} fn f(a: borrow Array<Array<i32, 2>, 2>) { g(a[0]); }",
+        "fn f(a: borrow array<array<i32, 2>, 2>) { let x := a[0]; }",
+        "fn f(a: borrow array<array<i32, 2>, 2>) -> array<i32, 2> { a[0] }",
+        "fn f(a: share array<array<i32, 2>, 2>) { a[1] = a[0]; }",
+        "fn g(x: array<i32, 2>) {} fn f(a: borrow array<array<i32, 2>, 2>) { g(a[0]); }",
     ] {
         assert!(codes(source).contains(&"TE022".into()), "{source}");
     }
@@ -231,16 +231,16 @@ fn element_extraction_through_references_copies_primitives_and_rejects_rows() {
 fn unsupported_array_call_forms_report_gate_diagnostics() {
     for source in [
         // references to primitive elements
-        "fn f(a: share Array<i32, 2>) { let r := a[0].share(); }",
-        "fn g(x: share i32) {} fn f(a: share Array<i32, 2>) { g(a[0].share()); }",
+        "fn f(a: share array<i32, 2>) { let r := a[0].share(); }",
+        "fn g(x: share i32) {} fn f(a: share array<i32, 2>) { g(a[0].share()); }",
         // temporaries cannot be borrowed
-        "fn g(a: borrow Array<i32, 2>) {} fn f() { g([1, 2].borrow()); }",
+        "fn g(a: borrow array<i32, 2>) {} fn f() { g([1, 2].borrow()); }",
         // array references are not values
-        "fn f(a: borrow Array<i32, 2>) -> i32 { a }",
-        "fn f(a: borrow Array<i32, 2>) { let b := if true { a } else { a }; }",
-        "fn f(a: borrow Array<i32, 2>) { [a]; }",
+        "fn f(a: borrow array<i32, 2>) -> i32 { a }",
+        "fn f(a: borrow array<i32, 2>) { let b := if true { a } else { a }; }",
+        "fn f(a: borrow array<i32, 2>) { [a]; }",
         // rebinding a reference handle
-        "fn f(a: share Array<i32, 2>, b: share Array<i32, 2>) { var r := a.share(); r = b; }",
+        "fn f(a: share array<i32, 2>, b: share array<i32, 2>) { var r := a.share(); r = b; }",
     ] {
         assert!(codes(source).contains(&"TE017".into()), "{source}");
     }

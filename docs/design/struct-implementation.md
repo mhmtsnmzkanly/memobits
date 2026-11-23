@@ -22,8 +22,8 @@ follow the array model: the callee owns a copy in its own frame cell, and
 struct-return storage belongs to the caller. Field-level references stay gated.
 
 **A3 — nested structs, array fields, arrays of structs (implemented; see the A3 checkpoint).**
-Struct-typed and array-typed fields (a struct inside a struct, `Array<T, N>`
-fields) and `Array<S, N>` with struct elements. The layout nests (size and
+Struct-typed and array-typed fields (a struct inside a struct, `array<T, N>`
+fields) and `array<S, N>` with struct elements. The layout nests (size and
 alignment computed recursively) and sub-aggregate moves follow the TE022 rule
 of arrays.
 
@@ -76,7 +76,7 @@ independently, and likewise distinct constant array indices.
   with or without an annotation (`let p: P = P { .. };`). Every declared field is
   given exactly once, in any order. Initialisers are evaluated in source order.
 - Primitive field reads `p.f` in arithmetic, comparisons, unary operators,
-  `if`/`else if` conditions (including `Bool` fields), `&&` / `||`, and array
+  `if`/`else if` conditions (including `bool` fields), `&&` / `||`, and array
   indices.
 - `p.f.copy()` into any owned position, including bindings with annotations.
 - Public types and fields across modules, through `use`, qualified paths, and
@@ -94,7 +94,7 @@ independently, and likewise distinct constant array indices.
 | Struct parameters, results, `borrow`/`share` parameters, struct-typed signatures including `pub` `main` | TE017 |
 | `.borrow()` / `.share()` of a struct, `.copy()` of a struct | TE017 |
 | Field access on a non-local base (`f().x`), and `1.field` | TE017 |
-| Struct-typed fields, array-typed fields, arrays of structs (`Array<P, N>`, `type G = Array<P, 2>`) (lifted by A3) | TE017 |
+| Struct-typed fields, array-typed fields, arrays of structs (`array<P, N>`, `type G = array<P, 2>`) (lifted by A3) | TE017 |
 | Enum types used as value types (lifted by B1, see `enum-implementation.md`) | was TE001 / TE016 |
 | Destructuring `let P { x } := p;` | SE002 |
 | Struct literal directly in an unparenthesised `if` condition | SE002 |
@@ -140,7 +140,7 @@ the remaining array-only checks (`is_aggregate`, `aggregate_bytes`).
 
 - `var` struct bindings and `var` owned struct parameters.
 - Field writes `p.x = v` and `p.x op= v` (`+= -= *= /= %=`, the scalar rules;
-  `Bool` fields take `=` only). Through `var` owners, owned `var` parameters,
+  `bool` fields take `=` only). Through `var` owners, owned `var` parameters,
   `share` parameters, and `var` share bindings.
 - Whole-struct moves: `let q := p;`, `q = p;` (a `var` target), a literal or call
   result as the right-hand side, `return p;`, struct-valued `if`/block results.
@@ -153,7 +153,7 @@ the remaining array-only checks (`is_aggregate`, `aggregate_bytes`).
   `var s := p.share();`) and reborrows to an equal or weaker access.
 - Results `-> P` for a literal, a local, an owned parameter or a call, used as an
   initialiser, assignment right-hand side or owned argument (`use_p(make())`).
-- Mixed-width fields (`u8`, `i64`, `f32`, `Bool`, `i16`, `f64`) keep their
+- Mixed-width fields (`u8`, `i64`, `f32`, `bool`, `i16`, `f64`) keep their
   layout through all of the above; narrow stores never touch neighbours.
 
 ### Lowering and evaluation order
@@ -187,7 +187,7 @@ struct references", "cannot return structs"); there is no external struct ABI.
 | --- | --- |
 | Field write to a `let` struct, an owned non-`var` parameter, a `borrow` parameter or binding, or a `let` share binding | TE004 |
 | Write to a private field of another module's struct | TE025 (existing) |
-| Field write of the wrong type, unknown field, compound write on `Bool` | TE002, TE024, TE007 |
+| Field write of the wrong type, unknown field, compound write on `bool` | TE002, TE024, TE007 |
 | Use after whole-struct move | BE001 |
 | Field write, whole assignment or move while a borrow is live; two `share`s (or share + borrow) of one struct in one call | BE005 |
 | `make().x`, `P { .. }.x`, a struct literal as a temporary | TE017 |
@@ -278,9 +278,9 @@ No new IR instruction and no new ownership rule were needed.
   `Line { a: P { x: 1, y: 2 }, b: make_p() }`; reads `l.a.x`; writes
   `l.a.x = v`, `l.a.x += v` (through a `var` owner or a `share` reference);
   whole-field replacement `l.a = P { .. }` and `l.a = other` (moves `other`).
-- Array-typed fields: `type Poly { pts: Array<i32, 4> }`; `p.pts[i]` reads and
+- Array-typed fields: `type Poly { pts: array<i32, 4> }`; `p.pts[i]` reads and
   writes with bounds checks, `p.pts[i] += v`, `p.pts = [..]`.
-- Arrays of structs `Array<P, 3>`: literals, repetition
+- Arrays of structs `array<P, 3>`: literals, repetition
   `[P { x: 0, y: 0 }; 8]`, `a[i].x` reads and writes, `a[i] = P { .. }`, and
   arbitrary nesting (arrays of structs holding arrays of structs).
 - Sub-aggregates lent to `borrow P` / `share P` / `borrow Array<..>` parameters
@@ -294,7 +294,7 @@ No new IR instruction and no new ownership rule were needed.
 | Problem | Code |
 | --- | --- |
 | Moving a sub-aggregate out: `let q := l.a;`, `let r := a[i];`, `f(l.a)` to an owned parameter, `return l.a;`, tail `l.a`, `l.b = l.a;`, `[a[0], a[1]]`, `l.a;` | TE022 ("a struct or array field/element cannot be moved out by field access/indexing; ... partial moves are deferred") |
-| Struct containing itself by value, also through arrays (`type A { xs: Array<A, 2> }`) | TE026 |
+| Struct containing itself by value, also through arrays (`type A { xs: array<A, 2> }`) | TE026 |
 | `l.a.x.share()`, `a[i].x.borrow()`, `p.pts[0].share()` | TE017 |
 | Write through a `let`, `borrow` or immutable root (`l.a.x = 1` on `let l`) | TE004 |
 | Constant index out of range at any level | TE008 |

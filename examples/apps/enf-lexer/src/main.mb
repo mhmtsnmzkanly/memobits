@@ -1,5 +1,5 @@
 // Bounded byte lexer fixture. See docs/design/enf-lexer-slice.md for scope.
-type Bytes = Array<u8, 16>;
+type Bytes = array<u8, 16>;
 
 type IntegerToken {
     value: u32,
@@ -8,16 +8,16 @@ type IntegerToken {
 }
 
 type LexError: Error {
-    offset: Option<i32>,
+    offset: i32?,
 }
 
-type Scan = Result<Option<IntegerToken>, LexError>;
+type Scan = IntegerToken? ! LexError;
 
-fn space(byte: u8) -> Bool {
+fn space(byte: u8) -> bool {
     byte == 32 || byte == 9 || byte == 10 || byte == 13
 }
 
-fn digit(byte: u8) -> Bool {
+fn digit(byte: u8) -> bool {
     byte >= 48 && byte <= 57
 }
 
@@ -65,7 +65,7 @@ fn scan(bytes: borrow Bytes, length: i32, cursor: share i32) -> Scan {
     Ok(Some(IntegerToken { value: value, start: start, end: cursor.copy() }))
 }
 
-fn token_is(scan_result: Scan, value: u32, start: i32, end: i32) -> Bool {
+fn token_is(scan_result: Scan, value: u32, start: i32, end: i32) -> bool {
     match scan_result {
         Ok(token) => match token {
             Some(integer) => integer.value == value && integer.start == start && integer.end == end,
@@ -75,14 +75,14 @@ fn token_is(scan_result: Scan, value: u32, start: i32, end: i32) -> Bool {
     }
 }
 
-fn at_end(scan_result: Scan) -> Bool {
+fn at_end(scan_result: Scan) -> bool {
     match scan_result {
         Ok(token) => match token { None => true, Some(_) => false },
         Err(_) => false,
     }
 }
 
-fn error_is(scan_result: Scan, code: u32, offset: Option<i32>) -> Bool {
+fn error_is(scan_result: Scan, code: u32, offset: i32?) -> bool {
     match scan_result {
         Err(error) => {
             let LexError { code: actual_code, offset: actual } := error;
@@ -99,7 +99,7 @@ fn error_is(scan_result: Scan, code: u32, offset: Option<i32>) -> Bool {
     }
 }
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     // The table in the design note defines the expected scans. Bytes after
     // the supplied length are padding; the extra digit in spaced is ignored.
     let spaces: Bytes = [9, 13, 10, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];

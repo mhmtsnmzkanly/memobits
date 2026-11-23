@@ -20,7 +20,7 @@ fn sum_to(count: i32) -> i32 {
     total
 }
 
-pub fn check() -> Result<i32, Error> {
+pub fn check() -> i32 ! Error {
     let value := factorial(5);
     let total := sum_to(10);
     if value != 120 {

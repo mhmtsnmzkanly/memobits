@@ -1,9 +1,9 @@
-// Character literals contain exactly one Unicode scalar. `Char` remains a
+// Character literals contain exactly one Unicode scalar. `char` remains a
 // distinct type from `u32`, though both use a 32-bit Wasm value.
-fn character_roundtrip(value: Char) -> Bool { value == '😀' }
-pub fn character_literals() -> Bool {
-    let ascii: Char = 'A';
-    let accented: Char = 'é';
+fn character_roundtrip(value: char) -> bool { value == '😀' }
+pub fn character_literals() -> bool {
+    let ascii: char = 'A';
+    let accented: char = 'é';
     ascii == 'A' && accented == 'é' && character_roundtrip('😀')
         && '\n' == '\n' && '\\' == '\\' && '\'' == '\''
 }
@@ -19,7 +19,7 @@ fn lowercase_text() -> string {
 pub fn byte_length(value: borrow string) -> u32 {
     value.len()
 }
-pub fn fixed_text() -> Bool {
+pub fn fixed_text() -> bool {
     let caption := text();
     let view := caption.borrow();
     // A shared read-only loan allows the owner to be read too.
@@ -34,13 +34,13 @@ pub fn fixed_text() -> Bool {
         && moved.len() == text().len()
         && "".len() == 0 && "abc".len() == 3 && "é".len() == 2 && "😀".len() == 4
 }
-pub fn byte_is(byte: u8?, expected: u8) -> Bool {
+pub fn byte_is(byte: u8?, expected: u8) -> bool {
     match byte { Some(value) => value == expected, None => false }
 }
-pub fn no_byte(byte: u8?) -> Bool {
+pub fn no_byte(byte: u8?) -> bool {
     match byte { Some(_) => false, None => true }
 }
-pub fn text_bytes() -> Bool {
+pub fn text_bytes() -> bool {
     let value := "é😀";
     let view := value.borrow();
     // byte_at reads raw UTF-8, including continuation bytes.
@@ -53,13 +53,13 @@ pub fn text_bytes() -> Bool {
         && no_byte(moved.byte_at(6)) && no_byte(moved.byte_at(4_294_967_295))
         && no_byte("".byte_at(0))
 }
-fn scalar_is(scalar: u32?, expected: u32) -> Bool {
+fn scalar_is(scalar: u32?, expected: u32) -> bool {
     match scalar { Some(value) => value == expected, None => false }
 }
-fn no_scalar(scalar: u32?) -> Bool {
+fn no_scalar(scalar: u32?) -> bool {
     match scalar { Some(_) => false, None => true }
 }
-pub fn text_scalars() -> Bool {
+pub fn text_scalars() -> bool {
     let value := "aé€😀";
     let ascii_text := "abc";
     let supplementary_text := "😀";
@@ -107,9 +107,9 @@ fn scalar_count(value: borrow string) -> u32 {
     }
     count
 }
-pub fn walk_text(value: borrow string) -> Bool {
-    let starts: Array<u32, 4> = [0, 1, 3, 6];
-    let scalars: Array<u32, 4> = [97, 233, 8_364, 128_512];
+pub fn walk_text(value: borrow string) -> bool {
+    let starts: array<u32, 4> = [0, 1, 3, 6];
+    let scalars: array<u32, 4> = [97, 233, 8_364, 128_512];
     let end := value.len();
     var offset: u32 = 0;
     var visited := 0;
@@ -127,12 +127,12 @@ pub fn walk_text(value: borrow string) -> Bool {
     visited == 4 && offset == 10
 }
 // `loop ch in text` visits each Unicode scalar in order and binds it as an
-// immutable `Char`. It works on a named `string` local or a borrowed
+// immutable `char`. It works on a named `string` local or a borrowed
 // parameter, evaluates the text once, and borrows it for the whole loop, so the
 // body cannot mutate or move it. `.len()` still counts bytes: this text has
-// four scalars in ten bytes. Compatibility: the legacy `Bytes<N>` type
+// four scalars in ten bytes. Compatibility: the legacy `array<u8, N>` type
 // spelling still compiles with the same meaning but prints warning MW003 on
-// stderr; this guide uses `string` and `Array<u8, N>`. `String` is rejected.
+// stderr; this guide uses `string` and `array<u8, N>`. `String` is rejected.
 fn count_wide(value: borrow string) -> u32 {
     var wide: u32 = 0;
     loop ch in value {
@@ -148,7 +148,7 @@ fn first_wide(value: borrow string) -> u32 {
     }
     0
 }
-pub fn text_loop() -> Bool {
+pub fn text_loop() -> bool {
     let sample := "aé€😀";
     var scalars: u32 = 0;
     var last := 'a';
@@ -168,7 +168,7 @@ pub fn text_loop() -> Bool {
         && total == 5 && heap.len() == 12 && none == 0
         && count_wide(heap.borrow()) == 2 && first_wide(heap.borrow()) == 4
 }
-pub fn text_boundaries() -> Bool {
+pub fn text_boundaries() -> bool {
     let value := "aé€😀";
     let view := value.borrow();
     // Byte offsets 0, 1, 3 and 6 start scalars. The byte length, 10,
@@ -192,7 +192,7 @@ fn add_question_mark(value: share string) {
 fn combined_byte_length(first: string, second: string, extra: u32) -> u32 {
     first.len() + second.len() + extra
 }
-pub fn text_concat() -> Bool {
+pub fn text_concat() -> bool {
     let left := "café";
     let right := "😀";
     // concat borrows both inputs. The new String owns its bytes until this
@@ -226,11 +226,11 @@ pub fn text_concat() -> Bool {
 }
 // Internal Results can return static text. The match moves the String out
 // of Ok. Exported String results remain gated.
-fn static_label(found: Bool) -> Result<string, Error> {
+fn static_label(found: bool) -> string ! Error {
     if found { return Ok("é"); }
     Err(Error { code: 7 })
 }
-pub fn static_text_result() -> Bool {
+pub fn static_text_result() -> bool {
     let found := match static_label(true) {
         Ok(text) => text.len() == 2,
         Err(_) => false
@@ -241,15 +241,15 @@ pub fn static_text_result() -> Bool {
     };
     found && missing
 }
-fn owned_label() -> Result<string, Error> {
+fn owned_label() -> string ! Error {
     let text := "é".concat("!");
     Ok(text)
 }
-pub fn heap_text_result() -> Bool {
+pub fn heap_text_result() -> bool {
     // A heap Ok must be matched immediately in the same function, with an
     // explicit Err arm and a binding for the owned String.
     let text := "é".concat("!");
-    let result: Result<string, Error> = Ok(text);
+    let result: string ! Error = Ok(text);
     let local_ok := match result {
         Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
         Err(_) => false

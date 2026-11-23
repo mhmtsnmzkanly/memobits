@@ -105,7 +105,7 @@ fn nested_enums_and_aggregate_payloads_match() {
     assert_eq!(
         f.result(
             "type P { x: i32, y: i32 }\n\
-             type Inner [ Num(i32), Pt(P, Array<i32, 2>) ]\n\
+             type Inner [ Num(i32), Pt(P, array<i32, 2>) ]\n\
              type Outer [ Nothing, Some(Inner), Two(Inner, Inner) ]\n\
              fn weigh(i: Inner) -> i32 {\n\
                  match i { Inner::Num(n) => n, Inner::Pt(p, a) => { let q := p; q.x * q.y + a[1] } }\n\
@@ -133,7 +133,7 @@ fn match_over_values_built_in_a_loop() {
                  if i == 0 {{ Shape::Empty }} else if i == 1 {{ Shape::Circle(2.0) }} else {{ Shape::Rect(3.0, 4.0) }}\n\
              }}\n\
              fn main() -> i32 {{\n\
-                 let kinds: Array<i32, 3> = [0, 1, 2];\n\
+                 let kinds: array<i32, 3> = [0, 1, 2];\n\
                  var total := 0;\n\
                  var i := 0;\n\
                  loop {{\n\
@@ -384,9 +384,9 @@ fn the_enums_example_project_runs_from_source_and_artifact() {
 // ---- Package B3: borrowing matches over places and references ----
 
 const GEOM: &str = "type P { x: i32, y: i32 }\n\
-    type Shape [ Empty, Circle(i32), Rect(i32, i32), Poly(P, Array<i32, 3>) ]\n\
+    type Shape [ Empty, Circle(i32), Rect(i32, i32), Poly(P, array<i32, 3>) ]\n\
     type Holder { shape: Shape, tag: P }\n\
-    fn is_big(s: borrow Shape) -> Bool {\n\
+    fn is_big(s: borrow Shape) -> bool {\n\
         match s { Shape::Rect(w, h) => w * h > 10, _ => false }\n\
     }\n\
     fn sum_point(p: borrow P) -> i32 { p.x + p.y }\n";
@@ -398,7 +398,7 @@ fn matching_an_enum_array_in_a_loop_counts_variants_and_sums_payloads() {
         f.result(&format!(
             "{GEOM}\
              fn main() -> i32 {{\n\
-                 let shapes: Array<Shape, 5> = [Shape::Rect(2, 3), Shape::Empty, Shape::Circle(4), \
+                 let shapes: array<Shape, 5> = [Shape::Rect(2, 3), Shape::Empty, Shape::Circle(4), \
                      Shape::Poly(P {{ x: 1, y: 2 }}, [10, 20, 30]), Shape::Rect(4, 5)];\n\
                  var rects := 0;\n\
                  var empties := 0;\n\
@@ -430,7 +430,7 @@ fn matching_a_struct_field_and_borrowing_params_agree_from_source_and_artifact()
             "{GEOM}\
              fn main() -> i32 {{\n\
                  let h := Holder {{ shape: Shape::Rect(4, 5), tag: P {{ x: 7, y: 8 }} }};\n\
-                 let arr: Array<Shape, 2> = [Shape::Empty, Shape::Rect(1, 1)];\n\
+                 let arr: array<Shape, 2> = [Shape::Empty, Shape::Rect(1, 1)];\n\
                  let by_field := match h.shape {{ Shape::Rect(w, _) => w, _ => 0 }};\n\
                  let by_param := if is_big(h.shape.borrow()) {{ 10 }} else {{ 0 }};\n\
                  let by_elem := if is_big(arr[1].borrow()) {{ 100 }} else {{ 1 }};\n\
@@ -449,7 +449,7 @@ fn nested_enum_payloads_and_aggregate_payload_bindings_read_through_references()
             "{GEOM}\
              type Wrap [ Plain, Boxed(Shape) ]\n\
              fn main() -> i32 {{\n\
-                 let w: Array<Wrap, 2> = [Wrap::Plain, Wrap::Boxed(Shape::Poly(P {{ x: 3, y: 4 }}, [5, 6, 7]))];\n\
+                 let w: array<Wrap, 2> = [Wrap::Plain, Wrap::Boxed(Shape::Poly(P {{ x: 3, y: 4 }}, [5, 6, 7]))];\n\
                  match w[1] {{\n\
                      Wrap::Boxed(inner) => match inner {{\n\
                          Shape::Poly(p, pts) => sum_point(p) * 100 + pts[2],\n\
@@ -510,7 +510,7 @@ fn a_dynamic_index_write_during_a_payload_borrow_is_be005() {
         &format!(
             "{GEOM}\
              fn main() -> i32 {{\n\
-                 var a: Array<Shape, 2> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5]), Shape::Empty];\n\
+                 var a: array<Shape, 2> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5]), Shape::Empty];\n\
                  var i := 0;\n\
                  var j := 1;\n\
                  match a[i] {{\n\
@@ -532,7 +532,7 @@ fn payload_bindings_cannot_be_moved_out_or_written_and_owned_matches_still_consu
             "{GEOM}\
              fn take(p: P) -> i32 {{ p.x }}\n\
              fn main() -> i32 {{\n\
-                 let a: Array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
+                 let a: array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
                  match a[0] {{ Shape::Poly(p, _) => take(p), _ => 0 }}\n\
              }}"
         ),
@@ -543,7 +543,7 @@ fn payload_bindings_cannot_be_moved_out_or_written_and_owned_matches_still_consu
         &format!(
             "{GEOM}\
              fn main() -> i32 {{\n\
-                 var a: Array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
+                 var a: array<Shape, 1> = [Shape::Poly(P {{ x: 1, y: 2 }}, [3, 4, 5])];\n\
                  match a[0] {{ Shape::Poly(p, _) => {{ p.x = 5; 1 }}, _ => 0 }}\n\
              }}"
         ),

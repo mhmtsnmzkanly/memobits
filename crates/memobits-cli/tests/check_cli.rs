@@ -53,7 +53,7 @@ fn failure(output: Output, code: &str, message: &str) {
 
 #[test]
 fn check_succeeds_without_writing_an_artifact() {
-    let f = Fixture::new("fn main() -> Result<i32, Error> { Ok(1 + 2) }");
+    let f = Fixture::new("fn main() -> i32 ! Error { Ok(1 + 2) }");
     let output = f.run(&["check"]);
     assert!(output.status.success(), "{output:?}");
     assert!(String::from_utf8(output.stdout)
@@ -67,7 +67,7 @@ fn check_succeeds_without_writing_an_artifact() {
 
 #[test]
 fn check_reports_type_errors_like_build() {
-    let f = Fixture::new("fn main() -> Result<i32, Error> { let x: i32 = true; Ok(x) }");
+    let f = Fixture::new("fn main() -> i32 ! Error { let x: i32 = true; Ok(x) }");
     let output = f.run(&["check"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let checked = String::from_utf8(output.stderr).unwrap();
@@ -90,10 +90,31 @@ fn check_reports_wasm_layout_gates_without_an_artifact() {
 
 #[test]
 fn check_rejects_build_only_options() {
-    let f = Fixture::new("fn main() -> Result<i32, Error> { Ok(1) }");
+    let f = Fixture::new("fn main() -> i32 ! Error { Ok(1) }");
     failure(
         f.run(&["check", "--output", "x.wasm"]),
         "PE004",
         "unexpected argument",
     );
+}
+
+#[test]
+fn bang_result_entry_runs_in_source_and_wasm() {
+    let f = Fixture::new(
+        "fn half(n: i32) -> i32? ! Error { if n > 0 { Ok(Some(n / 2)) } else { Ok(None) } }
+         fn main() -> i32 ! Error {
+             let ok: bool = true;
+             match half(84) { Ok(o) => match o { Some(v) => if ok { Ok(v) } else { Ok(0) }, None => Ok(0) }, Err(e) => Err(e) }
+         }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(i32(42))\n");
+    assert!(source.stderr.is_empty(), "{source:?}");
+    let build = f.run(&["build", "--output", "out.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "out.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, b"Result: Ok(i32(42))\n");
+    assert!(wasm.stderr.is_empty(), "{wasm:?}");
 }

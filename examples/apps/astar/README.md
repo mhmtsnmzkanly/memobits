@@ -18,7 +18,7 @@ route through the closed wall.
 [The search](src/grid.mb) uses four orthogonal neighbors on a 5 × 5 grid.
 Each move costs one. It scans the fixed-size frontier for the lowest sum of
 distance traveled and Manhattan distance to the goal. It returns an
-`Option<i32>` containing the optimal cost or `None` when the frontier is
+`i32?` containing the optimal cost or `None` when the frontier is
 exhausted or an endpoint is invalid. The example returns the cost only.
 
 ## Expected output

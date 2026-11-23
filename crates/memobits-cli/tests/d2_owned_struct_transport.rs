@@ -155,7 +155,7 @@ fn owned_flat_string_struct_arguments_run_in_source_and_wasm() {
         "owned-struct-args",
         r#"type Label { text: string, n: u32 }
 fn take(label: Label) -> u32 { label.text.len() + label.n }
-fn early(label: Label, flag: Bool) -> u32 { if flag { return 1; } label.text.len() }
+fn early(label: Label, flag: bool) -> u32 { if flag { return 1; } label.text.len() }
 fn two(first: Label, second: Label) -> u32 { first.text.len() + second.text.len() }
 fn main() -> u32 {
     let heap := "ab".concat("cd");
@@ -207,12 +207,12 @@ fn repeated_owned_string_struct_arguments_release_on_normal_and_early_returns() 
         "owned-struct-memory-stress",
         &format!(
             r#"type Label {{ text: string, n: u32 }}
-fn consume(label: Label, flag: Bool) -> u32 {{
+fn consume(label: Label, flag: bool) -> u32 {{
     let extra := "{text}".concat("");
     if flag {{ return 1; }}
     label.text.len() + label.n + extra.len() - extra.len()
 }}
-fn caller(flag: Bool) -> u32 {{
+fn caller(flag: bool) -> u32 {{
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 1 }};
     if flag {{ return 7; }}
@@ -414,17 +414,17 @@ fn borrowed_heap_payload_enum_across_blocks_is_rejected_before_extraction() {
     );
     for (body, code, message) in [
         (
-            "fn f(e: borrow E, c: Bool) -> u32 { let x := if c { e } else { e }; match x { E::S(s) => s.len(), E::N => 0 } }",
+            "fn f(e: borrow E, c: bool) -> u32 { let x := if c { e } else { e }; match x { E::S(s) => s.len(), E::N => 0 } }",
             "TE017",
             "reference-valued branch results are not supported",
         ),
         (
-            "fn f(e: borrow E, c: Bool) -> u32 { var r: u32 = 0; if c { match e { E::S(s) => { r = s.len(); }, E::N => {} } } r }",
+            "fn f(e: borrow E, c: bool) -> u32 { var r: u32 = 0; if c { match e { E::S(s) => { r = s.len(); }, E::N => {} } } r }",
             "TE018",
             "String enum payloads require a consuming match",
         ),
         (
-            "fn f(e: borrow E, c: Bool) -> u32 { let x := e; if c { match x { E::S(s) => s.len(), E::N => 0 } } else { 1 } }",
+            "fn f(e: borrow E, c: bool) -> u32 { let x := e; if c { match x { E::S(s) => s.len(), E::N => 0 } } else { 1 } }",
             "TE018",
             "String enum payloads require a consuming match",
         ),
@@ -457,7 +457,7 @@ fn make(k: u32) -> Label {
 }
 fn take(l: Label) -> u32 { l.n }
 fn lit() -> Label { let l := Label { text: "zz", n: 2 }; l }
-fn early(flag: Bool) -> Label {
+fn early(flag: bool) -> Label {
     let t := "ab".concat("cd");
     let l := Label { text: t, n: 1 };
     if flag {
@@ -507,7 +507,7 @@ fn repeated_owned_string_struct_results_release_on_normal_and_early_returns() {
         "owned-struct-result-stress",
         &format!(
             r#"type Label {{ text: string, n: u32 }}
-fn make(flag: Bool) -> Label {{
+fn make(flag: bool) -> Label {{
     let scratch := "{text}".concat("");
     let heap := "{text}".concat("");
     let label := Label {{ text: heap, n: 1 }};
@@ -518,7 +518,7 @@ fn make(flag: Bool) -> Label {{
     }}
     label
 }}
-fn use_result(flag: Bool, bail: Bool) -> u32 {{
+fn use_result(flag: bool, bail: bool) -> u32 {{
     let label := make(flag);
     if bail {{ return 5; }}
     label.text.len() + label.n

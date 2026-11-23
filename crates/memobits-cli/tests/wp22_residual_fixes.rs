@@ -91,7 +91,7 @@ pub type Holder<const N: u32> { pub a: i32 } extend {
     pub fn tag(borrow self) -> Tag<N> { Tag<N> { v: self.a } }
     pub fn local(borrow self) -> i32 { let t: Tag<N> = Tag<N> { v: self.a + 1 }; t.value() }
 }
-pub type Lane<T, const N: u32> { pub a: T, pub items: Array<T, N> } extend {
+pub type Lane<T, const N: u32> { pub a: T, pub items: array<T, N> } extend {
     pub fn slot(borrow self) -> Slot<T, N> { Slot<T, N> { item: self.a } }
 }
 fn take3(t: Tag<3>) -> i32 { t.value() }
@@ -184,7 +184,7 @@ fn generic_function_body_forwards_const_into_nested_type() {
         "pub type Tag<const N: u32> { pub v: i32 } extend {\n\
              pub fn value(borrow self) -> i32 { self.v }\n\
          }\n\
-         pub fn keep<T, const N: u32>(items: Array<T, N>) -> Array<T, N> {\n\
+         pub fn keep<T, const N: u32>(items: array<T, N>) -> array<T, N> {\n\
              let t: Tag<N> = Tag<N> { v: 7 };\n\
              if t.value() == 7 { items } else { items }\n\
          }\n\

@@ -74,7 +74,7 @@ impl Drop for Fixture {
 
 const TYPES: &str = "type P { x: i32, y: i32 }\n\
     type Line { a: P, b: P, n: i32 }\n\
-    type Grid { cells: Array<i32, 3>, k: i32 }\n";
+    type Grid { cells: array<i32, 3>, k: i32 }\n";
 
 #[test]
 fn destructuring_binds_primitives_and_aggregates() {
@@ -195,7 +195,7 @@ fn disjoint_fields_and_constant_rows_can_be_lent_together() {
             "{TYPES}fn read(p: borrow P) -> i32 {{ p.x * 10 + p.y }}\n\
              fn bump(p: share P) {{ p.x += 1; }}\n\
              fn both(a: share P, b: share P) {{ a.x += b.x; b.y += a.y; }}\n\
-             fn rows(a: share Array<i32, 3>, b: borrow Array<i32, 3>) {{ a[0] += b[2]; }}\n\
+             fn rows(a: share array<i32, 3>, b: borrow array<i32, 3>) {{ a[0] += b[2]; }}\n\
              fn main() -> i32 {{\n\
                  var l := Line {{ a: P {{ x: 1, y: 2 }}, b: P {{ x: 3, y: 4 }}, n: 0 }};\n\
                  let r := l.a.borrow();\n\
@@ -239,7 +239,7 @@ fn overlapping_loans_are_rejected_with_be005() {
         let message = f.error(
             &format!(
                 "{TYPES}fn both(a: share P, b: share P) {{}}\n\
-                 fn two(a: share Array<i32, 2>, b: share Array<i32, 2>) {{}}\n\
+                 fn two(a: share array<i32, 2>, b: share array<i32, 2>) {{}}\n\
                  fn main() -> i32 {{\n\
                      var l := Line {{ a: P {{ x: 1, y: 2 }}, b: P {{ x: 3, y: 4 }}, n: 0 }};\n\
                      {body}\n\

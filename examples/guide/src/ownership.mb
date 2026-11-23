@@ -4,7 +4,7 @@ use collections::make_words;
 // drop consumes a whole named owned String, List<u8>, or List<u32>.
 // A mutable binding can be assigned again. A loan must end before drop.
 // A user binding or function named drop takes precedence.
-pub fn explicit_drop() -> Bool {
+pub fn explicit_drop() -> bool {
     let text := "release".concat(" me");
     var bytes: List<u8> = [];
     bytes.push(42);
@@ -25,7 +25,7 @@ type TextLabel {
 // Scope exit needs no deallocation. The frame is reclaimed on return, and
 // literal bytes live in static memory.
 // Use straight-line literal field initializers.
-pub fn local_string_fields() -> Bool {
+pub fn local_string_fields() -> bool {
     var label := TextLabel { text: "é", number: 42 };
     {
         let moved := label;
@@ -43,7 +43,7 @@ pub fn local_string_fields() -> Bool {
 // escaping or replacing a whole heap-owning struct, nesting, and returning
 // the struct. A flat struct can be passed and returned by value; see
 // `owned_string_struct_argument`.
-pub fn local_heap_string_fields() -> Bool {
+pub fn local_heap_string_fields() -> bool {
     let text := "é".concat("!");
     let label := TextLabel { number: 9, text: text };
     {
@@ -63,7 +63,7 @@ pub fn local_heap_string_fields() -> Bool {
 // Temporaries as arguments or call results, `[l; N]` repeats, recursive
 // by-value types, exported signatures, and moving a field, element or payload
 // out of a live owner stay rejected.
-fn label_total(label: TextLabel, early: Bool) -> u32 {
+fn label_total(label: TextLabel, early: bool) -> u32 {
     if early { return 1; }
     label.number + label.text.len()
 }
@@ -72,7 +72,7 @@ fn make_label(number: u32) -> TextLabel {
     let label := TextLabel { number: number, text: heap };
     label
 }
-pub fn owned_string_struct_argument() -> Bool {
+pub fn owned_string_struct_argument() -> bool {
     let heap := "é".concat("!");
     let first := TextLabel { number: 9, text: heap };
     let second := TextLabel { number: 5, text: "ab" };
@@ -84,7 +84,7 @@ pub fn owned_string_struct_argument() -> Bool {
         && string_struct_elements()
         && nested_string_owners()
 }
-fn label_pair_total(labels: Array<TextLabel, 2>, early: Bool) -> u32 {
+fn label_pair_total(labels: array<TextLabel, 2>, early: bool) -> u32 {
     if early { return 1; }
     label_total_borrowed(labels[0].borrow()) + label_total_borrowed(labels[1].borrow())
 }
@@ -96,7 +96,7 @@ fn label_row_total(row: borrow (TextLabel, u32)) -> u32 {
 }
 // Elements are read through a borrow of the element or of the whole tuple.
 // Scope exit releases the Strings, and the array moves into an owned call.
-fn string_struct_elements() -> Bool {
+fn string_struct_elements() -> bool {
     let first_heap := "é".concat("!");
     let first := TextLabel { number: 9, text: first_heap };
     let second := TextLabel { number: 5, text: "ab" };
@@ -116,8 +116,8 @@ type NestedLabel {
     label: TextLabel,
     extra: u32,
 }
-type LabelSlot [Empty, Holds(NestedLabel), Rows(Array<TextLabel, 2>)]
-fn nested_label_total(nested: NestedLabel, early: Bool) -> u32 {
+type LabelSlot [Empty, Holds(NestedLabel), Rows(array<TextLabel, 2>)]
+fn nested_label_total(nested: NestedLabel, early: bool) -> u32 {
     if early { return 1; }
     nested.label.number + nested.label.text.len() + nested.extra
 }
@@ -133,7 +133,7 @@ fn label_slot_total(slot: LabelSlot) -> u32 {
 // Strings once, on normal and early exits. `match` of a whole local enum
 // binds the payload struct, which is read through its fields. An array moves
 // into a payload from a named local, not from a literal.
-fn nested_string_owners() -> Bool {
+fn nested_string_owners() -> bool {
     let first_heap := "é".concat("!");
     let first := TextLabel { number: 9, text: first_heap };
     let nested := NestedLabel { label: first, extra: 1 };
@@ -152,7 +152,7 @@ fn nested_string_owners() -> Bool {
     nested_label_total(nested, false) == 13 && nested_label_total(spare, true) == 1
         && label_slot_total(slot) == 6 && label_slot_total(rows) == 14
 }
-fn owned_string_struct_result() -> Bool {
+fn owned_string_struct_result() -> bool {
     let made := make_label(4);
     let unused := make_label(1);
     made.number == 4 && made.text.len() == 3 && label_total(made, false) == 7
@@ -169,7 +169,7 @@ fn append_question(text: borrow string) -> string {
 // result. Initializers run in source order. A temporary owner is released
 // on an early exit from a later initializer. After construction the struct
 // owns the bytes and releases them at lexical exit.
-pub fn temporary_string_fields() -> Bool {
+pub fn temporary_string_fields() -> bool {
     let prefix := "é";
     var order: u32 = 0;
     let label := TextLabel {
@@ -183,11 +183,11 @@ pub fn temporary_string_fields() -> Bool {
     label.number == 12 && byte_is(label.text.byte_at(2), 33)
         && byte_is(called.note.byte_at(2), 63)
 }
-fn inspect_text_label(label: borrow TextLabel) -> Bool {
+fn inspect_text_label(label: borrow TextLabel) -> bool {
     label.number == 9 && byte_length(label.text.borrow()) == 3
         && byte_is(label.text.byte_at(2), 33)
 }
-fn inspect_shared_text_label(label: share TextLabel) -> Bool {
+fn inspect_shared_text_label(label: share TextLabel) -> bool {
     label.number == 9 && byte_length(label.text.borrow()) == 3
         && byte_is(label.text.byte_at(2), 33)
 }
@@ -195,7 +195,7 @@ fn inspect_shared_text_label(label: share TextLabel) -> Bool {
 // The callee reads fields through either parameter. A share is exclusive for
 // the call, while the caller still owns the struct and can move it afterwards.
 // Whole references cannot be saved in another binding or forwarded.
-pub fn borrow_string_struct() -> Bool {
+pub fn borrow_string_struct() -> bool {
     let prefix := "é";
     var label := TextLabel { text: prefix.concat("!"), number: 9 };
     if !inspect_text_label(label.borrow()) || !inspect_shared_text_label(label.share()) {
@@ -208,7 +208,7 @@ pub fn borrow_string_struct() -> Bool {
 // or stages a literal, concat, or direct internal String call. The RHS can
 // borrow the old field. The write releases the old allocation after the RHS
 // finishes, and a borrow of a different field can stay live.
-pub fn replace_local_string_field() -> Bool {
+pub fn replace_local_string_field() -> bool {
     var label := EditableLabel { note: "keep", text: "" };
     let note := label.note.borrow();
     let replacement := "é";

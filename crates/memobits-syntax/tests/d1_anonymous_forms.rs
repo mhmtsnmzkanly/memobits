@@ -8,7 +8,7 @@ fn anonymous_record_and_enum_types_and_record_values_parse_without_reclassifying
         r#"
         type Shape = { right: u32, left: i32 };
         type Phase = enum [Ready, Waiting];
-        type Payload = enum [Number(i32), Pair(i32, Bool), Empty];
+        type Payload = enum [Number(i32), Pair(i32, bool), Empty];
         fn make() -> Phase {
             let record := { right: 2, left: 40 };
             let empty := {};

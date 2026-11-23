@@ -38,7 +38,7 @@ fn run(source: &str) -> i32 {
 
 const TYPES: &str = "type P { x: i32, y: i32 } \
     type Line { a: P, b: P } \
-    type Poly { n: u8, pts: Array<i32, 4>, c: P } ";
+    type Poly { n: u8, pts: array<i32, 4>, c: P } ";
 
 #[test]
 fn struct_in_struct_reads_writes_and_replacement() {
@@ -92,8 +92,8 @@ fn nested_aggregates_move_across_calls_and_results() {
             "{TYPES} \
              fn make() -> Poly {{ Poly {{ n: 1, pts: [1, 2, 3, 4], c: P {{ x: 5, y: 6 }} }} }} \
              fn grow(var p: Poly) -> Poly {{ p.pts[0] += 100; p.c.y = p.pts[0] + 0; p }} \
-             fn pick(c: Bool) -> Line {{ if c {{ Line {{ a: P {{ x: 1, y: 1 }}, b: P {{ x: 2, y: 2 }} }} }} else {{ Line {{ a: P {{ x: 3, y: 3 }}, b: P {{ x: 4, y: 4 }} }} }} }} \
-             fn sum(a: borrow Array<Poly, 2>) -> i32 {{ a[0].pts[0] + a[1].c.y }} \
+             fn pick(c: bool) -> Line {{ if c {{ Line {{ a: P {{ x: 1, y: 1 }}, b: P {{ x: 2, y: 2 }} }} }} else {{ Line {{ a: P {{ x: 3, y: 3 }}, b: P {{ x: 4, y: 4 }} }} }} }} \
+             fn sum(a: borrow array<Poly, 2>) -> i32 {{ a[0].pts[0] + a[1].c.y }} \
              fn main() -> i32 {{ \
                  let g := grow(make()); \
                  let h := grow(grow(make())); \
@@ -109,8 +109,8 @@ fn nested_aggregates_move_across_calls_and_results() {
 fn mixed_widths_survive_nesting_inside_arrays() {
     // Q is 24 bytes (u8 @0, i64 @8, f32 @16, Bool @20); R packs a Q, two Qs and
     // an i16 after a u8, so every inner offset depends on the nested alignment.
-    let source = "type Q { a: u8, b: i64, f: f32, ok: Bool } \
-        type R { tag: u8, q: Q, xs: Array<Q, 2>, last: i16 } \
+    let source = "type Q { a: u8, b: i64, f: f32, ok: bool } \
+        type R { tag: u8, q: Q, xs: array<Q, 2>, last: i16 } \
         fn bump(r: share R) { r.xs[1].b += 5; r.xs[0].ok = true; r.last = -3; r.q.f = 2.5; } \
         fn mk() -> R { R { tag: 1, q: Q { a: 1, b: 2, f: 0.5, ok: false }, \
             xs: [Q { a: 7, b: 8, f: 1.0, ok: true }, Q { a: 9, b: 10, f: 1.5, ok: false }], last: 11 } } \
@@ -171,12 +171,12 @@ fn bounds_are_checked_at_every_level() {
 #[test]
 fn zero_length_arrays_of_structs_are_empty() {
     assert_eq!(
-        run("type P { x: i32 } type Z { e: Array<P, 0>, n: i32 } \
-             fn main() -> i32 { let a: Array<P, 0> = [P { x: 1 }; 0]; let z := Z { e: a, n: 5 }; z.n }"),
+        run("type P { x: i32 } type Z { e: array<P, 0>, n: i32 } \
+             fn main() -> i32 { let a: array<P, 0> = [P { x: 1 }; 0]; let z := Z { e: a, n: 5 }; z.n }"),
         5
     );
     assert!(try_run(
-        "type P { x: i32 } fn main() -> i32 { let a: Array<P, 0> = [P { x: 1 }; 0]; var i := 0; a[i].x }"
+        "type P { x: i32 } fn main() -> i32 { let a: array<P, 0> = [P { x: 1 }; 0]; var i := 0; a[i].x }"
     )
     .is_err());
 }
@@ -195,7 +195,7 @@ fn repeating_a_struct_literal_evaluates_it_per_element() {
 
 #[test]
 fn nested_frames_over_the_configured_stack_are_diagnostics() {
-    let source = "type P { x: i32 } type Big { a: Array<P, 10000> } \
+    let source = "type P { x: i32 } type Big { a: array<P, 10000> } \
                   fn main() -> i32 { let b := Big { a: [P { x: 1 }; 10000] }; b.a[9999].x }";
     let program = lower(source);
     let exports = BTreeMap::from([("main".to_string(), memobits_ir::FunctionId(0))]);
@@ -214,7 +214,7 @@ fn nested_frames_over_the_configured_stack_are_diagnostics() {
     assert!(memobits_wasm::compile_with(&program, &exports, &large).is_ok());
     // Overflowing the 32-bit address space is a layout diagnostic, not a wrap.
     let huge = lower(
-        "type P { x: i64 } type A { a: Array<Array<Array<P, 65536>, 65536>, 65536> } fn main() {}",
+        "type P { x: i64 } type A { a: array<array<array<P, 65536>, 65536>, 65536> } fn main() {}",
     );
     let errors = memobits_wasm::compile(&huge, &BTreeMap::new()).unwrap_err();
     assert!(

@@ -67,7 +67,7 @@ Static literal bytes require no runtime action.
 - Library roots exclude unrelated application entry code.
 
 Aggregate layout and Wasm emission consume validated IR. A function-local
-`Option<borrow T>` can store a read-only handle in its `Some` variant. Enum
+`(borrow T)?` can store a read-only handle in its `Some` variant. Enum
 creation, consuming local transfer and extraction preserve its loan. IR
 validation gates signatures, nesting, wrapper addresses and block parameters.
 Heap-backed cleanup remains pending. The IR is an internal compiler format.

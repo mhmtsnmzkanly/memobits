@@ -304,7 +304,7 @@ fn all_five_primitive_u32_compound_operators_match_source_and_wasm() {
     // <<= 4 -> 43680; >>= 2 -> 10920; then +2 to land on 10922.
     f.write(
         "src/main.mb",
-        "fn main() -> Result<u32, Error> {\n\
+        "fn main() -> u32 ! Error {\n\
             var a: u32 = 4294967295;\n\
             a &= 255; if a != 255 { return Err(Error { code: 1 }); }\n\
             a |= 3840; if a != 4095 { return Err(Error { code: 2 }); }\n\

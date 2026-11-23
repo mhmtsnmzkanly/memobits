@@ -13,7 +13,7 @@ use self::fnv::fnv1a_3;
 use self::fnv::fnv1a_8;
 use self::fnv::fnv1a_slice;
 
-fn test_primitives() -> Bool {
+fn test_primitives() -> bool {
     let xor_ok := bit_xor(5, 3) == 6;
     let and_ok := bit_and(6, 3) == 2;
     let or_ok := bit_or(4, 2) == 6;
@@ -25,13 +25,13 @@ fn test_primitives() -> Bool {
     xor_ok && and_ok && or_ok && shl_ok && shr_ok && add_ok && mul_ok
 }
 
-fn test_fnv1a() -> Bool {
-    let empty: Array<u8, 8> = [0; 8];
-    let a: Array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
-    let abc_3: Array<u8, 3> = [97, 98, 99];
-    let abc: Array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
-    let hello: Array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
-    let memobits: Array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+fn test_fnv1a() -> bool {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc_3: array<u8, 3> = [97, 98, 99];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
 
     let v_empty := fnv1a_slice(empty.borrow(), 0);
     let v_a := fnv1a_slice(a.borrow(), 1);
@@ -50,12 +50,12 @@ fn test_fnv1a() -> Bool {
         && v_memo_fixed == 1_774_777_415
 }
 
-fn test_djb2() -> Bool {
-    let empty: Array<u8, 8> = [0; 8];
-    let a: Array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
-    let abc: Array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
-    let hello: Array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
-    let memobits: Array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+fn test_djb2() -> bool {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
 
     let v_empty := djb2_slice(empty.borrow(), 0);
     let v_a := djb2_slice(a.borrow(), 1);
@@ -72,12 +72,12 @@ fn test_djb2() -> Bool {
         && v_memo_fixed == 4_035_756_421
 }
 
-fn test_adler32() -> Bool {
-    let empty: Array<u8, 8> = [0; 8];
-    let a: Array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
-    let abc: Array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
-    let hello: Array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
-    let memobits: Array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+fn test_adler32() -> bool {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
 
     let v_empty := adler32_slice(empty.borrow(), 0);
     let v_a := adler32_slice(a.borrow(), 1);
@@ -94,7 +94,7 @@ fn test_adler32() -> Bool {
         && v_memo_fixed == 235_537_217
 }
 
-pub fn run() -> Result<u32, Error> {
+pub fn run() -> u32 ! Error {
     if !test_primitives() {
         return Err(Error { code: 1 });
     }
@@ -109,7 +109,7 @@ pub fn run() -> Result<u32, Error> {
     }
 
     // Return the verified FNV-1a hash of "Memobits"
-    let memobits: Array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
     let hash := fnv1a_8(memobits.borrow());
     Ok(hash)
 }

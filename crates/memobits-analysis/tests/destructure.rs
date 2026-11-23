@@ -6,7 +6,7 @@ use memobits_syntax::parse;
 
 const DECLS: &str = "type P { x: i32, y: u8 } \
     type Line { a: P, b: P, n: i32 } \
-    type Grid { cells: Array<i32, 3>, k: i32 } \
+    type Grid { cells: array<i32, 3>, k: i32 } \
     type Named { text: string, count: u32 } \
     type U {} \
     fn make() -> Line { Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 }, n: 5 } } ";

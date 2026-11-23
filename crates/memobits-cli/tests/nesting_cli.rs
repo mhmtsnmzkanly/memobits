@@ -74,7 +74,7 @@ impl Drop for Fixture {
 
 const TYPES: &str = "type P { x: i32, y: i32 }\n\
     type Line { a: P, b: P }\n\
-    type Poly { n: u8, pts: Array<i32, 4>, c: P }\n";
+    type Poly { n: u8, pts: array<i32, 4>, c: P }\n";
 
 #[test]
 fn a_particle_system_mutates_nested_arrays_and_sums_through_a_borrow() {
@@ -84,9 +84,9 @@ fn a_particle_system_mutates_nested_arrays_and_sums_through_a_borrow() {
     assert_eq!(
         f.result(
             "type Pt { x: i32, y: i32 }\n\
-             type Poly { id: u8, pts: Array<Pt, 4> }\n\
+             type Poly { id: u8, pts: array<Pt, 4> }\n\
              fn make() -> Poly { Poly { id: 0, pts: [Pt { x: 1, y: 2 }; 4] } }\n\
-             fn total(polys: borrow Array<Poly, 3>) -> i32 {\n\
+             fn total(polys: borrow array<Poly, 3>) -> i32 {\n\
                  var sum := 0;\n\
                  var i := 0;\n\
                  loop {\n\
@@ -156,8 +156,8 @@ fn mixed_widths_nest_inside_structs_inside_arrays() {
     let f = Fixture::new();
     assert_eq!(
         f.result(
-            "type Q { a: u8, b: i64, f: f32, ok: Bool }\n\
-             type R { tag: u8, q: Q, xs: Array<Q, 2>, last: i16 }\n\
+            "type Q { a: u8, b: i64, f: f32, ok: bool }\n\
+             type R { tag: u8, q: Q, xs: array<Q, 2>, last: i16 }\n\
              fn bump(r: share R) { r.xs[1].b += 5; r.xs[0].ok = true; r.last = -3; r.q.f = 2.5; }\n\
              fn mk() -> R {\n\
                  R { tag: 1, q: Q { a: 1, b: 2, f: 0.5, ok: false },\n\
@@ -189,7 +189,7 @@ fn mixed_widths_nest_inside_structs_inside_arrays() {
 #[test]
 fn evaluation_order_is_indices_then_value_then_the_bounds_checked_store() {
     let f = Fixture::new();
-    let log = "type P { pts: Array<i32, 2> }\n\
+    let log = "type P { pts: array<i32, 2> }\n\
         fn step(log: share i32, tag: i32, out: i32) -> i32 { log = log * 10 + tag; out }\n";
     // f, g, then h; the log records 1, 2, 3 and the value 42 lands at [1][1].
     assert_eq!(
@@ -258,8 +258,8 @@ fn zero_length_arrays_of_structs_and_per_element_repetition() {
     assert_eq!(
         f.result(
             "type P { x: i32 }\n\
-             type Z { e: Array<P, 0>, n: i32 }\n\
-             fn main() -> i32 { let a: Array<P, 0> = [P { x: 1 }; 0]; let z := Z { e: a, n: 5 }; z.n }"
+             type Z { e: array<P, 0>, n: i32 }\n\
+             fn main() -> i32 { let a: array<P, 0> = [P { x: 1 }; 0]; let z := Z { e: a, n: 5 }; z.n }"
         ),
         "Result: i32(5)"
     );
@@ -285,7 +285,7 @@ fn sub_aggregates_can_be_lent_and_disjoint_fields_are_independent() {
             "{TYPES}\
              fn read(p: borrow P) -> i32 {{ p.x * 10 + p.y }}\n\
              fn bump(p: share P) {{ p.x += 1; }}\n\
-             fn first(a: borrow Array<i32, 4>) -> i32 {{ a[0] }}\n\
+             fn first(a: borrow array<i32, 4>) -> i32 {{ a[0] }}\n\
              fn main() -> i32 {{\n\
                  var l := Line {{ a: P {{ x: 1, y: 2 }}, b: P {{ x: 3, y: 4 }} }};\n\
                  bump(l.a.share());\n\
@@ -364,7 +364,7 @@ fn moving_a_sub_aggregate_out_is_te022() {
     for source in [
         format!("{TYPES}fn f(l: Line) -> P {{ return l.a; }}\nfn main() -> i32 {{ 0 }}"),
         format!("{TYPES}fn f(l: Line) -> P {{ l.a }}\nfn main() -> i32 {{ 0 }}"),
-        format!("{TYPES}fn f(a: Array<P, 2>) -> P {{ a[0] }}\nfn main() -> i32 {{ 0 }}"),
+        format!("{TYPES}fn f(a: array<P, 2>) -> P {{ a[0] }}\nfn main() -> i32 {{ 0 }}"),
     ] {
         f.error(&source, "TE022");
     }
@@ -374,8 +374,8 @@ fn moving_a_sub_aggregate_out_is_te022() {
 fn recursive_containment_through_arrays_is_rejected() {
     let f = Fixture::new();
     for source in [
-        "type A { xs: Array<A, 2> }\nfn main() -> i32 { 0 }",
-        "type A { b: Array<B, 2> }\ntype B { a: A }\nfn main() -> i32 { 0 }",
+        "type A { xs: array<A, 2> }\nfn main() -> i32 { 0 }",
+        "type A { b: array<B, 2> }\ntype B { a: A }\nfn main() -> i32 { 0 }",
     ] {
         let message = f.error(source, "TE026");
         assert!(message.contains("recursive struct"), "{message}");
@@ -416,7 +416,7 @@ fn nested_aggregates_in_exported_signatures_are_le900() {
     );
     f.write(
         "src/app.mb",
-        "pub type P { pub x: i32 }\npub type L { pub a: P, pub xs: Array<P, 2> }\n\
+        "pub type P { pub x: i32 }\npub type L { pub a: P, pub xs: array<P, 2> }\n\
          pub fn f(l: L) -> i32 { 0 }\npub fn g() -> L { L { a: P { x: 1 }, xs: [P { x: 2 }; 2] } }\n\
          fn main() -> i32 { 0 }",
     );
@@ -429,7 +429,7 @@ fn nested_aggregates_in_exported_signatures_are_le900() {
 fn oversized_nested_frames_use_the_configured_stack_diagnostic() {
     let f = Fixture::new();
     let message = f.error(
-        "type P { x: i32 }\ntype Big { a: Array<P, 400000> }\n\
+        "type P { x: i32 }\ntype Big { a: array<P, 400000> }\n\
          fn main() -> i32 { let b := Big { a: [P { x: 1 }; 400000] }; b.a[0].x }",
         "LE900",
     );

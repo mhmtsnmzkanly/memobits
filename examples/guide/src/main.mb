@@ -5,11 +5,11 @@
 // the current source ABI supports only write_i32(i32) -> unit.
 //
 // The guide is split into topic modules next to this file. Each exports check
-// functions that return Bool; main calls them in topic order and reports a
+// functions that return bool; main calls them in topic order and reports a
 // distinct Err code for each failed check. The hundreds digit names the
 // defining module (1xx numbers ... 9xx operators); see ../README.md.
 //   numbers.mb         integers, floats, casts, wrapping and bit operations
-//   text.mb            Char, string literals, bytes, scalars, loops, concat
+//   text.mb            char, string literals, bytes, scalars, loops, concat
 //   tuples.mb          tuple values, destructuring, tuples with owned strings
 //   aggregates.mb      records, anonymous shapes, opaque types, share fields
 //   ownership.mb       string-owning structs, borrow/share calls, drop
@@ -63,7 +63,7 @@ use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defin
 // A zero-argument application entry can return Result or Attempt with a
 // primitive success payload. Both runners show the variant and typed value
 // or the concrete error type and code.
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     // Numbers, casts and bit operations.
     if !numbers() { return Err(Error { code: 101 }); }
     if !widenings() { return Err(Error { code: 102 }); }

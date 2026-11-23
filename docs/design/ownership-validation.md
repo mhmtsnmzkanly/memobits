@@ -31,7 +31,7 @@ scalars as implicitly copyable.
 ## Branch joins
 
 ```mb
-fn invalid(flag: Bool, value: i32) {
+fn invalid(flag: bool, value: i32) {
     if flag { let moved := value; }
     let later := value;
 }

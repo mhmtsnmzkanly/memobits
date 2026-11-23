@@ -10,13 +10,13 @@ limits and conformance remain open until there is a protocol reference.
 
 ## Fixture contract
 
-Scan a borrowed `Array<u8, 16>` with an explicit logical length and a byte
+Scan a borrowed `array<u8, 16>` with an explicit logical length and a byte
 cursor starting at zero. Validate that the length is in 0–16 before indexing.
 Skip ASCII space, tab, LF and CR. Recognize maximal runs of ASCII digits
 `0`–`9` as unsigned decimal integers in 0–4294967295, with leading zeroes
 allowed. This range exercises checked `u32` arithmetic in Memobits.
 
-One scan returns `Result<Option<IntegerToken>, LexError>`. `Some` carries
+One scan returns `IntegerToken? ! LexError`. `Some` carries
 the numeric value and its zero-based, half-open byte span. `None` means end of
 input after skipping whitespace. Advance the cursor on success and stop on
 the first error. A byte outside a digit run is handled by the next scan.

@@ -49,18 +49,18 @@ const DEFAULT: u32 = 1024 * 1024;
 #[test]
 fn default_stack_holds_a_grid_and_a_quarter_megabyte_array() {
     // 100 x 100 i32 = 40 KB.
-    let grid = "fn main() -> i32 { var g: Array<Array<i32, 100>, 100> = [[0; 100]; 100]; \
+    let grid = "fn main() -> i32 { var g: array<array<i32, 100>, 100> = [[0; 100]; 100]; \
                 g[99][99] = 7; g[99][99] + g[0][0] }";
     assert_eq!(run(grid, DEFAULT), 7);
     // 256 KiB local array (the repetition accumulator doubles it).
     let big =
-        "fn main() -> i32 { var a: Array<i32, 65536> = [0; 65536]; a[65535] = 5; a[65535] + a[0] }";
+        "fn main() -> i32 { var a: array<i32, 65536> = [0; 65536]; a[65535] = 5; a[65535] + a[0] }";
     assert_eq!(run(big, DEFAULT), 5);
 }
 
 #[test]
 fn two_mebibyte_array_needs_a_larger_stack() {
-    let source = "fn main() -> i32 { let a: Array<i32, 524288> = [1; 524288]; a[524287] }";
+    let source = "fn main() -> i32 { let a: array<i32, 524288> = [1; 524288]; a[524287] }";
     let errors = build(source, DEFAULT).unwrap_err();
     let message = &errors[0].message;
     assert!(message.contains("2097152 bytes"), "{message}");
@@ -71,7 +71,7 @@ fn two_mebibyte_array_needs_a_larger_stack() {
 
 #[test]
 fn frame_equal_to_the_stack_fits_and_one_more_element_does_not() {
-    let fits = "fn main() -> i32 { let a: Array<i32, 1000> = [3; 1000]; a[999] }";
+    let fits = "fn main() -> i32 { let a: array<i32, 1000> = [3; 1000]; a[999] }";
     // 4000 bytes twice = 8000 -> aligned frame 8000.
     assert!(build(fits, 8000).is_ok());
     assert!(build(fits, 7984).is_err());
@@ -99,7 +99,7 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 fn list_pop_keeps_the_backing_block_when_empty() {
     let program = lower(
         r#"
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var items: List<u32> = [];
             items.push(305_419_896);
             let removed := match items.pop() {
@@ -135,7 +135,7 @@ fn list_pop_keeps_the_backing_block_when_empty() {
 fn list_clear_retains_backing_storage_for_repeated_refills() {
     let program = lower(
         r#"
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var items: List<u32> = [];
             items.push(305_419_896);
             var round: u32 = 0;
@@ -197,7 +197,7 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
             bytes.push(if index % 2 == 0 { 195 } else { 169 });
             words.push(305_419_896 + index);
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             var index: u32 = 0;
@@ -297,7 +297,7 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
         fn discard(items: List<u32>) {}
         fn refill(items: share List<u32>) { items = fill(); }
         fn clear(items: share List<u32>) { items = []; }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var items := fill();
             var step := 0;
             loop {
@@ -353,7 +353,7 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
 fn owned_list_calls_and_returns_reuse_blocks_after_normal_exits() {
     let program = lower(
         r#"
-        fn consume(items: List<u32>, early: Bool) -> Bool {
+        fn consume(items: List<u32>, early: bool) -> bool {
             if early { return items.len() == 12_000; }
             false
         }
@@ -365,11 +365,11 @@ fn owned_list_calls_and_returns_reuse_blocks_after_normal_exits() {
             }
             items
         }
-        fn check(skip: Bool) -> Bool {
+        fn check(skip: bool) -> bool {
             let items := make();
             consume(items, { if skip { return true; } true })
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             if check(false) && check(true) { Ok(true) } else { Err(Error { code: 1 }) }
         }
     "#,
@@ -406,7 +406,7 @@ fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
     let bytes = build(
         r#"
         fn main() -> i32 {
-            let input: Bytes<3> = [195, 169, 255];
+            let input: array<u8, 3> = [195, 169, 255];
             let count := match input.validate_utf8(2) {
                 Ok(count) => count,
                 Err(_) => 0
@@ -441,15 +441,15 @@ fn utf8_validation_keeps_fixed_memory_and_preserves_bytes() {
 fn utf8_construction_validates_before_growth_and_reuses_storage() {
     let program = lower(
         r#"
-        fn valid() -> Result<Bool, Error> {
-            let input: Bytes<32_000> = [65; 32_000];
+        fn valid() -> bool ! Error {
+            let input: array<u8, 32_000> = [65; 32_000];
             match input.to_utf8_string(32_000) {
                 Ok(text) => { return Ok(text.len() == 32_000); },
                 Err(_) => Err(Error { code: 1 })
             }
         }
-        fn invalid() -> Result<Bool, Error> {
-            var input: Bytes<32_000> = [65; 32_000];
+        fn invalid() -> bool ! Error {
+            var input: array<u8, 32_000> = [65; 32_000];
             input[31_999] = 255;
             match input.to_utf8_string(32_000) {
                 Ok(text) => Err(Error { code: 1 }),
@@ -519,7 +519,7 @@ fn utf8_construction_validates_before_growth_and_reuses_storage() {
 
 #[test]
 fn outcome_cell_and_string_data_follow_the_stack_at_a_page_boundary() {
-    let program = lower(r#"fn main() -> Result<u32, Error> { Ok("é".len()) }"#);
+    let program = lower(r#"fn main() -> u32 ! Error { Ok("é".len()) }"#);
     let options = CompileOptions { stack_size: 65_520 };
     let artifact = compile_application_traced(&program, FunctionId(0), &options).unwrap();
     let (mut store, instance) = instantiate(&artifact.bytes);
@@ -551,7 +551,7 @@ fn static_regions_report_page_limit_failures_before_emission() {
         .message
         .contains("String literals exceed the supported Wasm memory size"));
 
-    let program = lower("fn main() -> Result<u32, Error> { Ok(1) }");
+    let program = lower("fn main() -> u32 ! Error { Ok(1) }");
     let error = compile_application_traced(&program, FunctionId(0), &CompileOptions { stack_size })
         .unwrap_err();
     assert!(error[0]
@@ -573,19 +573,19 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
     let right = "😀".repeat(6_000);
     let program = lower(&format!(
         r#"
-        fn consume(early: Bool, value: string) -> u32 {{
+        fn consume(early: bool, value: string) -> u32 {{
             if early {{ return value.len(); }}
             let moved := value;
             moved.len()
         }}
-        fn forward(value: string, early: Bool) -> u32 {{
+        fn forward(value: string, early: bool) -> u32 {{
             consume(early, value)
         }}
         fn make(left: borrow string, right: borrow string) -> string {{
             let result := left.concat(right);
             result
         }}
-        fn measure(left: borrow string, right: borrow string, early: Bool) -> u32 {{
+        fn measure(left: borrow string, right: borrow string, early: bool) -> u32 {{
             var steps := 0;
             loop {{
                 let joined := make(left, right);
@@ -607,7 +607,7 @@ fn owned_concat_reuses_memory_after_continue_break_and_return() {
             let joined := make(left, right);
             forward(joined, false)
         }}
-        fn main() -> Result<u32, Error> {{
+        fn main() -> u32 ! Error {{
             let left := "{left}";
             let right := "{right}";
             Ok(measure(left.borrow(), right.borrow(), false)
@@ -677,7 +677,7 @@ fn concat_reuses_a_non_head_block_without_losing_its_capacity() {
     let right = "😀".repeat(6_000);
     let program = lower(&format!(
         r#"
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let left := "{left}";
             let right := "{right}";
             {{
@@ -725,19 +725,19 @@ fn temporary_string_arguments_reuse_blocks_after_call_and_early_exit() {
             let result := seed.concat("");
             result
         }}
-        fn read(text: borrow string, expected: u32) -> Bool {{
+        fn read(text: borrow string, expected: u32) -> bool {{
             text.len() == expected
         }}
-        fn early(seed: borrow string) -> Bool {{
+        fn early(seed: borrow string) -> bool {{
             read(make(seed).borrow(), {{ return true; 0 }})
         }}
-        fn consume(text: string, expected: u32) -> Bool {{
+        fn consume(text: string, expected: u32) -> bool {{
             text.len() == expected
         }}
-        fn early_owned(seed: borrow string) -> Bool {{
+        fn early_owned(seed: borrow string) -> bool {{
             consume(make(seed), {{ return true; 0 }})
         }}
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var step := 0;
             loop {{
@@ -785,11 +785,11 @@ fn immediate_string_reads_reuse_memory_after_read_and_early_exit() {
             let result := seed.concat("");
             result
         }}
-        fn early(seed: borrow string) -> Bool {{
+        fn early(seed: borrow string) -> bool {{
             make(seed).byte_at({{ return true; 0 }});
             false
         }}
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var step := 0;
             loop {{
@@ -838,7 +838,7 @@ fn repeated_list_discard_reuses_storage_in_one_instance() {
             }
             result
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var live: List<u32> = [];
             live.push(305_419_896);
             var repeats: u32 = 0;
@@ -892,11 +892,11 @@ fn temporary_list_reads_reuse_storage_across_normal_and_early_exits() {
             }
             result
         }
-        fn early_return() -> Bool {
+        fn early_return() -> bool {
             make(10_000).get({ return true; });
             false
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             var live: List<u32> = [];
             live.push(305_419_896);
             var repeats: u32 = 0;
@@ -959,21 +959,21 @@ fn temporary_list_arguments_reuse_storage_across_normal_and_early_exits() {
             }
             result
         }
-        fn inspect(items: borrow List<u32>, index: u32) -> Bool {
+        fn inspect(items: borrow List<u32>, index: u32) -> bool {
             match items.get(index) { Some(value) => value == index, None => false }
         }
-        fn consume(items: List<u32>, index: u32) -> Bool {
+        fn consume(items: List<u32>, index: u32) -> bool {
             match items.get(index) { Some(value) => value == index, None => false }
         }
-        fn early_return() -> Bool {
+        fn early_return() -> bool {
             consume(make(10_000), { return true; });
             false
         }
-        fn early_borrow_return() -> Bool {
+        fn early_borrow_return() -> bool {
             inspect(make(10_000).borrow(), { return true; });
             false
         }
-        fn check(owned: Bool, limit: u32) -> Result<Bool, Error> {
+        fn check(owned: bool, limit: u32) -> bool ! Error {
             var live: List<u32> = [];
             live.push(305_419_896);
             var repeats: u32 = 0;
@@ -995,7 +995,7 @@ fn temporary_list_arguments_reuse_storage_across_normal_and_early_exits() {
                 None => Err(Error { code: 2 })
             }
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             match check(false, 4) {
                 Ok(value) => check(true, 4),
                 Err(error) => Err(error)
@@ -1038,7 +1038,7 @@ fn repeated_string_discard_reuses_one_block() {
             let result := seed.concat("");
             result
         }}
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var step := 0;
             loop {{
@@ -1077,9 +1077,9 @@ fn immediate_heap_result_matches_reuse_the_arm_allocation() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn check(seed: borrow string, early: Bool) -> Bool {{
+        fn check(seed: borrow string, early: bool) -> bool {{
             let text := seed.concat("");
-            let result: Result<string, Error> = Ok(text);
+            let result: string ! Error = Ok(text);
             match result {{
                 Err(_) => false,
                 Ok(value) => {{
@@ -1088,11 +1088,11 @@ fn immediate_heap_result_matches_reuse_the_arm_allocation() {
                 }}
             }}
         }}
-        fn make(seed: borrow string) -> Result<string, Error> {{
+        fn make(seed: borrow string) -> string ! Error {{
             let text := seed.concat("");
             Ok(text)
         }}
-        fn check_return(seed: borrow string, early: Bool) -> Bool {{
+        fn check_return(seed: borrow string, early: bool) -> bool {{
             let result := make(seed);
             match result {{
                 Ok(value) => {{
@@ -1102,7 +1102,7 @@ fn immediate_heap_result_matches_reuse_the_arm_allocation() {
                 Err(_) => false
             }}
         }}
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var step := 0;
             loop {{
@@ -1147,7 +1147,7 @@ fn share_string_replacement_and_push_str_reuse_caller_blocks() {
         }}
         fn inspect(text: share string) -> u32 {{ text.len() }}
         fn append_empty(text: share string) {{ text.push_str(""); }}
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var step := 0;
             loop {{
@@ -1190,7 +1190,7 @@ fn mutable_string_replacement_reuses_blocks_after_mixed_moves() {
     let literal = "é".repeat(24_000);
     let program = lower(&format!(
         r#"
-        fn main() -> Result<Bool, Error> {{
+        fn main() -> bool ! Error {{
             let seed := "{literal}";
             var text := seed.concat("");
             var step := 0;
@@ -1300,7 +1300,7 @@ fn concat_ir_requires_cleanup_but_allows_non_lifo_release() {
 
 #[test]
 fn deep_recursion_exhausts_the_stack_with_a_flag_and_leaves_fresh_runs_clean() {
-    let source = "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
+    let source = "fn rec(n: i32) -> i32 { let a: array<i32, 1024> = [n; 1024]; \
                   if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \
                   fn main() -> i32 { rec(100000) }";
     let bytes = build(source, 64 * 1024).unwrap();
@@ -1310,7 +1310,7 @@ fn deep_recursion_exhausts_the_stack_with_a_flag_and_leaves_fresh_runs_clean() {
     let flag = instance.get_global(&store, STACK_OVERFLOW_EXPORT).unwrap();
     assert_eq!(flag.get(&store).i32(), Some(1));
     // A fresh instance of the same module computes correctly and is unflagged.
-    let shallow = "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
+    let shallow = "fn rec(n: i32) -> i32 { let a: array<i32, 1024> = [n; 1024]; \
                    if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \
                    fn main() -> i32 { rec(4) }";
     assert_eq!(run(shallow, 64 * 1024), 10);
@@ -1355,7 +1355,7 @@ fn list_iteration_reuses_temporary_storage_after_each_exit() {
             }
             count
         }
-        fn main() -> Result<Bool, Error> {
+        fn main() -> bool ! Error {
             if run(0) != 9999 || run(1) != 0 || run(2) != 1 {
                 return Err(Error { code: 1 });
             }
@@ -1395,7 +1395,7 @@ fn local_struct_strings_reuse_heap_on_lexical_exits() {
             r#"
         type Label {{ first: string, number: u32, second: string, literal: string }}
 
-        fn staged(part: borrow string, exit: Bool) -> u32 {{
+        fn staged(part: borrow string, exit: bool) -> u32 {{
             let first := part.concat("!");
             let second := part.concat("?");
             let label := Label {{
@@ -1463,7 +1463,7 @@ fn string_field_replacement_reuses_blocks_without_overwriting_live_fields() {
         &format!(
             r#"
         type Label {{ other: string, text: string }}
-        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+        fn byte_is(value: u8?, expected: u8) -> bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
         fn main() -> i32 {{
@@ -1519,10 +1519,10 @@ fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
             let result := left.concat(right);
             result
         }}
-        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+        fn byte_is(value: u8?, expected: u8) -> bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn early(part: borrow string) -> Bool {{
+        fn early(part: borrow string) -> bool {{
             var label := Label {{ text: "", note: "" }};
             label.text = part.concat("?");
             label.text = label.text.concat({{
@@ -1536,7 +1536,7 @@ fn temporary_string_field_replacements_reuse_memory_after_rhs_exits() {
         fn forward(value: string, unused: u32) -> string {{
             value
         }}
-        fn early_call(part: borrow string) -> Bool {{
+        fn early_call(part: borrow string) -> bool {{
             var label := Label {{ text: "", note: "" }};
             label.text = part.concat("?");
             label.text = forward(part.concat("!"), {{
@@ -1609,10 +1609,10 @@ fn temporary_string_initializers_reuse_memory_after_constructor_exits() {
             }}
             ""
         }}
-        fn byte_is(value: Option<u8>, expected: u8) -> Bool {{
+        fn byte_is(value: u8?, expected: u8) -> bool {{
             match value {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn early(part: borrow string, exit: Bool) -> Bool {{
+        fn early(part: borrow string, exit: bool) -> bool {{
             let record := Record {{
                 first: part.concat("!"),
                 second: make(part, 1),
@@ -1673,14 +1673,14 @@ fn string_struct_call_borrows_keep_heap_cleanup_in_the_caller() {
         &format!(
             r#"
         type Record {{ text: string, number: u32 }}
-        fn last_is(text: borrow string, index: u32, expected: u8) -> Bool {{
+        fn last_is(text: borrow string, index: u32, expected: u8) -> bool {{
             match text.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn inspect(record: borrow Record, expected: u8) -> Bool {{
+        fn inspect(record: borrow Record, expected: u8) -> bool {{
             record.number == 7 && record.text.len() == 20_001
                 && last_is(record.text.borrow(), 20_000, expected)
         }}
-        fn early(part: borrow string, stop: Bool) -> Bool {{
+        fn early(part: borrow string, stop: bool) -> bool {{
             let record := Record {{ text: part.concat("!"), number: 7 }};
             inspect(record.borrow(), {{
                 if stop {{ return record.text.len() == 20_001; }}
@@ -1727,13 +1727,13 @@ fn string_struct_call_shares_keep_heap_cleanup_in_the_caller() {
         &format!(
             r#"
         type Record {{ text: string, literal: string, number: u32 }}
-        fn last_is(text: borrow string, index: u32, expected: u8) -> Bool {{
+        fn last_is(text: borrow string, index: u32, expected: u8) -> bool {{
             match text.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn inspect_pair(first: borrow string, second: borrow string) -> Bool {{
+        fn inspect_pair(first: borrow string, second: borrow string) -> bool {{
             first.len() == 20_001 && second.len() == 3
         }}
-        fn inspect(record: share Record, expected: u8) -> Bool {{
+        fn inspect(record: share Record, expected: u8) -> bool {{
             record.number == 7 && record.text.len() == 20_001
                 && last_is(record.text.borrow(), 20_000, expected)
                 && record.literal.len() == 3
@@ -1741,7 +1741,7 @@ fn string_struct_call_shares_keep_heap_cleanup_in_the_caller() {
                 && last_is(record.literal.borrow(), 2, 33)
                 && inspect_pair(record.text.borrow(), record.literal.borrow())
         }}
-        fn early(part: borrow string, stop: Bool) -> Bool {{
+        fn early(part: borrow string, stop: bool) -> bool {{
             var record := Record {{ text: part.concat("!"), literal: "é!", number: 7 }};
             inspect(record.share(), {{
                 if stop {{ return part.len() == 20_000; }}
@@ -1788,20 +1788,20 @@ fn string_struct_share_replacement_reuses_heap_and_keeps_sibling_loan_live() {
         &format!(
             r#"
         type Record {{ text: string, sibling: string }}
-        fn byte_is(value: borrow string, index: u32, expected: u8) -> Bool {{
+        fn byte_is(value: borrow string, index: u32, expected: u8) -> bool {{
             match value.byte_at(index) {{ Some(byte) => byte == expected, None => false }}
         }}
-        fn replace(record: share Record, suffix: borrow string, should_exit: Bool) {{
+        fn replace(record: share Record, suffix: borrow string, should_exit: bool) {{
             let sibling := record.sibling.borrow();
             if should_exit {{ return; }}
             record.text = record.text.concat(suffix);
             if sibling.len() != 4 {{ return; }}
         }}
-        fn make_text(value: Bool) -> string {{
+        fn make_text(value: bool) -> string {{
             let text := "fresh";
             text
         }}
-        fn replace_with_rhs_exit(record: share Record, should_exit: Bool) {{
+        fn replace_with_rhs_exit(record: share Record, should_exit: bool) {{
             record.text = make_text({{ if should_exit {{ return; }} false }});
         }}
         fn main() -> i32 {{
@@ -1849,7 +1849,7 @@ fn string_struct_share_later_argument_exit_reuses_heap() {
             r#"
         type Record {{ text: string, sibling: string }}
         fn replace(record: share Record, suffix: borrow string, code: i32) {{}}
-        fn later_argument_exit(should_exit: Bool) -> i32 {{
+        fn later_argument_exit(should_exit: bool) -> i32 {{
             let part := "{part}";
             var record := Record {{ text: part.concat("!"), sibling: "keep" }};
             let pending := part.concat("discard");

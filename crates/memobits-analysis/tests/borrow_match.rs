@@ -9,15 +9,15 @@ use memobits_ir::{InstructionKind, Program, UseMode};
 use memobits_syntax::parse;
 
 const DECLS: &str = "type P { x: i32, y: i32 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<i32, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<i32, 3>) ] \
     type Cell { kind: Shape, n: i32 } \
-    type Grid { cells: Array<Cell, 3>, extra: P } \
+    type Grid { cells: array<Cell, 3>, extra: P } \
     type Wrap [ Plain, Boxed(Shape) ] \
     type H { s: Shape, o: P } \
     fn make(n: i32) -> Shape { if n > 0 { Shape::Rect(n, 2) } else { Shape::Empty } } \
     fn read(p: borrow P) -> i32 { p.x + p.y } \
     fn take(p: P) -> i32 { p.x } \
-    fn is_big(s: borrow Shape) -> Bool { match s { Shape::Rect(w, h) => w * h > 10, _ => false } } ";
+    fn is_big(s: borrow Shape) -> bool { match s { Shape::Rect(w, h) => w * h > 10, _ => false } } ";
 
 fn lower(body: &str) -> Result<Program, Vec<Diagnostic>> {
     let source = format!("{DECLS} fn main() -> i32 {{ {body} }}");

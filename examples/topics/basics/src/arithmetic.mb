@@ -3,7 +3,7 @@ pub fn subtract(left: i32, right: i32) -> i32 { left - right }
 pub fn multiply(left: i32, right: i32) -> i32 { left * right }
 pub fn divide(left: i32, right: i32) -> i32 { left / right }
 
-pub fn check() -> Result<i32, Error> {
+pub fn check() -> i32 ! Error {
     let base := add(120, 15);
     let quantity := 4;
     let subtotal := multiply(base, quantity);

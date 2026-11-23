@@ -5,7 +5,7 @@ use text;
 // Chains the three topic checks. Each module reports its own distinct Err
 // codes (1 arithmetic, 2-3 loops, 4-6 text); the Ok value is their sum:
 // 265 + 175 + 22.
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     let total := match arithmetic::check() {
         Ok(value) => value,
         Err(error) => return Err(error)

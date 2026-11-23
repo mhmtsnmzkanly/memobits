@@ -27,7 +27,7 @@ fn anonymous_record_shapes_are_order_independent_but_exact() {
         "let reordered := { left: 1 as u32, other: 3 as u32 };",
     ] {
         let source = format!(
-            "fn main(flag: Bool) -> u32 {{ let first := {{ right: 2 as u32, left: 40 as u32 }}; {alternative} let selected := if flag {{ first }} else {{ reordered }}; selected.left }}"
+            "fn main(flag: bool) -> u32 {{ let first := {{ right: 2 as u32, left: 40 as u32 }}; {alternative} let selected := if flag {{ first }} else {{ reordered }}; selected.left }}"
         );
         let diagnostics = lower_module(&parse_source(&source), "shapes", &["main".into()])
             .expect_err("unequal structural shapes must not unify");
@@ -102,7 +102,7 @@ fn anonymous_enum_aliases_keep_declaration_site_identity_and_contextual_unit_var
 fn anonymous_enum_payloads_are_typed_and_extracted_by_variant_patterns() {
     let source = r#"
         fn main() -> i32 {
-            let result: enum [Number(i32), Pair(i32, Bool), Empty] = Number(40);
+            let result: enum [Number(i32), Pair(i32, bool), Empty] = Number(40);
             match result {
                 Number(value) => value + 2,
                 Pair(left, enabled) => left + (if enabled { 1 } else { 0 }),

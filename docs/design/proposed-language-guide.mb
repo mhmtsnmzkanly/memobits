@@ -20,7 +20,7 @@
 
 let age := 18;
 let pi := 3.14;
-let enabled: Bool = true;
+let enabled: bool = true;
 var score: i32 = 0;
 score = 10;
 score += 5;
@@ -78,7 +78,7 @@ type Player {
     score: i32,
 }
 
-fn inspect(player: borrow Player) -> Bool {
+fn inspect(player: borrow Player) -> bool {
     player.score >= 0
 }
 
@@ -144,8 +144,8 @@ duplicate[0] = 9;
 // Contextual literal typing is still being specified.
 // The default type of an unannotated collection literal remains unspecified.
 
-let offsets: Array<i32, 3> = [0, 1, 2];
-var cells: Array<i32, 3> = [0, 0, 0];
+let offsets: array<i32, 3> = [0, 1, 2];
+var cells: array<i32, 3> = [0, 0, 0];
 var scores: List<i32> = [10, 20, 30];
 
 cells[0] = 5;
@@ -154,8 +154,8 @@ cells[0] = 5;
 
 // ACCEPTED: repetition evaluates its expression once for each element, in
 // order. It copies primitives implicitly and does not clone aggregates.
-let board: Array<Array<i32, 3>, 3> = [[0; 3]; 3];
-let generated: Array<i32, 3> = [make_value(); 3]; // Calls three times.
+let board: array<array<i32, 3>, 3> = [[0; 3]; 3];
+let generated: array<i32, 3> = [make_value(); 3]; // Calls three times.
 // ERROR: [owned_value; 3]; // repeated moves are invalid; copy explicitly.
 type UserId = i64;
 
@@ -287,7 +287,7 @@ let new_text := try build_text() else (reason) {
 // `try build_text()` without else discards its Result error.
 
 // ACCEPTED: defaults handles normal completion without a result, not errors.
-fn choose_score(eligible: Bool) -> i32 defaults 0 {
+fn choose_score(eligible: bool) -> i32 defaults 0 {
     if eligible { 10 } else { return; }
 }
 // Explicit returns and tail values win; bare return and normal valueless

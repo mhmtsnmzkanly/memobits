@@ -1,7 +1,7 @@
 # ENF lexer fixture
 
 A bounded, self-checking byte lexer written in Memobits. It scans decimal
-integer tokens in fixed `Array<u8, 16>` buffers, reports byte spans, and
+integer tokens in fixed `array<u8, 16>` buffers, reports byte spans, and
 returns owned outcomes with a nominal `LexError` that derives from `Error`.
 Each failed check returns a distinct error code from `main`. Scope, limits and
 the UTF-8 boundary are described in the

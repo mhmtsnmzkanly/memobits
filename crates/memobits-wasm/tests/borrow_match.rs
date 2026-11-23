@@ -40,7 +40,7 @@ fn run(source: &str) -> i32 {
 }
 
 const DECLS: &str = "type P { x: i32, y: i32 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<i32, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<i32, 3>) ] \
     type Wrap [ Plain, Boxed(Shape), Pair(Shape, i32) ] \
     type H { n: i32, s: Shape } \
     fn px(p: borrow P) -> i32 { p.y } \
@@ -61,7 +61,7 @@ fn program(body: &str) -> String {
 fn matching_array_elements_counts_variants_and_sums_payloads() {
     assert_eq!(
         run(&program(
-            "let a: Array<Shape, 4> = [Shape::Rect(3, 4), Shape::Empty, Shape::Circle(1.5), \
+            "let a: array<Shape, 4> = [Shape::Rect(3, 4), Shape::Empty, Shape::Circle(1.5), \
                  Shape::Poly(P { x: 5, y: 6 }, [7, 8, 9])]; \
              var rects := 0; var other := 0; var sum := 0; var i := 0; \
              loop { if i == 4 { break; } \
@@ -166,7 +166,7 @@ fn local_borrow_option_stores_the_referent_address_and_releases_after_last_use()
         fn main() -> i32 {
             var owner := P { x: 7 };
             let handle := owner.borrow();
-            let wrapped: Option<borrow Alias> = Some(handle);
+            let wrapped: (borrow Alias)? = Some(handle);
             let moved := wrapped;
             let old := match moved {
                 Some(r) => {
@@ -176,10 +176,10 @@ fn local_borrow_option_stores_the_referent_address_and_releases_after_last_use()
                 },
                 None => 100
             };
-            let empty: Option<borrow P> = None;
+            let empty: (borrow P)? = None;
             let fallback := match empty { Some(r) => r.x, None => 5 };
             let number := 3;
-            let scalar: Option<borrow i32> = Some(number.borrow());
+            let scalar: (borrow i32)? = Some(number.borrow());
             let n := match scalar { Some(r) => r.copy(), None => 0 };
             old * 1000 + owner.x * 100 + fallback * 10 + n
         }";
@@ -192,7 +192,7 @@ fn unused_payload_releases_the_loan_before_the_arm_body() {
         run("
         fn main() -> i32 {
             var n := 7;
-            let wrapped: Option<borrow i32> = Some(n.borrow());
+            let wrapped: (borrow i32)? = Some(n.borrow());
             match wrapped { Some(_) => { n = 13; n }, None => 0 }
         }"),
         13
@@ -208,7 +208,7 @@ fn a_loop_reexecutes_the_same_borrow_option_initializer() {
             var sum := 0;
             loop {
                 if n == 4 { break; }
-                let wrapped: Option<borrow i32> = Some(n.borrow());
+                let wrapped: (borrow i32)? = Some(n.borrow());
                 sum += match wrapped { Some(r) => r.copy(), None => 0 };
                 n += 1;
             }

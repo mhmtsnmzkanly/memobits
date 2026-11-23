@@ -54,7 +54,7 @@ fn temporary_owned_string_tuple_transfers_to_call_and_cleans_on_later_exit() {
             let (left, right, base) := pair;
             if left.len() == 3 && right.len() == 3 { base as i32 + 6 } else { 0 }
         }
-        fn postpone(pair: (string, u32), flag: Bool) -> i32 { pair.1 as i32 }
+        fn postpone(pair: (string, u32), flag: bool) -> i32 { pair.1 as i32 }
         fn main() -> i32 {
             let left := "xy".concat("!");
             let right := "ab".concat("?");
@@ -82,7 +82,7 @@ fn temporary_owned_string_tuple_transfers_to_call_and_cleans_on_later_exit() {
 fn nested_nominal_string_owning_tuple_temporaries_keep_the_existing_transport_gate() {
     let fixture = Fixture::new();
     fixture.source(
-        "type Holder { text: string } fn consume(pair: (Holder, Bool)) {} fn main() -> i32 { let text := \"x\".concat(\"\"); let inner := Holder { text: text }; consume((inner, true)); 0 }",
+        "type Holder { text: string } fn consume(pair: (Holder, bool)) {} fn main() -> i32 { let text := \"x\".concat(\"\"); let inner := Holder { text: text }; consume((inner, true)); 0 }",
     );
     let build = fixture.run(&["build"]);
     assert_eq!(build.status.code(), Some(1), "{build:?}");
@@ -172,7 +172,7 @@ fn string_owning_tuple_enum_payload_moves_and_cleans_on_normal_and_early_returns
                 TextState::Empty => 0,
             }
         }
-        fn exit_early(state: TextState, flag: Bool) -> u32 {
+        fn exit_early(state: TextState, flag: bool) -> u32 {
             if flag { return 1; }
             consume(state)
         }

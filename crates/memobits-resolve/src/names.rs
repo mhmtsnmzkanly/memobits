@@ -840,7 +840,7 @@ mod array_tests {
     fn array_element_types_and_expression_children_are_resolved() {
         let parsed = memobits_syntax::parse(
             SourceId(0),
-            "fn f(a: Array<Array<Missing, 2>, 3>) { [unknown]; [other; 2]; a[index]; }",
+            "fn f(a: array<array<Missing, 2>, 3>) { [unknown]; [other; 2]; a[index]; }",
         );
         assert!(parsed.diagnostics.is_empty());
         let (diagnostics, _) = check(&parsed.module, std::iter::empty(), false);
@@ -857,7 +857,7 @@ mod array_tests {
     fn nested_array_elements_discover_qualified_type_dependencies() {
         let parsed = memobits_syntax::parse(
             SourceId(0),
-            "fn f(a: Array<Array<self::model::Value, 2>, 3>) {}",
+            "fn f(a: array<array<self::model::Value, 2>, 3>) {}",
         );
         let (diagnostics, qualified) = check(&parsed.module, std::iter::empty(), false);
         assert!(diagnostics.is_empty());

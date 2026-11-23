@@ -240,7 +240,7 @@ fn repeated_string_owning_tuple_enum_payloads_release_on_normal_and_early_exit()
     f.write(
         "src/main.mb",
         &format!(
-            "type TextState [ Texts((string, string), u32), Empty ] fn package(pair: (string, string), count: u32) -> TextState {{ TextState::Texts(pair, count) }} fn consume(state: TextState) -> u32 {{ match state {{ TextState::Texts(pair, count) => {{ let (left, right) := pair; left.len() + right.len() + count }}, TextState::Empty => 0 }} }} fn early(state: TextState, flag: Bool) -> u32 {{ if flag {{ return 1; }} consume(state) }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let a := \"{text}\".concat(\"\"); let b := \"{text}\".concat(\"\"); total += early(package((a, b), iteration), true); let c := \"{text}\".concat(\"\"); let d := \"{text}\".concat(\"\"); let state := package((c, d), 0); total += consume(state); iteration += 1; }} total }}"
+            "type TextState [ Texts((string, string), u32), Empty ] fn package(pair: (string, string), count: u32) -> TextState {{ TextState::Texts(pair, count) }} fn consume(state: TextState) -> u32 {{ match state {{ TextState::Texts(pair, count) => {{ let (left, right) := pair; left.len() + right.len() + count }}, TextState::Empty => 0 }} }} fn early(state: TextState, flag: bool) -> u32 {{ if flag {{ return 1; }} consume(state) }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let a := \"{text}\".concat(\"\"); let b := \"{text}\".concat(\"\"); total += early(package((a, b), iteration), true); let c := \"{text}\".concat(\"\"); let d := \"{text}\".concat(\"\"); let state := package((c, d), 0); total += consume(state); iteration += 1; }} total }}"
         ),
     );
 
@@ -346,7 +346,7 @@ fn unused_string_result_payloads_are_released_under_wasm_cap() {
     f.write(
         "src/main.mb",
         &format!(
-            "fn make(text: string) -> Result<string, Error> {{ Ok(text) }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let result := make(\"{text}\".concat(\"\")); let used := match result {{ Ok(value) => 1 as u32, Err(_) => 0 as u32 }}; total += used; iteration += 1; }} total }}"
+            "fn make(text: string) -> string ! Error {{ Ok(text) }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let result := make(\"{text}\".concat(\"\")); let used := match result {{ Ok(value) => 1 as u32, Err(_) => 0 as u32 }}; total += used; iteration += 1; }} total }}"
         ),
     );
 
@@ -400,7 +400,7 @@ fn enum_arrays_with_nested_string_tuple_arrays_release_on_normal_and_early_retur
     f.write(
         "src/main.mb",
         &format!(
-            "type Batch [ Rows(Array<(string, u32), 2>), Single((string, u32)), Text(string), Empty ] fn consume(states: Array<Batch, 3>, early: Bool) -> u32 {{ if early {{ return 1; }} 42 }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let a := \"{text}\".concat(\"\"); let b := \"{text}\".concat(\"\"); let c := \"{text}\".concat(\"\"); let d := \"{text}\".concat(\"\"); let first: (string, u32) = (a, 20); let second: (string, u32) = (b, 22); let third: (string, u32) = (c, 7); let rows: Array<(string, u32), 2> = [first, second]; let row_state: Batch = Batch::Rows(rows); let single_state: Batch = Batch::Single(third); let text_state: Batch = Batch::Text(d); let states: Array<Batch, 3> = [row_state, single_state, text_state]; total += consume(states, iteration % 2 == 0); iteration += 1; }} total }}"
+            "type Batch [ Rows(array<(string, u32), 2>), Single((string, u32)), Text(string), Empty ] fn consume(states: array<Batch, 3>, early: bool) -> u32 {{ if early {{ return 1; }} 42 }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let a := \"{text}\".concat(\"\"); let b := \"{text}\".concat(\"\"); let c := \"{text}\".concat(\"\"); let d := \"{text}\".concat(\"\"); let first: (string, u32) = (a, 20); let second: (string, u32) = (b, 22); let third: (string, u32) = (c, 7); let rows: array<(string, u32), 2> = [first, second]; let row_state: Batch = Batch::Rows(rows); let single_state: Batch = Batch::Single(third); let text_state: Batch = Batch::Text(d); let states: array<Batch, 3> = [row_state, single_state, text_state]; total += consume(states, iteration % 2 == 0); iteration += 1; }} total }}"
         ),
     );
 
@@ -453,7 +453,7 @@ fn unused_heap_string_parameters_release_on_normal_and_early_returns_under_wasm_
     f.write(
         "src/main.mb",
         &format!(
-            "fn make_text() -> string {{ let text := \"{text}\".concat(\"\"); text }} fn discard(text: string, early: Bool) {{ if early {{ return; }} }} fn main() -> u32 {{ var iteration: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let text := make_text(); discard(text, iteration % 2 == 0); iteration += 1; }} iteration }}"
+            "fn make_text() -> string {{ let text := \"{text}\".concat(\"\"); text }} fn discard(text: string, early: bool) {{ if early {{ return; }} }} fn main() -> u32 {{ var iteration: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let text := make_text(); discard(text, iteration % 2 == 0); iteration += 1; }} iteration }}"
         ),
     );
 
@@ -616,7 +616,7 @@ fn unused_nested_string_tuple_parameters_release_on_normal_and_early_returns() {
     f.write(
         "src/main.mb",
         &format!(
-            "fn discard(pair: ((string, string), u32), early: Bool) {{ if early {{ return; }} }} fn main() -> u32 {{ var iteration: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let left := \"{text}\".concat(\"\"); let right := \"{text}\".concat(\"\"); let inner := (left, right); discard((inner, iteration), iteration % 2 == 0); iteration += 1; }} iteration }}"
+            "fn discard(pair: ((string, string), u32), early: bool) {{ if early {{ return; }} }} fn main() -> u32 {{ var iteration: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let left := \"{text}\".concat(\"\"); let right := \"{text}\".concat(\"\"); let inner := (left, right); discard((inner, iteration), iteration % 2 == 0); iteration += 1; }} iteration }}"
         ),
     );
 
@@ -726,7 +726,7 @@ fn nested_literal_results_in_owned_aggregates_coexist_with_released_heap_strings
     f.write(
         "src/main.mb",
         &format!(
-            "type Box {{ text: Result<string, Error>, n: u32 }} fn consume(items: Array<Result<string, Error>, 2>, early: Bool) -> u32 {{ if early {{ return 1; }} match items[1] {{ Ok(_) => 0 as u32, Err(error) => error.code }} }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let heap := \"{text}\".concat(\"\"); let first: Result<string, Error> = Ok(\"literal\"); let second: Result<string, Error> = Err(Error {{ code: 9 }}); let items := [first, second]; let third: Result<string, Error> = Ok(\"boxed\"); let boxed := Box {{ text: third, n: 1 }}; total += heap.len() + consume(items, iteration % 2 == 0) + boxed.n; iteration += 1; }} total }}"
+            "type Box {{ text: string ! Error, n: u32 }} fn consume(items: array<string ! Error, 2>, early: bool) -> u32 {{ if early {{ return 1; }} match items[1] {{ Ok(_) => 0 as u32, Err(error) => error.code }} }} fn main() -> u32 {{ var iteration: u32 = 0; var total: u32 = 0; loop {{ if iteration == {ITERATIONS} {{ break; }} let heap := \"{text}\".concat(\"\"); let first: string ! Error = Ok(\"literal\"); let second: string ! Error = Err(Error {{ code: 9 }}); let items := [first, second]; let third: string ! Error = Ok(\"boxed\"); let boxed := Box {{ text: third, n: 1 }}; total += heap.len() + consume(items, iteration % 2 == 0) + boxed.n; iteration += 1; }} total }}"
         ),
     );
 

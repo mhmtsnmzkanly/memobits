@@ -295,11 +295,11 @@ fn extension_conformance_resolves_transparent_aliases_locally_and_across_modules
     let f = Fixture::new("pub fn add(a: i32, b: i32) -> i32 { a + b }");
     fs::write(
         f.0.join("src/main.mb"),
-        "use graphics; pub type Point { pub x: i32 } pub type Number = i32; pub interface Draw { fn draw(borrow self, amount: Number, pair: Result<Number, Number>) -> Result<Number, Number>; } extend Point of Draw { fn draw(borrow self, amount: i32, pair: Result<i32, i32>) -> Result<i32, i32> { pair } } fn main() -> i32 { 0 }",
+        "use graphics; pub type Point { pub x: i32 } pub type Number = i32; pub interface Draw { fn draw(borrow self, amount: Number, pair: Number ! Number) -> Number ! Number; } extend Point of Draw { fn draw(borrow self, amount: i32, pair: i32 ! i32) -> i32 ! i32 { pair } } fn main() -> i32 { 0 }",
     ).unwrap();
     fs::write(
         f.0.join("src/graphics.mb"),
-        "use self::main::{Point, Draw, Number}; pub type OtherNumber = Number; extend Point of Draw { fn draw(borrow self, amount: OtherNumber, pair: Result<OtherNumber, OtherNumber>) -> Result<Number, OtherNumber> { pair } }",
+        "use self::main::{Point, Draw, Number}; pub type OtherNumber = Number; extend Point of Draw { fn draw(borrow self, amount: OtherNumber, pair: OtherNumber ! OtherNumber) -> Number ! OtherNumber { pair } }",
     ).unwrap();
     let project = Project::load(&f.0, None).unwrap();
     let result = resolve(&project, Target::Application);
@@ -746,15 +746,11 @@ fn prelude_alias_cannot_hide_private_type_in_public_signature() {
 fn imported_outcome_alias_variants_check_names_and_visibility() {
     let f = Fixture::new(
         "use inner::Read as Inner;
-         pub type Maybe = Option<i32>;
+         pub type Maybe = i32?;
          pub type Read = Inner;
          type Hidden = Attempt<i32, Error>;",
     );
-    fs::write(
-        f.0.join("src/inner.mb"),
-        "pub type Read = Result<i32, Error>;",
-    )
-    .unwrap();
+    fs::write(f.0.join("src/inner.mb"), "pub type Read = i32 ! Error;").unwrap();
     for (source, expected) in [
         (
             "use math::Maybe; use math::Read as R; fn main() { Maybe::Some(7); R::Ok(7); }",
@@ -778,7 +774,7 @@ fn imported_outcome_alias_variants_check_names_and_visibility() {
 fn public_outcome_signatures_cannot_expose_private_nested_types() {
     let f = Fixture::new(
         "type Hidden { pub value: i32 }
-         pub fn make() -> Option<Attempt<Array<Hidden, 2>, Error>> { None }",
+         pub fn make() -> Attempt<array<Hidden, 2>, Error>? { None }",
     );
     fs::write(f.0.join("src/main.mb"), "use math::make; fn main() {}").unwrap();
     let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);
@@ -796,16 +792,13 @@ fn public_outcome_signatures_cannot_expose_private_nested_types() {
 fn reference_arguments_participate_in_name_and_visibility_checks() {
     let f = Fixture::new("type Hidden { pub value: i32 }");
     for (source, expected) in [
+        ("fn main() { let a: (borrow Missing)? = None; }", "NE003"),
         (
-            "fn main() { let a: Option<borrow Missing> = None; }",
-            "NE003",
-        ),
-        (
-            "fn main() { let a: Option<borrow math::Hidden> = None; }",
+            "fn main() { let a: (borrow math::Hidden)? = None; }",
             "ME007",
         ),
         (
-            "type Hidden { value: i32 } pub type Maybe = Option<borrow Hidden>; fn main() {}",
+            "type Hidden { value: i32 } pub type Maybe = (borrow Hidden)?; fn main() {}",
             "ME010",
         ),
     ] {

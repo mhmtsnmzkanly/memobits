@@ -51,7 +51,7 @@ fn run(source: &str) -> i32 {
 }
 
 const DECLS: &str = "type P { x: i32, y: i64 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<u8, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<u8, 3>) ] \
     type H { n: i32, s: Shape, m: u8 } \
     fn make(n: i32) -> Shape { if n > 0 { Shape::Rect(n, 2) } else { Shape::Empty } } \
     fn eat(s: Shape) -> i32 { 3 } \
@@ -117,7 +117,7 @@ fn enum_fields_arrays_and_repetition_run() {
             "let h := H { n: 7, s: Shape::Rect(1, 2), m: 9 }; \
              let a := [Shape::Empty, make(2), Shape::Circle(1.0)]; \
              let r := [Shape::Rect(1, 2); 4]; \
-             var g: Array<Shape, 2> = [Shape::Empty; 2]; g[1] = Shape::Circle(2.0); \
+             var g: array<Shape, 2> = [Shape::Empty; 2]; g[1] = Shape::Circle(2.0); \
              let k := peek(g[0].borrow()); \
              h.n + k"
         )),
@@ -129,7 +129,7 @@ fn enum_fields_arrays_and_repetition_run() {
 fn enum_payloads_nest_through_enums_structs_and_arrays() {
     assert_eq!(
         run(
-            "type In [ Leaf, Num(i64) ] type Mid { a: Array<In, 2>, k: u8 } \
+            "type In [ Leaf, Num(i64) ] type Mid { a: array<In, 2>, k: u8 } \
              type Out [ Wrap(In), Many(Mid), Pair(In, In) ] \
              fn count(o: borrow Out) -> i32 { 5 } \
              fn main() -> i32 { \
@@ -159,7 +159,7 @@ fn many_variant_enums_run() {
 
 #[test]
 fn an_enum_frame_over_the_configured_stack_is_a_diagnostic() {
-    let source = "type Big [ A(Array<i64, 5000>), B ] \
+    let source = "type Big [ A(array<i64, 5000>), B ] \
                   fn main() -> i32 { let b := Big::B; 1 }";
     let program = lower(source);
     let exports = exports_of(&program, &["main"]);
@@ -181,7 +181,7 @@ fn an_enum_frame_over_the_configured_stack_is_a_diagnostic() {
 #[test]
 fn enum_layout_overflow_is_reported_not_wrapped() {
     let source =
-        "type Huge [ A(Array<Array<Array<i64, 65536>, 65536>, 65536>) ] fn main() -> i32 { 1 }";
+        "type Huge [ A(array<array<array<i64, 65536>, 65536>, 65536>) ] fn main() -> i32 { 1 }";
     let program = lower(source);
     let errors = compile(&program, &BTreeMap::new()).unwrap_err();
     assert!(

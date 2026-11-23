@@ -6,11 +6,11 @@ use memobits_syntax::parse;
 
 const DECLS: &str = "type P { x: i32, y: i32 } \
     type Line { a: P, b: P } \
-    type Grid { rows: Array<Array<i32, 3>, 2>, tag: i32 } \
+    type Grid { rows: array<array<i32, 3>, 2>, tag: i32 } \
     fn both(a: share P, b: share P) {} \
     fn rd2(a: borrow P, b: borrow P) -> i32 { a.x + b.x } \
     fn mix(a: share P, b: borrow P) {} \
-    fn row2(a: share Array<i32, 3>, b: share Array<i32, 3>) {} \
+    fn row2(a: share array<i32, 3>, b: share array<i32, 3>) {} \
     fn bump(p: share P) { p.x += 1; } ";
 
 fn ownership(source: &str) -> Vec<String> {
@@ -206,7 +206,7 @@ fn fixed_iteration_loan_covers_the_body_and_ends_on_exit() {
          loop value in grid[0] { grid[1][0] = value; break; } \
          grid[0][0] = 7;",
     );
-    accepted("let empty: Bytes<0> = []; loop value in empty { let moved := empty; }");
+    accepted("let empty: array<u8, 0> = []; loop value in empty { let moved := empty; }");
     for control in ["break;", "continue;", "return;", "loop {}"] {
         rejected(&format!(
             "var array := [1, 2]; loop value in array {{ array[0] = value; {control} }}"
@@ -214,7 +214,7 @@ fn fixed_iteration_loan_covers_the_body_and_ends_on_exit() {
     }
     rejected("let array := [1]; loop value in array { let moved := array; break; }");
     let codes = ownership(
-        "fn move_out(array: Array<i32, 1>) -> Array<i32, 1> { \
+        "fn move_out(array: array<i32, 1>) -> array<i32, 1> { \
          loop value in array { return array; } array } fn main() {}",
     );
     assert!(codes.iter().any(|code| code == "BE005"), "{codes:?}");

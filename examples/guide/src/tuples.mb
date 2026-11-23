@@ -16,23 +16,23 @@
 // unsupported.
 type NestedTupleRecord { values: (string, string), count: u32 }
 type TextState [ Texts((string, string), u32), Discarded((string, string), (string, string)), Empty ]
-type TextBatch [ Rows(Array<(string, u32), 2>), Single((string, u32)), Plain(string), Empty ]
+type TextBatch [ Rows(array<(string, u32), 2>), Single((string, u32)), Plain(string), Empty ]
 // Fixed arrays can contain scalar and String-owning tuples, and tuples can
 // contain fixed arrays.
-fn sum_string_rows(rows: Array<(string, u32), 2>) -> u32 {
+fn sum_string_rows(rows: array<(string, u32), 2>) -> u32 {
     rows[0].1 + rows[1].1
 }
-fn consume_text_batches(batches: Array<TextBatch, 3>, early: Bool) -> Bool {
+fn consume_text_batches(batches: array<TextBatch, 3>, early: bool) -> bool {
     if early { return false; }
     true
 }
-fn tuple_array_values() -> Bool {
-    let rows: Array<(i32, Bool), 2> = [(40, false), (2, true)];
+fn tuple_array_values() -> bool {
+    let rows: array<(i32, bool), 2> = [(40, false), (2, true)];
     let first := "first".concat("");
     let second := "second".concat("");
     let first_row: (string, u32) = (first, 20);
     let second_row: (string, u32) = (second, 22);
-    let owned_rows: Array<(string, u32), 2> = [first_row, second_row];
+    let owned_rows: array<(string, u32), 2> = [first_row, second_row];
     let third := "third".concat("");
     let fourth := "fourth".concat("");
     let fifth := "fifth".concat("");
@@ -41,19 +41,19 @@ fn tuple_array_values() -> Bool {
     let batch_second: (string, u32) = (fourth, 22);
     let batch_single: (string, u32) = (fifth, 7);
     let batch_plain: TextBatch = TextBatch::Plain(sixth);
-    let batch_rows: Array<(string, u32), 2> = [batch_first, batch_second];
+    let batch_rows: array<(string, u32), 2> = [batch_first, batch_second];
     let rows_state: TextBatch = TextBatch::Rows(batch_rows);
     let single_state: TextBatch = TextBatch::Single(batch_single);
-    let batches: Array<TextBatch, 3> = [rows_state, single_state, batch_plain];
+    let batches: array<TextBatch, 3> = [rows_state, single_state, batch_plain];
     let nested := (rows, 0);
     nested.0[1].1 && nested.0[0].0 + nested.0[1].0 + nested.1 == 42
         && sum_string_rows(owned_rows) == 42
         && consume_text_batches(batches, false)
 }
-fn echo_pair(pair: (i32, Bool)) -> (i32, Bool) { (pair.0, pair.1) }
+fn echo_pair(pair: (i32, bool)) -> (i32, bool) { (pair.0, pair.1) }
 fn labeled_left(pair: (left: i32, right: i32)) -> i32 { pair.left }
 fn reversed_labeled_left(pair: (right: i32, left: i32)) -> i32 { pair.left }
-fn forward_owned_pair(pair: (string, u32), early: Bool) -> (string, u32) {
+fn forward_owned_pair(pair: (string, u32), early: bool) -> (string, u32) {
     if early { return pair; }
     pair
 }
@@ -66,18 +66,18 @@ fn consume_nested_text(pair: ((string, string), u32)) -> u32 {
     let ((left, right), base) := pair;
     left.len() + right.len() + base
 }
-fn owned_tuple_temporary_call() -> Bool {
+fn owned_tuple_temporary_call() -> bool {
     let left := "xy".concat("!");
     let right := "ab".concat("?");
     consume_owned_texts((left, right, 36 as u32)) == 42
 }
-fn nested_owned_tuple_temporary_call() -> Bool {
+fn nested_owned_tuple_temporary_call() -> bool {
     let left := "ab".concat("");
     let right := "cd".concat("");
     let inner := (left, right);
     consume_nested_text(forward_nested_text((inner, 38 as u32))) == 42
 }
-fn nested_owned_tuple_record_field() -> Bool {
+fn nested_owned_tuple_record_field() -> bool {
     let left := "ab".concat("");
     let right := "cd".concat("");
     let values := (left, right);
@@ -101,11 +101,11 @@ fn consume_text_state(state: TextState) -> u32 {
         TextState::Empty => 0,
     }
 }
-fn early_text_state_exit(state: TextState, flag: Bool) -> u32 {
+fn early_text_state_exit(state: TextState, flag: bool) -> u32 {
     if flag { return 1; }
     consume_text_state(state)
 }
-fn tuple_enum_payloads() -> Bool {
+fn tuple_enum_payloads() -> bool {
     let left := "ab".concat("");
     let right := "cd".concat("");
     let early := early_text_state_exit(package_text_state((left, right), 90 as u32), true);
@@ -118,7 +118,7 @@ fn tuple_enum_payloads() -> Bool {
     early + consume_text_state(package_text_state((first, second), 38 as u32)) == 43
         && consume_text_state(TextState::Discarded((a, b), (c, d))) == 4
 }
-pub fn tuple_values() -> Bool {
+pub fn tuple_values() -> bool {
     let pair := echo_pair((40, true));
     let (number, enabled) := pair;
     let text := "owned".concat("!");

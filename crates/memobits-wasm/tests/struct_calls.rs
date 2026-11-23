@@ -44,13 +44,13 @@ fn run(source: &str) -> i32 {
 #[test]
 fn owned_string_tuple_calls_reuse_heap_under_a_memory_cap() {
     let source = r#"
-        fn exact(value: borrow string) -> Bool {
+        fn exact(value: borrow string) -> bool {
             value.len() == 2 && match value.byte_at(0) {
                 Some(a) => a == 97 && match value.byte_at(1) { Some(b) => b == 98, None => false },
                 None => false
             }
         }
-        fn forward(pair: (string, u32), early: Bool) -> (string, u32) {
+        fn forward(pair: (string, u32), early: bool) -> (string, u32) {
             if early { return pair; }
             pair
         }
@@ -309,7 +309,7 @@ fn struct_results_returned_literal_local_and_parameter() {
 #[test]
 fn constructor_function_consumed_by_a_borrow_taking_function() {
     assert_eq!(
-        run("type Account { id: u32, balance: i64, active: Bool } \
+        run("type Account { id: u32, balance: i64, active: bool } \
              fn open(id: u32) -> Account { Account { id: id, balance: 0, active: true } } \
              fn deposit(a: share Account, amount: i64) { a.balance += amount; } \
              fn describe(a: borrow Account) -> i64 { if a.active { a.balance * 2 } else { 0 } } \
@@ -340,7 +340,7 @@ fn recursion_accumulates_in_a_struct_through_results() {
 
 #[test]
 fn mixed_width_fields_survive_calls_results_and_copies() {
-    let decls = "type M { a: u8, b: i64, c: f32, d: Bool, e: i16, f: f64 } \
+    let decls = "type M { a: u8, b: i64, c: f32, d: bool, e: i16, f: f64 } \
         fn make() -> M { M { a: 200, b: -5_000_000_000, c: 1.5, d: true, e: -300, f: 2.25 } } \
         fn pass(m: M) -> M { m } \
         fn edit(m: share M) { m.a = 255; m.b -= 1; m.c = 0.5; m.d = false; m.e += 1; m.f *= 2.0; } ";

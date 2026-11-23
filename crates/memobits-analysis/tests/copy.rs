@@ -94,12 +94,12 @@ fn copy_reads_locals_parameters_and_elements_without_consuming() {
 fn copy_reads_through_references() {
     accepted("fn f(r: borrow i32) -> i32 { let v := r.copy(); v + r }");
     accepted("fn f(r: share i32) -> i32 { r.copy() }");
-    accepted("fn f(r: borrow Bool) -> Bool { r.copy() }");
-    accepted("fn f(p: borrow Array<i32, 3>, i: i32) -> i32 { p[i].copy() }");
+    accepted("fn f(r: borrow bool) -> bool { r.copy() }");
+    accepted("fn f(p: borrow array<i32, 3>, i: i32) -> i32 { p[i].copy() }");
     accepted(
-        "fn f(p: share Array<i32, 3>, i: i32) -> i32 { let v := p[i].copy(); p[0] = v.copy(); v }",
+        "fn f(p: share array<i32, 3>, i: i32) -> i32 { let v := p[i].copy(); p[0] = v.copy(); v }",
     );
-    accepted("fn f(p: borrow Array<Array<u8, 2>, 2>) -> u8 { p[1][0].copy() }");
+    accepted("fn f(p: borrow array<array<u8, 2>, 2>) -> u8 { p[1][0].copy() }");
     accepted("fn main() -> i32 { var x := 1; let r := x.borrow(); let y := r.copy(); y + r }");
 }
 
@@ -108,7 +108,7 @@ fn copy_is_usable_in_every_owned_position() {
     accepted("fn main() { let x := 1; let y := x.copy(); var z := 0; z = x.copy(); }");
     accepted("fn take(v: i32) {} fn main() { let x := 1; take(x.copy()); take(x.copy()); }");
     accepted("fn main() -> i32 { let x := 1; return x.copy(); }");
-    accepted("fn mk(v: i32) -> Array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] }");
+    accepted("fn mk(v: i32) -> array<i32, 3> { [v.copy(), v.copy() + 1, v + 2] }");
     accepted("fn main() { let x := 7; let a := [x.copy(); 3]; let b := [x.copy(); 1]; let c := [x.copy(); 0]; let d := [x.copy(); 100]; }");
     accepted("fn main() -> i32 { let x := 1; if true { x.copy() } else { 2 } }");
     accepted("fn main() -> i32 { let x := 1; let y := { x.copy() }; y }");
@@ -156,9 +156,9 @@ fn copy_of_aggregates_and_bad_forms_are_rejected() {
     for source in [
         "fn main() { let a := [1, 2]; let b := a.copy(); }",
         "fn main() { let m := [[1, 2], [3, 4]]; let r := m[0].copy(); }",
-        "fn f(p: borrow Array<i32, 2>) { let b := p.copy(); }",
-        "fn f(p: share Array<i32, 2>) { let b := p.copy(); }",
-        "fn f(p: borrow Array<Array<i32, 2>, 2>) { let b := p[0].copy(); }",
+        "fn f(p: borrow array<i32, 2>) { let b := p.copy(); }",
+        "fn f(p: share array<i32, 2>) { let b := p.copy(); }",
+        "fn f(p: borrow array<array<i32, 2>, 2>) { let b := p[0].copy(); }",
     ] {
         let errors = rejected(source, "TE017");
         assert!(
@@ -170,7 +170,7 @@ fn copy_of_aggregates_and_bad_forms_are_rejected() {
     }
     rejected("fn main() { let x := 1; let y := x.copy(2); }", "TE010");
     rejected(
-        "fn main() { let x := 1; let y := x.copy(); let z: Bool = y; }",
+        "fn main() { let x := 1; let y := x.copy(); let z: bool = y; }",
         "TE002",
     );
 }

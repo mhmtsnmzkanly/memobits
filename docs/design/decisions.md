@@ -88,6 +88,11 @@ only where explicitly stated; unresolved API spellings remain proposals.
   `extend { ... }` block, or declare them in `extend Type { ... }`. Calls use
   `value.method(...)`; public methods become available across a direct module
   import. Trailing inherent extensions on generic types remain gated.
+- **Superseded spellings (2026-11-23):** the type spellings in this file are
+  being migrated per "Built-in type spelling" at the end of this document:
+  `bool`, `char`, `array<T, N>`, `T?`, `T ! E`, `T ?! E`; `Option<…>`,
+  `Result<…>`, `Attempt<…>`, `Bool`, `Char`, `Array<…>` are rejected and
+  `Bytes` no longer exists. Where text below conflicts, that section wins.
 - Compiler-known types include `Array<T, N>`, `Bytes<N>`, `List<T>`,
   `Option<T>`, `Result<T, E>`, and the three-state `Attempt<T, E>`. User
   nominal structs and enums also accept concrete type parameters; `u32` const
@@ -424,3 +429,34 @@ only where explicitly stated; unresolved API spellings remain proposals.
   functions are excluded from normal builds.
 - Until then, the runnable guide uses module-ranged check codes (1xx–9xx)
   documented in examples/guide/README.md.
+
+## Built-in type spelling (2026-11-23, user decision)
+
+This section supersedes earlier spelling statements in this file, including
+"Optional spelling", "Fixed-array spelling" and the `Bytes<N>` notes.
+
+- Built-in value types are lowercase: integers and floats (unchanged),
+  `bool`, `char`, `string`, and the fixed array `array<T, N>` (a built-in
+  feature of the core). User types and `Error` keep their declared names.
+- Optional, fallible and three-state results are type operators, not named
+  types:
+  - `T?` — a value that may be absent; variants `Some(T)` and `None`.
+  - `T ! E` — a value or an error; variants `Ok(T)` and `Err(E)`. `E` must be
+    `Error` or derived from it. Example: `fn main() -> i32 ! Error`.
+  - `T ?! E` — exactly the same type as `T? ! E` (a fallible operation whose
+    success may carry no value). There is no separate `Attempt` type.
+    `Done(v)`, `Skipped` and `Failed(e)` remain as constructor and pattern
+    aliases for `Ok(Some(v))`, `Ok(None)` and `Err(e)` on this type.
+  - `?` binds tighter than `!`: `u32? ! E` is `(u32?) ! E`; parentheses group
+    explicitly, e.g. `(u32 ! E)?` and `(borrow T)?`.
+- Removed spellings are compile errors (TE001) with guidance naming the
+  replacement: `Option<T>` → `T?`, `Result<T, E>` → `T ! E`,
+  `Attempt<T, E>` → `T ?! E`, `Bool` → `bool`, `Char` → `char`,
+  `Array<T, N>` → `array<T, N>`. There is no warning period.
+- `Bytes` is removed entirely, as if it never existed: no alias and no special
+  diagnostic (an ordinary unknown-type error). Byte buffers are
+  `array<u8, N>`. Migration warnings MW001–MW003 are unused; the non-failing
+  warning channel remains available for future use.
+- `List<T>` is unchanged for now; its name and model are decided with the
+  general collection work.
+- Diagnostics and host-visible type names use the new spellings.

@@ -381,7 +381,7 @@ fn imported_scalar_inputs_and_float_comparisons_are_checked() {
     assert_eq!(call_i32_1(&wasm, "id", 100).unwrap(), 100);
     assert!(call_i32_1(&wasm, "id", 128).is_err());
 
-    let bool_id = lower("fn id(x: Bool) -> Bool { x }");
+    let bool_id = lower("fn id(x: bool) -> bool { x }");
     let wasm = memobits_wasm::compile(&bool_id, &exports("id", 0)).unwrap();
     assert!(call_i32_1(&wasm, "id", 2).is_err());
 
@@ -397,7 +397,7 @@ fn imported_scalar_inputs_and_float_comparisons_are_checked() {
         assert!(call_i32_1(&wasm, "id", bad).is_err());
     }
 
-    let nan = lower("fn main() -> Bool { (0.0 / 0.0) != (0.0 / 0.0) }");
+    let nan = lower("fn main() -> bool { (0.0 / 0.0) != (0.0 / 0.0) }");
     let wasm = memobits_wasm::compile(&nan, &exports("main", 0)).unwrap();
     let (_engine, mut store, instance) = instantiate(&wasm);
     let result = instance
@@ -923,7 +923,7 @@ fn primitive_reference_widths_and_owner_cells_execute() {
         ("Bool", "false", "true"),
     ] {
         let program = lower(&format!(
-            "fn write(x: share {ty}) {{ x = {replacement}; }} fn relay(x: share {ty}) {{ write(x); }} fn run(var x: {ty}) -> Bool {{ var r := x.share(); relay(r); x == {replacement} }} fn main() -> Bool {{ run({initial}) }}"
+            "fn write(x: share {ty}) {{ x = {replacement}; }} fn relay(x: share {ty}) {{ write(x); }} fn run(var x: {ty}) -> bool {{ var r := x.share(); relay(r); x == {replacement} }} fn main() -> bool {{ run({initial}) }}"
         ));
         let wasm = memobits_wasm::compile(&program, &exports("main", 3)).unwrap();
         wasmparser::validate(&wasm).unwrap();
@@ -963,7 +963,7 @@ fn references_survive_nested_recursion_early_returns_and_repeated_calls() {
 
 #[test]
 fn reference_reads_and_writes_execute_in_loops_and_short_circuit_control_flow() {
-    let program = lower("fn bump(x: share i32) -> Bool { x += 1; true } fn check(x: borrow Bool) -> Bool { false || x && true } fn main() -> i32 { var x := 0; var flag := true; loop { if check(flag.borrow()) && bump(x.share()) { if x == 3 { break; } } } false && bump(x.share()); true || bump(x.share()); x }");
+    let program = lower("fn bump(x: share i32) -> bool { x += 1; true } fn check(x: borrow bool) -> bool { false || x && true } fn main() -> i32 { var x := 0; var flag := true; loop { if check(flag.borrow()) && bump(x.share()) { if x == 3 { break; } } } false && bump(x.share()); true || bump(x.share()); x }");
     let wasm = memobits_wasm::compile(&program, &exports("main", 2)).unwrap();
     wasmparser::validate(&wasm).unwrap();
     let (_, mut store, instance) = instantiate(&wasm);
@@ -1046,7 +1046,7 @@ fn checked_arithmetic_still_traps_after_reference_writes() {
 
 #[test]
 fn address_taken_bool_parameters_feed_branch_edges_and_returns() {
-    let program = lower("fn inspect(x: borrow Bool) -> Bool { !x } fn run(var flag: Bool) -> Bool { inspect(flag.borrow()); if flag { return flag; } else { flag } }");
+    let program = lower("fn inspect(x: borrow bool) -> bool { !x } fn run(var flag: bool) -> bool { inspect(flag.borrow()); if flag { return flag; } else { flag } }");
     let wasm = memobits_wasm::compile(&program, &exports("run", 1)).unwrap();
     wasmparser::validate(&wasm).unwrap();
     let (_, mut store, instance) = instantiate(&wasm);

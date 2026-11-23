@@ -31,10 +31,10 @@ fn run_as<R: wasmi::WasmResults>(source: &str) -> R {
         .unwrap_or_else(|error| panic!("{source}: {error}"))
 }
 
-const TYPES: &str = "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+const TYPES: &str = "type M { a: u8, b: i64, c: bool, d: f32, e: i16 } \
     type P { x: i32, y: i32 } \
     type Line { a: P, b: P, n: i32 } \
-    type Grid { cells: Array<i32, 3>, k: i32 } \
+    type Grid { cells: array<i32, 3>, k: i32 } \
     type Outer { g: Grid, tag: u8 } ";
 
 #[test]

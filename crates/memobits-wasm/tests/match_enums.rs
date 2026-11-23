@@ -40,7 +40,7 @@ fn run(source: &str) -> i32 {
 }
 
 const DECLS: &str = "type P { x: i32, y: i64 } \
-    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, Array<u8, 3>) ] \
+    type Shape [ Empty, Circle(f64), Rect(i32, i32), Poly(P, array<u8, 3>) ] \
     type Wrap [ Plain, Boxed(Shape), Pair(Shape, i32) ] \
     fn make(n: i32) -> Shape { \
         if n == 0 { Shape::Empty } else if n == 1 { Shape::Circle(2.5) } \

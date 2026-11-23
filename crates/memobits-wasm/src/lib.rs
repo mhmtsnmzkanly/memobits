@@ -5010,7 +5010,7 @@ mod struct_layout_tests {
     use super::*;
     use wasmi::{Engine, Linker, Module, Store};
 
-    const MIXED: &str = "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } \
+    const MIXED: &str = "type M { a: u8, b: i64, c: bool, d: f32, e: i16 } \
         fn main() -> i32 { let m := M { e: -7, a: 200, d: 1.5, c: true, b: 5000000000 }; 1 }";
 
     fn lower(source: &str) -> Program {
@@ -5041,10 +5041,10 @@ mod struct_layout_tests {
     #[test]
     fn nested_aggregates_are_laid_out_inline_with_their_own_alignment() {
         let program = lower(
-            "type Q { a: u8, b: i64, f: f32, ok: Bool } \
-             type R { tag: u8, q: Q, xs: Array<Q, 2>, last: i16 } \
-             type Z { e: Array<Q, 0>, n: u8 } \
-             type W { g: Array<Array<R, 2>, 3> } fn main() {}",
+            "type Q { a: u8, b: i64, f: f32, ok: bool } \
+             type R { tag: u8, q: Q, xs: array<Q, 2>, last: i16 } \
+             type Z { e: array<Q, 0>, n: u8 } \
+             type W { g: array<array<R, 2>, 3> } fn main() {}",
         );
         let layouts = struct_layouts(&program.types).unwrap();
         // Q: u8 @0, i64 @8, f32 @16, Bool @20; size 24, align 8.
@@ -5069,7 +5069,7 @@ mod struct_layout_tests {
         assert_eq!(layouts[3].size, 528);
         // Overflow is reported, never wrapped.
         let huge = lower(
-            "type P { x: i64 } type A { a: Array<Array<Array<P, 65536>, 65536>, 65536> } fn main() {}",
+            "type P { x: i64 } type A { a: array<array<array<P, 65536>, 65536>, 65536> } fn main() {}",
         );
         assert!(struct_layouts(&huge.types).is_err());
     }
@@ -5245,7 +5245,7 @@ mod enum_layout_tests {
     fn nested_aggregates_use_their_own_size_and_alignment() {
         let layout = layout_of(
             "type P { x: i32, y: i32 } type Shape [ Empty, Circle(f64), Rect(i32, i32), \
-             Poly(P, Array<u8, 3>) ] fn main() {}",
+             Poly(P, array<u8, 3>) ] fn main() {}",
             "Shape",
         );
         let variants = variants_of(&layout);
@@ -5260,7 +5260,7 @@ mod enum_layout_tests {
         assert_eq!((layout.size, layout.align), (24, 8));
         // An enum inside an enum, and an array of enums, stride by the enum size.
         let program =
-            lower("type In [ X(i16), Y ] type Out [ A(In), B(Array<In, 3>) ] fn main() {}");
+            lower("type In [ X(i16), Y ] type Out [ A(In), B(array<In, 3>) ] fn main() {}");
         let layouts = struct_layouts(&program.types).unwrap();
         assert_eq!((layouts[0].size, layouts[0].align), (4, 2));
         assert_eq!(
@@ -5273,7 +5273,7 @@ mod enum_layout_tests {
     #[test]
     fn layout_arithmetic_is_checked() {
         let program =
-            lower("type Huge [ A(Array<Array<Array<i64, 65536>, 65536>, 65536>) ] fn main() {}");
+            lower("type Huge [ A(array<array<array<i64, 65536>, 65536>, 65536>) ] fn main() {}");
         assert!(struct_layouts(&program.types).is_err());
     }
 

@@ -255,7 +255,7 @@ fn stack_overflow_keeps_its_own_code() {
     .unwrap();
     fs::write(
         f.0.join("src/app.mb"),
-        "fn rec(n: i32) -> i32 { let a: Array<i32, 1024> = [n; 1024]; \
+        "fn rec(n: i32) -> i32 { let a: array<i32, 1024> = [n; 1024]; \
          if n == 0 { 0 } else { rec(n - 1) + a[1023] } } \
          pub fn main() -> i32 { rec(100000) }",
     )

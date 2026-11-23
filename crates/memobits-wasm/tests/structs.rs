@@ -50,7 +50,7 @@ fn two_field_struct_multiplies_its_fields() {
     );
 }
 
-const MIXED: &str = "type M { a: u8, b: i64, c: Bool, d: f32, e: i16 } ";
+const MIXED: &str = "type M { a: u8, b: i64, c: bool, d: f32, e: i16 } ";
 
 #[test]
 fn mixed_width_fields_read_back_exactly() {
@@ -68,7 +68,7 @@ fn mixed_width_fields_read_back_exactly() {
     );
     assert_eq!(
         run_as::<i32>(&format!(
-            "{MIXED} fn main() -> Bool {{ {build} m.c.copy() }}"
+            "{MIXED} fn main() -> bool {{ {build} m.c.copy() }}"
         ))
         .unwrap(),
         1
@@ -99,7 +99,7 @@ fn mixed_width_fields_read_back_exactly() {
 
 #[test]
 fn extreme_values_survive_layout_padding() {
-    let program = "type W { a: u8, b: u64, c: i8, d: f64, e: u16, f: i32, g: Bool } ";
+    let program = "type W { a: u8, b: u64, c: i8, d: f64, e: u16, f: i32, g: bool } ";
     let build = "let w := W { g: false, f: -2147483648, e: 65535, d: -0.25, c: -128, b: 18446744073709551615, a: 255 };";
     for (field, ty, expected) in [
         ("a", "u8", 255i64),
@@ -153,7 +153,7 @@ fn structs_work_in_branches_loops_and_with_arrays() {
         20
     );
     assert_eq!(
-        run("type P { x: i32, flag: Bool } \
+        run("type P { x: i32, flag: bool } \
              fn main() -> i32 { \
                  let p := P { x: 7, flag: true }; let q := P { x: 9, flag: false }; \
                  let a := [10, 20, 30]; \

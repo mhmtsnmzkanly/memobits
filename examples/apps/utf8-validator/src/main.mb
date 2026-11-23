@@ -1,12 +1,12 @@
 // Check strict UTF-8 validation over the logical prefix of fixed byte arrays.
-fn count_is(bytes: Array<u8, 8>, length: i32, expected: i32) -> Bool {
+fn count_is(bytes: array<u8, 8>, length: i32, expected: i32) -> bool {
     match bytes.validate_utf8(length) {
         Ok(count) => count == expected,
         Err(_) => false,
     }
 }
 
-fn error_is(bytes: Array<u8, 8>, length: i32, code: u32, expected: Option<i32>) -> Bool {
+fn error_is(bytes: array<u8, 8>, length: i32, code: u32, expected: i32?) -> bool {
     match bytes.validate_utf8(length) {
         Ok(_) => false,
         Err(error) => {
@@ -23,7 +23,7 @@ fn error_is(bytes: Array<u8, 8>, length: i32, code: u32, expected: Option<i32>) 
     }
 }
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     // é, NUL and ASCII DEL. The invalid byte after the logical end is padding.
     if !count_is([195, 169, 0, 127, 255, 0, 0, 0], 4, 3)
         || !count_is([255; 8], 0, 0) {
@@ -66,7 +66,7 @@ fn main() -> Result<i32, Error> {
     if !error_is([0; 8], -1, 1, None) || !error_is([0; 8], 9, 1, None) {
         return Err(Error { code: 7 });
     }
-    let short: Array<u8, 2> = [195, 169];
+    let short: array<u8, 2> = [195, 169];
     let inferred_size := match short.borrow().validate_utf8(2) {
         Ok(count) => count == 1,
         Err(_) => false

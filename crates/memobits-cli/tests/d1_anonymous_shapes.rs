@@ -121,7 +121,7 @@ fn anonymous_record_types_require_the_exact_shape() {
     );
     f.write(
         "src/main.mb",
-        "fn main(flag: Bool) -> i32 { let left := { x: 1, y: true }; let right := { x: 2, z: true }; let value := if flag { left } else { right }; value.x }",
+        "fn main(flag: bool) -> i32 { let left := { x: 1, y: true }; let right := { x: 2, z: true }; let value := if flag { left } else { right }; value.x }",
     );
     let output = f.run(&["analyze-project"]);
     assert!(!output.status.success(), "{output:?}");
@@ -247,10 +247,10 @@ fn payload_anonymous_enums_construct_and_extract_multi_field_payloads_in_source_
     f.write(
         "src/main.mb",
         r#"
-        type Choice = enum [Number(i32), Pair(i32, Bool), Empty];
+        type Choice = enum [Number(i32), Pair(i32, bool), Empty];
         fn main() -> i32 {
             let number: Choice = Choice::Number(20);
-            let pair: enum [Number(i32), Pair(i32, Bool), Empty] = Pair(20, true);
+            let pair: enum [Number(i32), Pair(i32, bool), Empty] = Pair(20, true);
             let number_value := match number { Choice::Number(value) => value, _ => 0 };
             match pair {
                 Pair(left, enabled) => left + number_value + (if enabled { 2 } else { 0 }),
@@ -332,7 +332,7 @@ fn anonymous_payload_enum_identity_and_payload_types_are_checked() {
 
     f.write(
         "src/main.mb",
-        "fn main(value: i32?) { let item: enum [Borrowed(Option<borrow i32>)] = Borrowed(value); }",
+        "fn main(value: i32?) { let item: enum [Borrowed((borrow i32)?)] = Borrowed(value); }",
     );
     let output = f.run(&["analyze-project"]);
     assert!(!output.status.success(), "{output:?}");
@@ -379,12 +379,12 @@ fn generic_nominal_trailing_methods_specialize_for_each_receiver_type() {
         type Box<T> { value: T } extend {
             fn read_value(borrow self) -> T { self.value }
         }
-        type Packet<const N: u32> { values: Array<u32, N> } extend {
+        type Packet<const N: u32> { values: array<u32, N> } extend {
             fn first(borrow self) -> u32 { self.values[0] }
         }
         fn main() -> i32 {
             let number := Box<i32> { value: 40 };
-            let flag := Box<Bool> { value: true };
+            let flag := Box<bool> { value: true };
             let packet := Packet<1> { values: [2] };
             let other := Packet<2> { values: [0, 3] };
             if number.read_value() + packet.first() as i32 == 42
@@ -435,7 +435,7 @@ fn generic_nominal_method_specialization_reaches_mutual_method_calls() {
             }
         }
         fn main() -> i32 {
-            let value := Box<Bool> { value: 0 };
+            let value := Box<bool> { value: 0 };
             value.left()
         }
         "#,

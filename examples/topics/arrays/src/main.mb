@@ -3,7 +3,7 @@
 // functions (`borrow`, `share`, an array result) and a small nested array.
 
 // Read-only access through a `borrow` parameter.
-fn sum(a: borrow Array<i32, 3>) -> i32 {
+fn sum(a: borrow array<i32, 3>) -> i32 {
     var i := 0;
     var total := 0;
     loop {
@@ -17,7 +17,7 @@ fn sum(a: borrow Array<i32, 3>) -> i32 {
 }
 
 // Mutation through a `share` parameter is visible to the caller.
-fn scale(a: share Array<i32, 3>, k: i32) {
+fn scale(a: share array<i32, 3>, k: i32) {
     var i := 0;
     loop {
         if i >= 3 {
@@ -29,12 +29,12 @@ fn scale(a: share Array<i32, 3>, k: i32) {
 }
 
 // An array result is built by the callee and moved to the caller.
-fn make(base: i32) -> Array<i32, 3> {
+fn make(base: i32) -> array<i32, 3> {
     [base + 1, base + 2, base + 3]
 }
 
-fn main() -> Result<i32, Error> {
-    var squares: Array<i32, 8> = [0; 8];
+fn main() -> i32 ! Error {
+    var squares: array<i32, 8> = [0; 8];
     var i := 0;
     loop {
         if i >= 8 {

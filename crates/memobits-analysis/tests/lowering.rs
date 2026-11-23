@@ -46,7 +46,7 @@ fn lowers_calls_and_detects_repeated_owned_move() {
         move_codes("fn id(x: i32) -> i32 { x } fn main() -> i32 { let x := 1; id(x) }").is_empty()
     );
     assert!(move_codes(
-        "fn g(a: Array<i32, 1>, b: Array<i32, 1>) {} fn main() { let x := [1]; g(x, x); }"
+        "fn g(a: array<i32, 1>, b: array<i32, 1>) {} fn main() { let x := [1]; g(x, x); }"
     )
     .contains(&"BE001".into()));
     assert!(
@@ -88,7 +88,7 @@ fn captures_operands_before_later_side_effects() {
     assert!(first_capture < reassignment);
 
     let invalid = lower(
-        "fn g(a: Array<i32, 1>, b: i32) {} fn main() { let x := [1]; g(x, { let y := x; 0 }); }",
+        "fn g(a: array<i32, 1>, b: i32) {} fn main() { let x := [1]; g(x, { let y := x; 0 }); }",
     );
     assert!(memobits_ownership::check_moves(&invalid)
         .iter()
@@ -175,8 +175,8 @@ fn branch_join_and_reinitialization_have_expected_availability() {
 #[test]
 fn lowers_if_values_short_circuit_and_nested_loops() {
     for source in [
-        "fn f(x: Bool) -> i32 { if x { 1 } else { 2 } }",
-        "fn f(x: Bool) -> Bool { x && true || false }",
+        "fn f(x: bool) -> i32 { if x { 1 } else { 2 } }",
+        "fn f(x: bool) -> bool { x && true || false }",
         "fn f() { loop { if true { break; } else { continue; } } }",
         "fn f() -> i32 { loop { loop { break; } return 1; } }",
         "fn f() -> i32 { 1 + { return 2; }; }",
@@ -192,9 +192,9 @@ fn lowers_if_values_short_circuit_and_nested_loops() {
 #[test]
 fn mixed_return_paths_and_divergence_validate() {
     for source in [
-        "fn f(x: Bool) -> i32 { if x { return 1; } else { 2 } }",
+        "fn f(x: bool) -> i32 { if x { return 1; } else { 2 } }",
         "fn f() -> i32 { loop {} }",
-        "fn f() -> Bool { true || { return false; true } }",
+        "fn f() -> bool { true || { return false; true } }",
         "fn f() { let x := { return; }; }",
     ] {
         let program = lower(source);

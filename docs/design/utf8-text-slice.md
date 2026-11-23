@@ -48,7 +48,7 @@ layout share one private Wasm layout definition. Moving a String copies the
 descriptor through aggregate call and storage paths. Guest code has no
 operation that writes to the literal bytes. For an
 outcome entry, the runner's existing memory export still exposes linear
-memory to the embedding host. Internal `Result<string, E>` can store a
+memory to the embedding host. Internal `string ! E` can store a
 static String in its `Ok` payload. A heap-backed `Ok` is supported when a
 local Result binding is immediately followed by a same-function consuming
 match with explicit `Ok(value)` and `Err` arms. A direct internal call can
@@ -67,19 +67,19 @@ Heap allocation, capacity, growth, cleanup, and external text ABI remain
 later work. [Rust str::len](https://doc.rust-lang.org/std/primitive.str.html#method.len)
 
 Call `.is_char_boundary(offset)` with a `u32` byte offset on the same
-receivers. It returns `Bool`. Zero and the byte length are boundaries,
+receivers. It returns `bool`. Zero and the byte length are boundaries,
 including zero for empty text. Within the string, any byte that starts a
 scalar is a boundary. Continuation bytes and offsets above the length return
 false. The read-only receiver loan stays live while evaluating the offset.
 Wasm checks the unsigned offset before reading a byte.
 [Rust str::is_char_boundary](https://doc.rust-lang.org/std/primitive.str.html#method.is_char_boundary)
 
-`.byte_at(index: u32)` returns an owned `Option<u8>`. It reads raw UTF-8
+`.byte_at(index: u32)` returns an owned `u8?`. It reads raw UTF-8
 bytes, including continuation bytes. An unsigned bounds check returns
 `None` at or beyond the byte length before any byte load. The receiver
 follows the same loan rules as the boundary check.
 
-`.scalar_at(index: u32)` returns an owned `Option<u32>`. The index is a
+`.scalar_at(index: u32)` returns an owned `u32?`. The index is a
 UTF-8 byte offset. `Some` contains the scalar's numeric Unicode value, for
 example 233 for `é`. The existing `u32` type covers the full scalar range
 without introducing a public character type. A continuation byte or an
@@ -121,7 +121,7 @@ ranges, along the lines of Rust's `get`. Single-integer string indexing
 remains unsupported. A `borrow string` points to the owner's whole descriptor.
 A subrange needs its own base address and length while retaining the loan of
 the original owner. A borrow of a temporary descriptor would instead track
-the temporary's storage. The current local `Option<borrow T>` can carry a
+the temporary's storage. The current local `(borrow T)?` can carry a
 reference to an existing place, but it cannot provide a branch or call result
 that ties a newly derived view to the input loan. Loan checking rejects
 reference-valued call results, and borrow Options cannot cross IR block edges
@@ -136,10 +136,9 @@ syntax remain open. [Rust str::get](https://doc.rust-lang.org/std/primitive.str.
 
 ## Strict validation of fixed bytes
 
-`bytes.validate_utf8(length)` borrows a fixed `Bytes<N>` or its equivalent
-`Array<u8, N>`. It takes an `i32` logical length and returns
-`Result<i32, Utf8Error>`. Success gives the number of Unicode scalars.
-`Utf8Error` derives from `Error` and adds an `offset: Option<i32>` field,
+`bytes.validate_utf8(length)` borrows a fixed `array<u8, N>`. It takes an `i32` logical length and returns
+`i32 ! Utf8Error`. Success gives the number of Unicode scalars.
+`Utf8Error` derives from `Error` and adds an `offset: i32?` field,
 using the codes and offsets below. The compiler infers the bound from the
 receiver. Wasm checks the length before any byte load and validates without
 allocating or changing the input. The guest validator uses this operation
@@ -147,7 +146,7 @@ for its boundary and malformed-byte fixtures.
 
 ## Fallible construction from fixed bytes
 
-`bytes.to_utf8_string(length)` returns `Result<string, Utf8Error>` from
+`bytes.to_utf8_string(length)` returns `string ! Utf8Error` from
 the logical prefix of a fixed byte array. The method sits alongside
 `validate_utf8` on the byte receiver. The `to` spelling reflects that it
 borrows the input and makes an owned copy. The length is an `i32` and the
@@ -167,8 +166,8 @@ decoding is outside this strict constructor.
 
 ### Outcomes and offsets
 
-Use an internal `Result<string, Utf8Error>` with the validator's error
-shape, a derived error carrying `offset: Option<i32>`. Validate the length
+Use an internal `string ! Utf8Error` with the validator's error
+shape, a derived error carrying `offset: i32?`. Validate the length
 before indexing and report the first failing byte. Offsets are zero-based
 within the logical prefix.
 
@@ -195,7 +194,7 @@ This internal function with a scalar entry exercises the supported static
 case with the application entry ABI left scalar.
 
 ```mb
-fn construct() -> Result<string, Error> { Ok("é") }
+fn construct() -> string ! Error { Ok("é") }
 
 fn main() -> i32 {
     match construct() { Ok(text) => if text.len() == 2 { 0 } else { 1 }, Err(_) => 2 }
@@ -211,7 +210,7 @@ outcome ABI continues to require a primitive success payload.
 [Wasm member layout](../../crates/memobits-wasm/src/lib.rs) ·
 [Heap String IR validation](../../crates/memobits-ir/src/lib.rs)
 
-1. Implemented internal `Result<string, E>` for static success descriptors,
+1. Implemented internal `string ! E` for static success descriptors,
    including construction, return, receipt and consuming match. A String
    local or internal call result can be used when heap provenance is absent.
    Containers of these results and external signatures remain gated.

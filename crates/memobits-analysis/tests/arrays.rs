@@ -62,10 +62,10 @@ fn literal_and_read_index_lower_to_array_new_and_element_addr_load() {
 
 #[test]
 fn annotated_empty_arrays_and_dynamic_indices_lower() {
-    lower("fn main() { let a: Array<i32, 0> = []; }");
+    lower("fn main() { let a: array<i32, 0> = []; }");
     lower("fn f(n: i64) -> i32 { let a := [4, 5]; a[n] + 0 }");
-    lower("fn f(n: u8) -> Bool { let a := [true, false]; if a[n] { true } else { false } }");
-    lower("fn f(n: i32) -> Bool { let a := [true, false]; a[n] && a[0] }");
+    lower("fn f(n: u8) -> bool { let a := [true, false]; if a[n] { true } else { false } }");
+    lower("fn f(n: i32) -> bool { let a := [true, false]; a[n] && a[0] }");
     lower("fn f() -> i32 { let a := [1, 2]; let b := [3, 4]; a[b[0] - 3] + 0 }");
 }
 
@@ -103,7 +103,7 @@ fn unsupported_array_forms_stay_gated() {
         "fn main() { [1; 2]; }",
         "fn main() { let x := [1, 2][0] + 1; }",
         // indexing a call result
-        "fn make() -> Array<i32, 2> { [1, 2] } fn main() { let x := make()[0] + 1; }",
+        "fn make() -> array<i32, 2> { [1, 2] } fn main() { let x := make()[0] + 1; }",
         // references to primitive elements are not expressible
         "fn main() { var a := [1, 2]; let r := a[0].share(); }",
     ] {
@@ -133,7 +133,7 @@ fn mutable_arrays_assignment_and_whole_array_moves_lower() {
     lower("fn main() { var a := [1, 2]; a[0] = 3; a[1] += a[0] * 2; a[0] -= 1; a[0] /= 1; a[0] %= 5; }");
     lower("fn main() -> i32 { var a := [1, 2, 3]; var i := 1; a[i] = a[0] + 1; a[i - 1] += a[2]; a[0] + 0 }");
     lower("fn main() { var a := [1, 2]; let b := a; var c := [5, 6]; c = b; c = [7, 8]; c = [0; 2]; }");
-    lower("fn main() { var a := [1.5, 2.5]; a[0] += 1.0; let b: Array<u8, 2> = [1; 2]; }");
+    lower("fn main() { var a := [1.5, 2.5]; a[0] += 1.0; let b: array<u8, 2> = [1; 2]; }");
     // A primitive element may be copied into another element.
     lower("fn main() { var a := [1, 2]; a[0] = a[1]; }");
 }
@@ -217,7 +217,7 @@ fn repetition_lowers_to_a_loop_whose_size_is_independent_of_the_count() {
 
 #[test]
 fn repetition_of_zero_and_one_needs_no_loop() {
-    let zero = lower("fn f() -> i32 { 1 } fn main() { let a: Array<i32, 0> = [f(); 0]; }");
+    let zero = lower("fn f() -> i32 { 1 } fn main() { let a: array<i32, 0> = [f(); 0]; }");
     assert_eq!(zero.functions[1].blocks.len(), 1);
     assert!(!zero.functions[1]
         .blocks
@@ -240,7 +240,7 @@ fn repeating_an_aggregate_binding_is_a_repeated_move_but_primitives_repeat() {
     for source in [
         "fn main() { let x := 5; let a := [x; 3]; let b := [x; 3]; }",
         "fn main() { let x := 5; let a := [x; 1]; }",
-        "fn main() { let x := 5; let a: Array<i32, 0> = [x; 0]; }",
+        "fn main() { let x := 5; let a: array<i32, 0> = [x; 0]; }",
         "fn main() { let x := 5; let a := [x + 0; 3]; }",
     ] {
         let program = lower(source);

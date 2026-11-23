@@ -8,7 +8,7 @@ use geom::Point;
 type Size {
     width: i32,
     height: i32,
-    square: Bool,
+    square: bool,
     scale: u8,
 }
 
@@ -45,11 +45,11 @@ fn manhattan(p: borrow Point) -> i32 {
 }
 
 // An array of structs is read through a `borrow` parameter, level by level.
-fn total_area(sizes: borrow Array<Size, 2>) -> i32 {
+fn total_area(sizes: borrow array<Size, 2>) -> i32 {
     area(sizes[0].borrow()) + area(sizes[1].borrow())
 }
 
-fn main() -> Result<i32, Error> {
+fn main() -> i32 ! Error {
     var s := make_size(3, 4);
     grow(s.share(), 2);
     s.scale = 2;

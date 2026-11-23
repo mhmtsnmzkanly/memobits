@@ -1,7 +1,7 @@
 use text::{byte_is, no_byte};
 
 // Fixed arrays, structs, and ownership.
-pub type Row = Array<i32, 3>;
+pub type Row = array<i32, 3>;
 type Station {
     id: u32,
     readings: Row,
@@ -29,7 +29,7 @@ fn calibrate(var row: Row) -> Row {
     row[2] %= 3;
     row
 }
-pub fn stations() -> Bool {
+pub fn stations() -> bool {
     // Repetition calls station once per element.
     var pair := [station(7); 2];
     pair[0].readings = [4, 5, 8];
@@ -53,21 +53,20 @@ pub fn stations() -> Bool {
     id == 8 && recorded == 17 && total(grid[1].borrow()) == 14
         && pair[1].readings[2] == 9
 }
-// Array<u8, N> is the core fixed-byte representation. Bytes<N> remains a
-// compatibility alias outside the target core.
-fn set_first_byte(buffer: share Array<u8, 2>) {
+// array<u8, N> is the fixed-byte representation.
+fn set_first_byte(buffer: share array<u8, 2>) {
     buffer[0] = 42;
 }
-fn first_byte(buffer: borrow Array<u8, 2>) -> u8 {
+fn first_byte(buffer: borrow array<u8, 2>) -> u8 {
     buffer[0]
 }
-fn return_bytes(buffer: Array<u8, 2>) -> Array<u8, 2> {
+fn return_bytes(buffer: array<u8, 2>) -> array<u8, 2> {
     buffer
 }
-pub fn fixed_bytes() -> Bool {
-    var bytes: Array<u8, 2> = [0; 2];
+pub fn fixed_bytes() -> bool {
+    var bytes: array<u8, 2> = [0; 2];
     set_first_byte(bytes.share());
-    let array: Array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
+    let array: array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
     // Validation borrows the prefix and returns its Unicode scalar count.
     // The utf8-validator project checks malformed bytes and error offsets.
     let valid := match array.validate_utf8(1) {
@@ -79,7 +78,7 @@ pub fn fixed_bytes() -> Bool {
         Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
         Err(_) => false
     };
-    // contains and index_of read without moving the array. Numeric and Bool
+    // contains and index_of read without moving the array. Numeric and bool
     // arrays use == for comparisons, including nested rows.
     // index_of returns the first zero-based match, or None for a miss.
     let first := match [0, 42, 42].index_of(42) {
@@ -91,8 +90,8 @@ pub fn fixed_bytes() -> Bool {
 }
 // Fixed arrays iterate in index order. Each iteration binds an immutable
 // primitive copy. The read loan ends when the loop exits.
-pub fn fixed_iteration() -> Bool {
-    var bytes: Array<u8, 4> = [1, 0, 3, 9];
+pub fn fixed_iteration() -> bool {
+    var bytes: array<u8, 4> = [1, 0, 3, 9];
     var digits: u8 = 0;
     loop byte in bytes {
         if byte == 0 { continue; }
@@ -101,14 +100,14 @@ pub fn fixed_iteration() -> Bool {
     }
     bytes[0] = 7;
 
-    let empty: Array<Bool, 0> = [];
+    let empty: array<bool, 0> = [];
     loop flag in empty { return flag; }
     digits == 13 && bytes[0] == 7
 }
 fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
     items.get(index)
 }
-fn list_has_word(items: borrow List<u32>, value: u32) -> Bool {
+fn list_has_word(items: borrow List<u32>, value: u32) -> bool {
     items.contains(value)
 }
 fn append_word(items: share List<u32>, value: u32) {
@@ -128,7 +127,7 @@ fn replace_words(items: share List<u32>, value: u32) {
 // List iteration visits immutable copies in insertion order. An empty List
 // skips the body. A direct call result stays alive until the loop exits.
 // The read loan prevents writes and moves of the receiver during the body.
-pub fn list_iteration() -> Bool {
+pub fn list_iteration() -> bool {
     var bytes: List<u8> = [];
     loop value in bytes { return false; }
     bytes.push(9);
@@ -150,7 +149,7 @@ pub fn list_iteration() -> Bool {
 }
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
-pub fn primitive_lists() -> Bool {
+pub fn primitive_lists() -> bool {
     var bytes: List<u8> = [];
     let before := bytes.len();
     let empty := !bytes.contains(42);

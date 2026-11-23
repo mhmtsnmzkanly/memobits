@@ -1750,7 +1750,7 @@ mod outcome_tests {
     fn option_instances_share_alias_identity_and_keep_distinct_payloads() {
         let parsed = memobits_syntax::parse(
             SourceId(0),
-            "type Number = i32; type A = Option<Number>; type B = Option<i32>; type C = Option<u32>; type D = Option<Option<i32>>;",
+            "type Number = i32; type A = Number?; type B = i32?; type C = u32?; type D = i32??;",
         );
         assert!(parsed.diagnostics.is_empty());
         let (table, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
@@ -1770,7 +1770,7 @@ mod outcome_tests {
 
     #[test]
     fn option_does_not_hide_recursive_value_layouts() {
-        let parsed = memobits_syntax::parse(SourceId(0), "type Node { next: Option<Node> }");
+        let parsed = memobits_syntax::parse(SourceId(0), "type Node { next: Node? }");
         assert!(parsed.diagnostics.is_empty());
         let (_, diagnostics) = TypeTable::build(&[("", &parsed.module)], HashMap::new());
         assert!(!diagnostics.is_empty());
@@ -1780,7 +1780,7 @@ mod outcome_tests {
     fn generic_nominal_types_specialize_type_and_const_arguments_once() {
         let parsed = memobits_syntax::parse(
             SourceId(0),
-            "type Box<T> { value: T } type Buffer<T, const N: u32> { data: Array<T, N> } type Maybe<T> [None, Some(T)] fn use_box(value: Box<i32>) {} fn use_buffer(value: Buffer<u8, 3>) {} fn use_maybe(value: Maybe<i32>) {}",
+            "type Box<T> { value: T } type Buffer<T, const N: u32> { data: array<T, N> } type Maybe<T> [None, Some(T)] fn use_box(value: Box<i32>) {} fn use_buffer(value: Buffer<u8, 3>) {} fn use_maybe(value: Maybe<i32>) {}",
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let (table, diagnostics) = TypeTable::build(&[("main", &parsed.module)], HashMap::new());
@@ -1824,7 +1824,7 @@ mod outcome_tests {
     fn generic_type_layout_cycles_and_unbounded_specialization_are_diagnosed() {
         for source in [
             "type Node<T> { next: Node<T> } fn use_node(value: Node<i32>) {}",
-            "type Grow<T> { next: Grow<Array<T, 2>> } fn use_grow(value: Grow<i32>) {}",
+            "type Grow<T> { next: Grow<array<T, 2>> } fn use_grow(value: Grow<i32>) {}",
         ] {
             let parsed = memobits_syntax::parse(SourceId(0), source);
             assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);

@@ -12,7 +12,7 @@ fn exercise<T>(point: T) -> T {
     point
 }
 
-pub fn run() -> Result<i32, Error> {
+pub fn run() -> i32 ! Error {
     let point := Point { x: math::add(19, 23) };
     let drawn := (exercise(point).draw() of Draw).copy();
     if drawn != 42 { return Err(Error { code: 1 }); }

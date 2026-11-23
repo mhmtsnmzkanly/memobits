@@ -1,6 +1,6 @@
 # Compiler-known outcomes (B4)
 
-Owned `Option<T>`, `Result<T, E>`, and `Attempt<T, E>` execute inside Memobits
+Owned `T?`, `T ! E`, and `Attempt<T, E>` execute inside Memobits
 functions. Zero-argument application entries support `Result` and `Attempt`
 with primitive success payloads. The full B4 contract is in
 [decisions.md](decisions.md).
@@ -9,14 +9,14 @@ with primitive success payloads. The full B4 contract is in
 
 - The shared registry in `memobits-syntax/src/templates.rs` declares template
   parameter kinds and variant payloads. Syntax accepts the registered argument
-  lists, including the integer length of `Array<T, N>`. Analysis resolves type
+  lists, including the integer length of `array<T, N>`. Analysis resolves type
   arguments through local and module aliases, then interns each outcome by
   template identity and resolved arguments. Nested instances participate in
   recursive value layout checks. User-defined generics remain unavailable.
 - Syntax records `borrow T` and `share T` arguments with their access mode and
   full span. Name resolution checks referent names and visibility at any
   nesting depth. Analysis allows a written borrow argument only in a direct
-  local `Option<borrow T>` binding annotation. Other written reference
+  local `(borrow T)?` binding annotation. Other written reference
   arguments produce TE017 at the argument span, and inferred reference
   payloads produce TE017 at the payload expression. Integer slots still
   require literals. Contextual owned primitive payloads can still load
@@ -80,7 +80,7 @@ with primitive success payloads. The full B4 contract is in
 ```memobits
 fn main() -> i32 {
     var owner := 7;
-    let wrapped: Option<borrow i32> = Some(owner.borrow());
+    let wrapped: (borrow i32)? = Some(owner.borrow());
     let moved := wrapped;
     let old := match moved { Some(r) => r.copy(), None => 0 };
     owner = 9;
@@ -88,7 +88,7 @@ fn main() -> i32 {
 }
 ```
 
-- Use an immutable local binding with a direct `Option<borrow T>` annotation
+- Use an immutable local binding with a direct `(borrow T)?` annotation
   to construct `Some` or `None`. The referent can be a supported non-Unit
   primitive, struct, enum or fixed array, including a referent named through
   an alias. `Some` consumes an existing borrow handle or a fresh borrow
@@ -116,9 +116,9 @@ fn main() -> i32 {
 
 ## Application entry adapter
 
-- The supported success payloads are `Bool`, integers through 64 bits, and
+- The supported success payloads are `bool`, integers through 64 bits, and
   `f32` and `f64`. The application adapter accepts zero-argument
-  `Result<T, E>` and `Attempt<T, E>` entries, including aliases. `Option`
+  `T ! E` and `Attempt<T, E>` entries, including aliases. `Option`
   entries, outcomes with aggregate success payloads, other aggregate
   application signatures, and aggregate library exports get LE900.
 - The internal version 1 adapter exports `main` with two Wasm `i32` results

@@ -8,12 +8,12 @@ use memobits_syntax::parse;
 
 const DECLS: &str = "type P { x: i32, y: i32 } \
     type Line { a: P, b: P } \
-    type Poly { n: u8, pts: Array<i32, 4>, c: P } \
+    type Poly { n: u8, pts: array<i32, 4>, c: P } \
     fn make_p() -> P { P { x: 7, y: 8 } } \
     fn rd(p: borrow P) -> i32 { p.x } \
     fn bump(p: share P) { p.x += 1; } \
     fn both(a: share P, b: share P) {} \
-    fn total(a: borrow Array<P, 3>) -> i32 { a[0].x + a[2].y } \
+    fn total(a: borrow array<P, 3>) -> i32 { a[0].x + a[2].y } \
     fn sum(p: borrow Poly) -> i32 { p.pts[0] + p.c.x } ";
 
 fn parsed(source: &str) -> memobits_syntax::Module {
@@ -219,7 +219,7 @@ fn array_of_struct_forms_are_accepted() {
     for body in [
         "let a := [P { x: 1, y: 2 }, make_p()]; let v := a[1].x + a[0].y;",
         "var a := [P { x: 0, y: 0 }; 8]; a[3].x = 5; a[4] = P { x: 1, y: 1 }; a[2].y += 3;",
-        "let a: Array<P, 0> = [P { x: 0, y: 0 }; 0];",
+        "let a: array<P, 0> = [P { x: 0, y: 0 }; 0];",
         "var a := [P { x: 0, y: 0 }; 1]; a[0].x = 1;",
         "var m := [[P { x: 0, y: 0 }; 2]; 3]; m[1][0].x = 2; let v := m[2][1].y;",
         "var l := Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 } }; let v := l.a.x + l.b.y;",
@@ -303,8 +303,8 @@ fn moving_a_sub_aggregate_out_is_te022_for_fields_and_elements() {
     for source in [
         format!("{DECLS} fn f(l: Line) -> P {{ return l.a; }} fn main() {{}}"),
         format!("{DECLS} fn f(l: Line) -> P {{ l.a }} fn main() {{}}"),
-        format!("{DECLS} fn f(a: Array<P, 2>) -> P {{ return a[0]; }} fn main() {{}}"),
-        format!("{DECLS} fn f(p: Poly) -> Array<i32, 4> {{ p.pts }} fn main() {{}}"),
+        format!("{DECLS} fn f(a: array<P, 2>) -> P {{ return a[0]; }} fn main() {{}}"),
+        format!("{DECLS} fn f(p: Poly) -> array<i32, 4> {{ p.pts }} fn main() {{}}"),
     ] {
         rejected(&source, "TE022", "partial moves are deferred");
     }
@@ -346,7 +346,7 @@ fn write_through_immutable_roots_is_te004() {
         "through borrow binding",
     );
     rejected(
-        &format!("{DECLS} fn w(a: borrow Array<P, 2>) {{ a[0].x = 1; }} fn main() {{}}"),
+        &format!("{DECLS} fn w(a: borrow array<P, 2>) {{ a[0].x = 1; }} fn main() {{}}"),
         "TE004",
         "through borrow binding",
     );
@@ -406,11 +406,11 @@ fn type_errors_in_nested_places() {
 #[test]
 fn recursive_containment_through_arrays_is_te026() {
     for source in [
-        "type A { xs: Array<A, 2> } fn main() {}",
-        "type A { xs: Array<Array<A, 2>, 3> } fn main() {}",
-        "type A { b: Array<B, 2> } type B { a: A } fn main() {}",
-        "type A { b: B } type B { xs: Array<A, 0> } fn main() {}",
-        "type R = Array<A, 2>; type A { xs: R } fn main() {}",
+        "type A { xs: array<A, 2> } fn main() {}",
+        "type A { xs: array<array<A, 2>, 3> } fn main() {}",
+        "type A { b: array<B, 2> } type B { a: A } fn main() {}",
+        "type A { b: B } type B { xs: array<A, 0> } fn main() {}",
+        "type R = array<A, 2>; type A { xs: R } fn main() {}",
     ] {
         rejected(source, "TE026", "recursive struct");
     }
@@ -420,6 +420,6 @@ fn recursive_containment_through_arrays_is_te026() {
 fn aggregate_fields_and_elements_are_valid_by_value_types() {
     // Not recursive: a struct may repeat a type, and arrays may hold structs
     // that themselves hold arrays.
-    lower("type P { x: i32 } type Q { a: P, b: P, c: Array<P, 2> } type R { qs: Array<Q, 2> } fn main() {}");
-    lower("type G = Array<P, 2>; type P { x: i32 } type H { g: G } fn main() {}");
+    lower("type P { x: i32 } type Q { a: P, b: P, c: array<P, 2> } type R { qs: array<Q, 2> } fn main() {}");
+    lower("type G = array<P, 2>; type P { x: i32 } type H { g: G } fn main() {}");
 }

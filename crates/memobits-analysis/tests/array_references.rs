@@ -22,12 +22,12 @@ fn rejected(source: &str, code: &str) {
     assert!(codes.iter().any(|c| c == code), "{source}: {codes:?}");
 }
 
-const DECLARATIONS: &str = "fn read(a: borrow Array<i32, 3>) -> i32 { a[0] + 0 } \
-    fn write(a: share Array<i32, 3>) { a[0] = 1; } \
-    fn two(a: share Array<i32, 3>, b: share Array<i32, 3>) {} \
-    fn mixed(a: share Array<i32, 3>, b: borrow Array<i32, 3>) {} \
-    fn both(a: borrow Array<i32, 3>, b: borrow Array<i32, 3>) -> i32 { a[0] + b[1] } \
-    fn own(a: Array<i32, 3>) -> i32 { a[0] + 0 } ";
+const DECLARATIONS: &str = "fn read(a: borrow array<i32, 3>) -> i32 { a[0] + 0 } \
+    fn write(a: share array<i32, 3>) { a[0] = 1; } \
+    fn two(a: share array<i32, 3>, b: share array<i32, 3>) {} \
+    fn mixed(a: share array<i32, 3>, b: borrow array<i32, 3>) {} \
+    fn both(a: borrow array<i32, 3>, b: borrow array<i32, 3>) -> i32 { a[0] + b[1] } \
+    fn own(a: array<i32, 3>) -> i32 { a[0] + 0 } ";
 
 fn main_body(body: &str) -> String {
     format!("{DECLARATIONS}fn main() {{ {body} }}")
@@ -48,7 +48,7 @@ fn owned_array_arguments_move_the_source() {
     ));
     // Argument order: the move happens when the argument is evaluated.
     rejected(
-        "fn f(a: Array<i32, 2>, n: i32) {} fn main() { var a := [1, 2]; f(a, { a[0] = 5; 1 }); }",
+        "fn f(a: array<i32, 2>, n: i32) {} fn main() { var a := [1, 2]; f(a, { a[0] = 5; 1 }); }",
         "BE001",
     );
 }
@@ -77,7 +77,7 @@ fn two_share_arguments_of_the_same_array_conflict() {
         "BE005",
     );
     rejected(
-        "fn mixed(a: borrow Array<i32, 3>, b: share Array<i32, 3>) {} fn main() { var a := [1, 2, 3]; mixed(a.borrow(), a.share()); }",
+        "fn mixed(a: borrow array<i32, 3>, b: share array<i32, 3>) {} fn main() { var a := [1, 2, 3]; mixed(a.borrow(), a.share()); }",
         "BE005",
     );
     accepted(&main_body(
@@ -121,7 +121,7 @@ fn element_access_overlaps_the_whole_array_while_a_reference_is_live() {
     ));
     // A share argument is live for the whole call, including its other arguments.
     rejected(
-        "fn f(a: share Array<i32, 2>, n: i32) {} fn main() { var a := [1, 2]; f(a.share(), { a[0] = 1; 2 }); }",
+        "fn f(a: share array<i32, 2>, n: i32) {} fn main() { var a := [1, 2]; f(a.share(), { a[0] = 1; 2 }); }",
         "BE005",
     );
 }
@@ -129,19 +129,19 @@ fn element_access_overlaps_the_whole_array_while_a_reference_is_live() {
 #[test]
 fn reborrowing_a_reference_parameter_keeps_loans_and_availability() {
     accepted(
-        "fn r(a: borrow Array<i32, 2>) -> i32 { a[0] + 0 } \
-         fn w(a: share Array<i32, 2>) { a[0] = 1; } \
-         fn f(a: borrow Array<i32, 2>) -> i32 { r(a) + r(a) } \
-         fn g(a: share Array<i32, 2>) { w(a); w(a); a[1] = 3; r(a.borrow()); }",
+        "fn r(a: borrow array<i32, 2>) -> i32 { a[0] + 0 } \
+         fn w(a: share array<i32, 2>) { a[0] = 1; } \
+         fn f(a: borrow array<i32, 2>) -> i32 { r(a) + r(a) } \
+         fn g(a: share array<i32, 2>) { w(a); w(a); a[1] = 3; r(a.borrow()); }",
     );
     rejected(
-        "fn w(a: share Array<i32, 2>, b: share Array<i32, 2>) {} \
-         fn f(a: share Array<i32, 2>) { w(a, a); }",
+        "fn w(a: share array<i32, 2>, b: share array<i32, 2>) {} \
+         fn f(a: share array<i32, 2>) { w(a, a); }",
         "BE005",
     );
     // Moving a reference binding away makes the original unavailable.
     rejected(
-        "fn f(a: borrow Array<i32, 2>) { let b := a; a[0] + b[0]; }",
+        "fn f(a: borrow array<i32, 2>) { let b := a; a[0] + b[0]; }",
         "BE001",
     );
 }

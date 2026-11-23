@@ -82,13 +82,13 @@ fn tuples_compose_with_fixed_arrays_in_both_aggregate_directions() {
 
     assert_source_and_wasm(
         &fixture,
-        "fn read(values: Array<(i32, Bool), 2>) -> i32 { if values[1].1 { values[0].0 + values[1].0 } else { 0 } } fn main() -> i32 { read([(40, false), (2, true)]) }",
+        "fn read(values: array<(i32, bool), 2>) -> i32 { if values[1].1 { values[0].0 + values[1].0 } else { 0 } } fn main() -> i32 { read([(40, false), (2, true)]) }",
         "array-of-tuples.wasm",
     );
 
     assert_source_and_wasm(
         &fixture,
-        "fn read(value: (Array<i32, 2>, i32)) -> i32 { value.0[1] + value.1 } fn main() -> i32 { read(([40, 2], 40)) }",
+        "fn read(value: (array<i32, 2>, i32)) -> i32 { value.0[1] + value.1 } fn main() -> i32 { read(([40, 2], 40)) }",
         "tuple-with-array.wasm",
     );
 }
@@ -98,7 +98,7 @@ fn string_owning_tuple_arrays_transfer_through_owned_calls() {
     let fixture = Fixture::new();
     assert_source_and_wasm_output(
         &fixture,
-        "fn sum(values: Array<(string, u32), 2>) -> u32 { values[0].1 + values[1].1 } fn main() -> u32 { let left := \"left\".concat(\"!\"); let right := \"right\".concat(\"!\"); let first: (string, u32) = (left, 20); let second: (string, u32) = (right, 22); let rows: Array<(string, u32), 2> = [first, second]; sum(rows) }",
+        "fn sum(values: array<(string, u32), 2>) -> u32 { values[0].1 + values[1].1 } fn main() -> u32 { let left := \"left\".concat(\"!\"); let right := \"right\".concat(\"!\"); let first: (string, u32) = (left, 20); let second: (string, u32) = (right, 22); let rows: array<(string, u32), 2> = [first, second]; sum(rows) }",
         "string-tuple-array.wasm",
         b"Result: u32(42)\n",
         b"Result: i32(42)\n",
@@ -106,7 +106,7 @@ fn string_owning_tuple_arrays_transfer_through_owned_calls() {
 
     assert_source_and_wasm_output(
         &fixture,
-        "fn text_len(row: borrow (string, u32)) -> u32 { row.0.len() } fn main() -> u32 { let text := \"borrowed\".concat(\"!\"); let row: (string, u32) = (text, 40); let rows: Array<(string, u32), 1> = [row]; text_len(rows[0].borrow()) + rows[0].1 }",
+        "fn text_len(row: borrow (string, u32)) -> u32 { row.0.len() } fn main() -> u32 { let text := \"borrowed\".concat(\"!\"); let row: (string, u32) = (text, 40); let rows: array<(string, u32), 1> = [row]; text_len(rows[0].borrow()) + rows[0].1 }",
         "borrow-string-tuple-array.wasm",
         b"Result: u32(49)\n",
         b"Result: i32(49)\n",
@@ -142,7 +142,7 @@ fn enum_arrays_clean_active_tuple_and_nested_array_payloads() {
     let fixture = Fixture::new();
     assert_source_and_wasm_output(
         &fixture,
-        "type Text [ Rows(Array<(string, u32), 2>), Single((string, u32)), Empty ] fn consume(values: Array<Text, 2>, early: Bool) -> u32 { if early { return 1; } 42 } fn main() -> u32 { let a := \"a\".concat(\"\"); let b := \"b\".concat(\"\"); let c := \"c\".concat(\"\"); let first: (string, u32) = (a, 20); let second: (string, u32) = (b, 22); let third: (string, u32) = (c, 7); let rows: Array<(string, u32), 2> = [first, second]; let row_state: Text = Text::Rows(rows); let single_state: Text = Text::Single(third); let values: Array<Text, 2> = [row_state, single_state]; consume(values, false) }",
+        "type Text [ Rows(array<(string, u32), 2>), Single((string, u32)), Empty ] fn consume(values: array<Text, 2>, early: bool) -> u32 { if early { return 1; } 42 } fn main() -> u32 { let a := \"a\".concat(\"\"); let b := \"b\".concat(\"\"); let c := \"c\".concat(\"\"); let first: (string, u32) = (a, 20); let second: (string, u32) = (b, 22); let third: (string, u32) = (c, 7); let rows: array<(string, u32), 2> = [first, second]; let row_state: Text = Text::Rows(rows); let single_state: Text = Text::Single(third); let values: array<Text, 2> = [row_state, single_state]; consume(values, false) }",
         "enum-array-owning-tuples.wasm",
         b"Result: u32(42)\n",
         b"Result: i32(42)\n",

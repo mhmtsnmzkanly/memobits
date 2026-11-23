@@ -12,7 +12,7 @@ fn add_question(value: share string) {
     value.push_str("?");
 }
 
-pub fn check() -> Result<i32, Error> {
+pub fn check() -> i32 ! Error {
     let text := "hello";
     let joined := text.concat(" world");
     let moved := text;

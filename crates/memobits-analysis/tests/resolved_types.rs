@@ -54,7 +54,7 @@ fn imports_prelude_qualified_paths_and_module_identity() {
         "[prelude]\nother_add='other::add'\n",
         "use self::math::add as math_add; fn main() -> i32 { math_add(2, 3) + other_add(true) + self::math::add(4, 5) }",
         "pub fn add(a: i32, b: i32) -> i32 { a + b }",
-        "pub fn add(a: Bool) -> i32 { if a { 1 } else { 0 } }",
+        "pub fn add(a: bool) -> i32 { if a { 1 } else { 0 } }",
     );
     assert!(f.check().is_empty(), "{:?}", f.check());
 }
@@ -65,7 +65,7 @@ fn local_shadowing_keeps_lexical_binding() {
         "",
         "use math::add as call; fn main() -> i32 { let call := 1; call }",
         "pub fn add(a: i32) -> i32 { a }",
-        "pub fn add(a: Bool) -> Bool { a }",
+        "pub fn add(a: bool) -> bool { a }",
     );
     assert!(f.check().is_empty());
 }
@@ -77,7 +77,7 @@ fn imported_argument_error_uses_call_site_source_span() {
         "",
         source,
         "pub fn add(a: i32) -> i32 { a }",
-        "pub fn add(a: Bool) -> Bool { a }",
+        "pub fn add(a: bool) -> bool { a }",
     );
     let project = Project::load(&f.0, None).unwrap();
     let resolution = resolve(&project, Target::Application);
@@ -111,7 +111,7 @@ fn lower_resolved_preserves_canonical_function_identity_for_aliases() {
         "[prelude]\nother_add='other::add'\n",
         "use self::math::add as math_add; fn main() -> i32 { math_add(2, 3) + other_add(true) + self::math::add(4, 5) }",
         "pub fn add(a: i32, b: i32) -> i32 { a + b }",
-        "pub fn add(a: Bool) -> i32 { if a { 1 } else { 0 } }",
+        "pub fn add(a: bool) -> i32 { if a { 1 } else { 0 } }",
     );
     let project = Project::load(&f.0, None).unwrap();
     let resolution = resolve(&project, Target::Application);
@@ -199,7 +199,7 @@ fn lower_resolved_ownership_tracks_moves_across_modules() {
     let f = Fixture::new(
         "",
         "use math::take; fn main() { let x := [1]; take(x); x[0] + 1; }",
-        "pub fn take(value: Array<i32, 1>) {}",
+        "pub fn take(value: array<i32, 1>) {}",
         "",
     );
     let project = Project::load(&f.0, None).unwrap();
@@ -273,8 +273,8 @@ fn arrays_check_types_but_unsupported_forms_cannot_lower_in_resolved_modules() {
 #[test]
 fn nested_arrays_and_array_results_lower_in_resolved_modules() {
     for main in [
-        "fn main() { let a: Array<Array<i8, 1>, 2> = [[1], [2]]; }",
-        "fn main() {} fn values(a: Array<i32, 2>) -> Array<i32, 2> { [1, 2] }",
+        "fn main() { let a: array<array<i8, 1>, 2> = [[1], [2]]; }",
+        "fn main() {} fn values(a: array<i32, 2>) -> array<i32, 2> { [1, 2] }",
     ] {
         let fixture = Fixture::new("", main, "", "");
         assert!(fixture.check().is_empty(), "{:?}", fixture.check());
@@ -289,7 +289,7 @@ fn nested_arrays_and_array_results_lower_in_resolved_modules() {
 fn let_arrays_with_indexing_lower_in_resolved_modules() {
     let fixture = Fixture::new(
         "",
-        "fn main() -> i32 { let a: Array<i32, 2> = [1, 2]; a[1] + a[0] }",
+        "fn main() -> i32 { let a: array<i32, 2> = [1, 2]; a[1] + a[0] }",
         "",
         "",
     );

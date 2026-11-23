@@ -16,8 +16,8 @@ fn lower(source: &str) -> memobits_ir::Program {
 fn option_aliases_construct_match_and_cross_calls() {
     let program = lower(
         "type Number = i32;
-         type Maybe = Option<Number>;
-         fn make(n: i32) -> Option<i32> { Maybe::Some(n) }
+         type Maybe = Number?;
+         fn make(n: i32) -> i32? { Maybe::Some(n) }
          fn read(value: Maybe) -> i32 {
              match value { Maybe::Some(n) => n, Maybe::None => 0 }
          }
@@ -30,7 +30,7 @@ fn option_aliases_construct_match_and_cross_calls() {
 #[test]
 fn option_aggregate_payload_moves_remain_checked() {
     let program = lower(
-        "type Maybe = Option<Array<i32, 2>>;
+        "type Maybe = array<i32, 2>?;
          fn main() {
              let values := [1, 2];
              let first := Maybe::Some(values);
@@ -45,8 +45,8 @@ fn option_aggregate_payload_moves_remain_checked() {
 #[test]
 fn nested_options_keep_all_instantiated_ir_definitions() {
     let program = lower(
-        "type Inner = Option<i32>;
-         type Outer = Option<Inner>;
+        "type Inner = i32?;
+         type Outer = Inner?;
          fn main() -> i32 {
              let value := Outer::Some(Inner::Some(9));
              match value {
@@ -61,7 +61,7 @@ fn nested_options_keep_all_instantiated_ir_definitions() {
 
 #[test]
 fn contextual_option_prelude_constructors_and_patterns() {
-    let program = lower("fn make() -> Option<i32> { Some(7) } fn main() -> i32 { let empty: Option<i32> = None; let value := make(); match value { Some(n) => n, None => 0 } }");
+    let program = lower("fn make() -> i32? { Some(7) } fn main() -> i32 { let empty: i32? = None; let value := make(); match value { Some(n) => n, None => 0 } }");
     assert!(memobits_ownership::check_ownership(&program).is_empty());
 }
 
@@ -75,24 +75,18 @@ fn option_infers_nested_payloads_without_annotations() {
 #[test]
 fn reference_type_arguments_fail_before_lowering() {
     for (source, rejected) in [
+        ("type Maybe = (borrow i32)?; fn main() {}", "borrow i32"),
+        ("fn main() { let empty: (share i32)? = None; }", "share i32"),
         (
-            "type Maybe = Option<borrow i32>; fn main() {}",
+            "fn leak() -> (borrow i32)? { let n := 1; Some(n.borrow()) } fn main() {}",
             "borrow i32",
         ),
         (
-            "fn main() { let empty: Option<share i32> = None; }",
-            "share i32",
-        ),
-        (
-            "fn leak() -> Option<borrow i32> { let n := 1; Some(n.borrow()) } fn main() {}",
+            "type Record { value: array<(borrow i32)?, 2> } fn main() {}",
             "borrow i32",
         ),
         (
-            "type Record { value: Array<Option<borrow i32>, 2> } fn main() {}",
-            "borrow i32",
-        ),
-        (
-            "fn take(a: Array<borrow i32, 2>) {} fn main() {}",
+            "fn take(a: array<borrow i32, 2>) {} fn main() {}",
             "borrow i32",
         ),
         (
@@ -133,7 +127,7 @@ fn owned_option_still_copies_primitive_from_reference() {
     let program = lower(
         "fn main() -> i32 {
              var n := 1;
-             let wrapped: Option<i32> = Some(n.borrow());
+             let wrapped: i32? = Some(n.borrow());
              n = 2;
              match wrapped { Some(value) => value, None => n }
          }",
@@ -195,9 +189,9 @@ fn owned_result_and_attempt_intern_aliases_and_match_with_context() {
     let program = lower(
         "type Failure = Error;
          type Number = u32;
-         type Read = Result<Number, Failure>;
+         type Read = Number ! Failure;
          type Work = Attempt<Read, Failure>;
-         fn make() -> Result<u32, Error> { Ok(7) }
+         fn make() -> u32 ! Error { Ok(7) }
          fn work() -> Work { Done(make()) }
          fn main() -> u32 {
              let error: Read = Read::Err(Error { code: 17 });
@@ -218,7 +212,7 @@ fn owned_result_and_attempt_intern_aliases_and_match_with_context() {
 #[test]
 fn outcome_constructor_names_respect_shadowing() {
     lower(
-        "type R = Result<i32, Error>;
+        "type R = i32 ! Error;
          fn Ok(n: i32) -> R { R::Ok(n) }
          fn main() -> i32 {
              let value: R = Ok(5);
@@ -227,7 +221,7 @@ fn outcome_constructor_names_respect_shadowing() {
          }",
     );
     rejects(
-        "fn main() -> Result<i32, Error> { let Ok := 5; Ok(1) }",
+        "fn main() -> i32 ! Error { let Ok := 5; Ok(1) }",
         "TE011",
         "not callable",
     );
@@ -264,12 +258,12 @@ fn incomplete_or_incompatible_outcome_constructors_report_inference_errors() {
         "belongs to Result",
     );
     rejects(
-        "fn main() -> Result<i32, Error> { Ok(true) }",
+        "fn main() -> i32 ! Error { Ok(true) }",
         "TE002",
         "expected i32",
     );
     rejects(
-        "fn main() -> Result<i32, Error> { Ok(1, 2) }",
+        "fn main() -> i32 ! Error { Ok(1, 2) }",
         "TE010",
         "expects 1",
     );
@@ -283,7 +277,7 @@ fn incomplete_or_incompatible_outcome_constructors_report_inference_errors() {
 #[test]
 fn the_error_bound_checks_identity_and_inferred_payload_evidence() {
     rejects(
-        "type Lookalike { pub code: u32 } fn main() { let value: Result<i32, Lookalike> = Ok(7); }",
+        "type Lookalike { pub code: u32 } fn main() { let value: i32 ! Lookalike = Ok(7); }",
         "TE002",
         "requires Error or a type derived from it for its error type argument, found Lookalike",
     );
@@ -298,7 +292,7 @@ fn the_error_bound_checks_identity_and_inferred_payload_evidence() {
         "requires Error",
     );
     rejects(
-        "fn main() -> Result<i32, Error> { let e := Error { code: 0 }; Err(e.borrow()) }",
+        "fn main() -> i32 ! Error { let e := Error { code: 0 }; Err(e.borrow()) }",
         "TE017",
         "reference values cannot escape",
     );
@@ -328,7 +322,7 @@ fn outcome_matches_check_family_instance_and_coverage() {
 #[test]
 fn outcome_payload_constructors_consume_owned_aggregates() {
     let program = lower(
-        "type R = Result<Array<i32, 2>, Error>;
+        "type R = array<i32, 2> ! Error;
          type A = Attempt<i32, Error>;
          fn main() {
              let values := [1, 2];
@@ -351,7 +345,7 @@ fn outcome_payload_constructors_consume_owned_aggregates() {
 #[test]
 fn diverging_outcome_payloads_lower_without_constructing_a_variant() {
     lower(
-        "fn annotated() -> i32 { let value: Result<i32, Error> = Ok({ return 7; }); 0 }
+        "fn annotated() -> i32 { let value: i32 ! Error = Ok({ return 7; }); 0 }
          fn main() -> i32 { let value := Some({ return annotated(); }); 0 }",
     );
 }
@@ -359,7 +353,7 @@ fn diverging_outcome_payloads_lower_without_constructing_a_variant() {
 #[test]
 fn error_derivation_flattens_fields_in_ancestor_first_order() {
     let program = lower(
-        "type Handled = Result<u32, ParseError>;
+        "type Handled = u32 ! ParseError;
          type ParseError: BaseAlias { pub line: u32 }
          type BaseAlias = BaseError;
          type BaseError: Root { pub stage: u32, pub column: u32 }
@@ -398,7 +392,7 @@ fn error_derivation_rejects_non_error_bases() {
         ("", "u32"),
         ("", "Array<u32, 2>"),
         (
-            "type Wrapped = Result<i32, Valid>; type Valid: Error {}",
+            "type Wrapped = i32 ! Valid; type Valid: Error {}",
             "Wrapped",
         ),
     ] {
@@ -440,7 +434,7 @@ fn error_derivation_diagnoses_collisions_and_cycles() {
             "error derivation cycle",
         ),
         (
-            "type Base: Error { next: Result<i32, Leaf> } type Leaf: Base {}",
+            "type Base: Error { next: i32 ! Leaf } type Leaf: Base {}",
             "TE026",
             "'Leaf' would have infinite size",
         ),
@@ -456,7 +450,7 @@ fn derived_errors_are_moved_into_outcomes_and_require_context() {
          fn main() {
              let error := ParseError { code: 7 };
              let failed: Attempt<i32, ParseError> = Failed(error);
-             let reused: Result<i32, ParseError> = Err(error);
+             let reused: i32 ! ParseError = Err(error);
          }",
     );
     assert!(memobits_ownership::check_ownership(&program)
@@ -474,7 +468,7 @@ fn error_derivation_preserves_nominal_type_checks() {
     for (use_error, message) in [
         ("owned(e)", "expected Error, found ParseError"),
         (
-            "let failed: Result<i32, Error> = Err(e);",
+            "let failed: i32 ! Error = Err(e);",
             "expected Error, found ParseError",
         ),
     ] {
@@ -581,7 +575,7 @@ fn local_borrow_option_keeps_the_owner_loan_through_moves_and_extraction() {
         let source = format!(
             "type P {{ x: i32 }} fn main() -> i32 {{
                 var owner := P {{ x: 1 }};
-                let value: Option<borrow P> = Some(owner.borrow());
+                let value: (borrow P)? = Some(owner.borrow());
                 let moved := value;
                 {body}
             }}"
@@ -596,7 +590,7 @@ fn local_borrow_option_extraction_is_read_only_and_allows_later_owner_moves() {
     let source = "type P { x: i32 }
         fn main() -> i32 {
             var owner := P { x: 7 };
-            let wrapped: Option<borrow P> = Some(owner.borrow());
+            let wrapped: (borrow P)? = Some(owner.borrow());
             match wrapped { Some(r) => { let x := r.x; let moved := owner; x + moved.x }, None => 0 }
         }";
     assert!(memobits_ownership::check_ownership(&lower(source)).is_empty());
@@ -617,19 +611,19 @@ fn local_borrow_option_extraction_is_read_only_and_allows_later_owner_moves() {
 #[test]
 fn local_borrow_option_unsupported_transports_are_gated() {
     for body in [
-        "var value: Option<borrow i32> = Some(owner.borrow());",
-        "let value: Option<borrow i32> = Some(owner.share());",
-        "let value: Option<borrow i32> = Some(owner);",
-        "let value: Option<borrow i32> = { let inner := 2; let local: Option<borrow i32> = Some(inner.borrow()); local };",
-        "let value: Option<borrow i32> = if true { None } else { None };",
-        "let value: Option<borrow i32> = None; let next := Some(value);",
-        "let value: Option<borrow i32> = None; let next := [value];",
-        "let value: Option<borrow i32> = None; let r := value.borrow();",
-        "let value: Option<borrow i32> = Some(owner.borrow()); let r := match value { Some(r) => r, None => owner.borrow() };",
-        "let value: Option<borrow i32> = None; let next := match true_option() { Some(_) => value, None => value };",
+        "var value: (borrow i32)? = Some(owner.borrow());",
+        "let value: (borrow i32)? = Some(owner.share());",
+        "let value: (borrow i32)? = Some(owner);",
+        "let value: (borrow i32)? = { let inner := 2; let local: (borrow i32)? = Some(inner.borrow()); local };",
+        "let value: (borrow i32)? = if true { None } else { None };",
+        "let value: (borrow i32)? = None; let next := Some(value);",
+        "let value: (borrow i32)? = None; let next := [value];",
+        "let value: (borrow i32)? = None; let r := value.borrow();",
+        "let value: (borrow i32)? = Some(owner.borrow()); let r := match value { Some(r) => r, None => owner.borrow() };",
+        "let value: (borrow i32)? = None; let next := match true_option() { Some(_) => value, None => value };",
     ] {
         let source = format!(
-            "fn true_option() -> Option<i32> {{ Some(1) }}
+            "fn true_option() -> i32? {{ Some(1) }}
              fn main() {{ var owner := 1; {body} }}"
         );
         let parsed = parse(SourceId(91), &source);
@@ -646,7 +640,7 @@ fn ir_rejects_escaping_or_nonconsuming_borrow_option_transport() {
     let program = lower(
         "fn main() -> i32 {
             let owner := 9;
-            let wrapped: Option<borrow i32> = Some(owner.borrow());
+            let wrapped: (borrow i32)? = Some(owner.borrow());
             match wrapped { Some(r) => r.copy(), None => 0 }
         }",
     );
@@ -683,8 +677,8 @@ fn ir_rejects_a_second_borrow_option_initializer_without_an_intervening_move() {
 
     let mut program = lower(
         "fn main() {
-            let first: Option<borrow i32> = None;
-            let second: Option<borrow i32> = None;
+            let first: (borrow i32)? = None;
+            let second: (borrow i32)? = None;
         }",
     );
     let mut targets = program.functions[0].blocks[0]
@@ -713,7 +707,7 @@ fn ir_rejects_a_second_borrow_option_initializer_without_an_intervening_move() {
 fn borrow_option_reborrow_freezes_its_parent_share_until_last_use() {
     let source = "type P { x: i32 }
         fn update(parent: share P) -> i32 {
-            let wrapped: Option<borrow P> = Some(parent.borrow());
+            let wrapped: (borrow P)? = Some(parent.borrow());
             let old := match wrapped {
                 Some(r) => { let old := r.x; parent.x = 8; old },
                 None => 0
@@ -742,9 +736,9 @@ fn borrow_option_reborrow_freezes_its_parent_share_until_last_use() {
 
 #[test]
 fn borrow_option_loan_is_live_only_on_branches_that_use_it() {
-    let source = "fn branch(flag: Bool) -> i32 {
+    let source = "fn branch(flag: bool) -> i32 {
         var owner := 7;
-        let wrapped: Option<borrow i32> = Some(owner.borrow());
+        let wrapped: (borrow i32)? = Some(owner.borrow());
         if flag { match wrapped { Some(r) => r.copy(), None => 0 } }
         else { owner = 9; owner }
     }

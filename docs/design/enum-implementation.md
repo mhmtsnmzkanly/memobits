@@ -38,10 +38,10 @@ through a `share` binds read-only too.
 Implementation sequence and acceptance gates: `outcome-implementation.md`.
 The shared compiler registry supplies the templates. Analysis interns each
 concrete instance, so IR and Wasm use the ordinary enum pipeline.
-Type arguments such as `Option<i32>` instantiate compiler-known types;
+Type arguments such as `i32?` instantiate compiler-known types;
 user-defined generic declarations remain deferred, as required by `decisions.md`.
 Prelude variants are `Some`/`None`, `Ok`/`Err`, and `Done`/`Skipped`/`Failed`.
-Explicitly typed local `Option<borrow T>` bindings support construction,
+Explicitly typed local `(borrow T)?` bindings support construction,
 consuming local moves and consuming matches. The wrapper carries the loan on
 the referent until the wrapper or extracted reference reaches its last use.
 B3 loans cover borrowing the storage of an enum with owned payloads. See the
@@ -174,7 +174,7 @@ B1 defines the cell layout and the tag value so B2 only adds instructions.
 - Enum values as `let` / `var` bindings, whole assignment (`s = Shape::Empty;`),
   moves (BE001 after a move), owned / `borrow` / `share` parameters and `var`
   owned parameters, results, `if` and block joins, early `return`, struct fields
-  of enum type, `Array<Shape, N>` elements, array literals and repetition
+  of enum type, `array<Shape, N>` elements, array literals and repetition
   (`[Shape::Empty; 4]`, the element expression evaluated per element), enums
   inside enum payloads, and loops that build enums.
 - `.borrow()` / `.share()` of a whole enum to parameters or local reference

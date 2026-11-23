@@ -48,7 +48,7 @@ is left to analysis.
 Ordinary single-line UTF-8 string literals parse. String escapes, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
 current accepted subset. The parser is handwritten and uses Pratt precedence.
 
-Fixed-array syntax includes structured `Array<T, N>` (including nested element
+Fixed-array syntax includes structured `array<T, N>` (including nested element
 types), element literals, repetitions, and postfix indexing. Counts are
 source-located nonnegative integer literals. Other generic constructors are
 rejected. This crate only parses arrays; typing, ownership and execution live in

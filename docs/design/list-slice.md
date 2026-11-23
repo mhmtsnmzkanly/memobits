@@ -1,11 +1,11 @@
 # First executable List slice
 
 [Accepted collection and ownership decisions](decisions.md) define `List<T>`
-as a homogeneous dynamic collection and `Array<T, N>` as fixed-length.
+as a homogeneous dynamic collection and `array<T, N>` as fixed-length.
 A `let` owner cannot mutate its elements. Primitive elements can be read
 by value, `get` uses `Option` for absence, and later removal of an owned
 element transfers ownership. Keep the existing fixed-array rules, including
-the equivalence of `Bytes<N>` and `Array<u8, N>`.
+byte buffers as `array<u8, N>`.
 [Fixed arrays](fixed-array-implementation.md)
 
 ## Executable checkpoint
@@ -78,14 +78,14 @@ or a coverage need.
   when the List is already empty. It follows the same receiver and loan rules
   as `pop` and retains capacity for subsequent pushes.
 - Use `items.len()` for a non-consuming `u32` element count and
-  `items.get(index)` for a copied `Option<T>` at a `u32` index. Both work
+  `items.get(index)` for a copied `T?` at a `u32` index. Both work
   on immutable and mutable locals. The index expression runs once before
   the read. An out-of-range `get` returns `None` before computing an
   element address or loading a value. Subscript syntax can follow with
   the accepted checked-indexing behavior.
 
-- Use `items.contains(value) -> Bool` to check membership and
-  `items.index_of(value) -> Option<u32>` to get the first zero-based match.
+- Use `items.contains(value) -> bool` to check membership and
+  `items.index_of(value) -> u32?` to get the first zero-based match.
   Both use primitive `==` and require a search value of the element type.
   The methods borrow the receiver before evaluating the value once, then
   scan the initialized elements up to the first match. If no element
