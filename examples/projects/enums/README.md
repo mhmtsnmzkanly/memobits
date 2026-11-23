@@ -35,13 +35,15 @@ cargo run -p memobits-cli -- build --project examples/projects/enums/project.tom
 cargo run -p memobits-cli -- run examples/projects/enums/target/memobits/app.wasm
 ```
 
-Both run commands print the same result.
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
-Result: i32(1094300)
+Result: Ok(i32(1094300))
 ```
 
-The result is 300 + 4000 + 0 + 1090000. The rectangle `2 x 4` has area 8 and the circle
+The `Ok` value is 300 + 4000 + 0 + 1090000. The rectangle `2 x 4` has area 8 and the circle
 of radius 2 has area `3 * 2 * 2 = 12`, so the two areas sum to 20 and `shapes`
 is `corners(Shape::Rect(..))`, 4. The job starts `Waiting`, runs `Running(1)`,
 `Running(2)`, `Running(3)`, then the fourth step finishes it with

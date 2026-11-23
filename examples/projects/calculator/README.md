@@ -11,7 +11,8 @@ cargo run -p memobits-cli -- project --project examples/projects/calculator/proj
 ```
 
 The calculator chains `add`, `subtract`, `multiply` and `divide` over checked
-operations and checks the final total.
+operations and checks the final total, returning it as `Ok(265)` (`Err` code 1 on
+a mismatch).
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/calculator/project.toml
@@ -19,8 +20,10 @@ cargo run -p memobits-cli -- build --project examples/projects/calculator/projec
 cargo run -p memobits-cli -- run examples/projects/calculator/target/memobits/app.wasm
 ```
 
-Both run commands print the same result.
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
-Result: i32(0)
+Result: Ok(i32(265))
 ```

@@ -49,7 +49,7 @@ fn total_area(sizes: borrow Array<Size, 2>) -> i32 {
     area(sizes[0].borrow()) + area(sizes[1].borrow())
 }
 
-fn main() -> i32 {
+fn main() -> Result<i32, Error> {
     var s := make_size(3, 4);
     grow(s.share(), 2);
     s.scale = 2;
@@ -80,5 +80,5 @@ fn main() -> i32 {
     let spread := end.x - start.x;
 
     // `s` is borrowed for the call and stays usable afterwards.
-    area(s.borrow()) + offset + reach + extra + flat + spread
+    Ok(area(s.borrow()) + offset + reach + extra + flat + spread)
 }

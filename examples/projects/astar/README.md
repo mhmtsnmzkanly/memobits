@@ -8,7 +8,7 @@ cargo run -p memobits-cli -- build --project examples/projects/astar/project.tom
 cargo run -p memobits-cli -- run examples/projects/astar/target/memobits/app.wasm
 ```
 
-Both runs print `Result: Ok(i32(12))` after checking two layouts. The only gap
+Both runs check two layouts. The only gap
 in the wall is on the bottom row, so the shortest route takes four steps down,
 four across, and four up. Closing that gap leaves the goal cell open while
 making it unreachable. Error code 1 means the first search found no route,
@@ -20,3 +20,11 @@ Each move costs one. It scans the fixed-size frontier for the lowest sum of
 distance traveled and Manhattan distance to the goal. It returns an
 `Option<i32>` containing the optimal cost or `None` when the frontier is
 exhausted or an endpoint is invalid. The example returns the cost only.
+
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
+
+```text
+Result: Ok(i32(12))
+```

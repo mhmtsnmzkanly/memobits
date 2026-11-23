@@ -371,13 +371,13 @@ fn the_enums_example_project_runs_from_source_and_artifact() {
     );
     assert_eq!(
         String::from_utf8(run.stdout).unwrap().trim(),
-        "Result: i32(1094300)"
+        "Result: Ok(i32(1094300))"
     );
     assert!(copy.run(&["build"]).status.success());
     let artifact = copy.run(&["run", "target/memobits/app.wasm"]);
     assert_eq!(
         String::from_utf8(artifact.stdout).unwrap().trim(),
-        "Result: i32(1094300)"
+        "Result: Ok(i32(1094300))"
     );
 }
 

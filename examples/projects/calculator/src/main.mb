@@ -3,12 +3,15 @@ fn subtract(left: i32, right: i32) -> i32 { left - right }
 fn multiply(left: i32, right: i32) -> i32 { left * right }
 fn divide(left: i32, right: i32) -> i32 { left / right }
 
-fn main() -> i32 {
+fn main() -> Result<i32, Error> {
     let base := add(120, 15);
     let quantity := 4;
     let subtotal := multiply(base, quantity);
     let discount := subtract(subtotal, 30);
     let taxable := divide(discount, 2);
     let total := add(taxable, 10);
-    if total == 265 { 0 } else { 1 }
+    if total != 265 {
+        return Err(Error { code: 1 });
+    }
+    Ok(total)
 }

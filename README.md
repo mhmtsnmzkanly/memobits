@@ -33,7 +33,7 @@ Source and artifact execution use the same Wasm runtime. Standalone scalar
 artifacts display raw Wasm numeric types. Application entries returning
 `Result` or `Attempt` with a primitive success payload display the same
 variant, typed payload, or concrete error in both modes. This uses a private
-Wasm adapter for `main`. Function-local `Option<borrow T>` supports explicit
+Wasm adapter for `main`. Function-local `(borrow T)?` supports explicit
 construction, local moves and consuming matches. See the [outcome implementation notes](docs/design/outcome-implementation.md).
 
 Inspection commands:
@@ -69,13 +69,14 @@ Code, diagnostics, and documentation are written in English.
   through enum values, owned `match`, and borrowing `match`.
 - [Outcome types](docs/design/outcome-implementation.md) — compiler-known
   templates and remaining implementation gates.
-- [Illustrative syntax guide](examples/design/language-guide.mb) (not executable).
+- [Historical language proposal](docs/design/proposed-language-guide.mb) (not executable; superseded by the decisions and the runnable guide).
 
 ## Examples
 
-- [Runnable language guide](examples/projects/language-guide/src/main.mb)
-  walks through the executable language. Both runs below print
-  `Result: Ok(i32(42))`.
+Every project under `examples/projects/` has a README with an "Expected output"
+section; `crates/memobits-cli/tests/examples_documented.rs` runs each project
+from source and as standalone Wasm and compares the output to it. Run any of
+them with:
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/language-guide/project.toml
@@ -83,38 +84,48 @@ cargo run -p memobits-cli -- build --project examples/projects/language-guide/pr
 cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobits/app.wasm
 ```
 
-- `examples/projects/` — buildable projects with a `project.toml`.
-- `examples/projects/calculator/` — arithmetic over internal calls: `add`,
-  `subtract`, `multiply` and `divide` chained into a final checked total.
-- `examples/projects/computation/` — iterative computation with loops:
-  `factorial` and an iterative sum.
-- `examples/projects/strings/` — owned and borrowed String operations:
-  `concat`, `borrow`, `share` and `push_str`, plus struct-owned labels.
-- [A* grid search](examples/projects/astar/README.md) checks the optimal cost
-  around a wall and verifies that closing the gap makes the goal unreachable.
-- [Bounded ENF lexer fixture](docs/design/enf-lexer-slice.md) checks decimal
-  tokens, byte spans and error outcomes.
-- [Guest UTF-8 validator](examples/projects/utf8-validator/README.md) checks
-  Unicode scalar encodings and reports byte offsets for malformed input.
-- `examples/projects/arrays/` — fixed arrays: locals, calls, results and nested arrays.
-  Use `Bytes<N>` as a built-in spelling for `Array<u8, N>`.
+- [language-guide](examples/projects/language-guide/README.md) — the runnable
+  walkthrough of the executable language; prints `Result: Ok(i32(42))`.
+- [arrays](examples/projects/arrays/README.md) — fixed arrays: locals, calls,
+  results and nested arrays.
+- [astar](examples/projects/astar/README.md) — fixed-grid A* search with a
+  checked optimal cost and an unreachable-goal case.
+- [calculator](examples/projects/calculator/README.md) — arithmetic over
+  internal calls chained into a checked total.
+- [computation](examples/projects/computation/README.md) — iterative
+  computation with loops: `factorial` and an iterative sum.
+- [enf-lexer](examples/projects/enf-lexer/README.md) — bounded ENF byte lexer
+  fixture (see the [design note](docs/design/enf-lexer-slice.md)).
+- [enums](examples/projects/enums/README.md) — variants, `match` with
+  exhaustiveness, enum aliases and a state machine.
+- [hashing](examples/projects/hashing/README.md) — FNV-1a, DJB2 and Adler-32
+  over `Array<u8, N>` with software wrapping arithmetic.
+- [host-capability](examples/projects/host-capability/README.md) — a CLI host
+  import declared in the manifest and bound with `extern fn`.
+- [module-imports](examples/projects/module-imports/README.md) — direct module
+  imports and extension activation across modules.
+- [numeric](examples/projects/numeric/README.md) — minimal project with a
+  library `[export]`.
+- [strings](examples/projects/strings/README.md) — owned and borrowed `string`
+  operations: `concat`, `borrow`, `share` and `push_str`.
+- [structs](examples/projects/structs/README.md) — constructors, `share` and
+  `borrow` parameters, nesting, disjoint loans and destructuring.
+- [utf8-validator](examples/projects/utf8-validator/README.md) — Unicode scalar
+  validation of byte buffers with byte offsets for malformed input.
+- `examples/analysis/` — single files for the analysis and ownership commands.
+
+## Language notes
+
 - The language guide demonstrates `contains(value) -> Bool` and
-  `index_of(value) -> Option<u32>` on fixed arrays of numbers or `Bool`,
-  including `Bytes<N>`, and on `List<u8>` and `List<u32>`.
+  `index_of(value) -> u32?` on fixed arrays of numbers or `Bool`
+  (including `Array<u8, N>`) and on `List<u8>` and `List<u32>`.
   It also demonstrates `loop value in items` over those fixed arrays and Lists.
   [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
   · [List iteration](docs/design/list-slice.md#list-iteration)
-  [Runnable language guide](examples/projects/language-guide/src/main.mb)
-- `drop(value)` consumes a whole named owned `String`, `List<u8>`, or
+  · [Runnable language guide](examples/projects/language-guide/src/main.mb)
+- `drop(value)` consumes a whole named owned `string`, `List<u8>`, or
   `List<u32>` local or parameter and releases any heap storage it owns.
   Any live borrow or share prevents the drop. The binding is unavailable on
   every path that drops it until it is assigned again, if mutable.
   An in-scope function, import, or value named `drop` takes precedence over the
   built-in. [Runnable example](examples/projects/language-guide/src/main.mb)
-- `examples/projects/structs/` — structs: a constructor function, a share-mutating
-  function, a borrow-reading function, literals, field reads and a two-module use of
-  public fields.
-- `examples/projects/enums/` — enums: variants, `match` with exhaustiveness, aliases of
-  enum types and a state machine stepped in a loop.
-- `examples/analysis/` — single files for the analysis and ownership commands.
-- `examples/design/` — illustrative target syntax.

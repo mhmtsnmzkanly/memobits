@@ -73,7 +73,7 @@ fn count_corners(tiles: borrow Array<Shape, 4>) -> i32 {
     total
 }
 
-fn main() -> i32 {
+fn main() -> Result<i32, Error> {
     let rect := area(Figure::Rect(2.0, 4.0));
     let disc := area(Figure::Circle(2.0));
     let shapes := if rect + disc == 20.0 { corners(Shape::Rect(1.0, 1.0)) } else { 0 };
@@ -90,5 +90,5 @@ fn main() -> i32 {
     let tiles: Array<Shape, 4> = [Shape::Rect(3.0, 2.0), Shape::Empty, Shape::Circle(1.0), Shape::Rect(1.0, 5.0)];
     let wide := if is_wide(tiles[0].borrow()) { 1 } else { 0 };
     let borrowed := count_corners(tiles.borrow()) + wide * 100;
-    total(job) + shapes * 1000 + corners(Shape::Empty) + borrowed * 10000
+    Ok(total(job) + shapes * 1000 + corners(Shape::Empty) + borrowed * 10000)
 }

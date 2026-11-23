@@ -10,7 +10,7 @@ cargo run -p memobits-cli -- project --project examples/projects/computation/pro
 ```
 
 The computation checks `factorial(5) == 120` and the iterative sum
-`sum_to(10) == 55`.
+`sum_to(10) == 55` (`Err` codes 1 and 2) and returns their sum as `Ok(175)`.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/computation/project.toml
@@ -18,8 +18,10 @@ cargo run -p memobits-cli -- build --project examples/projects/computation/proje
 cargo run -p memobits-cli -- run examples/projects/computation/target/memobits/app.wasm
 ```
 
-Both run commands print the same result.
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
-Result: i32(0)
+Result: Ok(i32(175))
 ```

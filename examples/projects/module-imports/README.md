@@ -26,3 +26,11 @@ those symbols. `math` can refer to the local extension declaration, while
 `main` sees it through its explicit direct module edge. Transitive module loads
 do not activate extensions. The current project loader handles modules in one
 project; loading another package is outside this feature slice.
+
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
+
+```text
+Result: Ok(i32(42))
+```

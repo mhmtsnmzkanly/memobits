@@ -1952,7 +1952,7 @@ fn outcomes() -> Bool {
 //   signatures. Source host linking is limited to the CLI profile's typed
 //   memobits:console.write_i32(i32) -> unit import; see the host-capability
 //   example. Type exports and mb check are unsupported.
-// - examples/design/language-guide.mb explores target syntax. String slicing,
+// - docs/design/proposed-language-guide.mb (a historical proposal) explores target syntax. String slicing,
 //   scalar iteration, lists, try, defaults and
 //   aggregate .copy() are gated. Generic function calls and interface evidence
 //   forwarding are limited to the examples above; generic nominal structs are

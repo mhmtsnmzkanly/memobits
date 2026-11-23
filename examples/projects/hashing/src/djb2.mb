@@ -2,7 +2,7 @@ use self::bits::u8_to_u32;
 use self::bits::wrapping_add;
 use self::bits::wrapping_mul;
 
-pub fn djb2_slice(bytes: borrow Bytes<8>, length: i32) -> u32 {
+pub fn djb2_slice(bytes: borrow Array<u8, 8>, length: i32) -> u32 {
     var hash: u32 = 5_381;
     var i: i32 = 0;
     loop {
@@ -14,7 +14,7 @@ pub fn djb2_slice(bytes: borrow Bytes<8>, length: i32) -> u32 {
     hash
 }
 
-pub fn djb2_8(bytes: borrow Bytes<8>) -> u32 {
+pub fn djb2_8(bytes: borrow Array<u8, 8>) -> u32 {
     var hash: u32 = 5_381;
     loop b in bytes {
         let byte := u8_to_u32(b);

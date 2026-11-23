@@ -1,6 +1,6 @@
 # Hashing Primitives & Algorithms
 
-This example implements standard non-cryptographic hashing algorithms (**FNV-1a 32-bit**, **DJB2**, and **Adler-32**) over byte arrays (`Bytes<N>`) in Memobits, exploring how to safely implement bitwise operations and wrapping arithmetic on an engine with checked arithmetic.
+This example implements standard non-cryptographic hashing algorithms (**FNV-1a 32-bit**, **DJB2**, and **Adler-32**) over byte arrays (`Array<u8, N>`) in Memobits, exploring how to safely implement bitwise operations and wrapping arithmetic on an engine with checked arithmetic.
 
 ## Implemented Algorithms
 
@@ -38,9 +38,9 @@ The project provides robust software primitives in `src/bits.mb`:
 
 ## Byte Array Iteration
 
-Memobits supports fixed-size byte buffers (`Bytes<N>` / `Array<u8, N>`). This project demonstrates two iteration patterns:
-- **Whole-Buffer Iteration**: `loop byte in bytes { ... }` iterates over all $N$ elements of a borrowed `Bytes<N>`.
-- **Logical Slices**: Passing `bytes: borrow Bytes<N>, length: i32` allows processing arbitrary input lengths up to $N$ with an indexed `loop` breaking at `i == length`.
+Memobits supports fixed-size byte buffers (`Array<u8, N>`). This project demonstrates two iteration patterns:
+- **Whole-Buffer Iteration**: `loop byte in bytes { ... }` iterates over all $N$ elements of a borrowed `Array<u8, N>`.
+- **Logical Slices**: Passing `bytes: borrow Array<u8, N>, length: i32` allows processing arbitrary input lengths up to $N$ with an indexed `loop` breaking at `i == length`.
 
 ## Running and Building
 
@@ -57,7 +57,11 @@ cargo run -p memobits-cli -- build --project examples/projects/hashing/project.t
 cargo run -p memobits-cli -- run examples/projects/hashing/target/memobits/app.wasm
 ```
 
-Both runs verify all test vectors against known reference values (including empty inputs, single-character, and multi-byte inputs such as `"Memobits"`) and output:
+Both runs verify all test vectors against known reference values (including empty inputs, single-character, and multi-byte inputs such as `"Memobits"`) and print the result below.
+
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
 Result: Ok(u32(1774777415))

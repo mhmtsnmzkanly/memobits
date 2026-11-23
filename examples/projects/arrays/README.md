@@ -24,13 +24,15 @@ cargo run -p memobits-cli -- build --project examples/projects/arrays/project.to
 cargo run -p memobits-cli -- run examples/projects/arrays/target/memobits/app.wasm
 ```
 
-Both run commands print the same result.
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
-Result: i32(493)
+Result: Ok(i32(493))
 ```
 
-The result is the sum of three parts: 401 from the first section (140 for the
+The `Ok` value is the sum of three parts: 401 from the first section (140 for the
 squares 0 to 49, plus 100 added to `squares[3]`, plus `moved[3]` (109),
 `seed[2]` (3) and `peak`, a copy of `squares[7]` (49)); 72 from `sum` over `make(10)` doubled by `scale` (11, 12, 13
 become 22, 24, 26); and 20 from the nested array (`grid[0][1]` is 5 and the

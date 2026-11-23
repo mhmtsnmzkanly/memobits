@@ -1,7 +1,7 @@
 # Guest UTF-8 validator
 
 [The example](src/main.mb) exercises `bytes.validate_utf8(length)`. This
-built-in operation borrows the logical prefix of a fixed `Bytes<N>` and
+built-in operation borrows the logical prefix of a fixed `Array<u8, N>` and
 returns `Result<i32, Utf8Error>` with the Unicode scalar count on success.
 The length is an `i32`, and the receiver supplies the bound `N`.
 Validation allocates no heap storage and leaves the buffer intact.
@@ -25,11 +25,19 @@ and invalid fixtures, including é, scalar boundaries, and error offsets.
 It returns a fixture-group code if a check fails.
 
 From the repository root, run the source and build the standalone artifact
-in a temporary directory. Both runs print `Result: Ok(i32(0))`.
+in a temporary directory.
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/projects/utf8-validator/project.toml
 artifact_dir=$(mktemp -d)
 cargo run -p memobits-cli -- build --project examples/projects/utf8-validator/project.toml --output "$artifact_dir/utf8.wasm"
 cargo run -p memobits-cli -- run "$artifact_dir/utf8.wasm"
+```
+
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
+
+```text
+Result: Ok(i32(0))
 ```

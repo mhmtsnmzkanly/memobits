@@ -2,7 +2,7 @@
 
 The [accepted decisions](decisions.md) call for a small ENF lexer/parser
 consumer and leave protocol-specific numeric limits to libraries. The
-[illustrative guide](../../examples/design/language-guide.mb) names an
+[illustrative guide](proposed-language-guide.mb) names an
 `enf::Parser` import but gives no wire grammar. No ENF specification or
 wire fixtures were found in the repository. The rules below define a
 proposed test fixture for the language milestone. ENF token syntax, numeric

@@ -44,13 +44,15 @@ cargo run -p memobits-cli -- build --project examples/projects/structs/project.t
 cargo run -p memobits-cli -- run examples/projects/structs/target/memobits/app.wasm
 ```
 
-Both run commands print the same result.
+## Expected output
+
+Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
-Result: i32(63)
+Result: Ok(i32(63))
 ```
 
-The result is 31 + 10 + 9 + 9 + 2 + 2. `make_size(3, 4)` builds a 3 by 4 `Size`, `grow`
+The `Ok` value is 31 + 10 + 9 + 9 + 2 + 2. `make_size(3, 4)` builds a 3 by 4 `Size`, `grow`
 adds 2 to both sides through the `share` parameter, so `area` sees a 5 by 6
 square: `5 * 6` plus a bonus of 1 because `scale == 2`, gives 31. `p.x * p.y` is
 `2 * 5 = 10`. The segment ends at `(3, 5)` after the write and starts at

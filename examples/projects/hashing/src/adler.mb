@@ -2,7 +2,7 @@ use self::bits::bit_or;
 use self::bits::shl;
 use self::bits::u8_to_u32;
 
-pub fn adler32_slice(bytes: borrow Bytes<8>, length: i32) -> u32 {
+pub fn adler32_slice(bytes: borrow Array<u8, 8>, length: i32) -> u32 {
     let mod_adler: u32 = 65_521;
     var a: u32 = 1;
     var b: u32 = 0;
@@ -18,7 +18,7 @@ pub fn adler32_slice(bytes: borrow Bytes<8>, length: i32) -> u32 {
     bit_or(shl(b, 16), a)
 }
 
-pub fn adler32_8(bytes: borrow Bytes<8>) -> u32 {
+pub fn adler32_8(bytes: borrow Array<u8, 8>) -> u32 {
     let mod_adler: u32 = 65_521;
     var a: u32 = 1;
     var b: u32 = 0;
