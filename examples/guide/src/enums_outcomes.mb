@@ -1,0 +1,167 @@
+use collections::{Row, total};
+
+type Signal [Start, Stop] extend {
+    fn is_active(borrow self) -> Bool {
+        match self {
+            Signal::Start => true,
+            Signal::Stop => false,
+        }
+    }
+}
+pub fn trailing_enum_extension() -> Bool {
+    let signal := Signal::Start;
+    signal.is_active()
+}
+// Postfix `T?` is the preferred spelling of an optional type. The legacy
+// `Option<T>` spelling is still accepted silently with identical meaning;
+// this guide uses `T?` throughout. Grouping matters for
+// references: `(borrow T)?` is an optional borrow, while `borrow T?` borrows
+// an optional value. Contextual Some and None construction keeps the existing
+// Option representation and match behavior.
+pub fn optional_sugar() -> Bool {
+    let present: i32? = Some(40);
+    let absent: i32? = None;
+    (match present {
+        Some(value) => value == 40,
+        None => false,
+    }) && (match absent {
+        Some(_) => false,
+        None => true,
+    })
+}
+// A Result<String, E> may be stored in a struct field or a fixed-array element
+// while its Ok payload is a String literal. Heap Ok payloads are rejected
+// there (TE018); they must be matched immediately as shown above.
+type Outcome { text: Result<string, Error>, tag: u32 }
+fn failure_code(items: Array<Result<string, Error>, 2>) -> u32 {
+    match items[1] { Ok(_) => 0 as u32, Err(error) => error.code }
+}
+pub fn nested_result_storage() -> Bool {
+    let ok: Result<string, Error> = Ok("é");
+    let stored := Outcome { text: ok, tag: 3 };
+    let failed: Result<string, Error> = Err(Error { code: 8 });
+    let failed_outcome := Outcome { text: failed, tag: 4 };
+    let from_field := match failed_outcome.text { Ok(_) => 0 as u32, Err(error) => error.code };
+    let first: Result<string, Error> = Ok("x");
+    let second: Result<string, Error> = Err(Error { code: 9 });
+    let items := [first, second];
+    stored.tag == 3 && from_field == 8 && failure_code(items) == 9
+}
+// Enums and exhaustive matching. An alias can also qualify variants.
+type Reading [ Missing, Single(i32), Batch(Row, Bool) ]
+type Sample = Reading;
+fn inspect(sample: borrow Reading) -> i32 {
+    // Borrow matching copies primitive payloads and lends aggregate payloads.
+    match sample {
+        Sample::Missing => 0,
+        Sample::Single(value) => value,
+        Sample::Batch(row, _) => total(row),
+    }
+}
+fn take(sample: Reading) -> i32 {
+    // Owned matching consumes the enum. Here row is an owned array.
+    match sample {
+        Reading::Batch(row, valid) => {
+            if valid { total(row.borrow()) } else { 0 }
+        },
+        _ => 0, // A wildcard covers the remaining variants.
+    }
+}
+pub fn enums() -> Bool {
+    let readings := [Reading::Missing, Sample::Single(6)];
+    // Matching an array element also borrows in place.
+    let single := match readings[1] { Sample::Single(value) => value, _ => 0 };
+    let batch := Reading::Batch([2, 3, 4], true);
+    inspect(readings[0].borrow()) == 0 && single == 6
+        && inspect(batch.borrow()) == 9 && take(batch) == 9
+}
+// References and a function-local `(borrow T)?`.
+fn read(value: borrow i32) -> i32 {
+    value.copy()
+}
+pub fn optional_borrow() -> Bool {
+    var owner := 7;
+    var editor := owner.share(); // A stored mutable handle uses var.
+    editor += 1;
+    let saved := read(editor); // Reborrow the share for read-only access.
+    // The share ended at its last use. The annotation supplies the borrow
+    // payload type. Moving the wrapper transfers the handle and its loan.
+    let wrapped: (borrow i32)? = Some(owner.borrow());
+    let moved := wrapped;
+    let snapshot := match moved { Some(view) => read(view), None => 0 };
+    owner = 9; // The consuming match and the last use of view release the loan.
+
+    let empty: (borrow i32)? = None;
+    let fallback := match empty { Some(view) => view.copy(), None => owner };
+    saved == 8 && snapshot == 8 && fallback == 9
+}
+// Borrow optionals support direct annotations on immutable locals and consuming
+// matches. Aliases, fields, nesting, signatures and branch results are gated.
+// Reference returns, rebinding and loans of primitive projections such as
+// row[0].borrow() are also outside the current subset.
+// Owned outcomes and nominal errors.
+type ReadingError: Error {
+    pub station_id: u32,
+}
+type RangeError: ReadingError {
+    observed: i32,
+}
+type Checked = Result<Row, RangeError>;
+type Poll = Attempt<i32?, RangeError>;
+fn replace_context(context: share ReadingError) {
+    // A whole write through an ancestor share updates its visible fields.
+    // The descendant keeps its concrete type and its observed field.
+    context = ReadingError { code: 12, station_id: 7 };
+}
+fn error_code(error: borrow Error) -> u32 {
+    error.code
+}
+fn check(value: i32) -> Checked {
+    if value < 0 {
+        // Every inherited field needs an initializer, including Error.code.
+        Err(RangeError { code: 1, station_id: 0, observed: value })
+    } else {
+        Ok([value, value + 1, value + 2])
+    }
+}
+fn poll(enabled: Bool, value: i32) -> Poll {
+    if !enabled { return Poll::Skipped; }
+    match check(value) {
+        Ok(row) => {
+            // Some can infer an owned Option from its payload. Bare None
+            // needs an expected type, here supplied by Poll::Done.
+            if row[0] == 0 {
+                Poll::Done(None)
+            } else {
+                let reading := Some(total(row.borrow()));
+                Done(reading)
+            }
+        },
+        Err(error) => Failed(error),
+    }
+}
+pub fn outcomes() -> Bool {
+    let done := match poll(true, 2) {
+        Done(reading) => match reading { Some(value) => value == 9, None => false },
+        _ => false,
+    };
+    // Done(None) means the operation ran and found no reading.
+    let empty := match poll(true, 0) {
+        Done(reading) => match reading { None => true, Some(_) => false },
+        _ => false,
+    };
+    let skipped := match poll(false, 2) { Skipped => true, _ => false };
+    let failed := match poll(true, -4) {
+        Failed(error) => {
+            var error := error;
+            replace_context(error.share()); // RangeError to ReadingError.
+            error_code(error.borrow()) == 12 // RangeError to its root Error.
+                && error.station_id == 7 && error.observed == -4
+        },
+        _ => false,
+    };
+    done && empty && skipped && failed
+}
+// Ancestor reference conversion works at direct internal calls. Owned
+// conversion to an ancestor is unavailable. Result and Attempt require Error
+// or a nominal descendant as their error argument.

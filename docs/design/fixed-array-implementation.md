@@ -369,7 +369,7 @@ The receiver is evaluated and borrowed before the value is evaluated
 once. The scan stops at the first match. The receiver can be a local,
 a borrow or share handle, a row or field of a local aggregate, or an array
 value such as a literal or a function result.
-[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/main.mb)
 
 ## Fixed array iteration
 
@@ -386,7 +386,7 @@ exits the function. Bare `loop { ... }` still repeats until control leaves it.
 [List iteration](list-slice.md#list-iteration) uses the same loop syntax.
 Iteration over Strings and arrays of aggregates remains deferred.
 
-[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/main.mb)
 
 ## Implicit primitive copy checkpoint
 

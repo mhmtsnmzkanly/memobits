@@ -1,4 +1,4 @@
-//! Every `examples/projects/*` project documents its exact stdout in its
+//! Every `examples/{guide,topics/*,apps/*}` project documents its exact stdout in its
 //! README under `## Expected output`, in the first ```text block after that
 //! heading. This test runs each project from source and as a standalone Wasm
 //! artifact and compares stdout to that block.
@@ -54,14 +54,18 @@ fn expected_output_convention_is_parsed_strictly() {
 
 #[test]
 fn every_example_project_documents_and_matches_its_output() {
-    let projects = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/projects");
-    let mut manifests: Vec<PathBuf> = fs::read_dir(&projects)
-        .unwrap()
-        .map(|entry| entry.unwrap().path().join("project.toml"))
-        .filter(|manifest| manifest.is_file())
-        .collect();
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut manifests: Vec<PathBuf> = vec![examples.join("guide/project.toml")];
+    for group in ["topics", "apps"] {
+        manifests.extend(
+            fs::read_dir(examples.join(group))
+                .unwrap()
+                .map(|entry| entry.unwrap().path().join("project.toml")),
+        );
+    }
+    manifests.retain(|manifest| manifest.is_file());
     manifests.sort();
-    assert!(manifests.len() >= 14, "found {manifests:?}");
+    assert!(manifests.len() >= 13, "found {manifests:?}");
 
     let temp = std::env::temp_dir().join(format!("memobits-examples-{}", std::process::id()));
     fs::create_dir_all(&temp).unwrap();

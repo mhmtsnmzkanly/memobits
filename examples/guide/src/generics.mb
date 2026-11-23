@@ -1,0 +1,114 @@
+type Box<T> { value: T } extend {
+    fn read_value(borrow self) -> T { self.value }
+}
+type Buffer<T, const N: u32> { data: Array<T, N> }
+// Generic nominal methods may name nested instances of the receiver's type
+// parameter, such as Twin<Nest<T>>. Bounded nesting specializes per receiver;
+// unbounded polymorphic recursion stops at the 256-specialization diagnostic.
+type Twin<T> { first: T, second: T }
+type Nest<T> { value: T } extend {
+    fn twin(borrow self) -> Twin<Nest<T>> {
+        Twin<Nest<T>> { first: Nest<T> { value: self.value }, second: Nest<T> { value: self.value } }
+    }
+}
+// A const parameter in scope can be forwarded as a nested type argument
+// (Lane<N> inside a method of Gauge<const N: u32>). A method call on a field
+// or element place (`self.lane.span()`, `gauges[0].span()`) addresses the place
+// in place: `borrow self` reads it, `share self` needs a mutable owner and
+// respects field-level loans, and an owned `self` would be a partial move.
+type Lane<const N: u32> { width: i32 } extend {
+    fn span(borrow self) -> i32 { self.width }
+    fn widen(share self) { self.width += 1; }
+}
+type Gauge<const N: u32> { width: i32 } extend {
+    fn lane(borrow self) -> Lane<N> { Lane<N> { width: self.width } }
+}
+type GaugePair { first: Lane<2>, second: Lane<3> }
+type Maybe<T> [Empty, Present(T)]
+type Packet<const N: u32> [Data(Array<u8, N>)]
+// Generic functions specialize one unconstrained type parameter inferred from
+// a direct owned argument. Additional parameters may use that same T or fixed
+// concrete types; the result is T. A bounded const form forwards T and N only
+// through direct Array<T, N> parameters and results. Each body is checked for
+// its concrete specialization. A single interface bound on direct owned T
+// carries caller-visible evidence through nested generic calls and constrained
+// compound assignment. Other bound shapes, borrowed parameters, and nested
+// generic type patterns remain gated.
+fn identity<T>(value: T) -> T { value }
+fn select<T>(value: T, enabled: Bool, fallback: T) -> T {
+    if enabled { value } else { fallback }
+}
+pub fn generic_functions() -> Bool {
+    let number := 40;
+    let selected: i32 = select(number, true, 0);
+    let flag: Bool = identity(true);
+    let again: i32 = identity(selected);
+    flag && again + identity(2) == 42
+}
+fn echo_array<T, const N: u32>(value: Array<T, N>) -> Array<T, N> { value }
+fn relay_array<T, const N: u32>(value: Array<T, N>) -> Array<T, N> {
+    echo_array(value)
+}
+pub fn generic_array_forwarding() -> Bool {
+    let one: Array<i32, 1> = [40];
+    let two: Array<i32, 2> = [1, 1];
+    let first := relay_array(one);
+    let second := relay_array(two);
+    first[0] + second[0] + second[1] == 42
+}
+// A generic bound uses the caller-visible interface implementation. A nested
+// generic call forwards that selected evidence to the constrained function.
+type RenderPoint { value: i32 }
+interface Render { fn render(borrow self) -> i32; }
+extend RenderPoint of Render {
+    fn render(borrow self) -> i32 { self.value }
+}
+fn render_value<T>(value: T) -> i32 where T: Render {
+    value.render() of Render
+}
+fn relay_render<T>(value: T) -> i32 where T: Render {
+    render_value(value)
+}
+pub fn generic_interface_forwarding() -> Bool {
+    let point := RenderPoint { value: 42 };
+    relay_render(point) == 42
+}
+pub fn nested_generic_methods() -> Bool {
+    let signed := Nest<i32> { value: 40 };
+    let unsigned := Nest<u32> { value: 2 };
+    let pair := signed.twin();
+    let other := unsigned.twin();
+    let gauge := Gauge<3> { width: 40 }.lane();
+    var pair_lanes := GaugePair { first: Lane<2> { width: 1 }, second: gauge };
+    let first_view := pair_lanes.first.borrow();
+    pair_lanes.second.widen();
+    pair.first.value + pair.second.value == 80 && other.second.value == 2
+        && first_view.span() == 1 && pair_lanes.second.span() == 41
+}
+// Generic nominal structs and enums specialize by type arguments. Const
+// arguments substitute into admitted fixed-array fields. Enum construction
+// uses the expected concrete enum type.
+pub fn generic_structs() -> Bool {
+    let signed := Box<i32> { value: 41 };
+    let unsigned := Box<u32> { value: 42 };
+    let bytes := Buffer<u8, 2> { data: [0, 42] };
+    let maybe_i32: Maybe<i32> = Maybe::Present(42);
+    let maybe_u32: Maybe<u32> = Maybe::Empty;
+    let packet_one: Packet<1> = Packet::Data([1]);
+    let packet_two: Packet<2> = Packet::Data([20, 21]);
+    let unwrapped := match maybe_i32 {
+        Maybe::Present(value) => value,
+        Maybe::Empty => 0,
+    };
+    let empty := match maybe_u32 {
+        Maybe::Present(_) => false,
+        Maybe::Empty => true,
+    };
+    let packet_values := match packet_one {
+        Packet::Data(bytes) => bytes[0] as i32,
+    } + match packet_two {
+        Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32,
+    };
+    signed.read_value() + 1 == 42 && unsigned.read_value() == 42 && bytes.data[1] == 42
+        && unwrapped == 42 && empty && packet_values == 42
+}

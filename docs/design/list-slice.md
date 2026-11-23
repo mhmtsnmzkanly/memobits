@@ -49,7 +49,7 @@ argument and its result lives in a temporary owner until the read finishes.
 Normal early exits during argument evaluation release it through lexical
 cleanup. Other temporary uses, indirect calls, nesting, subscript syntax,
 and exports remain gated.
-[Runnable guide](../../examples/projects/language-guide/src/main.mb)
+[Runnable guide](../../examples/guide/src/main.mb)
 
 ## Source scope
 
@@ -131,7 +131,7 @@ ends when the loop exits. `continue` advances to the next element,
 result stays alive across iterations and is released on exhaustion, break,
 or return.
 
-[Runnable language guide](../../examples/projects/language-guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/main.mb)
 
 ## Private Wasm storage and cleanup
 

@@ -244,7 +244,7 @@ replacement through a reference or projection chain, indirect calls, and
 general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's
 basic block. See the checked examples in the
-[runnable language guide](../../examples/projects/language-guide/src/main.mb).
+[runnable language guide](../../examples/guide/src/main.mb).
 
 ### Whole String locals
 

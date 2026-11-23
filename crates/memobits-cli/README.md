@@ -101,7 +101,7 @@ a scalar count or a typed error with a byte offset.
 `bytes.to_utf8_string(length)` validates the same prefix and copies it
 into an owned String on success. Its Result uses the immediate consuming
 match rules for heap Strings. See the
-[UTF-8 validator](../../examples/projects/utf8-validator/README.md).
+[UTF-8 validator](../../examples/apps/utf8-validator/README.md).
 `let joined := left.concat(right);` borrows its inputs and allocates owned
 text for that binding. The result can be read, borrowed, or moved to
 another local. A whole mutable String local can be replaced. The RHS runs
@@ -137,7 +137,7 @@ borrow of a named struct owner and read its fields. The caller retains
 cleanup. String fields support borrowed reads and
 replacement on a mutable local using a named owned String, a literal, a
 direct concat, or a direct internal String-returning call. See the
-[local struct example](../../examples/projects/language-guide/src/main.mb)
+[local struct example](../../examples/guide/src/main.mb)
 and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 
 Application builds export the manifest entry as
@@ -164,7 +164,7 @@ In project source, declare it with `extern fn write_i32(value: i32);` and call
 declared module, name, and signature; undeclared and unsupported imports fail
 before guest execution. Both forms use the same fuel-limited Wasm runtime;
 source execution does not use a separate interpreter. See the
-[host capability example](../../examples/projects/host-capability/README.md).
+[host capability example](../../examples/topics/host-capability/README.md).
 
 Both forms accept `--fuel N` to set the execution budget to `N` fuel units, a
 positive integer. The default is 10000000000 (ten billion), which ordinary

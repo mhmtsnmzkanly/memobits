@@ -1,0 +1,227 @@
+use text::{byte_is, no_byte};
+
+// Fixed arrays, structs, and ownership.
+pub type Row = Array<i32, 3>;
+type Station {
+    id: u32,
+    readings: Row,
+}
+fn station(id: u32) -> Station {
+    // Every field must be initialized. The order here can differ from the type.
+    Station { readings: [0; 3], id: id }
+}
+fn record(row: share Row, index: i32, reading: i32) {
+    // share grants exclusive write access. The caller sees the update.
+    row[index] = reading;
+    return;
+}
+pub fn total(row: borrow Row) -> i32 {
+    // borrow grants read-only access. Primitive values copy implicitly;
+    // .copy() makes the same read explicit.
+    let first := row[0];
+    first + row[1].copy() + row[2]
+}
+fn calibrate(var row: Row) -> Row {
+    // An owned parameter takes the caller's array. var lets this function edit it.
+    row[0] -= 1;
+    row[1] *= 2;
+    row[2] /= 2;
+    row[2] %= 3;
+    row
+}
+pub fn stations() -> Bool {
+    // Repetition calls station once per element.
+    var pair := [station(7); 2];
+    pair[0].readings = [4, 5, 8];
+    let left := pair[0].borrow();
+    // Constant indices 0 and 1 are disjoint. A dynamic index can overlap both.
+    record(pair[1].readings.share(), 2, 9);
+    let before := total(left.readings.borrow());
+    pair[0] = station(8); // The loan ended at the last use of left.
+
+    var sample := station(7);
+    sample.readings = if before == 17 { [4, 5, 8] } else { [0; 3] };
+    let readings := sample.readings.borrow();
+    sample.id = 8; // A different field is also disjoint.
+    let recorded := total(readings);
+    let moved := sample; // Moving an aggregate consumes its old binding.
+    let Station { id, readings: row } := moved;
+    // Destructuring consumes the whole struct. Moving a single aggregate
+    // field or element out of its owner is unsupported.
+    let adjusted := calibrate(row);
+    let grid := [[1, 2, 3], adjusted];
+    id == 8 && recorded == 17 && total(grid[1].borrow()) == 14
+        && pair[1].readings[2] == 9
+}
+// Array<u8, N> is the core fixed-byte representation. Bytes<N> remains a
+// compatibility alias outside the target core.
+fn set_first_byte(buffer: share Array<u8, 2>) {
+    buffer[0] = 42;
+}
+fn first_byte(buffer: borrow Array<u8, 2>) -> u8 {
+    buffer[0]
+}
+fn return_bytes(buffer: Array<u8, 2>) -> Array<u8, 2> {
+    buffer
+}
+pub fn fixed_bytes() -> Bool {
+    var bytes: Array<u8, 2> = [0; 2];
+    set_first_byte(bytes.share());
+    let array: Array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
+    // Validation borrows the prefix and returns its Unicode scalar count.
+    // The utf8-validator project checks malformed bytes and error offsets.
+    let valid := match array.validate_utf8(1) {
+        Ok(count) => count == 1,
+        Err(_) => false
+    };
+    // Construction copies just the validated prefix into an owned String.
+    let copied := match array.to_utf8_string(1) {
+        Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
+        Err(_) => false
+    };
+    // contains and index_of read without moving the array. Numeric and Bool
+    // arrays use == for comparisons, including nested rows.
+    // index_of returns the first zero-based match, or None for a miss.
+    let first := match [0, 42, 42].index_of(42) {
+        Some(index) => index == 1,
+        None => false
+    };
+    valid && copied && first && array.contains(42) && !array.contains(255)
+        && first_byte(array.borrow()) == 42
+}
+// Fixed arrays iterate in index order. Each iteration binds an immutable
+// primitive copy. The read loan ends when the loop exits.
+pub fn fixed_iteration() -> Bool {
+    var bytes: Array<u8, 4> = [1, 0, 3, 9];
+    var digits: u8 = 0;
+    loop byte in bytes {
+        if byte == 0 { continue; }
+        if byte == 9 { break; }
+        digits = digits * 10 + byte;
+    }
+    bytes[0] = 7;
+
+    let empty: Array<Bool, 0> = [];
+    loop flag in empty { return flag; }
+    digits == 13 && bytes[0] == 7
+}
+fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
+    items.get(index)
+}
+fn list_has_word(items: borrow List<u32>, value: u32) -> Bool {
+    items.contains(value)
+}
+fn append_word(items: share List<u32>, value: u32) {
+    items.push(value);
+}
+fn owned_list_length(items: List<u32>) -> u32 {
+    items.len()
+}
+pub fn make_words(first: u32) -> List<u32> {
+    var words: List<u32> = [];
+    words.push(first);
+    words
+}
+fn replace_words(items: share List<u32>, value: u32) {
+    items = make_words(value);
+}
+// List iteration visits immutable copies in insertion order. An empty List
+// skips the body. A direct call result stays alive until the loop exits.
+// The read loan prevents writes and moves of the receiver during the body.
+pub fn list_iteration() -> Bool {
+    var bytes: List<u8> = [];
+    loop value in bytes { return false; }
+    bytes.push(9);
+    bytes.push(4);
+    bytes.push(2);
+    var digits: u8 = 0;
+    loop value in bytes {
+        if value == 9 { continue; }
+        digits = digits * 10 + value;
+    }
+    bytes.clear();
+
+    var first: u32 = 0;
+    loop value in make_words(1000) {
+        first = value;
+        break;
+    }
+    digits == 42 && bytes.len() == 0 && first == 1000
+}
+// An annotation selects an empty List. push appends to a whole var local.
+// Moving into a new binding transfers ownership of the backing storage.
+pub fn primitive_lists() -> Bool {
+    var bytes: List<u8> = [];
+    let before := bytes.len();
+    let empty := !bytes.contains(42);
+    bytes.push(42);
+    // Bind a direct internal List result to take ownership of its block.
+    let words := make_words(1000);
+    // A standalone call releases an ignored List result at the statement.
+    make_words(999);
+    // Read a direct internal List result with len or get. The call runs
+    // before the index, and the temporary is released after the read or
+    // on a normal early exit from the index expression.
+    let temporary_length := make_words(999).len();
+    // List<u8> and List<u32> support both searches on locals, borrow and
+    // share bindings, and direct internal call results. The receiver runs
+    // first and stays borrowed while the value runs once, even if empty.
+    let temporary_contains := make_words(1234).contains(1234);
+    let borrowed_contains := list_has_word(words.borrow(), 1000);
+    let missing_index := match make_words(1234).index_of(999) {
+        Some(_) => false,
+        None => true
+    };
+    let temporary_word := match make_words(1234).get(0) {
+        Some(value) => value == 1234,
+        None => false
+    };
+    // A direct borrow parameter also accepts an explicit borrow of a direct
+    // List call result. The owner lives through the call and is released
+    // afterward or on a normal early exit from a later argument.
+    let borrowed_word := match list_word_at(make_words(2345).borrow(), 0) {
+        Some(value) => value == 2345,
+        None => false
+    };
+    // A direct owned parameter takes a direct List call result. Arguments
+    // run left to right. The caller releases the temporary if a later
+    // argument exits early, and the callee owns it once invoked.
+    let owned_temporary_length := owned_list_length(make_words(3456));
+    var moved := words;
+    // An exclusive call can grow the List that the caller owns.
+    append_word(moved.share(), 2000);
+    // A direct call borrows the List. get copies the element out.
+    let word := match list_word_at(moved.borrow(), 1) {
+        Some(value) => value == 2000,
+        None => false
+    };
+    let old_length := moved.len();
+    // Replacement releases the old block after the RHS finishes.
+    moved = make_words(3000);
+    // A direct share parameter can replace the caller's whole List too.
+    replace_words(moved.share(), 4000);
+    // Stored share handles need var for a whole replacement.
+    var handle := moved.share();
+    handle = make_words(5000);
+    // Push through the same handle updates the owner's length and storage.
+    handle.push(6000);
+    // Pop removes the last element and keeps the backing storage for reuse.
+    let popped := match handle.pop() {
+        Some(value) => value == 6000,
+        None => false
+    };
+    let replacement := match handle.get(0) {
+        Some(value) => value == 5000,
+        None => false
+    };
+    // Clear removes every element and keeps the storage for subsequent pushes.
+    handle.clear();
+    let cleared := moved.len() == 0;
+    moved.push(7000);
+    // An owned parameter takes the whole List and releases it at scope exit.
+    let final_length := owned_list_length(moved);
+    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
+        && temporary_length == 1 && temporary_word && borrowed_word && owned_temporary_length == 1
+        && empty && temporary_contains && borrowed_contains && missing_index && bytes.contains(42)
+        && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
+}

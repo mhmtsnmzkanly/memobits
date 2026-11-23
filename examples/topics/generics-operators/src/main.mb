@@ -1,0 +1,67 @@
+use core::ops::{Add, Sub, PartialEq};
+
+type Vec2 { x: i32, y: i32 }
+
+// User-defined operators select the compiler-provided core::ops interfaces.
+// Add and Sub consume both owned operands and produce an owned Vec2.
+extend Vec2 of Add {
+    type Rhs = Vec2;
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x + rhs.x, y: self.y + rhs.y }
+    }
+}
+
+extend Vec2 of Sub {
+    type Rhs = Vec2;
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x - rhs.x, y: self.y - rhs.y }
+    }
+}
+
+// Equality borrows its left receiver and consumes the right operand.
+extend Vec2 of PartialEq {
+    type Rhs = Vec2;
+    fn eq(borrow self, rhs: Vec2) -> Bool { self.x == rhs.x && self.y == rhs.y }
+}
+
+// A user interface that a generic function can require.
+interface Weigh { fn weight(borrow self) -> i32; }
+
+extend Vec2 of Weigh {
+    fn weight(borrow self) -> i32 { self.x + self.y }
+}
+
+// One owned T parameter with one interface bound.
+fn weigh_twice<T>(value: T) -> i32 where T: Weigh {
+    value.weight() of Weigh + 1
+}
+
+// The caller-selected Add evidence projects Rhs and Output.
+fn combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
+    left + right
+}
+
+fn main() -> Result<i32, Error> {
+    let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
+    if sum.x != 11 || sum.y != 22 {
+        return Err(Error { code: 1 });
+    }
+    let diff := sum - Vec2 { x: 1, y: 2 };
+    if diff != (Vec2 { x: 10, y: 20 }) {
+        return Err(Error { code: 2 });
+    }
+    if diff == (Vec2 { x: 0, y: 0 }) {
+        return Err(Error { code: 3 });
+    }
+    let merged := combine(diff, Vec2 { x: 5, y: 5 });
+    if merged.x != 15 || merged.y != 25 {
+        return Err(Error { code: 4 });
+    }
+    let weight := weigh_twice(merged);
+    if weight != 41 {
+        return Err(Error { code: 5 });
+    }
+    Ok(weight)
+}

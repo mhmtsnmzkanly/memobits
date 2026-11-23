@@ -57,7 +57,7 @@ that unrelated executable bodies must not enter the artifact.
   Running both is not yet a usable combined reference-safety pipeline.
 - General aggregate types, strings, collections, matching, and outcome types
   were unavailable in the executable subset at the time of review.
-  The [fixed-grid A* consumer](../../examples/projects/astar/README.md) has
+  The [fixed-grid A* consumer](../../examples/apps/astar/README.md) has
   since landed, along with the [bounded ENF lexer fixture](enf-lexer-slice.md).
   ENF protocol conformance remains pending.
 - Dependencies, import selection, external packaging, and dependency cycle

@@ -24,7 +24,7 @@ UTF-8, and require an API of their own.
 Every safe string and text view contains valid UTF-8 for Unicode scalar
 values. Literal construction establishes the invariant. Later construction
 from arbitrary bytes must validate before yielding text. Raw bytes can stay
-in byte buffers. The [guest validator](../../examples/projects/utf8-validator/README.md)
+in byte buffers. The [guest validator](../../examples/apps/utf8-validator/README.md)
 already exercises that distinction.
 
 ## Executable literals and ownership
@@ -94,7 +94,7 @@ preserving byte-offset access. Empty, ASCII, multibyte and supplementary
 examples check both quantities. This bounded source-level traversal does not
 add a general iterator or change the existing byte-indexed `.scalar_at` API.
 
-The [runnable guide](../../examples/projects/language-guide/src/main.mb)
+The [runnable guide](../../examples/guide/src/main.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,
 and rejected reads after a move or during a live exclusive loan.
@@ -152,7 +152,7 @@ the logical prefix of a fixed byte array. The method sits alongside
 `validate_utf8` on the byte receiver. The `to` spelling reflects that it
 borrows the input and makes an owned copy. The length is an `i32` and the
 receiver supplies the bound. This matches
-the [guest validator](../../examples/projects/utf8-validator/README.md)
+the [guest validator](../../examples/apps/utf8-validator/README.md)
 and keeps the caller's fixed buffer available on either outcome. Success
 copies exactly the validated prefix into private String storage. Padding
 is ignored, embedded NUL is preserved, and a zero-length prefix yields

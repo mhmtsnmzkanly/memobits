@@ -10,11 +10,11 @@ The example exercises typed parameters, branches, integer limits, mutation,
 shadowing, and function calls. Analysis currently checks primitive types and
 loop-control placement; it does not check ownership or produce Wasm.
 
-For project-wide imports and library roots, use `examples/projects/numeric`:
+For project-wide imports and library roots, use `examples/topics/numeric`:
 
 ```sh
-cargo run -p memobits-cli -- analyze-project --project examples/projects/numeric/project.toml
-cargo run -p memobits-cli -- analyze-project --project examples/projects/numeric/project.toml --lib
+cargo run -p memobits-cli -- analyze-project --project examples/topics/numeric/project.toml
+cargo run -p memobits-cli -- analyze-project --project examples/topics/numeric/project.toml --lib
 ```
 
 The ownership example moves an array into a call, reinitializes it during

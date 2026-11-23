@@ -1,4 +1,0 @@
-[package]
-name = "strings-demo"
-version = "0.1.0"
-entry = "main::main"

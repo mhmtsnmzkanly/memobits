@@ -182,7 +182,7 @@ only where explicitly stated; unresolved API spellings remain proposals.
   are deferred. The host/task boundary needs a separate design. Properties are
   not ordinary field syntax. The implemented I1 extension slice selects a
   method explicitly with postfix `of`, and activates public extensions only
-  from a direct module import. See the [runnable multi-module example](../../examples/projects/module-imports/README.md).
+  from a direct module import. See the [runnable multi-module example](../../examples/topics/module-imports/README.md).
   Loading independent packages and cross-package extension identity remain
   outside the current implementation.
 - User-defined `+` selects the compiler-provided `core::ops::Add` interface.

@@ -1,0 +1,140 @@
+// Start at main, then follow the checks. Both source and Wasm runs should
+// print Result: Ok(i32(42)). Each error code identifies a failed check.
+// For a source declaration that calls a typed host import, see
+// ../topics/host-capability/README.md. It requires the CLI profile in project.toml;
+// the current source ABI supports only write_i32(i32) -> unit.
+//
+// The guide is split into topic modules next to this file. Each exports check
+// functions that return Bool; main calls them in topic order and reports a
+// distinct Err code for each failed check.
+//   numbers.mb         integers, floats, casts, wrapping and bit operations
+//   text.mb            Char, string literals, bytes, scalars, loops, concat
+//   tuples.mb          tuple values, destructuring, tuples with owned strings
+//   aggregates.mb      records, anonymous shapes, opaque types, share fields
+//   ownership.mb       string-owning structs, borrow/share calls, drop
+//   collections.mb     fixed arrays, byte arrays, lists, iteration
+//   enums_outcomes.mb  enums, match, optionals, references, Result and Attempt
+//   generics.mb        generic functions, structs, methods, interface bounds
+//   operators.mb       user-defined core::ops operators and compound assignment
+
+use numbers::{numbers, widenings, numeric_casts, wrapping_arithmetic, bit_operations};
+use text::{character_literals, fixed_text, text_boundaries, text_bytes, text_scalars, walk_text, text_loop, text_concat, static_text_result, heap_text_result};
+use tuples::{tuple_values};
+use aggregates::{anonymous_shapes, shared_string_field_replacement};
+use ownership::{explicit_drop, local_string_fields, local_heap_string_fields, borrow_string_struct, owned_string_struct_argument, temporary_string_fields, replace_local_string_field};
+use collections::{stations, fixed_bytes, primitive_lists, fixed_iteration, list_iteration};
+use enums_outcomes::{trailing_enum_extension, optional_sugar, enums, optional_borrow, outcomes, nested_result_storage};
+use generics::{generic_structs, nested_generic_methods, generic_functions, generic_array_forwarding, generic_interface_forwarding};
+use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defined_div, user_defined_rem, user_defined_bitand, user_defined_bitor, user_defined_bitxor, user_defined_negation, user_defined_equality, user_defined_ordering, user_defined_add_assign, user_defined_sub_assign, user_defined_mul_assign, user_defined_div_assign, user_defined_rem_assign, user_defined_bitand_assign, user_defined_bitor_assign, user_defined_bitxor_assign, user_defined_shl, user_defined_shl_assign, user_defined_shr_assign, generic_compound_assignments, user_defined_shr};
+
+// Project features to try from the repository root:
+// - examples/topics/module-imports is the runnable multi-module setup for
+//   `use math;` and explicit `point.draw() of Draw` selection. From the repo
+//   root, run `mb run --project examples/topics/module-imports/project.toml`
+//   or build that project and run its Wasm artifact. The grouped
+//   `use self::main::{Point, Draw};` import loads symbols; only the direct
+//   module edge activates public extensions. Transitive imports and prelude
+//   aliases do not activate extensions, and external package loading is not
+//   implemented yet. Its `exercise<T>` wrapper calls both an inherent method
+//   and a selected interface method. Constrained generic evidence is selected
+//   from the caller's visible extensions and forwarded through nested calls.
+// - examples/topics/numeric imports a public function via self::math and
+//   exports it as add in project.toml. Use its manifest with mb resolve --lib,
+//   mb build --lib, or mb build --output PATH.
+// - examples/topics/structs imports a public type and uses public fields.
+//   Imports support qualified paths and as aliases. Items and fields are
+//   module-private by default. A manifest prelude can supply local names.
+// - examples/topics/arrays and examples/topics/enums extend the aggregate
+//   examples. examples/analysis has standalone analyze and ownership inputs.
+// - crates/memobits-cli/README.md covers project, syntax, resolve, analyze,
+//   ownership, analyze-project, ownership-project, build, and run. See it
+//   for stack_size, fuel limits, and selecting a Wasm export with --entry.
+//   The runner calls zero-argument exports. Library exports use scalar
+//   signatures. Source host linking is limited to the CLI profile's typed
+//   memobits:console.write_i32(i32) -> unit import; see the host-capability
+//   example. Type exports and mb check are unsupported.
+// - docs/design/proposed-language-guide.mb (a historical proposal) explores target syntax. String slicing,
+//   scalar iteration, lists, try, defaults and
+//   aggregate .copy() are gated. Generic function calls and interface evidence
+//   forwarding are limited to the examples above; generic nominal structs are
+//   demonstrated above.
+
+// A zero-argument application entry can return Result or Attempt with a
+// primitive success payload. Both runners show the variant and typed value
+// or the concrete error type and code.
+fn main() -> Result<i32, Error> {
+    // Numbers, casts and bit operations.
+    if !numbers() { return Err(Error { code: 1 }); }
+    if !widenings() { return Err(Error { code: 22 }); }
+    if !numeric_casts() { return Err(Error { code: 26 }); }
+    if !wrapping_arithmetic() { return Err(Error { code: 24 }); }
+    if !bit_operations() { return Err(Error { code: 25 }); }
+    // Characters and text.
+    if !character_literals() { return Err(Error { code: 30 }); }
+    if !fixed_text() { return Err(Error { code: 7 }); }
+    if !text_boundaries() { return Err(Error { code: 8 }); }
+    if !text_bytes() { return Err(Error { code: 9 }); }
+    if !text_scalars() { return Err(Error { code: 10 }); }
+    let sample := "aé€😀";
+    if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
+    if !text_loop() { return Err(Error { code: 63 }); }
+    if !text_concat() { return Err(Error { code: 12 }); }
+    if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
+    // Tuples.
+    if !tuple_values() { return Err(Error { code: 31 }); }
+    // Records, anonymous shapes and opaque types.
+    if !anonymous_shapes() { return Err(Error { code: 59 }); }
+    if !shared_string_field_replacement() { return Err(Error { code: 23 }); }
+    // Owned strings in structs and explicit drop.
+    if !explicit_drop() { return Err(Error { code: 17 }); }
+    if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
+    if !borrow_string_struct() { return Err(Error { code: 21 }); }
+    if !owned_string_struct_argument() { return Err(Error { code: 62 }); }
+    if !temporary_string_fields() { return Err(Error { code: 20 }); }
+    if !replace_local_string_field() { return Err(Error { code: 19 }); }
+    // Fixed arrays and lists.
+    if !stations() { return Err(Error { code: 2 }); }
+    if !fixed_bytes() { return Err(Error { code: 6 }); }
+    if !primitive_lists() { return Err(Error { code: 14 }); }
+    if !fixed_iteration() { return Err(Error { code: 15 }); }
+    if !list_iteration() { return Err(Error { code: 16 }); }
+    // Enums, optionals and outcomes.
+    if !trailing_enum_extension() { return Err(Error { code: 29 }); }
+    if !optional_sugar() { return Err(Error { code: 28 }); }
+    if !enums() { return Err(Error { code: 3 }); }
+    if !optional_borrow() { return Err(Error { code: 4 }); }
+    if !outcomes() { return Err(Error { code: 5 }); }
+    if !nested_result_storage() { return Err(Error { code: 61 }); }
+    // Generic functions, structs and interface bounds.
+    if !generic_structs() { return Err(Error { code: 27 }); }
+    if !nested_generic_methods() { return Err(Error { code: 64 }); }
+    if !generic_functions() { return Err(Error { code: 32 }); }
+    if !generic_array_forwarding() { return Err(Error { code: 33 }); }
+    if !generic_interface_forwarding() { return Err(Error { code: 34 }); }
+    // User-defined operators (core::ops).
+    if !user_defined_add() { return Err(Error { code: 35 }); }
+    if !user_defined_sub() { return Err(Error { code: 36 }); }
+    if !user_defined_mul() { return Err(Error { code: 37 }); }
+    if !user_defined_div() { return Err(Error { code: 38 }); }
+    if !user_defined_rem() { return Err(Error { code: 39 }); }
+    if !user_defined_bitand() { return Err(Error { code: 40 }); }
+    if !user_defined_bitor() { return Err(Error { code: 41 }); }
+    if !user_defined_bitxor() { return Err(Error { code: 42 }); }
+    if !user_defined_negation() { return Err(Error { code: 44 }); }
+    if !user_defined_equality() { return Err(Error { code: 45 }); }
+    if !user_defined_ordering() { return Err(Error { code: 46 }); }
+    if !user_defined_add_assign() { return Err(Error { code: 47 }); }
+    if !user_defined_sub_assign() { return Err(Error { code: 48 }); }
+    if !user_defined_mul_assign() { return Err(Error { code: 49 }); }
+    if !user_defined_div_assign() { return Err(Error { code: 50 }); }
+    if !user_defined_rem_assign() { return Err(Error { code: 51 }); }
+    if !user_defined_bitand_assign() { return Err(Error { code: 52 }); }
+    if !user_defined_bitor_assign() { return Err(Error { code: 53 }); }
+    if !user_defined_bitxor_assign() { return Err(Error { code: 54 }); }
+    if !user_defined_shl() { return Err(Error { code: 56 }); }
+    if !user_defined_shl_assign() { return Err(Error { code: 55 }); }
+    if !user_defined_shr_assign() { return Err(Error { code: 58 }); }
+    if !generic_compound_assignments() { return Err(Error { code: 60 }); }
+    if !user_defined_shr() { return Err(Error { code: 57 }); }
+    Ok(42)
+}

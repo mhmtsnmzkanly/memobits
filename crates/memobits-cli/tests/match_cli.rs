@@ -352,7 +352,7 @@ fn unsupported_pattern_forms_are_syntax_errors_with_hints() {
 
 #[test]
 fn the_enums_example_project_runs_from_source_and_artifact() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/projects/enums");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/topics/enums");
     let copy = Fixture::new();
     fs::remove_file(copy.0.join("project.toml")).unwrap();
     copy.write(

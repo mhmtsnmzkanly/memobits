@@ -1,0 +1,81 @@
+/* Numbers and control flow. Block comments can /* nest */. */
+pub fn numbers() -> Bool {
+    // An annotation supplies the literal type. Without context, integers
+    // default to i32 and floats to f64.
+    let a: i8 = -8;
+    let b: i16 = -160;
+    let c := 3_200;
+    let d: i64 = 6_400;
+    let e: u8 = 8;
+    let f: u16 = 160;
+    let g: u32 = 320;
+    let h: u64 = 640;
+    let half: f32 = 5e-1;
+    let negative_half: f32 = -5e-1;
+    let quarter := 0.25;
+
+    // var permits assignment. let creates an immutable binding.
+    var step := 0;
+    var sum := 0;
+    loop {
+        step += 1;
+        if step > 5 { break; }
+        if step % 2 == 0 { continue; }
+        sum += step;
+    }
+    // A new binding can shadow the old one. A tail expression yields a value.
+    let sum := { let offset := 1; sum + offset };
+    if !(sum == 10) { return false; }
+    let divisor := step - 6;
+    // Short-circuit evaluation skips the division when divisor is zero.
+    if divisor == 0 || sum / divisor > 0 {
+        a < 0 && b <= -160 && c >= 3_200 && d != 0
+            && e * 2 == 16 && f - 10 == 150 && g / 2 == 160 && h % 3 == 1
+            && half + 0.5 == 1.0 && negative_half == -0.5
+            && quarter * 4.0 == 1.0
+    } else {
+        false
+    }
+}
+// Numeric `as` casts are explicit across supported integer and float types.
+// Integer casts keep low bits; float-to-int truncates and saturates, with NaN
+// becoming zero. The byte convenience method is equivalent to `as u32`.
+fn widen_byte(value: u8) -> u32 {
+    value as u32
+}
+fn widen_byte_method(value: u8) -> u32 {
+    value.to_u32()
+}
+pub fn widenings() -> Bool {
+    let bytes: Array<u8, 4> = [0, 127, 128, 255];
+    widen_byte(bytes[0]) == 0 && widen_byte_method(bytes[1]) == 127
+        && bytes[2] as u32 == 128 && bytes[3].to_u32() == 255
+}
+pub fn numeric_casts() -> Bool {
+    let all_bits: u32 = 4294967295;
+    let signed: i32 = all_bits as i32;
+    let fraction: i32 = (-1.9) as i32;
+    let nan: u32 = (0.0 / 0.0) as u32;
+    let saturated: u64 = 1e300 as u64;
+    let rounded: u64 = 16777217 as f32 as u64;
+    signed == -1 && fraction == -1 && nan == 0
+        && saturated == 18446744073709551615 && rounded == 16777216
+}
+// Explicit u32 wrapping methods perform arithmetic modulo 2^32. Plain `+`
+// and `*` keep their checked behavior.
+pub fn wrapping_arithmetic() -> Bool {
+    let max: u32 = 4294967295;
+    max.wrapping_add(1) == 0 && max.wrapping_mul(2) == 4294967294
+}
+// u32 bitwise operations preserve the bit pattern. Shift counts must be below
+// 32; left shift discards high bits and right shift fills with zeroes.
+pub fn bit_operations() -> Bool {
+    let high: u32 = 2147483648;
+    let pattern: u32 = 2863311530;
+    1 | 2 ^ 3 & 7 == 1 && pattern.bit_xor(1431655765) == 4294967295
+        && pattern.bit_and(15) == 10 && pattern.bit_or(5) == 2863311535
+        && 1 << 31 == high && high >> 31 == 1
+}
+// Integer arithmetic and array indexing are checked. Proven invalid cases
+// can fail compilation. Dynamic overflow, zero divisors and invalid indices
+// trap at runtime. Floats use IEEE arithmetic.

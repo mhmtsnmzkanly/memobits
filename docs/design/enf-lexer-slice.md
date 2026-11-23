@@ -45,7 +45,7 @@ The Memobits compiler lexer receives Rust `&str`. Guest-side UTF-8 strings
 and scalar iteration are still pending. This fixture uses byte arrays and
 rejects every non-ASCII byte at its first occurrence. The valid UTF-8 encoding
 of U+00E9 and its truncated prefix therefore produce the same fixture error.
-The [separate guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
+The [separate guest UTF-8 validator](../../examples/apps/utf8-validator/README.md)
 demonstrates scalar validation over byte buffers. Keep ENF offsets in bytes.
 Once the protocol reference establishes where text
 is permitted, define the UTF-8 validation and scalar-handling contract for
@@ -53,7 +53,7 @@ those tokens.
 
 ## Implementation and verification
 
-The [self-checking project](../../examples/projects/enf-lexer/src/main.mb)
+The [self-checking project](../../examples/apps/enf-lexer/src/main.mb)
 uses guest-side fixed arrays, a mutable cursor passed by `share`, owned
 outcomes, and a nominal `LexError` derived from `Error`. Array indexing uses
 an owned snapshot from `cursor.copy()` because a shared cursor used directly
@@ -66,9 +66,9 @@ from `main`. Both runs print `Result: Ok(i32(0))` on success. From the
 repository root, run:
 
 ```sh
-cargo run -p memobits-cli -- run --project examples/projects/enf-lexer/project.toml
+cargo run -p memobits-cli -- run --project examples/apps/enf-lexer/project.toml
 artifact_dir=$(mktemp -d)
-cargo run -p memobits-cli -- build --project examples/projects/enf-lexer/project.toml --output "$artifact_dir/enf.wasm"
+cargo run -p memobits-cli -- build --project examples/apps/enf-lexer/project.toml --output "$artifact_dir/enf.wasm"
 cargo run -p memobits-cli -- run "$artifact_dir/enf.wasm"
 ```
 

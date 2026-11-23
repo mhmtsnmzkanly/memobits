@@ -423,9 +423,19 @@ fn uppercase_string_is_rejected_with_te001_on_check() {
 
 #[test]
 fn language_guide_uses_current_spellings_and_runs_with_empty_stderr() {
-    let guide =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/projects/language-guide");
-    let source = fs::read_to_string(guide.join("src/main.mb")).unwrap();
+    let guide = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/guide");
+    // The guide is split into topic modules; scan every source file.
+    let mut paths: Vec<_> = fs::read_dir(guide.join("src"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "mb"))
+        .collect();
+    paths.sort();
+    let source = paths
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         source.contains("loop ch in sample"),
         "guide lacks the text loop example"

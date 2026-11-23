@@ -3064,12 +3064,12 @@ fn string_length_observes_move_and_loan_rules() {
 
 #[test]
 fn astar_example_checks_optimal_cost_and_unreachable_in_source_and_wasm() {
-    assert_example_runs_in_both_modes("astar", b"Result: Ok(i32(12))\n");
+    assert_example_runs_in_both_modes("apps/astar", b"Result: Ok(i32(12))\n");
 }
 
 #[test]
 fn enf_lexer_example_checks_byte_fixtures_in_source_and_wasm() {
-    assert_example_runs_in_both_modes("enf-lexer", b"Result: Ok(i32(0))\n");
+    assert_example_runs_in_both_modes("apps/enf-lexer", b"Result: Ok(i32(0))\n");
 }
 
 #[test]
@@ -3173,7 +3173,7 @@ fn utf8_validation_checks_receiver_type_and_borrows_through_length_evaluation() 
 
 #[test]
 fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
-    assert_example_runs_in_both_modes("utf8-validator", b"Result: Ok(i32(0))\n");
+    assert_example_runs_in_both_modes("apps/utf8-validator", b"Result: Ok(i32(0))\n");
 }
 
 #[test]
@@ -3233,7 +3233,7 @@ fn scalar_traversal_counts_scalars_separately_from_utf8_bytes_in_source_and_wasm
 
 #[test]
 fn language_guide_checks_bytes_array_equivalence_in_source_and_wasm() {
-    assert_example_runs_in_both_modes("language-guide", b"Result: Ok(i32(42))\n");
+    assert_example_runs_in_both_modes("guide", b"Result: Ok(i32(42))\n");
 }
 
 #[test]
@@ -6831,7 +6831,7 @@ fn applied_bytes_coexists_with_a_bare_bytes_import_and_moves_like_an_array() {
 
 fn assert_example_runs_in_both_modes(project: &str, expected: &[u8]) {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/projects")
+        .join("../../examples")
         .join(project)
         .join("project.toml");
     let manifest = manifest.to_str().unwrap();

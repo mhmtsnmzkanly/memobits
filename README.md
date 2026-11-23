@@ -24,9 +24,9 @@ subset is small and the output ABI is not stable.
 ## Usage
 
 ```sh
-cargo run -p memobits-cli -- run --project examples/projects/numeric/project.toml
-cargo run -p memobits-cli -- build --project examples/projects/numeric/project.toml
-cargo run -p memobits-cli -- run examples/projects/numeric/target/memobits/app.wasm
+cargo run -p memobits-cli -- run --project examples/topics/numeric/project.toml
+cargo run -p memobits-cli -- build --project examples/topics/numeric/project.toml
+cargo run -p memobits-cli -- run examples/topics/numeric/target/memobits/app.wasm
 ```
 
 Source and artifact execution use the same Wasm runtime. Standalone scalar
@@ -39,10 +39,10 @@ construction, local moves and consuming matches. See the [outcome implementation
 Inspection commands:
 
 ```sh
-cargo run -p memobits-cli -- project --project examples/projects/numeric/project.toml
-cargo run -p memobits-cli -- syntax examples/projects/numeric/src/main.mb
+cargo run -p memobits-cli -- project --project examples/topics/numeric/project.toml
+cargo run -p memobits-cli -- syntax examples/topics/numeric/src/main.mb
 cargo run -p memobits-cli -- analyze examples/analysis/numeric.mb
-cargo run -p memobits-cli -- resolve --project examples/projects/numeric/project.toml [--lib]
+cargo run -p memobits-cli -- resolve --project examples/topics/numeric/project.toml [--lib]
 ```
 
 See `crates/memobits-cli/README.md` for all commands.
@@ -73,46 +73,35 @@ Code, diagnostics, and documentation are written in English.
 
 ## Examples
 
-Every project under `examples/projects/` has a README with an "Expected output"
-section; `crates/memobits-cli/tests/examples_documented.rs` runs each project
-from source and as standalone Wasm and compares the output to it. Run any of
-them with:
+Examples live under `examples/`: the runnable [guide](examples/guide/README.md),
+small [topics](examples/topics), larger [apps](examples/apps) and single-file
+[analysis](examples/analysis) inputs. Each project README has an "Expected
+output" section; `crates/memobits-cli/tests/examples_documented.rs` runs every
+project from source and as standalone Wasm and compares the output to it. See
+[examples/README.md](examples/README.md) for the layout and verification.
+
+| Example | Topic | Command | Expected output |
+|---|---|---|---|
+| [guide](examples/guide/README.md) | Whole language, one module per topic | `cargo run -p memobits-cli -- run --project examples/guide/project.toml` | `Result: Ok(i32(42))` |
+| [basics](examples/topics/basics/README.md) | Arithmetic, loops and `string` basics as modules of one project | `cargo run -p memobits-cli -- run --project examples/topics/basics/project.toml` | `Result: Ok(i32(462))` |
+| [arrays](examples/topics/arrays/README.md) | Fixed arrays: locals, calls, results, nested arrays | `cargo run -p memobits-cli -- run --project examples/topics/arrays/project.toml` | `Result: Ok(i32(493))` |
+| [enums](examples/topics/enums/README.md) | Variants, `match`, exhaustiveness, aliases, state machine | `cargo run -p memobits-cli -- run --project examples/topics/enums/project.toml` | `Result: Ok(i32(1094300))` |
+| [generics-operators](examples/topics/generics-operators/README.md) | `core::ops` Add/Sub/PartialEq on a `Vec2` and a bounded generic function | `cargo run -p memobits-cli -- run --project examples/topics/generics-operators/project.toml` | `Result: Ok(i32(41))` |
+| [host-capability](examples/topics/host-capability/README.md) | CLI host import declared in the manifest, bound with `extern fn` | `cargo run -p memobits-cli -- run --project examples/topics/host-capability/project.toml` | `Host i32: 42` and `Result: i32(7)` |
+| [module-imports](examples/topics/module-imports/README.md) | Direct module imports and extension activation | `cargo run -p memobits-cli -- run --project examples/topics/module-imports/project.toml` | `Result: Ok(i32(42))` |
+| [numeric](examples/topics/numeric/README.md) | Minimal project with a library `[export]` | `cargo run -p memobits-cli -- run --project examples/topics/numeric/project.toml` | `Result: Ok(i32(42))` |
+| [structs](examples/topics/structs/README.md) | Constructors, `share`/`borrow` parameters, nesting, disjoint loans | `cargo run -p memobits-cli -- run --project examples/topics/structs/project.toml` | `Result: Ok(i32(63))` |
+| [astar](examples/apps/astar/README.md) | Fixed-grid A* search with an unreachable-goal case | `cargo run -p memobits-cli -- run --project examples/apps/astar/project.toml` | `Result: Ok(i32(12))` |
+| [enf-lexer](examples/apps/enf-lexer/README.md) | Bounded ENF byte lexer fixture | `cargo run -p memobits-cli -- run --project examples/apps/enf-lexer/project.toml` | `Result: Ok(i32(0))` |
+| [hashing](examples/apps/hashing/README.md) | FNV-1a, DJB2 and Adler-32 over `Array<u8, N>` | `cargo run -p memobits-cli -- run --project examples/apps/hashing/project.toml` | `Result: Ok(u32(1774777415))` |
+| [utf8-validator](examples/apps/utf8-validator/README.md) | Unicode scalar validation with byte offsets | `cargo run -p memobits-cli -- run --project examples/apps/utf8-validator/project.toml` | `Result: Ok(i32(0))` |
+
+Build and run a standalone artifact, for example the guide:
 
 ```sh
-cargo run -p memobits-cli -- run --project examples/projects/language-guide/project.toml
-cargo run -p memobits-cli -- build --project examples/projects/language-guide/project.toml
-cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobits/app.wasm
+cargo run -p memobits-cli -- build --project examples/guide/project.toml
+cargo run -p memobits-cli -- run examples/guide/target/memobits/app.wasm
 ```
-
-- [language-guide](examples/projects/language-guide/README.md) — the runnable
-  walkthrough of the executable language; prints `Result: Ok(i32(42))`.
-- [arrays](examples/projects/arrays/README.md) — fixed arrays: locals, calls,
-  results and nested arrays.
-- [astar](examples/projects/astar/README.md) — fixed-grid A* search with a
-  checked optimal cost and an unreachable-goal case.
-- [calculator](examples/projects/calculator/README.md) — arithmetic over
-  internal calls chained into a checked total.
-- [computation](examples/projects/computation/README.md) — iterative
-  computation with loops: `factorial` and an iterative sum.
-- [enf-lexer](examples/projects/enf-lexer/README.md) — bounded ENF byte lexer
-  fixture (see the [design note](docs/design/enf-lexer-slice.md)).
-- [enums](examples/projects/enums/README.md) — variants, `match` with
-  exhaustiveness, enum aliases and a state machine.
-- [hashing](examples/projects/hashing/README.md) — FNV-1a, DJB2 and Adler-32
-  over `Array<u8, N>` with software wrapping arithmetic.
-- [host-capability](examples/projects/host-capability/README.md) — a CLI host
-  import declared in the manifest and bound with `extern fn`.
-- [module-imports](examples/projects/module-imports/README.md) — direct module
-  imports and extension activation across modules.
-- [numeric](examples/projects/numeric/README.md) — minimal project with a
-  library `[export]`.
-- [strings](examples/projects/strings/README.md) — owned and borrowed `string`
-  operations: `concat`, `borrow`, `share` and `push_str`.
-- [structs](examples/projects/structs/README.md) — constructors, `share` and
-  `borrow` parameters, nesting, disjoint loans and destructuring.
-- [utf8-validator](examples/projects/utf8-validator/README.md) — Unicode scalar
-  validation of byte buffers with byte offsets for malformed input.
-- `examples/analysis/` — single files for the analysis and ownership commands.
 
 ## Language notes
 
@@ -122,10 +111,10 @@ cargo run -p memobits-cli -- run examples/projects/language-guide/target/memobit
   It also demonstrates `loop value in items` over those fixed arrays and Lists.
   [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
   · [List iteration](docs/design/list-slice.md#list-iteration)
-  · [Runnable language guide](examples/projects/language-guide/src/main.mb)
+  · [Runnable language guide](examples/guide/src/main.mb)
 - `drop(value)` consumes a whole named owned `string`, `List<u8>`, or
   `List<u32>` local or parameter and releases any heap storage it owns.
   Any live borrow or share prevents the drop. The binding is unavailable on
   every path that drops it until it is assigned again, if mutable.
   An in-scope function, import, or value named `drop` takes precedence over the
-  built-in. [Runnable example](examples/projects/language-guide/src/main.mb)
+  built-in. [Runnable example](examples/guide/src/main.mb)

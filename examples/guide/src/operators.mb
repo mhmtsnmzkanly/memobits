@@ -1,0 +1,497 @@
+// User-defined + selects the compiler-provided core::ops::Add interface.
+// Associated Rhs and Output permit a heterogeneous owned operation. Generic
+// signatures project both types through the caller-selected Add evidence;
+// primitive arithmetic remains checked and built in.
+use core::ops::Add;
+type AddPoint { value: i32 }
+type AddRight { value: i32 }
+type AddResult { value: i32 }
+extend AddPoint of Add {
+    type Rhs = AddRight;
+    type Output = AddResult;
+    fn add(self, rhs: AddRight) -> AddResult {
+        AddResult { value: self.value + rhs.value }
+    }
+}
+fn add_points<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
+    left + right
+}
+pub fn user_defined_add() -> Bool {
+    let left := AddPoint { value: 20 };
+    let right := AddRight { value: 22 };
+    let total := add_points(left, right);
+    total.value == 42
+}
+// User-defined - follows the same owned associated-type contract through
+// core::ops::Sub. Primitive subtraction stays built in and checked.
+use core::ops::Sub;
+type SubLeft { value: i32 }
+type SubRight { value: i32 }
+type SubResult { value: i32 }
+extend SubLeft of Sub {
+    type Rhs = SubRight;
+    type Output = SubResult;
+    fn sub(self, rhs: SubRight) -> SubResult {
+        SubResult { value: self.value - rhs.value }
+    }
+}
+fn subtract<T>(left: T, right: T::Rhs) -> T::Output where T: Sub {
+    left - right
+}
+pub fn user_defined_sub() -> Bool {
+    let difference := subtract(SubLeft { value: 50 }, SubRight { value: 8 });
+    difference.value == 42
+}
+// User-defined * uses the owned associated-type contract through Mul.
+use core::ops::Mul;
+type MulLeft { value: i32 }
+type MulRight { value: i32 }
+type MulResult { value: i32 }
+extend MulLeft of Mul {
+    type Rhs = MulRight;
+    type Output = MulResult;
+    fn mul(self, rhs: MulRight) -> MulResult {
+        MulResult { value: self.value * rhs.value }
+    }
+}
+fn multiply<T>(left: T, right: T::Rhs) -> T::Output where T: Mul {
+    left * right
+}
+pub fn user_defined_mul() -> Bool {
+    let product := multiply(MulLeft { value: 6 }, MulRight { value: 7 });
+    product.value == 42
+}
+// User-defined / uses the owned associated-type contract through Div.
+use core::ops::Div;
+type DivLeft { value: i32 }
+type DivRight { value: i32 }
+type DivResult { value: i32 }
+extend DivLeft of Div {
+    type Rhs = DivRight;
+    type Output = DivResult;
+    fn div(self, rhs: DivRight) -> DivResult {
+        DivResult { value: self.value / rhs.value }
+    }
+}
+fn divide<T>(left: T, right: T::Rhs) -> T::Output where T: Div {
+    left / right
+}
+pub fn user_defined_div() -> Bool {
+    let quotient := divide(DivLeft { value: 84 }, DivRight { value: 2 });
+    quotient.value == 42
+}
+// User-defined % uses the same owned associated-type contract through Rem.
+use core::ops::Rem;
+type RemLeft { value: i32 }
+type RemRight { value: i32 }
+type RemResult { value: i32 }
+extend RemLeft of Rem {
+    type Rhs = RemRight;
+    type Output = RemResult;
+    fn rem(self, rhs: RemRight) -> RemResult {
+        RemResult { value: self.value % rhs.value }
+    }
+}
+fn remainder<T>(left: T, right: T::Rhs) -> T::Output where T: Rem {
+    left % right
+}
+pub fn user_defined_rem() -> Bool {
+    let result := remainder(RemLeft { value: 43 }, RemRight { value: 7 });
+    result.value == 1
+}
+// User-defined & selects BitAnd for nominal operands. Primitive u32 `&`
+// keeps its existing per-bit operation.
+use core::ops::BitAnd;
+type MaskLeft { value: u32 }
+type MaskRight { value: u32 }
+type MaskResult { value: u32 }
+extend MaskLeft of BitAnd {
+    type Rhs = MaskRight;
+    type Output = MaskResult;
+    fn bitand(self, rhs: MaskRight) -> MaskResult {
+        MaskResult { value: self.value & rhs.value }
+    }
+}
+fn mask<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitAnd {
+    lhs & operand
+}
+pub fn user_defined_bitand() -> Bool {
+    let lhs := MaskLeft { value: 12 };
+    let operand := MaskRight { value: 10 };
+    let result := mask(lhs, operand);
+    result.value == 8
+}
+// User-defined | selects BitOr for nominal operands. Primitive u32 `|`
+// remains the built-in per-bit operation.
+use core::ops::BitOr;
+type MergeLeft { value: u32 }
+type MergeRight { value: u32 }
+type MergeResult { value: u32 }
+extend MergeLeft of BitOr {
+    type Rhs = MergeRight;
+    type Output = MergeResult;
+    fn bitor(self, rhs: MergeRight) -> MergeResult {
+        MergeResult { value: self.value | rhs.value }
+    }
+}
+fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitOr {
+    lhs | operand
+}
+pub fn user_defined_bitor() -> Bool {
+    let lhs := MergeLeft { value: 12 };
+    let operand := MergeRight { value: 10 };
+    let result := merge(lhs, operand);
+    result.value == 14
+}
+// User-defined ^ selects BitXor for nominal operands. Primitive u32 `^`
+// keeps its existing per-bit operation.
+use core::ops::BitXor;
+type XorLeft { value: u32 }
+type XorRight { value: u32 }
+type XorResult { value: u32 }
+extend XorLeft of BitXor {
+    type Rhs = XorRight;
+    type Output = XorResult;
+    fn bitxor(self, rhs: XorRight) -> XorResult {
+        XorResult { value: self.value ^ rhs.value }
+    }
+}
+fn xor<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitXor {
+    lhs ^ operand
+}
+pub fn user_defined_bitxor() -> Bool {
+    let result := xor(XorLeft { value: 12 }, XorRight { value: 10 });
+    result.value == 6
+}
+// User-defined unary minus selects Neg for nominal values. The receiver is
+// owned, and Output may differ from the input type.
+use core::ops::Neg;
+type NegInput { value: i32 }
+type NegResult { value: i32 }
+extend NegInput of Neg {
+    type Output = NegResult;
+    fn neg(self) -> NegResult { NegResult { value: 0 - self.value } }
+}
+fn negate<T>(value: T) -> T::Output where T: Neg { -value }
+pub fn user_defined_negation() -> Bool {
+    let result := negate(NegInput { value: 42 });
+    result.value == -42
+}
+// Nominal equality borrows its left receiver and consumes the right operand.
+use core::ops::PartialEq;
+type EqKey { value: u32 }
+extend EqKey of PartialEq {
+    type Rhs = EqKey;
+    fn eq(borrow self, rhs: EqKey) -> Bool { self.value == rhs.value }
+}
+pub fn user_defined_equality() -> Bool {
+    let left := EqKey { value: 12 };
+    let same := EqKey { value: 12 };
+    let different := EqKey { value: 13 };
+    let equal := left == same;
+    let not_equal := left != different;
+    equal && not_equal && left.value == 12
+}
+// Nominal ordering selects the matching PartialOrd member directly.
+use core::ops::PartialOrd;
+type OrderedKey { value: u32 }
+extend OrderedKey of PartialOrd {
+    type Rhs = OrderedKey;
+    fn lt(borrow self, rhs: OrderedKey) -> Bool { self.value < rhs.value }
+    fn le(borrow self, rhs: OrderedKey) -> Bool { self.value <= rhs.value }
+    fn gt(borrow self, rhs: OrderedKey) -> Bool { self.value > rhs.value }
+    fn ge(borrow self, rhs: OrderedKey) -> Bool { self.value >= rhs.value }
+}
+fn ordered_before<T>(left: T, right: T::Rhs) -> Bool where T: PartialOrd { left < right }
+pub fn user_defined_ordering() -> Bool {
+    let left := OrderedKey { value: 12 };
+    let right := OrderedKey { value: 13 };
+    let same := OrderedKey { value: 12 };
+    let lower := OrderedKey { value: 11 };
+    let lower_again := OrderedKey { value: 11 };
+    let higher := OrderedKey { value: 13 };
+    let same_again := OrderedKey { value: 12 };
+    let one := OrderedKey { value: 1 };
+    let two := OrderedKey { value: 2 };
+    left < right && left <= same && higher > lower && left >= lower_again && left >= same_again
+        && ordered_before(one, two)
+        && left.value == 12
+}
+// Nominal += selects AddAssign with a shared mutable place and owned RHS.
+use core::ops::AddAssign;
+type Tally { value: u32 }
+type TallyDelta { value: u32 }
+extend Tally of AddAssign {
+    type Rhs = TallyDelta;
+    fn add_assign(share self, rhs: TallyDelta) { self.value += rhs.value; }
+}
+fn generic_add_assign<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign {
+    var value := target;
+    value += rhs;
+    value
+}
+pub fn user_defined_add_assign() -> Bool {
+    var tally := Tally { value: 7 };
+    tally += TallyDelta { value: 5 };
+    let generic := generic_add_assign(Tally { value: 10 }, TallyDelta { value: 2 });
+    var primitive: u32 = 7;
+    primitive += 5;
+    tally.value == 12 && generic.value == 12 && primitive == 12
+}
+// Nominal -= selects SubAssign with a shared mutable place and owned Rhs.
+// Primitive numeric -= keeps its existing checked arithmetic behavior.
+use core::ops::SubAssign;
+type Balance { value: u32 }
+type BalanceDelta { value: u32 }
+extend Balance of SubAssign {
+    type Rhs = BalanceDelta;
+    fn sub_assign(share self, rhs: BalanceDelta) { self.value -= rhs.value; }
+}
+fn generic_sub_assign<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign {
+    var value := target;
+    value -= rhs;
+    value
+}
+pub fn user_defined_sub_assign() -> Bool {
+    var balance := Balance { value: 19 };
+    balance -= BalanceDelta { value: 7 };
+    let generic := generic_sub_assign(Balance { value: 20 }, BalanceDelta { value: 8 });
+    var primitive: u32 = 19;
+    primitive -= 7;
+    balance.value == 12 && generic.value == 12 && primitive == 12
+}
+// Nominal *= selects MulAssign with a shared mutable place and owned Rhs.
+// Primitive numeric *= keeps its existing checked arithmetic behavior.
+use core::ops::MulAssign;
+type Scale { value: u32 }
+type ScaleFactor { value: u32 }
+extend Scale of MulAssign {
+    type Rhs = ScaleFactor;
+    fn mul_assign(share self, rhs: ScaleFactor) { self.value *= rhs.value; }
+}
+fn generic_mul_assign<T>(target: T, rhs: T::Rhs) -> T where T: MulAssign {
+    var value := target;
+    value *= rhs;
+    value
+}
+pub fn user_defined_mul_assign() -> Bool {
+    var scale := Scale { value: 6 };
+    scale *= ScaleFactor { value: 7 };
+    let generic := generic_mul_assign(Scale { value: 6 }, ScaleFactor { value: 7 });
+    var primitive: u32 = 6;
+    primitive *= 7;
+    scale.value == 42 && generic.value == 42 && primitive == 42
+}
+// Nominal /= selects DivAssign with a shared mutable place and owned Rhs.
+// Primitive numeric /= retains checked integer division behavior.
+use core::ops::DivAssign;
+type Portion { value: u32 }
+type PortionDelta { value: u32 }
+extend Portion of DivAssign {
+    type Rhs = PortionDelta;
+    fn div_assign(share self, rhs: PortionDelta) { self.value /= rhs.value; }
+}
+fn generic_div_assign<T>(target: T, rhs: T::Rhs) -> T where T: DivAssign {
+    var value := target;
+    value /= rhs;
+    value
+}
+pub fn user_defined_div_assign() -> Bool {
+    var portion := Portion { value: 24 };
+    portion /= PortionDelta { value: 3 };
+    let generic := generic_div_assign(Portion { value: 81 }, PortionDelta { value: 3 });
+    var primitive: u32 = 48;
+    primitive /= 4;
+    portion.value == 8 && generic.value == 27 && primitive == 12
+}
+// Nominal %= selects RemAssign with a shared mutable place and owned Rhs.
+// Primitive remainder stays checked, including zero and signed overflow rules.
+use core::ops::RemAssign;
+type Remainder { value: u32 }
+type Modulus { value: u32 }
+type RemainderHolder { items: Array<Remainder, 1> }
+extend Remainder of RemAssign {
+    type Rhs = Modulus;
+    fn rem_assign(share self, rhs: Modulus) { self.value %= rhs.value; }
+}
+fn generic_rem_assign<T>(target: T, rhs: T::Rhs) -> T where T: RemAssign {
+    var value := target;
+    value %= rhs;
+    value
+}
+fn generic_rem_array_assign<T, const N: u32>(var values: Array<T, N>, index: u32, rhs: T::Rhs) -> Array<T, N>
+    where T: RemAssign {
+    values[index] %= rhs;
+    values
+}
+fn generic_rem_projected_assign<T>(var holder: RemainderHolder, witness: T, rhs: T::Rhs) -> RemainderHolder
+    where T: RemAssign {
+    holder.items[0] %= rhs;
+    holder
+}
+pub fn user_defined_rem_assign() -> Bool {
+    var remainder := Remainder { value: 23 };
+    let modulus := Modulus { value: 5 };
+    remainder %= modulus;
+    let generic := generic_rem_assign(Remainder { value: 23 }, Modulus { value: 5 });
+    let indexed := generic_rem_array_assign([Remainder { value: 23 }], 0, Modulus { value: 5 });
+    remainder.value == 3 && generic.value == 3 && indexed[0].value == 3
+}
+// Nominal &= selects BitAndAssign with a shared mutable place and owned Rhs.
+use core::ops::BitAndAssign;
+type PermissionBits { value: u32 }
+type PermissionMask { value: u32 }
+extend PermissionBits of BitAndAssign {
+    type Rhs = PermissionMask;
+    fn bitand_assign(share self, rhs: PermissionMask) { self.value &= rhs.value; }
+}
+fn generic_bitand_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitAndAssign {
+    var value := target;
+    value &= rhs;
+    value
+}
+pub fn user_defined_bitand_assign() -> Bool {
+    var permissions := PermissionBits { value: 15 };
+    let mask := PermissionMask { value: 6 };
+    permissions &= mask;
+    let generic := generic_bitand_assign(PermissionBits { value: 15 }, PermissionMask { value: 6 });
+    permissions.value == 6 && generic.value == 6
+}
+// Nominal |= selects BitOrAssign and keeps the same single-evaluation place rules.
+use core::ops::BitOrAssign;
+type FeatureBits { value: u32 }
+type FeatureMask { value: u32 }
+extend FeatureBits of BitOrAssign {
+    type Rhs = FeatureMask;
+    fn bitor_assign(share self, rhs: FeatureMask) { self.value |= rhs.value; }
+}
+fn generic_bitor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitOrAssign {
+    var value := target;
+    value |= rhs;
+    value
+}
+pub fn user_defined_bitor_assign() -> Bool {
+    var features := FeatureBits { value: 8 };
+    let mask := FeatureMask { value: 3 };
+    features |= mask;
+    let generic := generic_bitor_assign(FeatureBits { value: 8 }, FeatureMask { value: 3 });
+    features.value == 11 && generic.value == 11
+}
+// Nominal ^= selects BitXorAssign; primitive u32 keeps per-bit XOR behavior.
+use core::ops::BitXorAssign;
+type FeatureDelta { value: u32 }
+extend FeatureBits of BitXorAssign {
+    type Rhs = FeatureDelta;
+    fn bitxor_assign(share self, rhs: FeatureDelta) { self.value ^= rhs.value; }
+}
+fn generic_bitxor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitXorAssign {
+    var value := target;
+    value ^= rhs;
+    value
+}
+pub fn user_defined_bitxor_assign() -> Bool {
+    var features := FeatureBits { value: 10 };
+    let delta := FeatureDelta { value: 3 };
+    features ^= delta;
+    let generic := generic_bitxor_assign(FeatureBits { value: 10 }, FeatureDelta { value: 3 });
+    features.value == 9 && generic.value == 9
+}
+// User-defined << selects Shl for nominal operands. Primitive u32 shifts
+// reject counts at or above 32, statically or at runtime.
+use core::ops::Shl;
+type ShiftLeft { value: u32 }
+type ShiftCount { value: u32 }
+type ShiftResult { value: u32 }
+extend ShiftLeft of Shl {
+    type Rhs = ShiftCount;
+    type Output = ShiftResult;
+    fn shl(self, rhs: ShiftCount) -> ShiftResult {
+        ShiftResult { value: self.value << rhs.value }
+    }
+}
+fn shift<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shl {
+    lhs << count
+}
+pub fn user_defined_shl() -> Bool {
+    let result := shift(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    result.value == 48
+}
+// Nominal <<= selects ShlAssign with the same checked place sequencing.
+use core::ops::ShlAssign;
+extend ShiftLeft of ShlAssign {
+    type Rhs = ShiftCount;
+    fn shl_assign(share self, rhs: ShiftCount) { self.value <<= rhs.value; }
+}
+fn generic_shl_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShlAssign {
+    var value := target;
+    value <<= rhs;
+    value
+}
+pub fn user_defined_shl_assign() -> Bool {
+    var value := ShiftLeft { value: 3 };
+    let count := ShiftCount { value: 4 };
+    value <<= count;
+    let generic := generic_shl_assign(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    var primitive: u32 = 3;
+    primitive <<= 4;
+    value.value == 48 && generic.value == 48 && primitive == 48
+}
+// Nominal >>= uses ShrAssign; primitive u32 counts must be below 32.
+use core::ops::ShrAssign;
+extend ShiftRight of ShrAssign {
+    type Rhs = ShiftAmount;
+    fn shr_assign(share self, rhs: ShiftAmount) { self.value >>= rhs.value; }
+}
+fn generic_shr_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShrAssign {
+    var value := target;
+    value >>= rhs;
+    value
+}
+pub fn user_defined_shr_assign() -> Bool {
+    var value := ShiftRight { value: 48 };
+    let count := ShiftAmount { value: 2 };
+    value >>= count;
+    var primitive: u32 = 48;
+    primitive >>= 2;
+    let generic := generic_shr_assign(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
+    value.value == 12 && primitive == 12 && generic.value == 12
+}
+// A single generic bound forwards selected assignment evidence through owned
+// locals, indexed Array<T, N> elements and a field-then-index projected place.
+pub fn generic_compound_assignments() -> Bool {
+    let remainder := generic_rem_assign(Remainder { value: 23 }, Modulus { value: 5 });
+    let remainder_items := generic_rem_array_assign(
+        [Remainder { value: 23 }, Remainder { value: 19 }], 1, Modulus { value: 7 }
+    );
+    let remainder_holder := generic_rem_projected_assign(
+        RemainderHolder { items: [Remainder { value: 23 }] }, Remainder { value: 0 }, Modulus { value: 5 }
+    );
+    let permissions := generic_bitand_assign(
+        PermissionBits { value: 15 }, PermissionMask { value: 6 }
+    );
+    let features_or := generic_bitor_assign(FeatureBits { value: 8 }, FeatureMask { value: 3 });
+    let features_xor := generic_bitxor_assign(FeatureBits { value: 10 }, FeatureDelta { value: 3 });
+    let shifted := generic_shl_assign(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    remainder.value == 3 && remainder_items[1].value == 5 && remainder_holder.items[0].value == 3
+        && permissions.value == 6 && features_or.value == 11
+        && features_xor.value == 9 && shifted.value == 48
+}
+// User-defined >> selects Shr and may use a distinct RHS type.
+use core::ops::Shr;
+type ShiftRight { value: u32 }
+type ShiftAmount { value: u32 }
+type Shifted { value: u32 }
+extend ShiftRight of Shr {
+    type Rhs = ShiftAmount;
+    type Output = Shifted;
+    fn shr(self, rhs: ShiftAmount) -> Shifted {
+        Shifted { value: self.value >> rhs.value }
+    }
+}
+fn shift_right<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shr {
+    lhs >> count
+}
+pub fn user_defined_shr() -> Bool {
+    let result := shift_right(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
+    result.value == 12
+}

@@ -6,9 +6,9 @@ use memobits_syntax::{
 #[test]
 fn parses_real_project_sources() {
     for source in [
-        include_str!("../../../examples/projects/numeric/src/main.mb"),
-        include_str!("../../../examples/projects/numeric/src/math.mb"),
-        include_str!("../../../examples/projects/enums/src/main.mb"),
+        include_str!("../../../examples/topics/numeric/src/main.mb"),
+        include_str!("../../../examples/topics/numeric/src/math.mb"),
+        include_str!("../../../examples/topics/enums/src/main.mb"),
     ] {
         let result = parse(SourceId(0), source);
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);

@@ -230,7 +230,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   The scrutinee is consumed (BE001 afterwards) and payload bindings are owned
   locals. IR: `EnumTag`, `VariantExtract`, `Switch`. Aliases of enum types now
   resolve variant paths in the resolver. Details in the B2 checkpoint of
-  `enum-implementation.md`; example in `examples/projects/enums/`.
+  `enum-implementation.md`; example in `examples/topics/enums/`.
 
 ### Enums (B3)
 
@@ -244,7 +244,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   enum place overlap. Disjoint writes during a payload borrow are accepted, an
   overlapping write is BE005 with the place named. Mutable matching stays
   deferred. Details in the B3 checkpoint of `enum-implementation.md`; example
-  in `examples/projects/enums/`.
+  in `examples/topics/enums/`.
 
 ### Current limits
 
@@ -308,7 +308,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - The [bounded ENF lexer fixture](enf-lexer-slice.md) runs its ASCII decimal
   acceptance cases from source and standalone Wasm. Protocol grammar,
   UTF-8 token handling and parser conformance require a protocol reference.
-- The [guest UTF-8 validator](../../examples/projects/utf8-validator/README.md)
+- The [guest UTF-8 validator](../../examples/apps/utf8-validator/README.md)
   validates fixed byte buffers with explicit lengths and byte-offset errors.
   The [executable text slice](utf8-text-slice.md) runs ordinary UTF-8 literals,
   owned `String` transfers and internal borrows using private Wasm data.
@@ -338,7 +338,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
 
 ### A* validation consumer
 
-The [A* example project](../../examples/projects/astar/README.md) completes
+The [A* example project](../../examples/apps/astar/README.md) completes
 the fixed-grid consumer milestone. It uses four-neighbor movement with unit
 costs, Manhattan distance, and a fixed-array frontier scanned for the lowest
 estimated total cost. The example checks a known optimal cost and an

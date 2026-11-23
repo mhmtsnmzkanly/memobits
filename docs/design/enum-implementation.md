@@ -218,7 +218,7 @@ B1 defines the cell layout and the tag value so B2 only adds instructions.
 ### Not in B1
 
 Everything in B2 to B4 above. B1 had no example project because an enum was
-not observable without `match`; the first one (`examples/projects/enums/`)
+not observable without `match`; the first one (`examples/topics/enums/`)
 arrived with B2. B1's behaviour is covered by tests in every layer; the tag and
 payload bytes are checked by in-crate backend tests that read memory through the
 test-only `__test_memory` export, not by any language-level tag access.
