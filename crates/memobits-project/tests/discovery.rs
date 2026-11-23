@@ -1,4 +1,4 @@
-use memobits_project::{discover_modules, Project};
+use memobits_project::{discover_modules, Manifest, Project};
 use std::{
     fs,
     path::Path,
@@ -71,6 +71,44 @@ fn missing_root_and_invalid_module_paths_are_errors() {
         .to_string()
         .contains("invalid module path"));
 }
+
+#[test]
+fn manifest_host_profile_is_parsed_and_validated() {
+    let valid =
+        Manifest::parse("[package]\nname='hosted'\nentry='main::run'\n[host]\nprofile='cli'\n")
+            .unwrap();
+    assert_eq!(valid.host.unwrap().profile.as_deref(), Some("cli"));
+
+    let missing =
+        Manifest::parse("[package]\nname='hosted'\nentry='main::run'\n[host]\n").unwrap_err();
+    assert!(missing.to_string().contains("host.profile is required"));
+
+    let unknown =
+        Manifest::parse("[package]\nname='hosted'\nentry='main::run'\n[host]\nprofile='browser'\n")
+            .unwrap_err();
+    assert!(unknown.to_string().contains("unknown host profile"));
+
+    let capability = Manifest::parse(
+        "[package]\nname='hosted'\nentry='main::run'\n[host]\nprofile='cli'\ncapability='clock'\n",
+    )
+    .unwrap_err();
+    assert!(capability.to_string().contains("invalid project manifest"));
+
+    let typed_import = Manifest::parse(
+        "[package]\nname='hosted'\nentry='main::run'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i32']\nresult='unit'\n",
+    )
+    .unwrap();
+    assert_eq!(typed_import.host.unwrap().imports.len(), 1);
+
+    let wrong_signature = Manifest::parse(
+        "[package]\nname='hosted'\nentry='main::run'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i64']\nresult='unit'\n",
+    )
+    .unwrap_err();
+    assert!(wrong_signature
+        .to_string()
+        .contains("unsupported host import"));
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_symlink_cycles() {

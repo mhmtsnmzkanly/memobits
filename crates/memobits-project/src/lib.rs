@@ -33,6 +33,38 @@ pub struct Manifest {
     pub dependencies: BTreeMap<String, Dependency>,
     #[serde(default)]
     pub build: Build,
+    #[serde(default)]
+    pub host: Option<Host>,
+}
+
+/// Optional `[host]` table. The CLI profile currently admits one typed console
+/// import; every other setting remains rejected by `deny_unknown_fields`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Host {
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub imports: Vec<HostImport>,
+}
+
+/// One typed host function import enabled by the selected profile.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostImport {
+    pub module: String,
+    pub name: String,
+    pub params: Vec<HostValueType>,
+    pub result: HostValueType,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HostValueType {
+    I32,
+    I64,
+    F32,
+    F64,
+    Unit,
 }
 
 /// Optional `[build]` table.
@@ -154,6 +186,37 @@ impl Manifest {
                 return Err(Error::Build(format!(
                     "build.stack_size {size} must be a multiple of {STACK_SIZE_ALIGNMENT} bytes"
                 )));
+            }
+        }
+        if let Some(host) = &self.host {
+            match host.profile.as_deref() {
+                None => return Err(invalid("host.profile is required; supported profile: cli")),
+                Some("cli") => {}
+                Some(profile) => {
+                    return Err(invalid(format!(
+                        "unknown host profile {profile:?}; supported profile: cli"
+                    )))
+                }
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for import in &host.imports {
+                let key = (&import.module, &import.name);
+                if !seen.insert(key) {
+                    return Err(invalid(format!(
+                        "duplicate host import '{}.{}'",
+                        import.module, import.name
+                    )));
+                }
+                if import.module != "memobits:console"
+                    || import.name != "write_i32"
+                    || import.params.as_slice() != &[HostValueType::I32]
+                    || import.result != HostValueType::Unit
+                {
+                    return Err(invalid(format!(
+                        "unsupported host import '{}.{}'; supported signature is memobits:console.write_i32(i32) -> unit",
+                        import.module, import.name
+                    )));
+                }
             }
         }
         if self.package.name.trim().is_empty() {

@@ -363,6 +363,7 @@ fn check_block(
         match &statement.kind {
             StatementKind::Binding { value, .. }
             | StatementKind::Destructure { value, .. }
+            | StatementKind::TupleDestructure { value, .. }
             | StatementKind::Expression(value) => check_expr(value, types, diagnostics),
             StatementKind::Assign { target, value, .. } => {
                 check_expr(target, types, diagnostics);
@@ -390,6 +391,48 @@ fn diagnostic(number: u16, span: memobits_diagnostics::Span, message: &str) -> D
     );
     diagnostic.span = Some(span);
     diagnostic
+}
+
+pub(crate) fn shift_assignment_count_error(span: memobits_diagnostics::Span) -> Diagnostic {
+    diagnostic(3, span, "u32 shift count must be less than 32")
+}
+
+pub(crate) fn shift_assignment_count_out_of_range(expr: &Expr) -> bool {
+    fn integer(expr: &Expr) -> Option<i128> {
+        match &expr.kind {
+            ExprKind::Number(raw)
+                if raw
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'_') =>
+            {
+                raw.replace('_', "").parse().ok()
+            }
+            ExprKind::Unary { operator, operand } if operator == "+" || operator == "-" => {
+                let value = integer(operand)?;
+                if operator == "-" {
+                    value.checked_neg()
+                } else {
+                    Some(value)
+                }
+            }
+            ExprKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left = integer(left)?;
+                let right = integer(right)?;
+                match operator.as_str() {
+                    "+" => left.checked_add(right),
+                    "-" => left.checked_sub(right),
+                    "*" => left.checked_mul(right),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    integer(expr).is_some_and(|count| count >= 32)
 }
 
 /// Check one syntax module against facts already captured by its type pass.

@@ -2301,3 +2301,154 @@ fn an_aggregate_variant_extraction_must_be_followed_by_a_consuming_use() {
         "{errors:?}"
     );
 }
+
+/// `enum E { S(String), N(i32) }` plus a function whose only parameter is a
+/// borrowed reference to `holder`. `path` instructions turn that reference
+/// into an `E` value (value id 0 is the address chain's last load); the
+/// extraction under test reads `variant`.
+fn borrowed_payload_program(
+    holder: Type,
+    holder_def: Option<TypeDef>,
+    address_chain: impl FnOnce(&mut Vec<Type>) -> Vec<Instruction>,
+    variant: u32,
+) -> Vec<String> {
+    let enum_ty = Type::Enum(TypeId(0));
+    let mut f = function();
+    f.signature.parameters = vec![ParameterType {
+        access: Access::Borrow,
+        ty: holder.clone(),
+    }];
+    f.signature.result = Box::new(Type::Primitive(Primitive::Unit));
+    f.parameter_locals = vec![LocalId(0)];
+    f.locals = vec![Local {
+        name: "holder".into(),
+        ty: ref_ty(Access::Borrow, holder),
+        mutable: false,
+        span: span(),
+    }];
+    f.values = vec![];
+    let mut instructions = address_chain(&mut f.values);
+    let loaded = (f.values.len() - 1) as u32;
+    assert_eq!(f.values[loaded as usize], enum_ty);
+    let extracted = f.values.len() as u32;
+    f.values.push(if variant == 0 { Type::String } else { i32_ty() });
+    instructions.push(ins(
+        Some(extracted),
+        InstructionKind::VariantExtract {
+            base: val(loaded, UseMode::Read),
+            variant,
+            field: 0,
+        },
+    ));
+    f.blocks[0].instructions = instructions;
+    f.blocks[0].terminator.kind = TerminatorKind::Return(None);
+    let mut types = vec![enum_def(
+        "E",
+        vec![("S", vec![Type::String]), ("N", vec![i32_ty()])],
+    )];
+    types.extend(holder_def);
+    match (Program { functions: vec![f], types }).validate() {
+        Ok(()) => vec![],
+        Err(errors) => errors.into_iter().map(|e| e.message).collect(),
+    }
+}
+
+const BORROWED_PAYLOAD: &str = "cannot be extracted from borrowed, field or array-element storage";
+
+fn direct_load_chain(values: &mut Vec<Type>) -> Vec<Instruction> {
+    values.push(Type::Enum(TypeId(0)));
+    vec![ins(
+        Some(0),
+        InstructionKind::Load {
+            reference: loc(0, UseMode::Borrow),
+        },
+    )]
+}
+
+fn field_load_chain(values: &mut Vec<Type>) -> Vec<Instruction> {
+    values.push(ref_ty(Access::Borrow, Type::Enum(TypeId(0))));
+    values.push(Type::Enum(TypeId(0)));
+    vec![
+        ins(
+            Some(0),
+            InstructionKind::FieldAddr {
+                loan: LoanId(0),
+                base: loc(0, UseMode::Borrow),
+                field: 0,
+                access: Access::Borrow,
+            },
+        ),
+        ins(
+            Some(1),
+            InstructionKind::Load {
+                reference: val(0, UseMode::Borrow),
+            },
+        ),
+    ]
+}
+
+fn element_load_chain(values: &mut Vec<Type>) -> Vec<Instruction> {
+    values.push(i32_ty());
+    values.push(ref_ty(Access::Borrow, Type::Enum(TypeId(0))));
+    values.push(Type::Enum(TypeId(0)));
+    vec![
+        ins(
+            Some(0),
+            InstructionKind::Constant(Constant::Integer("0".into())),
+        ),
+        ins(
+            Some(1),
+            InstructionKind::ElementAddr {
+                loan: LoanId(0),
+                base: loc(0, UseMode::Borrow),
+                index: val(0, UseMode::Read),
+                access: Access::Borrow,
+            },
+        ),
+        ins(
+            Some(2),
+            InstructionKind::Load {
+                reference: val(1, UseMode::Borrow),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn rejects_heap_payload_extraction_from_borrowed_enum() {
+    let errors = borrowed_payload_program(
+        ref_ty(Access::Borrow, Type::Enum(TypeId(0))),
+        None,
+        direct_load_chain,
+        0,
+    );
+    assert!(has(&errors, BORROWED_PAYLOAD), "{errors:?}");
+}
+
+#[test]
+fn rejects_heap_payload_extraction_from_struct_field() {
+    let holder = struct_def("H", vec![("e", Type::Enum(TypeId(0)))]);
+    let errors = borrowed_payload_program(Type::Struct(TypeId(1)), Some(holder), field_load_chain, 0);
+    assert!(has(&errors, BORROWED_PAYLOAD), "{errors:?}");
+}
+
+#[test]
+fn rejects_heap_payload_extraction_from_array_element() {
+    let holder = Type::Array {
+        element: Box::new(Type::Enum(TypeId(0))),
+        len: 2,
+    };
+    let errors = borrowed_payload_program(holder, None, element_load_chain, 0);
+    assert!(has(&errors, BORROWED_PAYLOAD), "{errors:?}");
+}
+
+#[test]
+fn accepts_scalar_payload_extraction_from_borrowed_storage() {
+    let errors = borrowed_payload_program(
+        ref_ty(Access::Borrow, Type::Enum(TypeId(0))),
+        None,
+        direct_load_chain,
+        1,
+    );
+    assert!(!has(&errors, BORROWED_PAYLOAD), "{errors:?}");
+}

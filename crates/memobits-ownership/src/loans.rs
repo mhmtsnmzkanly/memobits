@@ -652,7 +652,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         }
         | InstructionKind::StringIsCharBoundary { source, offset }
         | InstructionKind::StringByteAt { source, offset }
-        | InstructionKind::StringScalarAt { source, offset } => vec![source, offset],
+        | InstructionKind::StringScalarAt { source, offset }
+        | InstructionKind::StringScalarRead { source, offset, .. } => vec![source, offset],
         InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::ReplaceStringField { value, .. } => vec![value],
@@ -1554,6 +1555,9 @@ fn check_instruction(
             source: reference, ..
         }
         | InstructionKind::StringScalarAt {
+            source: reference, ..
+        }
+        | InstructionKind::StringScalarRead {
             source: reference, ..
         } if type_at(function, reference.source).is_some_and(is_reference) => {
             check_reference_read(

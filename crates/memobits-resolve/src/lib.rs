@@ -4,10 +4,10 @@ mod names;
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
 use memobits_project::Project;
 use memobits_syntax::{
-    templates, AssociatedTypeBinding, InterfaceMethod, ItemKind, Module, Type, TypeArgument,
-    TypeDefinition,
+    AssociatedTypeBinding, InterfaceMethod, ItemKind, Module, Type, TypeArgument, TypeDefinition,
+    templates,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Target {
@@ -24,6 +24,8 @@ pub struct Resolution {
     pub package: String,
     pub modules: BTreeMap<String, SourceModule>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Non-failing warnings from every parsed module (never abort a command).
+    pub warnings: Vec<Diagnostic>,
     /// Explicit direct module imports, kept separate from symbol imports and preludes.
     pub module_imports: BTreeMap<String, BTreeSet<String>>,
 }
@@ -47,6 +49,7 @@ pub struct InherentExtensionCandidate {
     pub public: bool,
     pub span: Span,
     pub target: Type,
+    pub generic_parameters: Vec<memobits_syntax::GenericParameter>,
     pub methods: Vec<InterfaceMethod>,
 }
 impl Resolution {
@@ -104,6 +107,7 @@ impl Resolution {
                     let ItemKind::InherentExtension {
                         public,
                         target,
+                        generic_parameters,
                         methods,
                     } = &item.kind
                     else {
@@ -115,6 +119,7 @@ impl Resolution {
                         public: *public,
                         span: item.span,
                         target: target.clone(),
+                        generic_parameters: generic_parameters.clone(),
                         methods: methods.clone(),
                     })
                 })
@@ -176,7 +181,7 @@ fn split(path: &str, project: &Project) -> Option<(String, String)> {
     let (module, name) = path.rsplit_once("::")?;
     Some((module.into(), name.into()))
 }
-const CORE_OPS_SOURCE: &str = "pub interface Add { type Rhs; type Output; fn add(self, rhs: Rhs) -> Output; }\npub interface Sub { type Rhs; type Output; fn sub(self, rhs: Rhs) -> Output; }\npub interface Mul { type Rhs; type Output; fn mul(self, rhs: Rhs) -> Output; }\npub interface Div { type Rhs; type Output; fn div(self, rhs: Rhs) -> Output; }\npub interface Rem { type Rhs; type Output; fn rem(self, rhs: Rhs) -> Output; }";
+const CORE_OPS_SOURCE: &str = "pub interface Add { type Rhs; type Output; fn add(self, rhs: Rhs) -> Output; }\npub interface Sub { type Rhs; type Output; fn sub(self, rhs: Rhs) -> Output; }\npub interface Mul { type Rhs; type Output; fn mul(self, rhs: Rhs) -> Output; }\npub interface Div { type Rhs; type Output; fn div(self, rhs: Rhs) -> Output; }\npub interface Rem { type Rhs; type Output; fn rem(self, rhs: Rhs) -> Output; }\npub interface BitAnd { type Rhs; type Output; fn bitand(self, rhs: Rhs) -> Output; }\npub interface BitOr { type Rhs; type Output; fn bitor(self, rhs: Rhs) -> Output; }\npub interface BitXor { type Rhs; type Output; fn bitxor(self, rhs: Rhs) -> Output; }\npub interface Shl { type Rhs; type Output; fn shl(self, rhs: Rhs) -> Output; }\npub interface Shr { type Rhs; type Output; fn shr(self, rhs: Rhs) -> Output; }\npub interface Neg { type Output; fn neg(self) -> Output; }\npub interface PartialEq { type Rhs; fn eq(borrow self, rhs: Rhs) -> Bool; }\npub interface PartialOrd { type Rhs; fn lt(borrow self, rhs: Rhs) -> Bool; fn le(borrow self, rhs: Rhs) -> Bool; fn gt(borrow self, rhs: Rhs) -> Bool; fn ge(borrow self, rhs: Rhs) -> Bool; }\npub interface AddAssign { type Rhs; fn add_assign(share self, rhs: Rhs); }\npub interface SubAssign { type Rhs; fn sub_assign(share self, rhs: Rhs); }\npub interface MulAssign { type Rhs; fn mul_assign(share self, rhs: Rhs); }\npub interface DivAssign { type Rhs; fn div_assign(share self, rhs: Rhs); }\npub interface RemAssign { type Rhs; fn rem_assign(share self, rhs: Rhs); }\npub interface BitAndAssign { type Rhs; fn bitand_assign(share self, rhs: Rhs); }\npub interface BitOrAssign { type Rhs; fn bitor_assign(share self, rhs: Rhs); }\npub interface BitXorAssign { type Rhs; fn bitxor_assign(share self, rhs: Rhs); }\npub interface ShlAssign { type Rhs; fn shl_assign(share self, rhs: Rhs); }\npub interface ShrAssign { type Rhs; fn shr_assign(share self, rhs: Rhs); }";
 fn is_core_module(name: &str) -> bool {
     name == "core::ops"
 }
@@ -259,6 +264,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         package: project.manifest.package.name.clone(),
         modules: BTreeMap::new(),
         diagnostics: vec![],
+        warnings: vec![],
         module_imports: BTreeMap::new(),
     };
     if project
@@ -368,6 +374,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         );
         let parsed = memobits_syntax::parse(id, &text);
         result.diagnostics.extend(parsed.diagnostics);
+        result.warnings.extend(parsed.warnings);
         let mut names = BTreeSet::new();
         for item in &parsed.module.items {
             let name = match &item.kind {
@@ -446,6 +453,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         }
         for item in &parsed.module.items {
             let mut exposed = Vec::new();
+            let mut exposed_generics = HashSet::new();
             match &item.kind {
                 ItemKind::Function {
                     public: true,
@@ -501,8 +509,13 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 ItemKind::InherentExtension {
                     public: true,
                     target,
+                    generic_parameters,
                     methods,
                 } => {
+                    exposed_generics.extend(generic_parameters.iter().filter_map(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                            .then(|| parameter.name.as_str())
+                    }));
                     exposed.push(target);
                     for method in methods {
                         exposed.extend(method.parameters.iter().map(|parameter| &parameter.ty));
@@ -512,6 +525,9 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 _ => {}
             }
             while let Some(ty) = exposed.pop() {
+                if ty.path.len() == 1 && exposed_generics.contains(ty.path[0].as_str()) {
+                    continue;
+                }
                 exposed.extend(ty.arguments.iter().filter_map(|argument| match argument {
                     TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
                         Some(ty)
@@ -977,6 +993,9 @@ fn canonical_type_inner(
     seen: &mut BTreeSet<String>,
     builtins: &[&str],
 ) -> String {
+    if ty.path.is_empty() {
+        return "<invalid-type>".into();
+    }
     if ty.path.as_slice() == ["\0tuple"] {
         let elements = ty
             .arguments
@@ -992,6 +1011,37 @@ fn canonical_type_inner(
             })
             .collect::<Vec<_>>();
         return format!("tuple({})", elements.join(","));
+    }
+    if ty.path.as_slice() == ["\0record"] {
+        let mut fields = ty
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                TypeArgument::TupleField {
+                    label: Some(label),
+                    ty,
+                } => (
+                    label.clone(),
+                    canonical_type_inner(project, resolution, module, imports, ty, seen, builtins),
+                ),
+                _ => ("<invalid-field>".into(), "<invalid-type>".into()),
+            })
+            .collect::<Vec<_>>();
+        fields.sort_by(|left, right| left.0.cmp(&right.0));
+        return format!(
+            "record{{{}}}",
+            fields
+                .into_iter()
+                .map(|(label, ty)| format!("{label}:{ty}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    if ty.path.first().is_some_and(|part| part == "\0enum") {
+        return format!(
+            "anonymous-enum({}:{}:{})",
+            ty.span.source.0, ty.span.start, ty.span.end
+        );
     }
     let mut path = if ty.path.as_slice() == ["string"] {
         "String".to_owned()

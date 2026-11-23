@@ -7,6 +7,7 @@ use memobits_syntax::parse;
 const DECLS: &str = "type P { x: i32, y: u8 } \
     type Line { a: P, b: P, n: i32 } \
     type Grid { cells: Array<i32, 3>, k: i32 } \
+    type Named { text: string, count: u32 } \
     type U {} \
     fn make() -> Line { Line { a: P { x: 1, y: 2 }, b: P { x: 3, y: 4 }, n: 5 } } ";
 
@@ -176,4 +177,115 @@ fn nested_patterns_omission_and_rest_are_gated_by_the_parser() {
             result.diagnostics
         );
     }
+}
+
+#[test]
+fn tuple_destructuring_binds_positional_elements_and_consumes_the_source_once() {
+    for body in [
+        "let pair := (40, true); let (number, flag) := pair; let result := if flag { number + 2 } else { 0 };",
+        "var (number, flag) := (40, true); number += 2; let result := if flag { number } else { 0 };",
+        "let nested := ((40, true), 2); let (inner, count) := nested; let (number, flag) := inner; let result := if flag { number + count } else { 0 };",
+        "let nested := ((40, true), 2); let ((number, flag), _) := nested; let result := if flag { number + 2 } else { 0 };",
+        "let text := \"xy\".concat(\"!\"); let pair := (text, 40 as u32); let (moved, count) := pair; let result := moved.len() + count;",
+        "let text := \"xy\".concat(\"!\"); let pair := (40 as u32, text); let (count, moved) := pair; let result := moved.len() + count;",
+        "let text := \"xy\".concat(\"!\"); let pair := (text, 40 as u32); let (_, count) := pair; let result := count;",
+        "let () := ();",
+    ] {
+        let codes = ownership(body);
+        assert!(codes.is_empty(), "{body}: {codes:?}");
+    }
+
+    let program = lower("let pair := (40, true); let (number, flag) := pair;");
+    let function = program.functions.last().unwrap();
+    let modes: Vec<UseMode> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match &instruction.kind {
+            InstructionKind::Extract { base, .. } => Some(base.mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(modes, vec![UseMode::Read, UseMode::Consume]);
+}
+
+#[test]
+fn tuple_destructuring_rejects_invalid_patterns_and_accepts_nested_string_tuples() {
+    rejected(
+        "let text := \"xy\".concat(\"!\"); let (moved, count) := (text, 40 as u32);",
+        "TE017",
+        "requires a named owned tuple local",
+    );
+    rejected(
+        "let named := Named { text: \"xy\".concat(\"!\"), count: 40 }; let Named { text, count } := named;",
+        "TE018",
+        "a struct owning a heap String can only move directly into a new local",
+    );
+    rejected(
+        "let pair := (1, true); let (same, same) := pair;",
+        "TE023",
+        "introduced more than once",
+    );
+    rejected(
+        "let pair := (1, true); let (only, second, third) := pair;",
+        "TE023",
+        "expects 2 bindings",
+    );
+    rejected("let (first, second) := 42;", "TE023", "not a tuple type");
+    lower("let text := \"xy\"; let inner := (text, 40 as u32); let outer := (inner, true); let (nested, enabled) := outer;");
+    assert!(
+        ownership("let pair := (1, true); let (number, flag) := pair; let later := pair.0;")
+            .contains(&"BE001".into())
+    );
+    assert!(
+        ownership("let text := \"xy\".concat(\"!\"); let pair := (text, 40 as u32); let (moved, count) := pair; let later := pair.1;")
+            .contains(&"BE001".into())
+    );
+}
+
+#[test]
+fn only_owned_string_tuple_parameters_enter_heap_cleanup_tracking() {
+    let source = parsed(
+        "fn discard(pair: ((string, string), u32)) {} fn scalar(value: u32) {} fn borrowed(value: borrow i32) {} fn borrowed_tuple(pair: borrow ((string, string), u32)) {} fn main() {}",
+    );
+    let program = lower_module(&source, "test", &["main".into()]).unwrap();
+    program.validate().unwrap();
+    let facts = program.heap_strings();
+    let parameter_fact = |name: &str| {
+        let (index, function) = program
+            .functions
+            .iter()
+            .enumerate()
+            .find(|(_, function)| function.path.name == name)
+            .unwrap();
+        (index, function.parameter_locals[0])
+    };
+
+    let (discard, tuple_parameter) = parameter_fact("discard");
+    assert!(facts[discard].locals.contains(&tuple_parameter));
+    assert!(program.functions[discard].blocks[0]
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.kind, InstructionKind::EndStructLocal { local } if local == tuple_parameter)));
+
+    let (scalar, scalar_parameter) = parameter_fact("scalar");
+    assert!(!facts[scalar].locals.contains(&scalar_parameter));
+    assert!(!program.functions[scalar].blocks[0]
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.kind, InstructionKind::EndStructLocal { .. })));
+
+    let (borrowed, reference_parameter) = parameter_fact("borrowed");
+    assert!(!facts[borrowed].locals.contains(&reference_parameter));
+    assert!(!program.functions[borrowed].blocks[0]
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.kind, InstructionKind::EndStructLocal { .. })));
+
+    let (borrowed_tuple, reference_tuple) = parameter_fact("borrowed_tuple");
+    assert!(!facts[borrowed_tuple].locals.contains(&reference_tuple));
+    assert!(!program.functions[borrowed_tuple].blocks[0]
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.kind, InstructionKind::EndStructLocal { .. })));
 }

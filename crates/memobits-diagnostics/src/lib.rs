@@ -16,6 +16,8 @@ pub enum Category {
     StaticOperation,
     Project,
     Runtime,
+    /// Non-failing migration warnings (`MW`); always rendered with warning severity.
+    Migration,
 }
 
 impl Category {
@@ -29,6 +31,7 @@ impl Category {
             Self::StaticOperation => "LE",
             Self::Project => "PE",
             Self::Runtime => "RE",
+            Self::Migration => "MW",
         }
     }
 }
@@ -89,6 +92,7 @@ impl FromStr for DiagnosticCode {
             b"LE" => Category::StaticOperation,
             b"PE" => Category::Project,
             b"RE" => Category::Runtime,
+            b"MW" => Category::Migration,
             _ => return Err(InvalidCode),
         };
         let number = bytes[2..]
@@ -280,6 +284,7 @@ mod tests {
             Category::StaticOperation,
             Category::Project,
             Category::Runtime,
+            Category::Migration,
         ] {
             for number in [1, 42, 999] {
                 let code = DiagnosticCode::new(category, number).unwrap();

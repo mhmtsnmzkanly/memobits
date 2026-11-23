@@ -80,6 +80,8 @@ enum InstanceKey {
     Template(TemplateId),
     Generic(String),
     Tuple(String),
+    Record(String),
+    AnonymousEnum(Span, String),
 }
 
 #[derive(Clone)]
@@ -96,6 +98,9 @@ pub(super) struct TypeTable {
     imports: HashMap<String, HashMap<String, String>>,
     aliases: RefCell<HashMap<String, AliasState>>,
     generic_in_progress: RefCell<HashSet<String>>,
+    /// Already-resolved types spliced into written types as `\0ty` paths while
+    /// specializing generic method bodies and signatures.
+    resolved_arguments: RefCell<Vec<Ty>>,
 }
 
 fn key(module: &str, name: &str) -> String {
@@ -117,6 +122,19 @@ fn substitute_type(
         .arguments
         .iter()
         .map(|argument| match argument {
+            // A const parameter forwarded as a nominal argument (`Tag<N>`)
+            // parses as a type path; substitute its value when it is in scope.
+            TypeArgument::Type(ty)
+                if ty.path.len() == 1
+                    && ty.arguments.is_empty()
+                    && !types.contains_key(&ty.path[0])
+                    && constants.contains_key(&ty.path[0]) =>
+            {
+                TypeArgument::Integer(memobits_syntax::IntegerLiteral {
+                    span: ty.span,
+                    raw: constants[&ty.path[0]].to_string(),
+                })
+            }
             TypeArgument::Type(ty) => TypeArgument::Type(substitute_type(ty, types, constants)),
             TypeArgument::TupleField { label, ty } => TypeArgument::TupleField {
                 label: label.clone(),
@@ -378,6 +396,91 @@ impl TypeTable {
         Ok(Ty::Tuple(id, name.into(), aliases))
     }
 
+    /// Intern an anonymous record by its exact named field/type set. Field
+    /// order in the resulting layout is canonical; initializer order remains
+    /// in the syntax tree and is honored by lowering.
+    pub(super) fn instantiate_record(&self, mut fields: Vec<(String, Ty)>, span: Span) -> Ty {
+        fields.sort_by(|left, right| left.0.cmp(&right.0));
+        let identity = format!(
+            "{:?}",
+            fields
+                .iter()
+                .map(|(name, ty)| (name, self.semantic_tuple_element_identity(ty)))
+                .collect::<Vec<_>>()
+        );
+        let mut instances = self.instances.borrow_mut();
+        if let Some((index, (_, _, info))) = instances
+            .iter()
+            .enumerate()
+            .find(|(_, (key, _, _))| *key == InstanceKey::Record(identity.clone()))
+        {
+            return Ty::Struct((self.types.len() + index) as u32, info.name.as_str().into());
+        }
+        let id = (self.types.len() + instances.len()) as u32;
+        let name = format!("Record{id}");
+        let info = StructInfo {
+            name: name.clone(),
+            module: "\0record".into(),
+            span,
+            is_enum: false,
+            bodyless: false,
+            fields: fields
+                .into_iter()
+                .map(|(name, ty)| FieldInfo {
+                    name,
+                    public: true,
+                    module: "\0record".into(),
+                    ty,
+                    ty_span: span,
+                })
+                .collect(),
+            variants: Vec::new(),
+        };
+        instances.push((InstanceKey::Record(identity), Vec::new(), info));
+        Ty::Struct(id, name.into())
+    }
+
+    pub(super) fn instantiate_anonymous_enum(&self, variants: &[VariantInfo], span: Span) -> Ty {
+        let identity = variants
+            .iter()
+            .map(|variant| {
+                format!(
+                    "{}({})",
+                    variant.name,
+                    variant
+                        .payload
+                        .iter()
+                        .map(|ty| self.semantic_tuple_element_identity(ty))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let key = InstanceKey::AnonymousEnum(span, identity);
+        let mut instances = self.instances.borrow_mut();
+        if let Some((index, (_, _, info))) = instances
+            .iter()
+            .enumerate()
+            .find(|(_, (existing, _, _))| existing == &key)
+        {
+            return Ty::Enum((self.types.len() + index) as u32, info.name.as_str().into());
+        }
+        let id = (self.types.len() + instances.len()) as u32;
+        let name = format!("Enum{id}");
+        let info = StructInfo {
+            name: name.clone(),
+            module: "\0anonymous-enum".into(),
+            span,
+            is_enum: true,
+            bodyless: false,
+            fields: Vec::new(),
+            variants: variants.to_vec(),
+        };
+        instances.push((key, Vec::new(), info));
+        Ty::Enum(id, name.into())
+    }
+
     fn semantic_tuple_element_identity(&self, ty: &Ty) -> String {
         match ty {
             Ty::Tuple(id, _, _) => {
@@ -424,7 +527,10 @@ impl TypeTable {
             .get(index)
             .and_then(|entry| match entry.0 {
                 InstanceKey::Template(id) => Some(id),
-                InstanceKey::Generic(_) | InstanceKey::Tuple(_) => None,
+                InstanceKey::Generic(_)
+                | InstanceKey::Tuple(_)
+                | InstanceKey::Record(_)
+                | InstanceKey::AnonymousEnum(_, _) => None,
             })
     }
 
@@ -572,8 +678,19 @@ impl TypeTable {
         let instance = instances.get(index.checked_sub(self.types.len())?)?;
         match &instance.0 {
             InstanceKey::Generic(key) => Some(key.clone()),
-            InstanceKey::Template(_) | InstanceKey::Tuple(_) => None,
+            InstanceKey::Template(_)
+            | InstanceKey::Tuple(_)
+            | InstanceKey::Record(_)
+            | InstanceKey::AnonymousEnum(_, _) => None,
         }
+    }
+
+    /// Concrete arguments of a generic nominal instance, in declaration order.
+    pub fn generic_arguments(&self, id: u32) -> Option<Vec<ResolvedArgument>> {
+        let index = id as usize;
+        let instances = self.instances.borrow();
+        let instance = instances.get(index.checked_sub(self.types.len())?)?;
+        matches!(&instance.0, InstanceKey::Generic(_)).then(|| instance.1.clone())
     }
 
     /// Snapshot all definitions in their ID order for retained IR type facts.
@@ -592,6 +709,7 @@ impl TypeTable {
             imports: HashMap::new(),
             aliases: RefCell::new(HashMap::new()),
             generic_in_progress: RefCell::new(HashSet::new()),
+            resolved_arguments: RefCell::new(Vec::new()),
         }
     }
 
@@ -1244,13 +1362,62 @@ impl TypeTable {
         })
     }
 
+    /// Substitute concrete types and const values for generic parameter names
+    /// inside the type arguments of a written type. Each concrete type is
+    /// spliced in as a `\0ty` path that `resolve` maps straight back to it, so
+    /// nested generic arguments such as `Pair<Wrap<T>>` resolve through the
+    /// ordinary instantiation path and keep one identity per concrete shape.
+    pub(super) fn substitute_generic_arguments(
+        &self,
+        ty: &Type,
+        types: &HashMap<String, Ty>,
+        constants: &HashMap<String, u32>,
+    ) -> Type {
+        let mut written = HashMap::new();
+        for (name, concrete) in types {
+            let mut interned = self.resolved_arguments.borrow_mut();
+            let index = interned
+                .iter()
+                .position(|candidate| candidate == concrete)
+                .unwrap_or_else(|| {
+                    interned.push(concrete.clone());
+                    interned.len() - 1
+                });
+            written.insert(
+                name.clone(),
+                Type {
+                    span: ty.span,
+                    path: vec!["\0ty".into(), index.to_string()],
+                    arguments: Vec::new(),
+                },
+            );
+        }
+        substitute_type(ty, &written, constants)
+    }
+
     /// Resolve a written type in `module`, following aliases to their targets.
     pub fn resolve(&self, module: &str, ty: &Type) -> Result<Ty, TypeFailure> {
+        if let [marker, index] = ty.path.as_slice() {
+            if marker == "\0ty" {
+                let found = index
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| self.resolved_arguments.borrow().get(index).cloned());
+                return found.ok_or_else(|| TypeFailure {
+                    span: ty.span,
+                    code: 1,
+                    message: "internal resolved type reference is unavailable".into(),
+                });
+            }
+        }
         let failure = |code: u16, message: String| TypeFailure {
             span: ty.span,
             code,
             message,
         };
+        if ty.path.is_empty() {
+            return Err(failure(1, "type path cannot be empty".into()));
+        }
         if ty.path.as_slice() == ["\0tuple"] {
             let label_count = ty
                 .arguments
@@ -1299,6 +1466,134 @@ impl TypeTable {
                 return Err(failure(17, "tuple types cannot contain direct or nested references until embedded tuple loans are supported".into()));
             }
             return self.instantiate_tuple(elements, ty.span);
+        }
+        if ty.path.as_slice() == ["\0record"] {
+            let mut labels = HashSet::new();
+            let fields = ty
+                .arguments
+                .iter()
+                .map(|argument| match argument {
+                    TypeArgument::TupleField {
+                        label: Some(label),
+                        ty,
+                    } => {
+                        if !labels.insert(label) {
+                            return Err(failure(
+                                2,
+                                format!("duplicate anonymous record field '{label}'"),
+                            ));
+                        }
+                        let field_ty = self.resolve(module, ty)?;
+                        if self.contains_reference(&field_ty, &mut HashSet::new()) {
+                            return Err(failure(
+                                17,
+                                "anonymous record fields cannot contain references in this slice"
+                                    .into(),
+                            ));
+                        }
+                        Ok((label.clone(), field_ty))
+                    }
+                    _ => Err(failure(
+                        17,
+                        "anonymous record types require named value fields".into(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if fields.is_empty() {
+                return Err(failure(
+                    2,
+                    "anonymous record types need at least one field".into(),
+                ));
+            }
+            return Ok(self.instantiate_record(fields, ty.span));
+        }
+        if ty.path.first().is_some_and(|part| part == "\0enum") {
+            if ty.path.len() < 2 {
+                return Err(failure(
+                    2,
+                    "anonymous enum types need at least one variant".into(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            let mut payload_specs = HashMap::new();
+            for argument in &ty.arguments {
+                let TypeArgument::TupleField {
+                    label: Some(variant),
+                    ty: payload,
+                } = argument
+                else {
+                    return Err(failure(
+                        2,
+                        "anonymous enum payloads must be associated with a variant name".into(),
+                    ));
+                };
+                if payload_specs
+                    .insert(variant.as_str(), payload.as_ref())
+                    .is_some()
+                {
+                    return Err(failure(
+                        2,
+                        format!(
+                            "anonymous enum variant '{variant}' has duplicate payload metadata"
+                        ),
+                    ));
+                }
+            }
+            let mut variants = Vec::with_capacity(ty.path.len() - 1);
+            for variant in &ty.path[1..] {
+                if !seen.insert(variant) {
+                    return Err(failure(
+                        2,
+                        format!("anonymous enum variant '{variant}' is declared more than once"),
+                    ));
+                }
+                let payload = payload_specs.remove(variant.as_str());
+                let mut payload_types = Vec::new();
+                if let Some(payload) = payload {
+                    if payload.path.as_slice() != ["\0tuple"] {
+                        return Err(failure(
+                            2,
+                            format!("invalid payload list for anonymous enum variant '{variant}'"),
+                        ));
+                    }
+                    for argument in &payload.arguments {
+                        let payload_ty = match argument {
+                            TypeArgument::Type(payload_ty) => self.resolve(module, payload_ty)?,
+                            _ => {
+                                return Err(failure(
+                                    17,
+                                    "anonymous enum payloads require owned value types".into(),
+                                ));
+                            }
+                        };
+                        if self.contains_reference(&payload_ty, &mut HashSet::new()) {
+                            return Err(failure(
+                                17,
+                                "anonymous enum payloads cannot contain references in this slice"
+                                    .into(),
+                            ));
+                        }
+                        payload_types.push(payload_ty);
+                    }
+                    if payload_types.is_empty() {
+                        return Err(failure(
+                            2,
+                            format!("anonymous enum variant '{variant}' has an empty payload"),
+                        ));
+                    }
+                }
+                variants.push(VariantInfo {
+                    name: variant.clone(),
+                    payload: payload_types,
+                });
+            }
+            if !payload_specs.is_empty() {
+                return Err(failure(
+                    2,
+                    "anonymous enum payload metadata names an undeclared variant".into(),
+                ));
+            }
+            return Ok(self.instantiate_anonymous_enum(&variants, ty.span));
         }
         if let Some(template) = templates::lookup_type(ty) {
             let arguments = resolve_arguments(template, ty, |kind, argument| {

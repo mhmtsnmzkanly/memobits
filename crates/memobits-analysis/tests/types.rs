@@ -278,6 +278,15 @@ fn accepts_defaults_annotations_and_local_calls() {
 }
 
 #[test]
+fn negative_float_literals_keep_contextual_type_through_lowering() {
+    let source = "fn main() { let decimal: f32 = -1.25; let exponent: f32 = -5e-1; let default := -1.25; }";
+    let parsed = parse(SourceId(9), source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let program = memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]);
+    assert!(program.is_ok(), "{program:?}");
+}
+
+#[test]
 fn checks_bindings_operators_conditions_and_branches() {
     assert!(codes("fn main() { let x: Bool = 1; }").contains(&"TE002".into()));
     assert!(codes("fn main() { true + 1; }").contains(&"TE007".into()));

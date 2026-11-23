@@ -34,7 +34,9 @@ fn invalid_control(number: u16, keyword: &str, span: Span) -> Diagnostic {
 fn check_block(block: &Block, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
     for statement in &block.statements {
         match &statement.kind {
-            StatementKind::Binding { value, .. } | StatementKind::Destructure { value, .. } => {
+            StatementKind::Binding { value, .. }
+            | StatementKind::Destructure { value, .. }
+            | StatementKind::TupleDestructure { value, .. } => {
                 check_expr(value, in_loop, diagnostics)
             }
             StatementKind::Assign { target, value, .. } => {

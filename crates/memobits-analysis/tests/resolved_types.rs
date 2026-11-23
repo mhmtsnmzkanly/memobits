@@ -149,6 +149,52 @@ fn lower_resolved_preserves_canonical_function_identity_for_aliases() {
 }
 
 #[test]
+fn generic_specializations_keep_inline_enum_payload_types_distinct() {
+    let f = Fixture::new(
+        "",
+        r#"
+        fn wrap<T>(value: T) -> u32 {
+            let wrapped: enum [Item(T), Empty] = Item(value);
+            match wrapped { Item(_) => 42, Empty => 0 }
+        }
+        fn main() -> u32 { wrap(1) + wrap(true) }
+        "#,
+        "",
+        "",
+    );
+    let project = Project::load(&f.0, None).unwrap();
+    let resolution = resolve(&project, Target::Application);
+    assert!(
+        resolution.diagnostics.is_empty(),
+        "{:?}",
+        resolution.diagnostics
+    );
+
+    let program = lower_resolved(&project, &resolution)
+        .unwrap_or_else(|diagnostics| panic!("{diagnostics:?}"));
+    program.validate().unwrap();
+    let specialized: Vec<_> = program
+        .types
+        .iter()
+        .filter_map(|definition| {
+            if definition.path.module.as_slice() != ["\0anonymous-enum"] {
+                return None;
+            }
+            let memobits_ir::TypeDefKind::Enum { variants } = &definition.kind else {
+                return None;
+            };
+            (variants
+                .first()
+                .is_some_and(|variant| variant.name == "Item"))
+            .then(|| variants[0].payload[0].clone())
+        })
+        .collect();
+    assert_eq!(specialized.len(), 2, "{specialized:?}");
+    assert!(specialized.contains(&memobits_ir::Type::Primitive(memobits_ir::Primitive::I32)));
+    assert!(specialized.contains(&memobits_ir::Type::Primitive(memobits_ir::Primitive::Bool)));
+}
+
+#[test]
 fn lower_resolved_ownership_tracks_moves_across_modules() {
     let f = Fixture::new(
         "",

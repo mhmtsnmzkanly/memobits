@@ -1,7 +1,7 @@
-//! Type checks for primitives and fixed arrays. Executable IR supports arrays of primitive
-//! elements and nested arrays (literal, repetition, indexing, element, row and whole-array
-//! assignment, array parameters, results and `if`/block results); every other array form is
-//! gated with TE017.
+//! Type checks for primitives and fixed arrays. Executable IR supports arrays of primitive,
+//! struct/tuple, enum and nested-array elements (literal, repetition, indexing, element, row and
+//! whole-array assignment, array parameters, results and `if`/block results), subject to backend
+//! storage gates for owning values.
 //! Name resolution across modules and ownership checking are separate passes.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,19 +15,22 @@ use memobits_ir::{
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
-    Access, Block, Expr, ExprKind, FieldPattern, GenericParameter, GenericParameterKind, ItemKind,
-    MatchArm, Module, Parameter, PatternKind, Statement, StatementKind, Type, WhereBound,
+    Access, Block, Expr, ExprKind, FieldInit, FieldPattern, GenericParameter, GenericParameterKind,
+    ItemKind, MatchArm, Module, Parameter, PatternKind, Statement, StatementKind, TupleBinding,
+    Type, WhereBound,
 };
 
 mod arrays;
+mod interfaces;
 mod lists;
 mod operations;
 mod templates;
 mod typetable;
 use memobits_syntax::templates::{self as registry, Template};
+use interfaces::qualified_interface;
 use operations::{floating, int_limit, integer, numeric};
 use templates::ResolvedArgument;
-use typetable::{StructInfo, TypeTable};
+use typetable::{StructInfo, TypeTable, VariantInfo};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckMode {
@@ -83,6 +86,10 @@ struct ExtensionCandidate {
     associated_types: HashMap<String, Ty>,
     methods: HashMap<String, (Access, Vec<FunctionParameter>, Ty, Span, FunctionId)>,
     public_methods: HashSet<String>,
+    generic_target: Option<Type>,
+    generic_parameters: Vec<GenericParameter>,
+    generic_methods: Vec<memobits_syntax::InterfaceMethod>,
+    declaration_imports: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -109,6 +116,18 @@ struct GenericSpecialization {
 }
 
 #[derive(Clone)]
+struct GenericMethodSpecialization {
+    module: String,
+    extension_span: Span,
+    method: memobits_syntax::InterfaceMethod,
+    target: Ty,
+    substitution: HashMap<String, Ty>,
+    const_substitution: HashMap<String, u32>,
+    id: FunctionId,
+    key: String,
+}
+
+#[derive(Clone)]
 struct GenericEvidence {
     interface: String,
     candidate: ExtensionCandidate,
@@ -119,6 +138,8 @@ struct SpecializationRegistry {
     next_id: u32,
     by_key: HashMap<String, FunctionId>,
     requests: Vec<GenericSpecialization>,
+    method_requests: Vec<GenericMethodSpecialization>,
+    method_by_key: HashMap<String, FunctionId>,
 }
 const UNIT: Ty = Ty::Primitive("Unit");
 const BOOL: Ty = Ty::Primitive("Bool");
@@ -174,6 +195,7 @@ fn supported_generic_function(template: &GenericFunctionTemplate) -> bool {
         parameter.access != Access::Owned
             || (if array_mode {
                 !is_array_generic_pattern(&parameter.ty, type_name, const_name.unwrap())
+                    && !is_associated_projection(&parameter.ty, type_name)
                     && (type_mentions_parameter(&parameter.ty, type_name)
                         || type_mentions_const(&parameter.ty, const_name.unwrap()))
             } else {
@@ -384,6 +406,7 @@ fn flow_block(block: &Block) -> Flow {
         flow = flow.then(match &statement.kind {
             StatementKind::Binding { value, .. }
             | StatementKind::Destructure { value, .. }
+            | StatementKind::TupleDestructure { value, .. }
             | StatementKind::Expression(value) => flow_expr(value),
             StatementKind::Assign { target, value, .. } => flow_expr(target).then(flow_expr(value)),
             StatementKind::Return(value) => value
@@ -600,6 +623,8 @@ pub struct FunctionFacts {
     pub selected_calls: Vec<SelectedCall>,
     /// User-defined binary operator implementations selected for lowering.
     pub selected_operators: Vec<SelectedCall>,
+    /// User-defined compound assignments selected for statement lowering.
+    pub selected_assignments: Vec<SelectedCall>,
     /// `match` expressions over owned enums, with the pattern facts lowering needs.
     pub matches: Vec<MatchFact>,
     pub tuple_projections: Vec<TupleProjectionFact>,
@@ -782,6 +807,103 @@ struct Checker {
     result: Ty,
 }
 impl Checker {
+    fn specialize_inherent_candidate(
+        &mut self,
+        candidate: &ExtensionCandidate,
+        receiver: &Ty,
+    ) -> Option<ExtensionCandidate> {
+        let target = candidate.generic_target.as_ref()?;
+        let (Ty::Struct(id, _) | Ty::Enum(id, _)) = receiver else {
+            return None;
+        };
+        let key = self
+            .table
+            .generic_definition_key(&candidate.module, target)?;
+        if self.table.generic_origin(*id).as_deref() != Some(key.as_str()) {
+            return None;
+        }
+        let arguments = self.table.generic_arguments(*id)?;
+        if arguments.len() != candidate.generic_parameters.len() {
+            return None;
+        }
+        let mut substitution = HashMap::new();
+        let mut const_substitution = HashMap::new();
+        for (parameter, argument) in candidate.generic_parameters.iter().zip(arguments) {
+            match (&parameter.kind, argument) {
+                (GenericParameterKind::Type, ResolvedArgument::Type(ty)) => {
+                    substitution.insert(parameter.name.clone(), ty);
+                }
+                (GenericParameterKind::Const(_), ResolvedArgument::Integer(value)) => {
+                    const_substitution.insert(parameter.name.clone(), value);
+                }
+                _ => return None,
+            }
+        }
+        let mut type_checker = Checker {
+            module: candidate.module.clone(),
+            table: Rc::clone(&self.table),
+            generic_types: substitution.clone(),
+            generic_consts: const_substitution.clone(),
+            imports: candidate.declaration_imports.clone(),
+            ..checker()
+        };
+        let mut specialized = candidate.clone();
+        specialized.target = receiver.clone();
+        specialized.generic_target = None;
+        specialized.methods.clear();
+        for method in &candidate.generic_methods {
+            let parameters: Vec<_> = method
+                .parameters
+                .iter()
+                .map(|parameter| FunctionParameter {
+                    access: ir_access(parameter.access),
+                    ty: type_checker.type_path(&parameter.ty),
+                })
+                .collect();
+            let result = method
+                .result
+                .as_ref()
+                .map(|ty| type_checker.type_path(ty))
+                .unwrap_or(UNIT);
+            let base_id = candidate.methods.get(&method.name).map(|entry| entry.4)?;
+            let identity = format!(
+                "{}:{}:{}:{receiver:?}",
+                candidate.module, candidate.span.start, method.name
+            );
+            let id = if let Some(registry) = &self.specialization_registry {
+                let mut registry = registry.borrow_mut();
+                if let Some(id) = registry.method_by_key.get(&identity) {
+                    *id
+                } else {
+                    let id = FunctionId(registry.next_id);
+                    registry.next_id += 1;
+                    registry.method_by_key.insert(identity.clone(), id);
+                    registry.method_requests.push(GenericMethodSpecialization {
+                        module: candidate.module.clone(),
+                        extension_span: candidate.span,
+                        method: method.clone(),
+                        target: receiver.clone(),
+                        substitution: substitution.clone(),
+                        const_substitution: const_substitution.clone(),
+                        id,
+                        key: identity,
+                    });
+                    id
+                }
+            } else {
+                base_id
+            };
+            specialized.methods.insert(
+                method.name.clone(),
+                (method.receiver, parameters, result, method.span, id),
+            );
+        }
+        for error in type_checker.diagnostics {
+            self.diagnostics.push(error);
+        }
+        Some(specialized)
+    }
+
     fn generic_identity_call(
         &mut self,
         expr: &Expr,
@@ -1147,6 +1269,125 @@ impl Checker {
         }
     }
 
+    fn contains_string_owner(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Ty::String => true,
+            Ty::Array(element, _) => self.contains_string_owner(element, visited),
+            Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
+                if !visited.insert(*id) {
+                    return false;
+                }
+                let info = self.table.info(*id);
+                info.fields
+                    .iter()
+                    .any(|field| self.contains_string_owner(&field.ty, visited))
+                    || info
+                        .variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
+                        .any(|payload| self.contains_string_owner(payload, visited))
+            }
+            _ => false,
+        }
+    }
+
+    fn contains_list(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Ty::List(_) => true,
+            Ty::Array(element, _) => self.contains_list(element, visited),
+            Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
+                if !visited.insert(*id) {
+                    return false;
+                }
+                let info = self.table.info(*id);
+                info.fields
+                    .iter()
+                    .any(|field| self.contains_list(&field.ty, visited))
+                    || info
+                        .variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
+                        .any(|payload| self.contains_list(payload, visited))
+            }
+            _ => false,
+        }
+    }
+
+    fn tuple_has_unsupported_nested_string_owner(&self, ty: &Ty) -> bool {
+        let Ty::Tuple(id, _, _) = ty else {
+            return false;
+        };
+        self.table.info(*id).fields.iter().any(|field| {
+            field.ty != Ty::String
+                && self.contains_string_owner(&field.ty, &mut HashSet::new())
+                && !self.supported_nested_string_tuple(&field.ty, &mut HashSet::new())
+        })
+    }
+
+    /// A nominal struct that holds String storage directly or through a nested
+    /// struct but is not admitted by the shared `memobits_ir` transport rule.
+    fn struct_has_unsupported_nested_string_owner(&self, ty: &Ty) -> bool {
+        let Ty::Struct(id, _) = ty else {
+            return false;
+        };
+        let info = self.table.info(*id);
+        info.module != "\0tuple"
+            && info.fields.iter().any(|field| {
+                field.ty == Ty::String
+                    || (matches!(field.ty, Ty::Struct(..) | Ty::Array(..))
+                        && self.contains_string_owner(&field.ty, &mut HashSet::new()))
+            })
+            && !self.admitted_string_owner_struct(*id, &mut HashSet::new())
+    }
+
+    /// Shared-rule classification of a nominal struct id; the recursion and
+    /// visited set live here because `Ty` is the analysis type model.
+    fn admitted_string_owner_struct(&self, id: u32, visited: &mut HashSet<u32>) -> bool {
+        use memobits_ir::OwnerFieldShape as Shape;
+        let info = self.table.info(id);
+        if info.module == "\0tuple" || !visited.insert(id) {
+            return false;
+        }
+        fn shape(this: &Checker, ty: &Ty, visited: &mut HashSet<u32>) -> Shape {
+            match ty {
+                Ty::String => Shape::String,
+                Ty::Primitive(_) => Shape::Primitive,
+                Ty::Struct(child, _) if this.admitted_string_owner_struct(*child, visited) => {
+                    Shape::Owner
+                }
+                Ty::Array(element, len) if *len != 0 => match shape(this, element, visited) {
+                    Shape::Owner => Shape::Owner,
+                    _ => Shape::Other,
+                },
+                _ => Shape::Other,
+            }
+        }
+        let fields: Vec<Shape> = info
+            .fields
+            .iter()
+            .map(|field| shape(self, &field.ty, visited))
+            .collect();
+        visited.remove(&id);
+        memobits_ir::is_string_owner_struct(self.table.error_ancestry(id).is_some(), fields)
+    }
+
+    fn supported_nested_string_tuple(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+        let Ty::Tuple(id, _, _) = ty else {
+            return false;
+        };
+        let info = self.table.info(*id);
+        if info.module != "\0tuple" || !visited.insert(*id) {
+            return false;
+        }
+        let supported = info.fields.iter().all(|field| {
+            field.ty == Ty::String
+                || !self.contains_string_owner(&field.ty, &mut HashSet::new())
+                || self.supported_nested_string_tuple(&field.ty, visited)
+        });
+        visited.remove(id);
+        supported
+    }
+
     fn error(&mut self, n: u16, span: Span, message: impl Into<String>) {
         self.diagnostics.push(diagnostic(n, span, message));
     }
@@ -1202,6 +1443,9 @@ impl Checker {
         }
     }
     fn type_path(&mut self, ty: &Type) -> Ty {
+        if ty.path.first().is_some_and(|part| part == "\0enum") {
+            return self.inline_enum_type(ty);
+        }
         if ty.path.len() == 2 {
             if let Some(target) = self.generic_types.get(&ty.path[0]).cloned() {
                 let matches = self
@@ -1252,7 +1496,112 @@ impl Checker {
                 }
             }
         }
+        let ty = &self.substitute_generic_arguments(ty);
         self.report_type_resolution(ty, self.table.resolve(&self.module, ty))
+    }
+    /// Splices the active generic substitution into the arguments of a written
+    /// nominal type, so `Pair<Wrap<T>>` inside a specialized body names the
+    /// concrete instance.
+    fn substitute_generic_arguments(&self, ty: &Type) -> Type {
+        if ty.arguments.is_empty()
+            || (self.generic_types.is_empty() && self.generic_consts.is_empty())
+        {
+            return ty.clone();
+        }
+        self.table
+            .substitute_generic_arguments(ty, &self.generic_types, &self.generic_consts)
+    }
+    fn inline_enum_type(&mut self, ty: &Type) -> Ty {
+        if ty.path.len() < 2 {
+            self.error(2, ty.span, "anonymous enum types need at least one variant");
+            return Ty::Error;
+        }
+        let mut seen = HashSet::new();
+        let mut payload_specs = HashMap::new();
+        for argument in &ty.arguments {
+            let memobits_syntax::TypeArgument::TupleField {
+                label: Some(variant),
+                ty: payload,
+            } = argument
+            else {
+                self.error(
+                    2,
+                    ty.span,
+                    "anonymous enum payloads must be associated with a variant name",
+                );
+                return Ty::Error;
+            };
+            if payload_specs
+                .insert(variant.as_str(), payload.as_ref())
+                .is_some()
+            {
+                self.error(
+                    2,
+                    ty.span,
+                    format!("anonymous enum variant '{variant}' has duplicate payload metadata"),
+                );
+                return Ty::Error;
+            }
+        }
+
+        let mut variants = Vec::with_capacity(ty.path.len() - 1);
+        for variant in &ty.path[1..] {
+            if !seen.insert(variant) {
+                self.error(
+                    2,
+                    ty.span,
+                    format!("anonymous enum variant '{variant}' is declared more than once"),
+                );
+                return Ty::Error;
+            }
+            let mut payload_types = Vec::new();
+            if let Some(payload) = payload_specs.remove(variant.as_str()) {
+                if payload.path.as_slice() != ["\0tuple"] || payload.arguments.is_empty() {
+                    self.error(
+                        2,
+                        payload.span,
+                        format!("invalid payload list for anonymous enum variant '{variant}'"),
+                    );
+                    return Ty::Error;
+                }
+                for argument in &payload.arguments {
+                    let memobits_syntax::TypeArgument::Type(payload_ty) = argument else {
+                        self.error(
+                            17,
+                            payload.span,
+                            "anonymous enum payloads require owned value types",
+                        );
+                        return Ty::Error;
+                    };
+                    let resolved = self.type_path(payload_ty);
+                    if resolved == Ty::Error {
+                        return Ty::Error;
+                    }
+                    if self.contains_reference(&resolved, &mut HashSet::new()) {
+                        self.error(
+                            17,
+                            payload_ty.span,
+                            "anonymous enum payloads cannot contain references in this slice",
+                        );
+                        return Ty::Error;
+                    }
+                    payload_types.push(resolved);
+                }
+            }
+            variants.push(VariantInfo {
+                name: variant.clone(),
+                payload: payload_types,
+            });
+        }
+        if !payload_specs.is_empty() {
+            self.error(
+                2,
+                ty.span,
+                "anonymous enum payload metadata names an undeclared variant",
+            );
+            return Ty::Error;
+        }
+        self.table.instantiate_anonymous_enum(&variants, ty.span)
     }
     fn cast_u8_to_u32(&mut self, source: Ty, span: Span) -> Ty {
         if read_type(source) == U8 {
@@ -1456,6 +1805,156 @@ impl Checker {
             );
         }
     }
+    fn destructure_tuple(
+        &mut self,
+        statement: &Statement,
+        mutable: bool,
+        elements: &[TupleBinding],
+        value: &Expr,
+    ) {
+        self.allow_array_value(value);
+        let inferred = self.expr(value, None);
+        self.reject_extraction(value, &inferred);
+        let table = Rc::clone(&self.table);
+        let fields = match &inferred {
+            Ty::Tuple(id, _, _) => Some(table.info(*id).fields),
+            Ty::Error => None,
+            Ty::Reference { .. } => {
+                self.error(
+                    2,
+                    value.span,
+                    "cannot destructure a reference; destructuring consumes an owned tuple value",
+                );
+                None
+            }
+            other => {
+                self.error(
+                    23,
+                    statement.span,
+                    format!("'{}' is not a tuple type", name(other)),
+                );
+                None
+            }
+        };
+        if fields.is_some() {
+            if self.contains_string_owner(&inferred, &mut HashSet::new())
+                && !matches!(&value.kind, ExprKind::Path(path)
+                    if path.len() == 1
+                        && self.lookup(&path[0]).is_some_and(|binding|
+                            binding.access == IrAccess::Owned
+                                && matches!(&binding.ty, Ty::Tuple(..))))
+            {
+                self.error(
+                    17,
+                    value.span,
+                    "String-owning tuple destructuring requires a named owned tuple local",
+                );
+            }
+            if self.tuple_has_unsupported_nested_string_owner(&inferred) {
+                self.error(
+                    17,
+                    statement.span,
+                    "tuple destructuring cannot move nested String-owning aggregates other than tuples in this slice",
+                );
+            }
+            self.bind_tuple_patterns(
+                elements,
+                &inferred,
+                mutable,
+                statement.span,
+                &mut HashSet::new(),
+            );
+        }
+    }
+    fn bind_tuple_patterns(
+        &mut self,
+        elements: &[TupleBinding],
+        tuple_ty: &Ty,
+        mutable: bool,
+        span: Span,
+        seen: &mut HashSet<String>,
+    ) {
+        let Ty::Tuple(id, _, _) = tuple_ty else {
+            self.error(
+                23,
+                span,
+                format!("nested tuple pattern cannot match '{}'", name(tuple_ty)),
+            );
+            return;
+        };
+        let table = Rc::clone(&self.table);
+        let fields = table.info(*id).fields;
+        if elements.len() != fields.len() {
+            self.error(
+                23,
+                span,
+                format!(
+                    "tuple destructuring expects {} bindings, found {}",
+                    fields.len(),
+                    elements.len()
+                ),
+            );
+        }
+        for (index, element) in elements.iter().enumerate() {
+            let ty = fields
+                .get(index)
+                .map_or(Ty::Error, |field| field.ty.clone());
+            let addr = element as *const TupleBinding as usize;
+            if let Some(nested) = &element.nested {
+                let local_name = format!("__tuple_pattern_{addr}");
+                self.register_local(
+                    &local_name,
+                    &ty,
+                    mutable,
+                    IrAccess::Owned,
+                    element.span,
+                    addr,
+                );
+                self.bind_tuple_patterns(nested, &ty, mutable, element.span, seen);
+                continue;
+            }
+            if element.binding == "_" {
+                let local_name = format!("__tuple_discard_{addr}");
+                self.register_local(
+                    &local_name,
+                    &ty,
+                    mutable,
+                    IrAccess::Owned,
+                    element.span,
+                    addr,
+                );
+                continue;
+            }
+            if !seen.insert(element.binding.clone()) {
+                self.error(
+                    23,
+                    element.span,
+                    format!(
+                        "binding '{}' is introduced more than once in the tuple pattern",
+                        element.binding
+                    ),
+                );
+            }
+            let id = self.register_local(
+                &element.binding,
+                &ty,
+                mutable,
+                IrAccess::Owned,
+                element.span,
+                addr,
+            );
+            self.scopes.last_mut().unwrap().insert(
+                element.binding.clone(),
+                Binding {
+                    ty,
+                    mutable,
+                    access: IrAccess::Owned,
+                    id,
+                    origin: addr,
+                },
+            );
+        }
+    }
     fn block(&mut self, block: &Block, expected: Option<&Ty>) -> (Ty, bool) {
         self.scopes.push(HashMap::new());
         for statement in &block.statements {
@@ -1467,7 +1966,15 @@ impl Checker {
                     value,
                 } => {
                     let annotation = annotation.as_ref().map(|ty| {
-                        self.report_type_resolution(ty, self.table.resolve_local(&self.module, ty))
+                        if ty.path.first().is_some_and(|part| part == "\0enum") {
+                            self.type_path(ty)
+                        } else {
+                            let ty = &self.substitute_generic_arguments(ty);
+                            self.report_type_resolution(
+                                ty,
+                                self.table.resolve_local(&self.module, ty),
+                            )
+                        }
                     });
                     self.allow_array_value(value);
                     let previous = self.concat_destination;
@@ -1511,6 +2018,11 @@ impl Checker {
                     fields,
                     value,
                 } => self.destructure(statement, *mutable, path, fields, value),
+                StatementKind::TupleDestructure {
+                    mutable,
+                    elements,
+                    value,
+                } => self.destructure_tuple(statement, *mutable, elements, value),
                 StatementKind::Assign {
                     target,
                     operator,
@@ -1657,7 +2169,63 @@ impl Checker {
                         self.concat_destination = Some(value as *const Expr as usize);
                         self.share_field_assignment = share_field_target;
                     }
-                    let value_ty = self.expr(value, Some(&target_ty));
+                    if matches!(
+                        operator.as_str(),
+                        "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+                    ) && matches!(target_ty, Ty::Struct(..) | Ty::Enum(..))
+                    {
+                        self.allow_array_value(value);
+                    }
+                    let rhs_expected = if matches!(
+                        operator.as_str(),
+                        "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+                    ) && matches!(target_ty, Ty::Struct(..) | Ty::Enum(..))
+                    {
+                        let (interface_name, method_name) = match operator.as_str() {
+                            "+=" => ("AddAssign", "add_assign"),
+                            "-=" => ("SubAssign", "sub_assign"),
+                            "*=" => ("MulAssign", "mul_assign"),
+                            "/=" => ("DivAssign", "div_assign"),
+                            "%=" => ("RemAssign", "rem_assign"),
+                            "&=" => ("BitAndAssign", "bitand_assign"),
+                            "|=" => ("BitOrAssign", "bitor_assign"),
+                            ">>=" => ("ShrAssign", "shr_assign"),
+                            "<<=" => ("ShlAssign", "shl_assign"),
+                            _ => ("BitXorAssign", "bitxor_assign"),
+                        };
+                        let interface = qualified_interface(
+                            &self.module,
+                            &self.imports,
+                            &Type {
+                                span: statement.span,
+                                path: vec!["core".into(), "ops".into(), interface_name.into()],
+                                arguments: Vec::new(),
+                            },
+                        );
+                        self.generic_evidence
+                            .iter()
+                            .find(|evidence| {
+                                evidence.interface == interface
+                                    && evidence.candidate.target == target_ty
+                                    && evidence.candidate.methods.contains_key(method_name)
+                            })
+                            .map(|evidence| &evidence.candidate)
+                            .or_else(|| {
+                                self.extension_candidates.iter().find(|c| {
+                                    c.interface.as_deref() == Some(interface.as_str())
+                                        && c.target == target_ty
+                                        && c.methods.contains_key(method_name)
+                                        && c.visible
+                                        && (c.local || c.public_methods.contains(method_name))
+                                })
+                            })
+                            .and_then(|candidate| candidate.associated_types.get("Rhs"))
+                            .cloned()
+                            .unwrap_or_else(|| target_ty.clone())
+                    } else {
+                        target_ty.clone()
+                    };
+                    let value_ty = self.expr(value, Some(&rhs_expected));
                     self.concat_destination = previous;
                     self.share_field_assignment = previous_share_field;
                     if operator == "=" {
@@ -1673,16 +2241,154 @@ impl Checker {
                     if operator == "=" {
                         self.ensure(&value_ty, &target_ty, value.span);
                     } else {
-                        if !numeric(&target_ty) {
-                            self.error(
-                                7,
-                                target.span,
-                                "compound assignment requires a numeric binding",
+                        if matches!(
+                            operator.as_str(),
+                            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+                        ) && matches!(target_ty, Ty::Struct(..) | Ty::Enum(..))
+                        {
+                            let (interface_name, method_name) = match operator.as_str() {
+                                "+=" => ("AddAssign", "add_assign"),
+                                "-=" => ("SubAssign", "sub_assign"),
+                                "*=" => ("MulAssign", "mul_assign"),
+                                "/=" => ("DivAssign", "div_assign"),
+                                "%=" => ("RemAssign", "rem_assign"),
+                                "&=" => ("BitAndAssign", "bitand_assign"),
+                                "|=" => ("BitOrAssign", "bitor_assign"),
+                                ">>=" => ("ShrAssign", "shr_assign"),
+                                "<<=" => ("ShlAssign", "shl_assign"),
+                                _ => ("BitXorAssign", "bitxor_assign"),
+                            };
+                            let interface = qualified_interface(
+                                &self.module,
+                                &self.imports,
+                                &Type {
+                                    span: statement.span,
+                                    path: vec!["core".into(), "ops".into(), interface_name.into()],
+                                    arguments: Vec::new(),
+                                },
                             );
-                        }
-                        self.ensure(&value_ty, &target_ty, value.span);
-                        if operator == "%=" && !integer(&target_ty) {
-                            self.error(7, statement.span, "remainder requires integers");
+                            let matching = self
+                                .generic_evidence
+                                .iter()
+                                .find(|evidence| {
+                                    evidence.interface == interface
+                                        && evidence.candidate.target == target_ty
+                                        && evidence.candidate.methods.contains_key(method_name)
+                                })
+                                .map(|evidence| vec![evidence.candidate.clone()])
+                                .unwrap_or_else(|| {
+                                    self.extension_candidates
+                                        .iter()
+                                        .filter(|c| {
+                                            c.interface.as_deref() == Some(interface.as_str())
+                                                && c.target == target_ty
+                                                && c.methods.contains_key(method_name)
+                                        })
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                });
+                            let applicable = matching
+                                .iter()
+                                .filter(|c| {
+                                    c.visible && (c.local || c.public_methods.contains(method_name))
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if applicable.len() > 1 {
+                                self.error(
+                                    7,
+                                    statement.span,
+                                    format!(
+                                        "ambiguous {interface_name} implementation for `{operator}`"
+                                    ),
+                                );
+                            } else if let Some(candidate) = applicable.first() {
+                                let (receiver_access, parameters, result, _, function) =
+                                    candidate.methods[method_name].clone();
+                                if receiver_access != Access::Share
+                                    || parameters.len() != 1
+                                    || parameters[0].access != IrAccess::Owned
+                                    || (parameters[0].ty != value_ty && value_ty != Ty::Never)
+                                    || result != UNIT
+                                {
+                                    self.error(7, statement.span, format!("{interface_name} requires a share receiver, an owned matching Rhs, and Unit result"));
+                                } else if let Some(facts) = self.facts.as_mut() {
+                                    let Some(expression) = facts
+                                        .expressions
+                                        .iter()
+                                        .find(|fact| {
+                                            fact.node_addr == target as *const Expr as usize
+                                        })
+                                        .map(|fact| fact.id)
+                                    else {
+                                        continue;
+                                    };
+                                    if let Some(IrType::Function(signature)) =
+                                        ir_type(&Ty::Function(
+                                            vec![
+                                                FunctionParameter {
+                                                    access: IrAccess::Share,
+                                                    ty: target_ty.clone(),
+                                                },
+                                                parameters[0].clone(),
+                                            ],
+                                            Box::new(UNIT.clone()),
+                                        ))
+                                    {
+                                        facts.selected_assignments.push(SelectedCall {
+                                            expression,
+                                            function,
+                                            receiver_access,
+                                            signature,
+                                        });
+                                    } else {
+                                        self.error(7, statement.span, format!("{interface_name} signature cannot be represented by the current IR"));
+                                    }
+                                }
+                            } else {
+                                self.error(
+                                    7,
+                                    statement.span,
+                                    if matching.is_empty() {
+                                        format!("no visible {interface_name} implementation for this target type")
+                                    } else {
+                                        format!("matching {interface_name} implementation is private or inactive")
+                                    },
+                                );
+                            }
+                        } else {
+                            if matches!(operator.as_str(), "<<=" | ">>=")
+                                && target_ty == U32
+                                && crate::constants::shift_assignment_count_out_of_range(value)
+                            {
+                                self.diagnostics.push(
+                                    crate::constants::shift_assignment_count_error(value.span),
+                                );
+                            }
+                            if matches!(operator.as_str(), "&=" | "|=" | "^=" | "<<=" | ">>=")
+                                && target_ty != U32
+                            {
+                                self.error(
+                                    7,
+                                    target.span,
+                                    "primitive bitwise compound assignment currently requires u32",
+                                );
+                            } else if !matches!(operator.as_str(), "&=" | "|=" | "^=")
+                                && !numeric(&target_ty)
+                            {
+                                self.error(
+                                    7,
+                                    target.span,
+                                    "compound assignment requires a numeric binding",
+                                );
+                            }
+                            self.ensure(&value_ty, &target_ty, value.span);
+                            if operator == "%=" && !integer(&target_ty) {
+                                self.error(7, statement.span, "remainder requires integers");
+                            }
+                            if matches!(operator.as_str(), "<<=" | ">>=") && !integer(&target_ty) {
+                                self.error(7, statement.span, "shift requires integers");
+                            }
                         }
                     }
                 }
@@ -1729,13 +2435,20 @@ impl Checker {
                         Ty::List(element) if self.list_read_receiver(items) => {
                             Ty::Primitive(element)
                         }
+                        Ty::String if matches!(&items.kind, ExprKind::Path(path) if path.len() == 1) => {
+                            Ty::Primitive("Char")
+                        }
+                        Ty::String => {
+                            self.error(17, items.span, "string iteration requires a named string local or parameter");
+                            Ty::Error
+                        }
                         Ty::List(_) => {
                             self.error(17, items.span, "List iteration requires a local binding or a direct internal List call");
                             Ty::Error
                         }
                         Ty::Never | Ty::Error => Ty::Error,
                         _ => {
-                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements, or a List<u8> or List<u32>");
+                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements, or a List<u8> or List<u32>, or a named string");
                             Ty::Error
                         }
                     };
@@ -2317,6 +3030,95 @@ impl Checker {
         }
     }
 
+    fn anonymous_record(&mut self, expr: &Expr, fields: &[FieldInit], expected: Option<&Ty>) -> Ty {
+        if self.lowering && !self.array_allowed(expr) {
+            self.error(
+                17,
+                expr.span,
+                "anonymous record literals must be used as an owned value (binding initializer, assignment, argument, result or branch value); bind the record before projecting it",
+            );
+        }
+        let table = Rc::clone(&self.table);
+        let expected_record = match expected {
+            Some(ty @ Ty::Struct(id, _)) if table.info(*id).module == "\0record" => {
+                Some((ty.clone(), table.info(*id)))
+            }
+            Some(Ty::Error | Ty::Never) | None => None,
+            Some(other) => {
+                self.error(
+                    2,
+                    expr.span,
+                    format!(
+                        "anonymous record literal has no structural type matching expected {}",
+                        name(other)
+                    ),
+                );
+                return Ty::Error;
+            }
+        };
+
+        let mut inferred = Vec::new();
+        let mut seen = HashSet::new();
+        for init in fields {
+            if !seen.insert(init.name.as_str()) {
+                self.error(
+                    23,
+                    init.span,
+                    format!("field '{}' is initialised more than once", init.name),
+                );
+                self.expr(&init.value, None);
+                continue;
+            }
+            let declared = expected_record
+                .as_ref()
+                .and_then(|(_, info)| info.fields.iter().find(|field| field.name == init.name));
+            if expected_record.is_some() && declared.is_none() {
+                self.error(
+                    23,
+                    init.span,
+                    format!("anonymous record shape has no field '{}'", init.name),
+                );
+            }
+            let expected_field = declared.map(|field| field.ty.clone());
+            self.allow_array_value(&init.value);
+            let previous_concat = self.concat_destination;
+            if expected_field == Some(Ty::String) {
+                self.concat_destination = Some(&init.value as *const Expr as usize);
+            }
+            let actual = self.expr(&init.value, expected_field.as_ref());
+            self.concat_destination = previous_concat;
+            self.reject_extraction(&init.value, &actual);
+            if let Some(want) = &expected_field {
+                self.ensure(&actual, want, init.value.span);
+            } else if expected_record.is_none() && actual != Ty::Error && actual != Ty::Never {
+                inferred.push((init.name.clone(), actual));
+            }
+        }
+        if let Some((ty, info)) = expected_record {
+            let missing: Vec<&str> = info
+                .fields
+                .iter()
+                .filter(|field| !seen.contains(field.name.as_str()))
+                .map(|field| field.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                self.error(
+                    23,
+                    expr.span,
+                    format!(
+                        "missing field(s) in anonymous record: {}",
+                        missing.join(", ")
+                    ),
+                );
+            }
+            ty
+        } else if inferred.len() == seen.len() {
+            table.instantiate_record(inferred, expr.span)
+        } else {
+            Ty::Error
+        }
+    }
+
     /// `base.field`: a read of one field of a named local struct.
     fn field_read(&mut self, base: &Expr, field_name: &str, expr: &Expr) -> Ty {
         if self.lowering {
@@ -2500,6 +3302,24 @@ impl Checker {
                         .position(|candidate| &candidate.name == variant)
                         .map(|index| index as u32);
                     return Some((as_ty.clone(), index));
+                }
+            }
+        }
+        if let ([variant], Some(as_ty @ Ty::Enum(id, _))) = (path, expected) {
+            // A bare variant is contextual only when an expected enum selects
+            // it. Payload constructors are validated by their caller, and
+            // ordinary names keep their lexical precedence.
+            if self.lookup(variant).is_none()
+                && !self.functions.contains_key(variant)
+                && !self.imports.contains_key(variant)
+            {
+                let info = self.table.info(*id);
+                if let Some(index) = info
+                    .variants
+                    .iter()
+                    .position(|candidate| candidate.name == *variant)
+                {
+                    return Some((as_ty.clone(), Some(index as u32)));
                 }
             }
         }
@@ -3535,6 +4355,21 @@ impl Checker {
                 Ty::Error
             }
             ExprKind::Unary { operator, operand } => {
+                // A leading minus is part of a floating literal's contextual
+                // type. Checking the unsigned magnitude without context would
+                // default it to f64 before the surrounding f32 can apply.
+                if operator == "-" {
+                    if let ExprKind::Number(raw) = &operand.kind {
+                        if raw.contains(['.', 'e', 'E']) {
+                            let chosen = expected.filter(|ty| floating(ty)).cloned().unwrap_or(F64);
+                            // Check the magnitude under the same context so it
+                            // gets a type fact for lowering as well as the
+                            // unary expression receiving that type.
+                            self.expr(operand, Some(&chosen));
+                            return chosen;
+                        }
+                    }
+                }
                 if operator == "-" {
                     if let ExprKind::Number(raw) = &operand.kind {
                         if !raw.contains(['.', 'e', 'E']) {
@@ -3559,6 +4394,109 @@ impl Checker {
                         }
                     }
                 }
+                if operator == "-" {
+                    self.allow_array_value(operand);
+                    let operand_ty = read_type(self.expr(operand, None));
+                    if matches!(operand_ty, Ty::Struct(..) | Ty::Enum(..)) {
+                        let interface = qualified_interface(
+                            &self.module,
+                            &self.imports,
+                            &Type {
+                                span: expr.span,
+                                path: vec!["core".into(), "ops".into(), "Neg".into()],
+                                arguments: Vec::new(),
+                            },
+                        );
+                        let forwarded = self.generic_evidence.iter().find(|evidence| {
+                            evidence.interface == interface
+                                && evidence.candidate.target == operand_ty
+                        });
+                        let matching = if let Some(evidence) = forwarded {
+                            vec![evidence.candidate.clone()]
+                        } else {
+                            self.extension_candidates
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.interface.as_deref() == Some(interface.as_str())
+                                        && candidate.target == operand_ty
+                                        && candidate.methods.contains_key("neg")
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        };
+                        let applicable = matching
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.visible
+                                    && (candidate.local || candidate.public_methods.contains("neg"))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if applicable.len() > 1 {
+                            self.error(7, expr.span, "ambiguous Neg implementation for `-`");
+                            return Ty::Error;
+                        }
+                        if let Some(candidate) = applicable.first() {
+                            let (receiver_access, parameters, result, _, function) =
+                                candidate.methods.get("neg").cloned().unwrap();
+                            if receiver_access != Access::Owned || !parameters.is_empty() {
+                                self.error(
+                                    7,
+                                    expr.span,
+                                    "Neg requires an owned receiver and no operands",
+                                );
+                                return Ty::Error;
+                            }
+                            if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                                let signature = match ir_type(&Ty::Function(
+                                    vec![FunctionParameter {
+                                        access: IrAccess::Owned,
+                                        ty: operand_ty.clone(),
+                                    }],
+                                    Box::new(result.clone()),
+                                )) {
+                                    Some(IrType::Function(signature)) => signature,
+                                    _ => return Ty::Error,
+                                };
+                                facts.selected_operators.push(SelectedCall {
+                                    expression,
+                                    function,
+                                    receiver_access,
+                                    signature,
+                                });
+                            }
+                            return result;
+                        }
+                        self.error(
+                            7,
+                            expr.span,
+                            if matching.is_empty() {
+                                "no visible Neg implementation for this operand type"
+                            } else {
+                                "matching Neg implementation is private or inactive"
+                            },
+                        );
+                        return Ty::Error;
+                    }
+                    if operand_ty == Ty::Never {
+                        return Ty::Never;
+                    }
+                    if numeric(&operand_ty) {
+                        if matches!(operand_ty, Ty::Primitive("u8" | "u16" | "u32" | "u64")) {
+                            self.error(7, expr.span, "negation requires a signed numeric type");
+                            return Ty::Error;
+                        }
+                        return operand_ty;
+                    }
+                    if operand_ty != Ty::Error {
+                        self.error(
+                            7,
+                            expr.span,
+                            "negation requires a signed numeric type or Neg implementation",
+                        );
+                    }
+                    return Ty::Error;
+                }
                 let wanted = if operator == "!" {
                     Some(&BOOL)
                 } else {
@@ -3573,14 +4511,7 @@ impl Checker {
                         self.ensure(&ty, &BOOL, operand.span);
                         BOOL
                     }
-                    "+" | "-" if numeric(&ty) => {
-                        if operator == "-"
-                            && matches!(ty, Ty::Primitive("u8" | "u16" | "u32" | "u64"))
-                        {
-                            self.error(7, expr.span, "negation requires a signed numeric type");
-                        }
-                        ty
-                    }
+                    "+" | "-" if numeric(&ty) => ty,
                     "+" | "-" => {
                         if ty != Ty::Error {
                             self.error(7, expr.span, "unary arithmetic requires a number");
@@ -3616,7 +4547,24 @@ impl Checker {
                 left,
                 right,
             } => {
-                if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%") {
+                if matches!(
+                    operator.as_str(),
+                    "+" | "-"
+                        | "*"
+                        | "/"
+                        | "%"
+                        | "&"
+                        | "^"
+                        | "|"
+                        | "<<"
+                        | ">>"
+                        | "=="
+                        | "!="
+                        | "<"
+                        | "<="
+                        | ">"
+                        | ">="
+                ) {
                     if !matches!(&left.kind, ExprKind::Path(path) if path.len() > 1) {
                         self.allow_array_value(left);
                     }
@@ -3644,13 +4592,18 @@ impl Checker {
                     let left_ty = read_type(
                         self.expr(left, if bool_op { Some(&BOOL) } else { expected_num }),
                     );
-                    let overloaded_arithmetic = matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+                    let overloaded_arithmetic =
+                        matches!(
+                            operator.as_str(),
+                            "+" | "-" | "*" | "/" | "%" | "&" | "^" | "|" | "<<" | ">>"
+                        ) && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..));
+                    let overloaded_equality = matches!(operator.as_str(), "==" | "!=")
                         && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..));
                     let right_ty = read_type(self.expr(
                         right,
                         if bool_op {
                             Some(&BOOL)
-                        } else if overloaded_arithmetic {
+                        } else if overloaded_arithmetic || overloaded_equality {
                             None
                         } else {
                             Some(&left_ty)
@@ -3671,11 +4624,23 @@ impl Checker {
                     );
                     return Ty::Error;
                 }
-                if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
-                    && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..))
+                if matches!(
+                    operator.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "&" | "^" | "|" | "<<" | ">>"
+                ) && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..))
                     && left_ty != Ty::Error
                 {
-                    let (interface_name, method_name, operator_name) = if operator == "+" {
+                    let (interface_name, method_name, operator_name) = if operator == "<<" {
+                        ("Shl", "shl", "Shl")
+                    } else if operator == ">>" {
+                        ("Shr", "shr", "Shr")
+                    } else if operator == "&" {
+                        ("BitAnd", "bitand", "BitAnd")
+                    } else if operator == "^" {
+                        ("BitXor", "bitxor", "BitXor")
+                    } else if operator == "|" {
+                        ("BitOr", "bitor", "BitOr")
+                    } else if operator == "+" {
                         ("Add", "add", "Add")
                     } else if operator == "-" {
                         ("Sub", "sub", "Sub")
@@ -3781,6 +4746,217 @@ impl Checker {
                     );
                     return Ty::Error;
                 }
+                if matches!(operator.as_str(), "==" | "!=")
+                    && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..))
+                    && left_ty != Ty::Error
+                {
+                    let interface_key = qualified_interface(
+                        &self.module,
+                        &self.imports,
+                        &Type {
+                            span: expr.span,
+                            path: vec!["core".into(), "ops".into(), "PartialEq".into()],
+                            arguments: Vec::new(),
+                        },
+                    );
+                    let matching = self
+                        .generic_evidence
+                        .iter()
+                        .find(|evidence| {
+                            evidence.interface == interface_key
+                                && evidence.candidate.target == left_ty
+                        })
+                        .map(|evidence| vec![evidence.candidate.clone()])
+                        .unwrap_or_else(|| {
+                            self.extension_candidates
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.interface.as_deref() == Some(interface_key.as_str())
+                                        && candidate.target == left_ty
+                                        && candidate.methods.contains_key("eq")
+                                })
+                                .cloned()
+                                .collect()
+                        });
+                    let applicable = matching
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.visible
+                                && (candidate.local || candidate.public_methods.contains("eq"))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if applicable.len() > 1 {
+                        self.error(
+                            7,
+                            expr.span,
+                            format!("ambiguous PartialEq implementation for `{operator}`"),
+                        );
+                        return Ty::Error;
+                    }
+                    if let Some(candidate) = applicable.first() {
+                        let (receiver_access, parameters, result, _, function) =
+                            candidate.methods.get("eq").cloned().unwrap();
+                        if receiver_access != Access::Borrow
+                            || parameters.len() != 1
+                            || parameters[0].access != IrAccess::Owned
+                            || parameters[0].ty != right_ty
+                            || result != BOOL
+                        {
+                            self.error(7, expr.span, "PartialEq requires a borrowed receiver, an owned matching operand, and Bool result");
+                            return Ty::Error;
+                        }
+                        if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                            let signature = match ir_type(&Ty::Function(
+                                vec![
+                                    FunctionParameter {
+                                        access: IrAccess::Borrow,
+                                        ty: left_ty.clone(),
+                                    },
+                                    parameters[0].clone(),
+                                ],
+                                Box::new(BOOL),
+                            )) {
+                                Some(IrType::Function(signature)) => signature,
+                                _ => return Ty::Error,
+                            };
+                            facts.selected_operators.push(SelectedCall {
+                                expression,
+                                function,
+                                receiver_access,
+                                signature,
+                            });
+                        }
+                        return BOOL;
+                    }
+                    self.error(
+                        7,
+                        expr.span,
+                        if matching.is_empty() {
+                            if matches!(left_ty, Ty::Enum(..)) {
+                                "enums without a visible PartialEq implementation cannot be compared with `==` or `!=`; use `match` to inspect the variant"
+                            } else {
+                                "no visible PartialEq implementation for this operand type"
+                            }
+                        } else {
+                            "matching PartialEq implementation is private or inactive"
+                        },
+                    );
+                    return Ty::Error;
+                }
+                if matches!(operator.as_str(), "==" | "!=")
+                    && matches!(right_ty, Ty::Enum(..))
+                    && !matches!(left_ty, Ty::Enum(..))
+                {
+                    self.error(
+                        7,
+                        expr.span,
+                        "enum equality requires a visible `PartialEq` implementation on the left operand; use `match` to inspect the variant",
+                    );
+                    return BOOL;
+                }
+                if matches!(operator.as_str(), "<" | "<=" | ">" | ">=")
+                    && matches!(left_ty, Ty::Struct(..) | Ty::Enum(..))
+                    && left_ty != Ty::Error
+                {
+                    let method_name = match operator.as_str() {
+                        "<" => "lt",
+                        "<=" => "le",
+                        ">" => "gt",
+                        ">=" => "ge",
+                        _ => unreachable!(),
+                    };
+                    let interface_key = qualified_interface(
+                        &self.module,
+                        &self.imports,
+                        &Type {
+                            span: expr.span,
+                            path: vec!["core".into(), "ops".into(), "PartialOrd".into()],
+                            arguments: Vec::new(),
+                        },
+                    );
+                    let matching = self
+                        .generic_evidence
+                        .iter()
+                        .find(|evidence| {
+                            evidence.interface == interface_key
+                                && evidence.candidate.target == left_ty
+                        })
+                        .map(|evidence| vec![evidence.candidate.clone()])
+                        .unwrap_or_else(|| {
+                            self.extension_candidates
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.interface.as_deref() == Some(interface_key.as_str())
+                                        && candidate.target == left_ty
+                                        && candidate.methods.contains_key(method_name)
+                                })
+                                .cloned()
+                                .collect()
+                        });
+                    let applicable = matching
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.visible
+                                && (candidate.local
+                                    || candidate.public_methods.contains(method_name))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if applicable.len() > 1 {
+                        self.error(
+                            7,
+                            expr.span,
+                            format!("ambiguous PartialOrd implementation for `{operator}`"),
+                        );
+                        return Ty::Error;
+                    }
+                    if let Some(candidate) = applicable.first() {
+                        let (receiver_access, parameters, result, _, function) =
+                            candidate.methods.get(method_name).cloned().unwrap();
+                        if receiver_access != Access::Borrow
+                            || parameters.len() != 1
+                            || parameters[0].access != IrAccess::Owned
+                            || parameters[0].ty != right_ty
+                            || result != BOOL
+                        {
+                            self.error(7, expr.span, "PartialOrd requires a borrowed receiver, an owned matching operand, and Bool result");
+                            return Ty::Error;
+                        }
+                        if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                            let signature = match ir_type(&Ty::Function(
+                                vec![
+                                    FunctionParameter {
+                                        access: IrAccess::Borrow,
+                                        ty: left_ty.clone(),
+                                    },
+                                    parameters[0].clone(),
+                                ],
+                                Box::new(BOOL),
+                            )) {
+                                Some(IrType::Function(signature)) => signature,
+                                _ => return Ty::Error,
+                            };
+                            facts.selected_operators.push(SelectedCall {
+                                expression,
+                                function,
+                                receiver_access,
+                                signature,
+                            });
+                        }
+                        return BOOL;
+                    }
+                    self.error(
+                        7,
+                        expr.span,
+                        if matching.is_empty() {
+                            "no visible PartialOrd implementation for this operand type"
+                        } else {
+                            "matching PartialOrd implementation is private or inactive"
+                        },
+                    );
+                    return Ty::Error;
+                }
                 match operator.as_str() {
                     "&&" | "||" => {
                         self.ensure(&left_ty, &BOOL, left.span);
@@ -3846,139 +5022,7 @@ impl Checker {
                 interface,
             } => {
                 if let Some(interface) = interface {
-                    let interface_key = qualified_interface(&self.module, &self.imports, interface);
-                    let ExprKind::Field {
-                        base,
-                        name: method_name,
-                    } = &callee.kind
-                    else {
-                        self.error(
-                            7,
-                            expr.span,
-                            "interface selection requires a receiver method call",
-                        );
-                        return Ty::Error;
-                    };
-                    self.allow_array_value(base);
-                    let receiver = read_type(self.expr(base, None));
-                    let mut matching = self
-                        .extension_candidates
-                        .iter()
-                        .filter(|candidate| {
-                            candidate.target == receiver
-                                && candidate.interface.as_deref() == Some(interface_key.as_str())
-                                && candidate.methods.contains_key(method_name)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if let Some(evidence) = self.generic_evidence.iter().find(|evidence| {
-                        evidence.interface == interface_key && evidence.candidate.target == receiver
-                    }) {
-                        if evidence.candidate.methods.contains_key(method_name) {
-                            matching = vec![evidence.candidate.clone()];
-                        }
-                    }
-                    let applicable = matching
-                        .iter()
-                        .filter(|candidate| candidate.visible)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if applicable.is_empty() && !matching.is_empty() {
-                        let locations = matching
-                            .iter()
-                            .map(|candidate| {
-                                format!(
-                                    "{}:{}..{}",
-                                    candidate.module, candidate.span.start, candidate.span.end
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.error(
-                            7,
-                            expr.span,
-                            format!("matching extension is private or inactive: {locations}"),
-                        );
-                        return Ty::Error;
-                    }
-                    if applicable.is_empty() {
-                        self.error(
-                            7,
-                            expr.span,
-                            format!(
-                                "no visible extension implements '{}::{}' for {}",
-                                interface_key,
-                                method_name,
-                                name(&receiver)
-                            ),
-                        );
-                        return Ty::Error;
-                    }
-                    if applicable.len() > 1 {
-                        let locations = applicable
-                            .iter()
-                            .map(|candidate| {
-                                format!(
-                                    "{}:{}..{}",
-                                    candidate.module, candidate.span.start, candidate.span.end
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.error(
-                            7,
-                            expr.span,
-                            format!("ambiguous extension selection; candidates: {locations}"),
-                        );
-                        return Ty::Error;
-                    }
-                    let candidate = &applicable[0];
-                    let (receiver_access, parameters, result, _method_span, function) =
-                        candidate.methods.get(method_name).cloned().unwrap();
-                    self.ensure(&receiver, &candidate.target, base.span);
-                    if parameters.len() != arguments.len() {
-                        self.error(
-                            10,
-                            expr.span,
-                            format!(
-                                "expected {} method arguments, found {}",
-                                parameters.len(),
-                                arguments.len()
-                            ),
-                        );
-                    }
-                    for (argument, parameter) in arguments.iter().zip(&parameters) {
-                        let actual = self.expr(argument, Some(&parameter.ty));
-                        self.ensure(&actual, &parameter.ty, argument.span);
-                    }
-                    if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
-                        let mut function_parameters = vec![FunctionParameter {
-                            access: ir_access(receiver_access),
-                            ty: candidate.target.clone(),
-                        }];
-                        function_parameters.extend(parameters.clone());
-                        let signature = match ir_type(&Ty::Function(
-                            function_parameters,
-                            Box::new(result.clone()),
-                        )) {
-                            Some(IrType::Function(signature)) => signature,
-                            _ => {
-                                self.error(
-                                    7,
-                                    expr.span,
-                                    "selected extension signature is outside the executable type subset",
-                                );
-                                return Ty::Error;
-                            }
-                        };
-                        facts.selected_calls.push(SelectedCall {
-                            expression,
-                            function,
-                            receiver_access,
-                            signature,
-                        });
-                    }
-                    return result;
+                    return self.interface_selected_call(expr, id, callee, arguments, interface);
                 }
                 if let ExprKind::Path(path) = &callee.kind {
                     if path.as_slice() == ["drop"]
@@ -4071,16 +5115,19 @@ impl Checker {
                     }) {
                         self.allow_array_value(base);
                         let receiver = read_type(self.expr(base, None));
-                        let matching = self
-                            .extension_candidates
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.interface.is_none()
-                                    && candidate.target == receiver
-                                    && candidate.methods.contains_key(name)
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>();
+                        let available = self.extension_candidates.clone();
+                        let mut matching = Vec::new();
+                        for candidate in available.into_iter().filter(|candidate| {
+                            candidate.interface.is_none() && candidate.methods.contains_key(name)
+                        }) {
+                            if candidate.target == receiver {
+                                matching.push(candidate);
+                            } else if let Some(candidate) =
+                                self.specialize_inherent_candidate(&candidate, &receiver)
+                            {
+                                matching.push(candidate);
+                            }
+                        }
                         let applicable = matching
                             .iter()
                             .filter(|candidate| {
@@ -4122,6 +5169,9 @@ impl Checker {
                         let candidate = &applicable[0];
                         let (receiver_access, parameters, result, _, function) =
                             candidate.methods.get(name).cloned().unwrap();
+                        if receiver_access == Access::Owned {
+                            self.reject_extraction(base, &receiver);
+                        }
                         if parameters.len() != arguments.len() {
                             self.error(
                                 10,
@@ -4216,6 +5266,27 @@ impl Checker {
                         let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
                         self.concat_destination = previous_concat;
                         self.temporary_borrow_argument = previous_borrow;
+                        if params.get(i).is_some_and(|parameter| {
+                            parameter.access == IrAccess::Owned
+                                && self.struct_has_unsupported_nested_string_owner(&parameter.ty)
+                        }) {
+                            self.error(
+                                17,
+                                arg.span,
+                                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, primitive and nested owner fields)",
+                            );
+                        }
+                        if params.get(i).is_some_and(|parameter| {
+                            parameter.access == IrAccess::Owned
+                                && self.tuple_has_unsupported_nested_string_owner(&parameter.ty)
+                        })
+                        {
+                            self.error(
+                                17,
+                                arg.span,
+                                "owned tuple calls cannot transport nested String-owning aggregates other than tuples in this slice",
+                            );
+                        }
                         if let Some(parameter) = params
                             .get(i)
                             .filter(|parameter| matches!(parameter.ty, Ty::List(_)))
@@ -4299,6 +5370,9 @@ impl Checker {
                 type_arguments,
                 fields,
             } => {
+                if path.is_empty() && type_arguments.is_empty() {
+                    return self.anonymous_record(expr, fields, expected);
+                }
                 if self.lowering && !self.array_allowed(expr) {
                     self.error(
                         17,
@@ -4473,7 +5547,7 @@ pub fn check_types(module: &Module) -> Vec<Diagnostic> {
 
 /// Check a standalone module and retain canonical local and expression facts.
 /// This returns no facts if type or control-flow diagnostics exist.
-/// Array forms outside the executable subset (results, nesting, element references) report TE017.
+/// Unsupported array element storage, including references, reports TE017.
 pub fn check_typed_module(module: &Module) -> Result<TypedModule, Vec<Diagnostic>> {
     let (mut diagnostics, functions, types) = check_standalone(module, CheckMode::Execution);
     diagnostics.extend(crate::check_control_flow(module));
@@ -4506,12 +5580,16 @@ fn extension_candidates_for(
                     Some(candidate.interface),
                     candidate.associated_types,
                     candidate.methods,
+                    Vec::new(),
+                    None,
                 )
             });
     let inherent_declarations = resolution
         .all_inherent_extension_candidates()
         .into_iter()
         .map(|candidate| {
+            let generic_target =
+                (!candidate.generic_parameters.is_empty()).then(|| candidate.target.clone());
             (
                 candidate.module,
                 candidate.public,
@@ -4520,6 +5598,8 @@ fn extension_candidates_for(
                 None,
                 Vec::new(),
                 candidate.methods,
+                candidate.generic_parameters,
+                generic_target,
             )
         });
     for (
@@ -4530,6 +5610,8 @@ fn extension_candidates_for(
         declaration_interface,
         declaration_associated_types,
         declaration_methods,
+        generic_parameters,
+        generic_target,
     ) in interface_declarations.chain(inherent_declarations)
     {
         let local = declaration_module == caller;
@@ -4560,7 +5642,11 @@ fn extension_candidates_for(
             imports: imports.clone(),
             ..checker()
         };
-        let target = checker.type_path(&declaration_target);
+        let target = if generic_target.is_some() {
+            Ty::Error
+        } else {
+            checker.type_path(&declaration_target)
+        };
         let interface = declaration_interface
             .as_ref()
             .map(|ty| qualified_interface(&declaration_module, &imports, ty));
@@ -4579,6 +5665,25 @@ fn extension_candidates_for(
         let methods = declaration_methods
             .iter()
             .map(|method| {
+                if generic_target.is_some() {
+                    return (
+                        method.name.clone(),
+                        (
+                            method.receiver,
+                            Vec::new(),
+                            Ty::Error,
+                            method.span,
+                            extension_ids
+                                .get(&(
+                                    declaration_module.clone(),
+                                    declaration_span.start,
+                                    method.name.clone(),
+                                ))
+                                .copied()
+                                .unwrap_or(FunctionId(0)),
+                        ),
+                    );
+                }
                 let parameters = method
                     .parameters
                     .iter()
@@ -4599,11 +5704,14 @@ fn extension_candidates_for(
                         parameters,
                         result,
                         method.span,
-                        extension_ids[&(
-                            declaration_module.clone(),
-                            declaration_span.start,
-                            method.name.clone(),
-                        )],
+                        extension_ids
+                            .get(&(
+                                declaration_module.clone(),
+                                declaration_span.start,
+                                method.name.clone(),
+                            ))
+                            .copied()
+                            .unwrap_or(FunctionId(0)),
                     ),
                 )
             })
@@ -4627,23 +5735,13 @@ fn extension_candidates_for(
             associated_types,
             methods,
             public_methods,
+            generic_target,
+            generic_parameters,
+            generic_methods: declaration_methods,
+            declaration_imports: imports,
         });
     }
     candidates
-}
-
-fn qualified_interface(module: &str, imports: &HashMap<String, String>, ty: &Type) -> String {
-    let path = if ty.path.len() == 1 {
-        imports
-            .get(&ty.path[0])
-            .cloned()
-            .unwrap_or_else(|| format!("{module}::{}", ty.path[0]))
-    } else if let Some(import) = imports.get(&ty.path[0]) {
-        format!("{import}::{}", ty.path[1..].join("::"))
-    } else {
-        ty.path.join("::")
-    };
-    path.strip_prefix("self::").unwrap_or(&path).to_owned()
 }
 
 fn imports_for_module(module: &Module, project: &Project) -> HashMap<String, String> {
@@ -4707,11 +5805,19 @@ fn check_standalone(
     for item in &module.items {
         match &item.kind {
             ItemKind::Function {
+                external,
                 name,
                 parameters,
                 result,
                 ..
             } => {
+                if *external {
+                    c.error(
+                        15,
+                        item.span,
+                        "external functions require project host-profile validation",
+                    );
+                }
                 c.function_ids
                     .insert(name.clone(), FunctionId(next_function));
                 next_function += 1;
@@ -4770,6 +5876,7 @@ fn check_standalone(
                     explicit_drops: Vec::new(),
                     selected_calls: Vec::new(),
                     selected_operators: Vec::new(),
+                    selected_assignments: Vec::new(),
                     matches: Vec::new(),
                     tuple_projections: Vec::new(),
                     tuple_initializers: Vec::new(),
@@ -5012,9 +6119,16 @@ pub(crate) fn check_resolved_mode(
     let mut extension_ids = HashMap::new();
     for (module_name, source) in &resolution.modules {
         for item in &source.syntax.items {
-            if let ItemKind::Extension { methods, .. }
-            | ItemKind::InherentExtension { methods, .. } = &item.kind
-            {
+            let methods = match &item.kind {
+                ItemKind::Extension { methods, .. } => Some(methods),
+                ItemKind::InherentExtension {
+                    methods,
+                    generic_parameters,
+                    ..
+                } if generic_parameters.is_empty() => Some(methods),
+                _ => None,
+            };
+            if let Some(methods) = methods {
                 for method in methods {
                     extension_ids.insert(
                         (module_name.clone(), item.span.start, method.name.clone()),
@@ -5132,6 +6246,7 @@ pub(crate) fn check_resolved_mode(
                             explicit_drops: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
+                            selected_assignments: Vec::new(),
                             matches: Vec::new(),
                             tuple_projections: Vec::new(),
                             tuple_initializers: Vec::new(),
@@ -5146,6 +6261,10 @@ pub(crate) fn check_resolved_mode(
             }
         }
         for item in &source.syntax.items {
+            if matches!(&item.kind, ItemKind::InherentExtension { generic_parameters, .. } if !generic_parameters.is_empty())
+            {
+                continue;
+            }
             let (target, methods) = match &item.kind {
                 ItemKind::Extension {
                     target, methods, ..
@@ -5204,6 +6323,7 @@ pub(crate) fn check_resolved_mode(
                             explicit_drops: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
+                            selected_assignments: Vec::new(),
                             matches: Vec::new(),
                             tuple_projections: Vec::new(),
                             tuple_initializers: Vec::new(),
@@ -5220,119 +6340,280 @@ pub(crate) fn check_resolved_mode(
         diagnostics.extend(c.diagnostics);
     }
     let mut specialization_index = 0usize;
+    let mut method_index = 0usize;
+    let mut generic_limit_reported = false;
+    let mut method_limit_reported = false;
     loop {
-        let request = specialization_registry
-            .borrow()
-            .requests
-            .get(specialization_index)
-            .cloned();
-        let Some(request) = request else {
-            break;
-        };
-        if specialization_index >= 256 {
-            diagnostics.push(diagnostic(
-                7,
-                request.template.span,
-                "generic specialization limit exceeded (maximum 256 distinct functions)",
-            ));
-            break;
-        }
-        specialization_index += 1;
-        let Some(source) = resolution.modules.get(&request.template.module) else {
-            diagnostics.push(diagnostic(
-                7,
-                request.template.span,
-                "generic specialization source module is unavailable",
-            ));
-            continue;
-        };
-        let Some(item) = source
-            .syntax
-            .items
-            .iter()
-            .find(|item| item.span == request.template.span)
-        else {
-            diagnostics.push(diagnostic(
-                7,
-                request.template.span,
-                "generic specialization source declaration is unavailable",
-            ));
-            continue;
-        };
-        let ItemKind::Function {
-            parameters, body, ..
-        } = &item.kind
-        else {
-            unreachable!("generic template points to a function item")
-        };
-        let mut c = Checker {
-            lowering,
-            module: request.template.module.clone(),
-            table: Rc::clone(&table),
-            generic_types: request.substitution.clone(),
-            generic_consts: request.const_substitution.clone(),
-            generic_evidence: request.evidence.clone(),
-            generic_functions: generic_templates.clone(),
-            specialization_registry: Some(Rc::clone(&specialization_registry)),
-            extension_candidates: extension_candidates_for(
+        let mut made_progress = false;
+        loop {
+            let request = specialization_registry
+                .borrow()
+                .requests
+                .get(specialization_index)
+                .cloned();
+            let Some(request) = request else {
+                break;
+            };
+            if specialization_index >= 256 {
+                if !generic_limit_reported {
+                    diagnostics.push(diagnostic(
+                        7,
+                        request.template.span,
+                        "generic specialization limit exceeded (maximum 256 distinct functions)",
+                    ));
+                    generic_limit_reported = true;
+                }
+                specialization_index += 1;
+                continue;
+            }
+            specialization_index += 1;
+            made_progress = true;
+            let Some(source) = resolution.modules.get(&request.template.module) else {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.template.span,
+                    "generic specialization source module is unavailable",
+                ));
+                continue;
+            };
+            let Some(item) = source
+                .syntax
+                .items
+                .iter()
+                .find(|item| item.span == request.template.span)
+            else {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.template.span,
+                    "generic specialization source declaration is unavailable",
+                ));
+                continue;
+            };
+            let ItemKind::Function {
+                parameters, body, ..
+            } = &item.kind
+            else {
+                unreachable!("generic template points to a function item")
+            };
+            let mut c = Checker {
+                lowering,
+                module: request.template.module.clone(),
+                table: Rc::clone(&table),
+                generic_types: request.substitution.clone(),
+                generic_consts: request.const_substitution.clone(),
+                generic_evidence: request.evidence.clone(),
+                generic_functions: generic_templates.clone(),
+                specialization_registry: Some(Rc::clone(&specialization_registry)),
+                extension_candidates: extension_candidates_for(
+                    &request.template.module,
+                    project,
+                    resolution,
+                    &table,
+                    &extension_ids,
+                ),
+                qualified_functions: signatures.clone(),
+                qualified_function_ids: ids.clone(),
+                ..checker()
+            };
+            install_function_environment(
+                &mut c,
                 &request.template.module,
+                &source.syntax,
                 project,
-                resolution,
-                &table,
-                &extension_ids,
-            ),
-            qualified_functions: signatures.clone(),
-            qualified_function_ids: ids.clone(),
-            ..checker()
-        };
-        install_function_environment(
-            &mut c,
-            &request.template.module,
-            &source.syntax,
-            project,
-            &generic_templates,
-            &signatures,
-            &ids,
-        );
-        let params = parameters
-            .iter()
-            .map(|parameter| FunctionParameter {
+                &generic_templates,
+                &signatures,
+                &ids,
+            );
+            let params = parameters
+                .iter()
+                .map(|parameter| FunctionParameter {
+                    access: ir_access(parameter.access),
+                    ty: c.type_path(&parameter.ty),
+                })
+                .collect::<Vec<_>>();
+            let result = request
+                .template
+                .result
+                .as_ref()
+                .map(|ty| c.type_path(ty))
+                .unwrap_or(UNIT);
+            if lowering {
+                c.facts = Some(FunctionFacts {
+                    id: request.id,
+                    span: request.template.span,
+                    source_module: request.template.module.clone(),
+                    source_name: request.template.name.clone(),
+                    specialization_key: Some(request.key.clone()),
+                    signature: request.signature,
+                    locals: Vec::new(),
+                    expressions: Vec::new(),
+                    path_uses: Vec::new(),
+                    variant_uses: Vec::new(),
+                    explicit_drops: Vec::new(),
+                    selected_calls: Vec::new(),
+                    selected_operators: Vec::new(),
+                    selected_assignments: Vec::new(),
+                    matches: Vec::new(),
+                    tuple_projections: Vec::new(),
+                    tuple_initializers: Vec::new(),
+                    next_expr: 0,
+                });
+            }
+            check_function_body(&mut c, parameters, body, params, result);
+            if let Some(facts) = c.facts.take() {
+                all_facts.push(facts);
+            }
+            diagnostics.extend(c.diagnostics);
+        }
+        loop {
+            let request = specialization_registry
+                .borrow()
+                .method_requests
+                .get(method_index)
+                .cloned();
+            let Some(request) = request else {
+                break;
+            };
+            if method_index >= 256 {
+                if !method_limit_reported {
+                    diagnostics.push(diagnostic(
+                        7,
+                        request.method.span,
+                        "generic inherent method specialization limit exceeded (maximum 256 distinct methods)",
+                    ));
+                    method_limit_reported = true;
+                }
+                method_index += 1;
+                continue;
+            }
+            method_index += 1;
+            made_progress = true;
+            let Some(source) = resolution.modules.get(&request.module) else {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.method.span,
+                    "generic inherent method module is unavailable",
+                ));
+                continue;
+            };
+            let Some(extension) = source
+                .syntax
+                .items
+                .iter()
+                .find(|item| item.span == request.extension_span)
+            else {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.method.span,
+                    "generic inherent extension source is unavailable",
+                ));
+                continue;
+            };
+            let method = match &extension.kind {
+                ItemKind::InherentExtension { methods, .. } => methods.iter().find(|method| {
+                    method.span == request.method.span && method.name == request.method.name
+                }),
+                _ => None,
+            };
+            let Some(method) = method else {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.method.span,
+                    "generic inherent method source is unavailable",
+                ));
+                continue;
+            };
+            let mut parameters = vec![Parameter {
+                span: method.span,
+                mutable: false,
+                name: "self".to_owned(),
+                access: method.receiver,
+                ty: Type {
+                    span: method.span,
+                    path: vec!["Self".into()],
+                    arguments: Vec::new(),
+                },
+            }];
+            parameters.extend(method.parameters.iter().cloned());
+            let mut c = Checker {
+                lowering,
+                module: request.module.clone(),
+                table: Rc::clone(&table),
+                generic_types: request.substitution.clone(),
+                generic_consts: request.const_substitution.clone(),
+                generic_functions: generic_templates.clone(),
+                specialization_registry: Some(Rc::clone(&specialization_registry)),
+                extension_candidates: extension_candidates_for(
+                    &request.module,
+                    project,
+                    resolution,
+                    &table,
+                    &extension_ids,
+                ),
+                qualified_functions: signatures.clone(),
+                qualified_function_ids: ids.clone(),
+                ..checker()
+            };
+            install_function_environment(
+                &mut c,
+                &request.module,
+                &source.syntax,
+                project,
+                &generic_templates,
+                &signatures,
+                &ids,
+            );
+            let mut parameter_types = vec![FunctionParameter {
+                access: ir_access(method.receiver),
+                ty: request.target.clone(),
+            }];
+            parameter_types.extend(method.parameters.iter().map(|parameter| FunctionParameter {
                 access: ir_access(parameter.access),
                 ty: c.type_path(&parameter.ty),
-            })
-            .collect::<Vec<_>>();
-        let result = request
-            .template
-            .result
-            .as_ref()
-            .map(|ty| c.type_path(ty))
-            .unwrap_or(UNIT);
-        if lowering {
-            c.facts = Some(FunctionFacts {
-                id: request.id,
-                span: request.template.span,
-                source_module: request.template.module.clone(),
-                source_name: request.template.name.clone(),
-                specialization_key: Some(request.key.clone()),
-                signature: request.signature,
-                locals: Vec::new(),
-                expressions: Vec::new(),
-                path_uses: Vec::new(),
-                variant_uses: Vec::new(),
-                explicit_drops: Vec::new(),
-                selected_calls: Vec::new(),
-                selected_operators: Vec::new(),
-                matches: Vec::new(),
-                tuple_projections: Vec::new(),
-                tuple_initializers: Vec::new(),
-                next_expr: 0,
-            });
+            }));
+            let result = method
+                .result
+                .as_ref()
+                .map(|ty| c.type_path(ty))
+                .unwrap_or(UNIT);
+            if lowering {
+                if let Some(IrType::Function(signature)) = ir_type(&Ty::Function(
+                    parameter_types.clone(),
+                    Box::new(result.clone()),
+                )) {
+                    c.facts = Some(FunctionFacts {
+                        id: request.id,
+                        span: method.span,
+                        source_module: request.module.clone(),
+                        source_name: method.name.clone(),
+                        specialization_key: Some(request.key.clone()),
+                        signature,
+                        locals: Vec::new(),
+                        expressions: Vec::new(),
+                        path_uses: Vec::new(),
+                        variant_uses: Vec::new(),
+                        explicit_drops: Vec::new(),
+                        selected_calls: Vec::new(),
+                        selected_operators: Vec::new(),
+                        selected_assignments: Vec::new(),
+                        matches: Vec::new(),
+                        tuple_projections: Vec::new(),
+                        tuple_initializers: Vec::new(),
+                        next_expr: 0,
+                    });
+                }
+            }
+            if let Some(body) = &method.body {
+                check_function_body(&mut c, &parameters, body, parameter_types, result);
+            }
+            if let Some(facts) = c.facts.take() {
+                all_facts.push(facts);
+            }
+            diagnostics.extend(c.diagnostics);
         }
-        check_function_body(&mut c, parameters, body, params, result);
-        if let Some(facts) = c.facts.take() {
-            all_facts.push(facts);
+        if !made_progress {
+            break;
         }
-        diagnostics.extend(c.diagnostics);
     }
     if diagnostics.is_empty() {
         all_facts.sort_by_key(|facts| facts.id.0);

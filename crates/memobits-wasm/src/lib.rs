@@ -10,26 +10,38 @@ use memobits_entry_abi as entry_abi;
 use memobits_ir::{
     ArrayInit, BinaryOp, BlockId, Constant, EntryOutcome, ErrorAncestry, Function, FunctionId,
     Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
-    Type, TypeDef, TypeDefKind, UnaryOp, ValueId,
+    Type, TypeDef, TypeDefKind, UnaryOp, UseMode, ValueId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ExportKind, ExportSection,
-    Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
+    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind,
+    ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
+    ImportSection,
     Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module, TypeSection,
     ValType,
 };
 
 mod arrays;
+mod layout;
 mod list_descriptor;
 mod memory;
 mod operations;
 mod string_descriptor;
 mod string_heap;
 mod utf8;
+mod validation;
 use arrays::{array_cell, array_cell_of, emit_array_copy};
+use layout::{
+    aggregate_layout, struct_layouts, type_has_string_storage, type_layout, FieldStorage,
+    StructLayout, STRUCT_LAYOUT_OVERFLOW,
+};
+#[cfg(test)]
+use layout::VariantLayout;
 use memory::{LayoutError, StaticLayout};
 use operations::emit_numeric_cast;
+use validation::{
+    primitive_signature, supported_type, unsupported_instruction, validate_string_struct_borrows,
+};
 
 fn diagnostic(message: impl Into<String>, span: Option<Span>) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(
@@ -175,13 +187,20 @@ fn compile_target(
     };
     let mut errors = Vec::new();
     for (name, function) in exports {
-        if program.functions.get(function.0 as usize).is_none() {
+        let Some(function_body) = program.functions.get(function.0 as usize) else {
             errors.push(diagnostic(
                 format!(
                     "Wasm export '{name}' refers to missing function {:?}",
                     function
                 ),
                 None,
+            ));
+            continue;
+        };
+        if host_import(function_body).is_some() {
+            errors.push(diagnostic(
+                format!("host import function '{}' cannot be exported", function_body.path.name),
+                Some(function_body.span),
             ));
         }
     }
@@ -285,6 +304,22 @@ fn compile_target(
     }
     let heap_strings = program.heap_strings();
     for (function, heap) in program.functions.iter().zip(&heap_strings) {
+        if let Some((module, name)) = host_import(function) {
+            let matches_capability = module == "memobits:console"
+                && name == "write_i32"
+                && function.signature.parameters.len() == 1
+                && function.signature.parameters[0].access == memobits_ir::Access::Owned
+                && function.signature.parameters[0].ty
+                    == Type::Primitive(Primitive::I32)
+                && function.signature.result.as_ref()
+                    == &Type::Primitive(Primitive::Unit);
+            if !matches_capability {
+                errors.push(diagnostic(
+                    "unsupported typed host import; expected memobits:console.write_i32(i32) -> unit",
+                    Some(function.span),
+                ));
+            }
+        }
         let uses = value_use_counts(function);
         validate_string_struct_borrows(program, function, &structs, &uses, &mut errors);
         if let Err(error) = FrameLayout::for_function_in(&structs, function, stack_size) {
@@ -330,7 +365,7 @@ fn compile_target(
                         if matches!(instruction.output.map(|id| &function.values[id.0 as usize]),
                             Some(Type::Reference { inner, .. }) if **inner == Type::String)
                             && (*access != memobits_ir::Access::Borrow
-                                || !matches!(base.source, Source::Local(_))) =>
+                                || !field_addr_rooted_at_local(function, base.source)) =>
                     {
                         errors.push(diagnostic(
                             "a String struct field can only be read through a borrow of a named local field or replaced directly on a mutable local using a named String, literal, concat, or direct internal String call",
@@ -374,277 +409,54 @@ fn compile_target(
         .map_err(|message| vec![diagnostic(message, None)])
 }
 
-fn validate_string_struct_borrows(
-    program: &Program,
-    function: &Function,
-    structs: &[StructLayout],
-    uses: &[u32],
-    errors: &mut Vec<Diagnostic>,
-) {
-    use memobits_ir::Access;
-
-    let is_tuple = |ty: &Type| {
-        matches!(ty, Type::Struct(id)
-        if program.types.get(id.0 as usize).is_some_and(|definition| definition.path.module.as_slice() == ["\0tuple"]))
-    };
-    let is_string_struct =
-        |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
-    let is_string_tuple = |ty: &Type| is_tuple(ty) && is_string_struct(ty);
-    let is_string_struct_ref =
-        |ty: &Type| matches!(ty, Type::Reference { inner, .. } if is_string_struct(inner));
-
-    if function.signature.parameters.iter().any(|p| {
-        (is_string_struct(&p.ty)
-            && !matches!(p.access, Access::Borrow | Access::Share)
-            && !is_string_tuple(&p.ty))
-            || is_string_struct_ref(&p.ty)
-    }) || (is_string_struct(&function.signature.result)
-        && !is_string_tuple(&function.signature.result))
-        || is_string_struct_ref(&function.signature.result)
-    {
-        errors.push(diagnostic(
-            "structs with String fields can cross internal calls only as borrow or share parameters",
-            Some(function.span),
-        ));
+fn host_import(function: &Function) -> Option<(&str, &str)> {
+    let module = function.path.module.as_slice();
+    if module.len() == 2 && module[0] == memobits_ir::HOST_IMPORT_MODULE {
+        Some((module[1].as_str(), function.path.name.as_str()))
+    } else {
+        None
     }
+}
 
-    if function.locals.iter().enumerate().any(|(index, local)| {
-        is_string_struct_ref(&local.ty)
-            && !(function.parameter_locals.contains(&LocalId(index as u32))
-                && matches!(
-                    local.ty,
-                    Type::Reference {
-                        access: Access::Borrow | Access::Share,
+/// String field reads are restricted to addresses reached through a named
+/// local owner. Nested tuple projections produce SSA values between the owner
+/// and the String field, so checking only for a direct local base rejects
+/// `record.values.0` despite the projection still being rooted in `record`.
+fn field_addr_rooted_at_local(function: &Function, source: Source) -> bool {
+    fn rooted(
+        function: &Function,
+        source: Source,
+        producers: &HashMap<memobits_ir::ValueId, &Instruction>,
+        visited: &mut HashSet<memobits_ir::ValueId>,
+    ) -> bool {
+        match source {
+            Source::Local(local) => function.locals.get(local.0 as usize).is_some(),
+            Source::Value(value) if visited.insert(value) => {
+                let result = producers.get(&value).is_some_and(|instruction| {
+                    let InstructionKind::FieldAddr {
+                        base,
+                        access: memobits_ir::Access::Borrow,
                         ..
-                    }
-                ))
-    }) {
-        errors.push(diagnostic(
-            "whole borrows of structs with String fields cannot be stored in local bindings",
-            Some(function.span),
-        ));
-    }
-
-    for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
-        let InstructionKind::Call {
-            callee:
-                Operand {
-                    source: Source::Function(target),
-                    ..
-                },
-            arguments,
-        } = &instruction.kind
-        else {
-            continue;
-        };
-        let Some(callee) = program.functions.get(target.0 as usize) else {
-            continue;
-        };
-        for (parameter, argument) in callee.signature.parameters.iter().zip(arguments) {
-            if parameter.access == Access::Owned
-                && is_string_tuple(&parameter.ty)
-                && !matches!(argument.source, Source::Local(local)
-                    if function.locals.get(local.0 as usize).is_some_and(|value| value.ty == parameter.ty)
-                        && argument.mode == memobits_ir::UseMode::Consume)
-            {
-                errors.push(diagnostic(
-                    "an owned String tuple argument must move directly from a named tuple local",
-                    argument.span,
-                ));
+                    } = &instruction.kind
+                    else {
+                        return false;
+                    };
+                    rooted(function, base.source, producers, visited)
+                });
+                visited.remove(&value);
+                result
             }
+            _ => false,
         }
     }
 
-    if !function.values.iter().any(is_string_struct_ref)
-        && !function
-            .locals
-            .iter()
-            .any(|local| is_string_struct_ref(&local.ty))
-    {
-        return;
-    }
-    let instructions = || function.blocks.iter().flat_map(|block| &block.instructions);
-    let borrows: HashMap<_, _> = instructions()
-        .filter_map(|instruction| {
-            let output = instruction.output?;
-            let index = output.0 as usize;
-            let InstructionKind::Borrow { owner, access, .. } = &instruction.kind else {
-                return None;
-            };
-            if !matches!(access, Access::Borrow | Access::Share) {
-                return None;
-            }
-            (uses[index] == 1 && is_string_struct_ref(&function.values[index]))
-                .then_some((output, owner.source))
-        })
+    let producers: HashMap<_, _> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.output.map(|output| (output, instruction)))
         .collect();
-    let mut allowed = HashSet::new();
-    let mut forwarded_parameter = false;
-    for instruction in instructions() {
-        let InstructionKind::Call {
-            callee:
-                Operand {
-                    source: Source::Function(_),
-                    ..
-                },
-            arguments,
-        } = &instruction.kind
-        else {
-            continue;
-        };
-        for argument in arguments {
-            let value = match argument.source {
-                Source::Local(local)
-                    if is_string_struct_ref(&function.locals[local.0 as usize].ty) =>
-                {
-                    forwarded_parameter = true;
-                    continue;
-                }
-                Source::Value(value) => value,
-                _ => continue,
-            };
-            let Some(&source) = borrows.get(&value) else {
-                continue;
-            };
-            // Argument lowering reborrows the explicit `owner.borrow()`.
-            // Both addresses must be used only in this chain to the call.
-            let (root, original) = match source {
-                Source::Value(original) => (borrows.get(&original).copied(), Some(original)),
-                _ => (Some(source), None),
-            };
-            if matches!(root, Some(Source::Local(local))
-                if is_string_struct(&function.locals[local.0 as usize].ty))
-            {
-                allowed.insert(value);
-                allowed.extend(original);
-            }
-        }
-    }
-    if forwarded_parameter
-        || function.values.iter().enumerate().any(|(index, ty)| {
-            is_string_struct_ref(ty) && !allowed.contains(&ValueId(index as u32))
-        })
-    {
-        errors.push(diagnostic(
-            "a whole borrow or share of a struct with String fields requires a named owner and direct use as an internal call argument",
-            Some(function.span),
-        ));
-    }
-}
-
-fn unsupported_instruction(instruction: &Instruction) -> Option<String> {
-    match &instruction.kind {
-        InstructionKind::Constant(_)
-        | InstructionKind::EndStructLocal { .. }
-        | InstructionKind::EndStringLocal { .. }
-        | InstructionKind::DropLocal { .. }
-        | InstructionKind::Capture(_)
-        | InstructionKind::Copy { .. }
-        | InstructionKind::StringLen { .. }
-        | InstructionKind::ListGet { .. }
-        | InstructionKind::ListRead { .. }
-        | InstructionKind::CollectionSearch { .. }
-        | InstructionKind::ListLen { .. }
-        | InstructionKind::ListPush { .. }
-        | InstructionKind::ListPop { .. }
-        | InstructionKind::ListClear { .. }
-        | InstructionKind::EndListLocal { .. }
-        | InstructionKind::EmptyList
-        | InstructionKind::InitConcatString { .. }
-        | InstructionKind::StringIsCharBoundary { .. }
-        | InstructionKind::StringByteAt { .. }
-        | InstructionKind::StringScalarAt { .. }
-        | InstructionKind::ValidateUtf8 { .. }
-        | InstructionKind::Assign { .. } => None,
-        InstructionKind::Cast { .. } => None,
-        InstructionKind::Borrow { .. }
-        | InstructionKind::Load { .. }
-        | InstructionKind::Store { .. }
-        | InstructionKind::ReplaceStringField { .. } => None,
-        InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
-        InstructionKind::StructNew { .. }
-        | InstructionKind::EnumNew { .. }
-        | InstructionKind::FieldAddr { .. }
-        | InstructionKind::VariantAddr { .. }
-        | InstructionKind::Extract { .. }
-        | InstructionKind::EnumTag { .. }
-        | InstructionKind::VariantExtract { .. } => None,
-        InstructionKind::Call { callee, .. } => match callee.source {
-            Source::Function(_) => None,
-            _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
-        },
-        InstructionKind::Unary { .. } => None,
-        InstructionKind::Binary {
-            op: BinaryOp::And | BinaryOp::Or,
-            ..
-        } => Some(
-            "logical and/or must be lowered to control flow before Wasm code generation".into(),
-        ),
-        InstructionKind::Binary { .. } => None,
-    }
-}
-
-fn primitive_signature<'a>(
-    mut parameters: impl Iterator<Item = &'a memobits_ir::ParameterType>,
-    result: &Type,
-) -> bool {
-    parameters.all(|p| match p.access {
-        memobits_ir::Access::Owned => {
-            matches!(
-                p.ty,
-                Type::Primitive(_)
-                    | Type::String
-                    | Type::List(_)
-                    | Type::Array { .. }
-                    | Type::Struct(_)
-                    | Type::Enum(_)
-            )
-        }
-        memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
-            matches!(p.ty, Type::List(_))
-                || matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
-                || matches!(
-                    p.ty,
-                    Type::String | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
-                )
-        }
-    }) && matches!(
-        result,
-        Type::Primitive(_)
-            | Type::String
-            | Type::List(_)
-            | Type::Array { .. }
-            | Type::Struct(_)
-            | Type::Enum(_)
-    )
-}
-
-fn supported_type(ty: &Type) -> bool {
-    match ty {
-        Type::Primitive(_) => true,
-        // A struct or enum is an inline frame-cell value, passed internally by address.
-        Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) => true,
-        Type::Reference {
-            access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
-            inner,
-        } if matches!(inner.as_ref(), Type::List(_)) => true,
-        Type::Reference {
-            access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
-            inner,
-        } => match inner.as_ref() {
-            Type::Primitive(kind) => *kind != Primitive::Unit,
-            array @ Type::Array { .. } => supported_type(array),
-            Type::String | Type::Struct(_) | Type::Enum(_) => true,
-            _ => false,
-        },
-        Type::Array { element, .. } => match element.as_ref() {
-            Type::Primitive(kind) => *kind != Primitive::Unit,
-            nested @ Type::Array { .. } => supported_type(nested),
-            Type::Struct(_) | Type::Enum(_) => true,
-            _ => false,
-        },
-        _ => false,
-    }
+    rooted(function, source, &producers, &mut HashSet::new())
 }
 
 /// Identity of an array cell owner within one function.
@@ -672,329 +484,6 @@ struct FrameLayout {
     /// Layout of each struct type, indexed by `TypeId`.
     structs: Vec<StructLayout>,
     size: u32,
-}
-
-/// How one struct field is stored: a primitive written with a typed store, or a
-/// nested array or struct copied as `size` bytes from its value cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldStorage {
-    Primitive(Primitive),
-    Aggregate(u32),
-}
-
-/// Natural-alignment layout of a struct or enum. A struct lays its fields out
-/// in declaration order, each at the next offset aligned to its own alignment,
-/// total size rounded up to the largest field alignment. An enum (`variants` is
-/// `Some`) stores its tag at offset 0 and every variant's payload in one shared
-/// area; `offsets` and `fields` are empty for it. A nested aggregate is laid
-/// out inline with its own size and alignment (the validator rejects by-value
-/// cycles).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct StructLayout {
-    size: u32,
-    align: u32,
-    offsets: Vec<u32>,
-    fields: Vec<FieldStorage>,
-    enum_layout: Option<EnumLayout>,
-    error_identity: Option<u32>,
-    string_offsets: Vec<u32>,
-}
-
-impl StructLayout {
-    fn has_string_fields(&self) -> bool {
-        !self.string_offsets.is_empty()
-    }
-}
-
-/// Enum layout: the tag at offset 0 with the smallest unsigned width that holds
-/// the variant count (1 byte up to 256 variants, 2 up to 65536, else 4), then
-/// the payload area, aligned to the largest payload alignment of any variant.
-/// Each variant places its payload fields from the start of that area, so the
-/// size is the largest variant extent, rounded up to the enum's alignment. The
-/// layout is internal, not a stable ABI, and bytes beyond the active variant's
-/// payload are unspecified.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct EnumLayout {
-    tag_size: u32,
-    string_success: bool,
-    variants: Vec<VariantLayout>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct VariantLayout {
-    offsets: Vec<u32>,
-    fields: Vec<FieldStorage>,
-}
-
-const STRUCT_LAYOUT_OVERFLOW: &str = "struct layout overflows the 32-bit address space";
-
-fn struct_layouts(types: &[TypeDef]) -> Result<Vec<StructLayout>, String> {
-    let mut done: Vec<Option<StructLayout>> = vec![None; types.len()];
-    for index in 0..types.len() {
-        struct_layout_at(types, index, &mut done, &mut Vec::new())?;
-    }
-    Ok(done
-        .into_iter()
-        .map(|layout| layout.expect("laid out"))
-        .collect())
-}
-
-/// Size, alignment and storage kind of one field or payload value.
-fn member_layout(
-    types: &[TypeDef],
-    ty: &Type,
-    done: &mut Vec<Option<StructLayout>>,
-    active: &mut Vec<usize>,
-) -> Result<Option<(u32, u32, FieldStorage)>, String> {
-    Ok(match ty {
-        Type::Primitive(kind) => {
-            let (size, align) = storage_layout(*kind)?;
-            Some((size, align, FieldStorage::Primitive(*kind)))
-        }
-        Type::Reference { inner, .. } if **inner == Type::String => {
-            return Err("Wasm does not yet support String fields or enum payloads".into());
-        }
-        // Validated local borrow Option payloads store a Wasm address.
-        Type::Reference { .. } => Some((4, 4, FieldStorage::Primitive(Primitive::U32))),
-        Type::String => {
-            return Err("Wasm does not yet support String fields or enum payloads".into())
-        }
-        nested @ (Type::Array { .. } | Type::Struct(_) | Type::Enum(_)) => {
-            nested_struct_layouts(types, nested, done, active)?;
-            let layout_at = |id: u32| done.get(id as usize).and_then(Option::as_ref);
-            if matches!(nested, Type::Struct(id) if layout_at(id.0).is_some_and(|layout| layout.has_string_fields()))
-            {
-                return Err("Wasm does not yet support nesting structs with String fields".into());
-            }
-            if matches!(nested, Type::Enum(id) if layout_at(id.0).is_some_and(has_string_success)) {
-                return Err("Wasm does not yet support nested Result<String, E> storage".into());
-            }
-            let (size, align) = type_layout(&layout_at, nested)?;
-            Some((size, align, FieldStorage::Aggregate(size)))
-        }
-        _ => None,
-    })
-}
-
-fn struct_layout_at(
-    types: &[TypeDef],
-    index: usize,
-    done: &mut Vec<Option<StructLayout>>,
-    active: &mut Vec<usize>,
-) -> Result<(), String> {
-    if done[index].is_some() {
-        return Ok(());
-    }
-    let definition = &types[index];
-    if active.contains(&index) {
-        let what = match definition.kind {
-            TypeDefKind::Struct { .. } => "struct",
-            TypeDefKind::Enum { .. } => "enum",
-        };
-        return Err(format!(
-            "{what} '{}' contains itself by value",
-            definition.path.name
-        ));
-    }
-    active.push(index);
-    let layout = match &definition.kind {
-        TypeDefKind::Struct { fields } => {
-            let has_string_fields = fields.iter().any(|field| field.ty == Type::String);
-            if has_string_fields
-                && (definition.error_ancestry.is_some()
-                    || fields
-                        .iter()
-                        .any(|field| !matches!(field.ty, Type::String | Type::Primitive(_))))
-            {
-                return Err("structs with String fields support only String and primitive fields and cannot inherit from Error".into());
-            }
-            let mut offset = if definition.error_ancestry == Some(ErrorAncestry::Root) {
-                entry_abi::ERROR_ID_BYTES
-            } else {
-                0
-            };
-            let mut align = 1u32;
-            let mut offsets = Vec::with_capacity(fields.len());
-            let mut storage = Vec::with_capacity(fields.len());
-            if let Some(ErrorAncestry::Derived(parent)) = definition.error_ancestry {
-                let parent = parent.0 as usize;
-                struct_layout_at(types, parent, done, active)?;
-                let base = done[parent].as_ref().expect("laid out parent");
-                // Whole stores through a Share of the ancestor copy its padded size.
-                // Reserve that entire prefix before placing any descendant fields.
-                offset = base.size;
-                align = base.align;
-                offsets.extend_from_slice(&base.offsets);
-                storage.extend_from_slice(&base.fields);
-            }
-            for field in &fields[offsets.len()..] {
-                let member = if field.ty == Type::String {
-                    Some((
-                        string_descriptor::SIZE,
-                        string_descriptor::ALIGN,
-                        FieldStorage::Aggregate(string_descriptor::SIZE),
-                    ))
-                } else {
-                    member_layout(types, &field.ty, done, active)?
-                };
-                let Some((size, field_align, kind)) = member else {
-                    return Err(format!(
-                        "field '{}' of struct '{}' has an unsupported type",
-                        field.name, definition.path.name
-                    ));
-                };
-                offset = align_up(offset, field_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                offsets.push(offset);
-                storage.push(kind);
-                offset = offset.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                align = align.max(field_align);
-            }
-            StructLayout {
-                size: align_up(offset, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
-                align,
-                string_offsets: fields
-                    .iter()
-                    .zip(&offsets)
-                    .filter_map(|(field, offset)| (field.ty == Type::String).then_some(*offset))
-                    .collect(),
-                offsets,
-                fields: storage,
-                enum_layout: None,
-                error_identity: definition.error_ancestry.map(|_| index as u32 + 1),
-            }
-        }
-        TypeDefKind::Enum { variants } => {
-            let tag_size = match variants.len() {
-                0..=256 => 1u32,
-                257..=65536 => 2,
-                _ => 4,
-            };
-            let string_success = definition.entry_outcome == Some(EntryOutcome::Result)
-                && variants
-                    .first()
-                    .is_some_and(|variant| variant.payload == [Type::String]);
-            // First pass: member sizes, so the payload area's alignment is known.
-            let mut sized: Vec<Vec<(u32, u32, FieldStorage)>> = Vec::with_capacity(variants.len());
-            let mut payload_align = 1u32;
-            for (index, variant) in variants.iter().enumerate() {
-                let mut members = Vec::with_capacity(variant.payload.len());
-                for ty in &variant.payload {
-                    let member = if string_success && index == 0 {
-                        Some((
-                            string_descriptor::SIZE,
-                            string_descriptor::ALIGN,
-                            FieldStorage::Aggregate(string_descriptor::SIZE),
-                        ))
-                    } else {
-                        member_layout(types, ty, done, active)?
-                    };
-                    let Some(member) = member else {
-                        return Err(format!(
-                            "payload of variant '{}' of enum '{}' has an unsupported type",
-                            variant.name, definition.path.name
-                        ));
-                    };
-                    payload_align = payload_align.max(member.1);
-                    members.push(member);
-                }
-                sized.push(members);
-            }
-            let payload_start = align_up(tag_size, payload_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-            let align = payload_align.max(tag_size);
-            let mut extent = tag_size;
-            let mut laid_out = Vec::with_capacity(sized.len());
-            for members in sized {
-                let mut cursor = payload_start;
-                let mut offsets = Vec::with_capacity(members.len());
-                let mut fields = Vec::with_capacity(members.len());
-                for (size, member_align, kind) in members {
-                    cursor = align_up(cursor, member_align).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                    offsets.push(cursor);
-                    fields.push(kind);
-                    cursor = cursor.checked_add(size).ok_or(STRUCT_LAYOUT_OVERFLOW)?;
-                }
-                extent = extent.max(cursor);
-                laid_out.push(VariantLayout { offsets, fields });
-            }
-            StructLayout {
-                size: align_up(extent, align).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
-                align,
-                offsets: Vec::new(),
-                fields: Vec::new(),
-                error_identity: None,
-                string_offsets: Vec::new(),
-                enum_layout: Some(EnumLayout {
-                    tag_size,
-                    string_success,
-                    variants: laid_out,
-                }),
-            }
-        }
-    };
-    done[index] = Some(layout);
-    active.pop();
-    Ok(())
-}
-
-/// Lay out every struct or enum reachable from a field type before the field itself.
-fn nested_struct_layouts(
-    types: &[TypeDef],
-    ty: &Type,
-    done: &mut Vec<Option<StructLayout>>,
-    active: &mut Vec<usize>,
-) -> Result<(), String> {
-    match ty {
-        Type::Struct(id) | Type::Enum(id) => struct_layout_at(types, id.0 as usize, done, active),
-        Type::Array { element, .. } => nested_struct_layouts(types, element, done, active),
-        _ => Ok(()),
-    }
-}
-
-/// Size and alignment of an array or struct type. Arrays multiply the element
-/// size by the length with checked arithmetic at every level; the cost depends
-/// on the nesting depth of the type only, never on a source-supplied count.
-fn aggregate_layout(structs: &[StructLayout], ty: &Type) -> Result<(u32, u32), String> {
-    type_layout(&|id| structs.get(id as usize), ty)
-}
-
-fn has_string_success(layout: &StructLayout) -> bool {
-    layout
-        .enum_layout
-        .as_ref()
-        .is_some_and(|layout| layout.string_success)
-}
-
-fn type_layout<'a>(
-    struct_layout: &dyn Fn(u32) -> Option<&'a StructLayout>,
-    ty: &Type,
-) -> Result<(u32, u32), String> {
-    match ty {
-        Type::Primitive(kind) => storage_layout(*kind),
-        Type::String => Ok((string_descriptor::SIZE, string_descriptor::ALIGN)),
-        Type::List(_) => Ok((list_descriptor::SIZE, list_descriptor::ALIGN)),
-        Type::Struct(id) | Type::Enum(id) => struct_layout(id.0)
-            .map(|layout| (layout.size, layout.align))
-            .ok_or_else(|| "type is out of range".to_string()),
-        Type::Array { element, len } => {
-            if matches!(element.as_ref(), Type::Struct(id) if struct_layout(id.0).is_some_and(|layout| layout.has_string_fields()))
-            {
-                return Err("Wasm does not yet support nesting structs with String fields".into());
-            }
-            if **element == Type::String {
-                return Err("Wasm does not yet support String array elements".into());
-            }
-            if matches!(element.as_ref(), Type::Enum(id) if struct_layout(id.0).is_some_and(has_string_success))
-            {
-                return Err("Wasm does not yet support nested Result<String, E> storage".into());
-            }
-            let (size, align) = type_layout(struct_layout, element)?;
-            let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
-            Ok((bytes, align))
-        }
-        _ => Err(
-            "array elements must be primitives, structs, enums or arrays in frame layout".into(),
-        ),
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1266,7 +755,8 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 }
                 | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
-                | InstructionKind::StringScalarAt { source, offset } => {
+                | InstructionKind::StringScalarAt { source, offset }
+                | InstructionKind::StringScalarRead { source, offset, .. } => {
                     count(source);
                     count(offset);
                 }
@@ -1842,15 +1332,32 @@ fn encode_frames_traced(
             }
         }
     }
-    let indices = reachable
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index as u32))
-        .collect::<BTreeMap<_, _>>();
     let selected = reachable
         .iter()
         .map(|id| &program.functions[*id as usize])
         .collect::<Vec<_>>();
+    let import_count = selected
+        .iter()
+        .filter(|function| host_import(function).is_some())
+        .count() as u32;
+    let mut next_import = 0u32;
+    let mut next_definition = import_count;
+    let indices = reachable
+        .iter()
+        .map(|id| {
+            let function = &program.functions[*id as usize];
+            let index = if host_import(function).is_some() {
+                let index = next_import;
+                next_import += 1;
+                index
+            } else {
+                let index = next_definition;
+                next_definition += 1;
+                index
+            };
+            (*id, index)
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut static_layout = match &entry {
         Some(adapter) => adapter.static_layout,
         None => {
@@ -1898,9 +1405,17 @@ fn encode_frames_traced(
         };
         types.ty().function(params, results);
     }
+    let mut import_section = ImportSection::new();
+    for (function, type_index) in selected.iter().zip(&function_types) {
+        if let Some((module, name)) = host_import(function) {
+            import_section.import(module, name, EntityType::Function(*type_index));
+        }
+    }
     let mut functions = FunctionSection::new();
-    for type_index in &function_types {
-        functions.function(*type_index);
+    for (function, type_index) in selected.iter().zip(&function_types) {
+        if host_import(function).is_none() {
+            functions.function(*type_index);
+        }
     }
     let mut export_section = ExportSection::new();
     for (name, function) in exports {
@@ -1964,7 +1479,9 @@ fn encode_frames_traced(
             functions.function(signatures.len() as u32 + prior);
             (selected.len() as u32 + prior, program)
         });
-    let has_frames = reachable.iter().any(|id| sizes[*id as usize] != 0);
+    let has_frames = reachable.iter().any(|id| {
+        host_import(&program.functions[*id as usize]).is_none() && sizes[*id as usize] != 0
+    });
     if observe && has_frames {
         export_section.export("__test_memory", ExportKind::Memory, 0);
         export_section.export("__test_sp", ExportKind::Global, 0);
@@ -1983,7 +1500,11 @@ fn encode_frames_traced(
         spans: Vec::new(),
     };
     for id in &reachable {
+        if host_import(&program.functions[*id as usize]).is_some() {
+            continue;
+        }
         code.function(&compile_function(
+            program,
             &program.functions[*id as usize],
             &indices,
             sizes[*id as usize],
@@ -2084,7 +1605,11 @@ fn encode_frames_traced(
         globals.global(heap_global, &ConstExpr::i32_const(0));
     }
     let mut module = Module::new();
-    module.section(&types).section(&functions);
+    module.section(&types);
+    if !selected.iter().all(|function| host_import(function).is_none()) {
+        module.section(&import_section);
+    }
+    module.section(&functions);
     if has_memory {
         module.section(&memories);
     }
@@ -2108,6 +1633,7 @@ fn encode_frames_traced(
 
 #[allow(clippy::too_many_arguments)]
 fn compile_function(
+    program: &Program,
     function: &Function,
     indices: &BTreeMap<u32, u32>,
     frame_size: u32,
@@ -2132,17 +1658,32 @@ fn compile_function(
         .map(|local| wasm_type(&local.ty))
         .collect::<Vec<_>>();
     local_types.extend(function.values.iter().map(wasm_type));
+    let max_array_depth = function
+        .locals
+        .iter()
+        .map(|local| max_string_array_depth(&program.types, &local.ty, &mut HashSet::new()))
+        .chain(
+            function
+                .values
+                .iter()
+                .map(|ty| max_string_array_depth(&program.types, ty, &mut HashSet::new())),
+        )
+        .max()
+        .unwrap_or(0);
     local_types.push(ValType::I32); // dispatcher program counter
     local_types.push(ValType::I64); // exact wide intermediate for <= 32-bit ints
     if frame_size != 0 {
         local_types.push(ValType::I32);
     } // activation frame base
+    let cleanup_local_count = 1usize.saturating_add(max_array_depth.saturating_mul(2));
+    local_types.extend(std::iter::repeat(ValType::I32).take(cleanup_local_count));
     let locals = local_types
         .into_iter()
         .map(|ty| (1, ty))
         .collect::<Vec<_>>();
     let pc = param_count + function.locals.len() as u32 + function.values.len() as u32;
     let scratch64 = pc + 1;
+    let cleanup_base = scratch64 + 1 + u32::from(frame_size != 0);
     let mut wasm = WasmFunction::new(locals);
     let body = &mut wasm;
     let frame = (frame_size != 0).then_some(FrameState {
@@ -2192,12 +1733,24 @@ fn compile_function(
             if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
                 body.instructions().local_get(index as u32);
                 list_descriptor::clear_allocation(body);
-            } else if heap_locals.contains(local) {
-                // The incoming pointer addresses the caller's moved slot.
-                // Clear it only after the callee has received the descriptor.
-                body.instruction(&WasmInstruction::LocalGet(index as u32));
-                body.instruction(&WasmInstruction::I32Const(0));
-                string_descriptor::store_allocation(body);
+            } else if heap_locals.contains(local)
+                && type_has_string_storage(&program.types, &function.locals[local.0 as usize].ty)
+            {
+                // The incoming pointer addresses the caller's moved aggregate.
+                // Clear every descriptor at its typed location after copying;
+                // a fixed offset would overwrite enum tags or payload fields.
+                emit_string_storage_cleanup(
+                    body,
+                    &program.types,
+                    &layout.structs,
+                    &function.locals[local.0 as usize].ty,
+                    index as u32,
+                    0,
+                    cleanup_base,
+                    0,
+                    None,
+                    false,
+                )?;
             }
             continue;
         }
@@ -2219,11 +1772,13 @@ fn compile_function(
                 function,
                 param_count,
                 scratch64,
+                cleanup_base,
                 indices,
                 &layout,
                 frame,
                 strings,
                 heap_locals,
+                &program.types,
                 heap_copy_index,
                 utf8,
                 traps,
@@ -2307,7 +1862,7 @@ fn emit_string_scalar(
     source: &Operand,
     offset: &Operand,
     layout: &FrameLayout,
-    frame: FrameState,
+    frame: Option<FrameState>,
     lead: u32,
 ) -> Result<(), String> {
     emit_string_byte(
@@ -2317,7 +1872,7 @@ fn emit_string_scalar(
         source,
         offset,
         layout,
-        Some(frame),
+        frame,
     )?;
     body.instruction(&WasmInstruction::LocalSet(lead));
     // UTF-8 is already validated. Prefix ranges select the scalar width.
@@ -2344,9 +1899,9 @@ fn emit_string_scalar(
             _ => {
                 // index < len ensures subtraction cannot wrap. Checking the
                 // remaining width before any tail load bounds all byte offsets.
-                emit_operand(body, function, param_count, source, layout, Some(frame))?;
+                emit_operand(body, function, param_count, source, layout, frame)?;
                 string_descriptor::load_length(body);
-                emit_operand(body, function, param_count, offset, layout, Some(frame))?;
+                emit_operand(body, function, param_count, offset, layout, frame)?;
                 body.instruction(&WasmInstruction::I32Sub);
                 body.instruction(&WasmInstruction::I32Const(width));
                 body.instruction(&WasmInstruction::I32GeU);
@@ -2364,7 +1919,7 @@ fn emit_string_scalar(
                         source,
                         offset,
                         layout,
-                        Some(frame),
+                        frame,
                     )?;
                     body.instruction(&WasmInstruction::I32Load8U(MemArg {
                         offset: delta as u64,
@@ -2499,6 +2054,209 @@ fn release_list_cell(
     Ok(())
 }
 
+fn max_string_array_depth(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> usize {
+    match ty {
+        Type::Array { element, len } if *len != 0 => {
+            1 + max_string_array_depth(types, element, visited)
+        }
+        Type::Struct(id) | Type::Enum(id) if visited.insert(id.0) => {
+            let depth = match types.get(id.0 as usize).map(|definition| &definition.kind) {
+                Some(TypeDefKind::Struct { fields }) => fields
+                    .iter()
+                    .map(|field| max_string_array_depth(types, &field.ty, visited))
+                    .max()
+                    .unwrap_or(0),
+                Some(TypeDefKind::Enum { variants }) => variants
+                    .iter()
+                    .flat_map(|variant| &variant.payload)
+                    .map(|field| max_string_array_depth(types, field, visited))
+                    .max()
+                    .unwrap_or(0),
+                None => 0,
+            };
+            visited.remove(&id.0);
+            depth
+        }
+        _ => 0,
+    }
+}
+
+fn emit_relative_address(body: &mut WasmFunction, base: u32, offset: u32) {
+    body.instruction(&WasmInstruction::LocalGet(base));
+    if offset != 0 {
+        body.instruction(&WasmInstruction::I32Const(offset as i32));
+        body.instruction(&WasmInstruction::I32Add);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_string_storage_cleanup(
+    body: &mut WasmFunction,
+    types: &[TypeDef],
+    structs: &[StructLayout],
+    ty: &Type,
+    base_local: u32,
+    offset: u32,
+    scratch_base: u32,
+    array_depth: usize,
+    heap_copy_index: Option<u32>,
+    release: bool,
+) -> Result<(), String> {
+    if !type_has_string_storage(types, ty) {
+        return Ok(());
+    }
+    match ty {
+        Type::String => {
+            if release {
+                if let Some(releaser) = heap_copy_index {
+                    emit_relative_address(body, base_local, offset);
+                    string_descriptor::load_allocation(body);
+                    body.instruction(&WasmInstruction::Call(releaser + 1));
+                }
+            }
+            emit_relative_address(body, base_local, offset);
+            body.instruction(&WasmInstruction::I32Const(0));
+            string_descriptor::store_allocation(body);
+        }
+        Type::Array { element, len } => {
+            if *len == 0 {
+                return Ok(());
+            }
+            let (stride, _) = type_layout(&|id| structs.get(id as usize), element)?;
+            let index_local = scratch_base + 1 + (array_depth as u32) * 2;
+            let child_base = index_local + 1;
+            body.instruction(&WasmInstruction::I32Const(0));
+            body.instruction(&WasmInstruction::LocalSet(index_local));
+            body.instruction(&WasmInstruction::Block(BlockType::Empty));
+            body.instruction(&WasmInstruction::Loop(BlockType::Empty));
+            body.instruction(&WasmInstruction::LocalGet(index_local));
+            body.instruction(&WasmInstruction::I32Const(*len as i32));
+            body.instruction(&WasmInstruction::I32GeU);
+            body.instruction(&WasmInstruction::BrIf(1));
+            emit_relative_address(body, base_local, offset);
+            body.instruction(&WasmInstruction::LocalGet(index_local));
+            body.instruction(&WasmInstruction::I32Const(stride as i32));
+            body.instruction(&WasmInstruction::I32Mul);
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::LocalSet(child_base));
+            emit_string_storage_cleanup(
+                body,
+                types,
+                structs,
+                element,
+                child_base,
+                0,
+                scratch_base,
+                array_depth + 1,
+                heap_copy_index,
+                release,
+            )?;
+            body.instruction(&WasmInstruction::LocalGet(index_local));
+            body.instruction(&WasmInstruction::I32Const(1));
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::LocalSet(index_local));
+            body.instruction(&WasmInstruction::Br(0));
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::End);
+        }
+        Type::Struct(id) => {
+            let definition = types
+                .get(id.0 as usize)
+                .ok_or("struct type is out of range")?;
+            let TypeDefKind::Struct { fields } = &definition.kind else {
+                return Err("struct cleanup refers to an enum type".into());
+            };
+            let layout = structs.get(id.0 as usize).ok_or("struct type is out of range")?;
+            for (field, field_offset) in fields.iter().zip(&layout.offsets) {
+                emit_string_storage_cleanup(
+                    body,
+                    types,
+                    structs,
+                    &field.ty,
+                    base_local,
+                    offset.checked_add(*field_offset).ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                    scratch_base,
+                    array_depth,
+                    heap_copy_index,
+                    release,
+                )?;
+            }
+        }
+        Type::Enum(id) => {
+            let definition = types.get(id.0 as usize).ok_or("enum type is out of range")?;
+            let TypeDefKind::Enum { variants } = &definition.kind else {
+                return Err("enum cleanup refers to a struct type".into());
+            };
+            let layout = structs.get(id.0 as usize).ok_or("enum type is out of range")?;
+            let enum_layout = layout.enum_layout.as_ref().ok_or("missing enum layout")?;
+            for (variant_index, variant) in variants.iter().enumerate() {
+                if !enum_layout.string_variants.get(variant_index).copied().unwrap_or(false) {
+                    continue;
+                }
+                emit_relative_address(body, base_local, offset);
+                match enum_layout.tag_size {
+                    1 => emit_load(body, Primitive::U8),
+                    2 => emit_load(body, Primitive::U16),
+                    _ => emit_load(body, Primitive::U32),
+                }
+                body.instruction(&WasmInstruction::I32Const(variant_index as i32));
+                body.instruction(&WasmInstruction::I32Eq);
+                body.instruction(&WasmInstruction::If(BlockType::Empty));
+                let payload_layout = enum_layout
+                    .variants
+                    .get(variant_index)
+                    .ok_or("missing enum variant layout")?;
+                for (field, field_offset) in variant.payload.iter().zip(&payload_layout.offsets) {
+                    emit_string_storage_cleanup(
+                        body,
+                        types,
+                        structs,
+                        field,
+                        base_local,
+                        offset
+                            .checked_add(*field_offset)
+                            .ok_or(STRUCT_LAYOUT_OVERFLOW)?,
+                        scratch_base,
+                        array_depth,
+                        heap_copy_index,
+                        release,
+                    )?;
+                }
+                body.instruction(&WasmInstruction::End);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn emit_local_string_storage_cleanup(
+    body: &mut WasmFunction,
+    types: &[TypeDef],
+    structs: &[StructLayout],
+    ty: &Type,
+    frame: FrameState,
+    cell_offset: u32,
+    cleanup_base: u32,
+    heap_copy_index: Option<u32>,
+    release: bool,
+) -> Result<(), String> {
+    emit_address(body, frame, cell_offset);
+    body.instruction(&WasmInstruction::LocalSet(cleanup_base));
+    emit_string_storage_cleanup(
+        body,
+        types,
+        structs,
+        ty,
+        cleanup_base,
+        0,
+        cleanup_base,
+        0,
+        heap_copy_index,
+        release,
+    )
+}
+
 fn clear_moved_heap_source(
     body: &mut WasmFunction,
     function: &Function,
@@ -2506,23 +2264,51 @@ fn clear_moved_heap_source(
     operand: &Operand,
     layout: &FrameLayout,
     frame: Option<FrameState>,
+    types: &[TypeDef],
+    cleanup_base: u32,
     heap_locals: &HashSet<LocalId>,
 ) -> Result<(), String> {
-    if let Source::Local(source) = operand.source {
+    let owner = match operand.source {
+        Source::Local(local) => Some((local, operand.clone())),
+        Source::Value(value) => function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find(|instruction| instruction.output == Some(value))
+            .and_then(|instruction| match &instruction.kind {
+                InstructionKind::Capture(Operand {
+                    source: Source::Local(local),
+                    mode: UseMode::Consume,
+                    ..
+                }) => Some((*local, Operand {
+                    source: Source::Local(*local),
+                    mode: UseMode::Consume,
+                    span: operand.span,
+                })),
+                _ => None,
+            }),
+        Source::Function(_) => None,
+    };
+    if let Some((source, owner_operand)) = owner {
         if matches!(function.locals[source.0 as usize].ty, Type::List(_)) {
-            emit_operand(body, function, param_count, operand, layout, frame)?;
+            emit_operand(body, function, param_count, &owner_operand, layout, frame)?;
             list_descriptor::clear_allocation(body);
         } else if heap_locals.contains(&source) {
-            if let Type::Struct(id) = function.locals[source.0 as usize].ty {
+            if type_has_string_storage(types, &function.locals[source.0 as usize].ty) {
                 let cell = array_cell_of(layout, Slot::Local(source.0))?;
-                let frame = frame.ok_or("struct local requires a frame")?;
-                for offset in &layout.structs[id.0 as usize].string_offsets {
-                    emit_address(body, frame, cell.offset + offset);
-                    body.instructions().i32_const(0);
-                    string_descriptor::store_allocation(body);
-                }
+                emit_local_string_storage_cleanup(
+                    body,
+                    types,
+                    &layout.structs,
+                    &function.locals[source.0 as usize].ty,
+                    frame.ok_or("aggregate local requires a frame")?,
+                    cell.offset,
+                    cleanup_base,
+                    None,
+                    false,
+                )?;
             } else {
-                emit_operand(body, function, param_count, operand, layout, frame)?;
+                emit_operand(body, function, param_count, &owner_operand, layout, frame)?;
                 body.instructions().i32_const(0);
                 string_descriptor::store_allocation(body);
             }
@@ -3165,11 +2951,13 @@ fn compile_instruction(
     function: &Function,
     param_count: u32,
     scratch64: u32,
+    cleanup_base: u32,
     indices: &BTreeMap<u32, u32>,
     layout: &FrameLayout,
     frame: Option<FrameState>,
     strings: &BTreeMap<&str, u32>,
     heap_locals: &HashSet<LocalId>,
+    type_definitions: &[TypeDef],
     heap_copy_index: Option<u32>,
     utf8: Option<(u32, &Program)>,
     traps: &mut Traps,
@@ -3186,7 +2974,18 @@ fn compile_instruction(
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
                 release_list_cell(body, cell, frame, heap_copy_index)?;
             } else if heap_locals.contains(&local) {
-                release_string_local(body, local, layout, frame, heap_copy_index)?;
+                let cell = array_cell_of(layout, Slot::Local(local.0))?;
+                emit_local_string_storage_cleanup(
+                    body,
+                    type_definitions,
+                    &layout.structs,
+                    &function.locals[local.0 as usize].ty,
+                    frame.ok_or("aggregate local requires a frame")?,
+                    cell.offset,
+                    cleanup_base,
+                    heap_copy_index,
+                    true,
+                )?;
             }
             // Lexical cleanup and reassignment still visit the slot.
             clear_moved_heap_source(
@@ -3196,22 +2995,25 @@ fn compile_instruction(
                 value,
                 layout,
                 frame,
+                type_definitions,
+                cleanup_base,
                 heap_locals,
             )?;
         }
         InstructionKind::EndStructLocal { local } => {
             if heap_locals.contains(local) {
-                let Type::Struct(id) = function.locals[local.0 as usize].ty else {
-                    return Err("struct scope exit requires a struct local".into());
-                };
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
-                let frame = frame.ok_or("struct local requires a frame")?;
-                for offset in &layout.structs[id.0 as usize].string_offsets {
-                    release_string_at(body, frame, cell.offset + offset, heap_copy_index)?;
-                    emit_address(body, frame, cell.offset + offset);
-                    body.instructions().i32_const(0);
-                    string_descriptor::store_allocation(body);
-                }
+                emit_local_string_storage_cleanup(
+                    body,
+                    type_definitions,
+                    &layout.structs,
+                    &function.locals[local.0 as usize].ty,
+                    frame.ok_or("aggregate local requires a frame")?,
+                    cell.offset,
+                    cleanup_base,
+                    heap_copy_index,
+                    true,
+                )?;
             }
         }
         InstructionKind::EndStringLocal { local } => {
@@ -3279,6 +3081,8 @@ fn compile_instruction(
                     operand,
                     layout,
                     frame,
+                    type_definitions,
+                    cleanup_base,
                     heap_locals,
                 )?;
                 return Ok(());
@@ -3615,6 +3419,30 @@ fn compile_instruction(
             body.instruction(&WasmInstruction::End);
             body.instruction(&WasmInstruction::LocalSet(output));
         }
+        InstructionKind::StringScalarRead {
+            source,
+            offset,
+            width,
+        } => {
+            let output = output.ok_or("String scalar read lacks an output")?;
+            if *width {
+                // Width from the lead byte of a validated scalar start.
+                emit_string_byte(body, function, param_count, source, offset, layout, frame)?;
+                body.instruction(&WasmInstruction::LocalSet(output));
+                body.instruction(&WasmInstruction::I32Const(1));
+                for limit in [0xc0, 0xe0, 0xf0] {
+                    body.instruction(&WasmInstruction::LocalGet(output));
+                    body.instruction(&WasmInstruction::I32Const(limit));
+                    body.instruction(&WasmInstruction::I32GeU);
+                    body.instruction(&WasmInstruction::I32Add);
+                }
+            } else {
+                emit_string_scalar(
+                    body, function, param_count, source, offset, layout, frame, output,
+                )?;
+            }
+            body.instruction(&WasmInstruction::LocalSet(output));
+        }
         InstructionKind::StringByteAt { source, offset }
         | InstructionKind::StringScalarAt { source, offset } => {
             let scalar = matches!(&instruction.kind, InstructionKind::StringScalarAt { .. });
@@ -3638,7 +3466,7 @@ fn compile_instruction(
                     source,
                     offset,
                     layout,
-                    frame,
+                    Some(frame),
                     output,
                 )?;
                 Primitive::U32
@@ -3715,6 +3543,19 @@ fn compile_instruction(
                                 });
                             }
                         }
+                        if type_has_string_storage(type_definitions, &element) {
+                            clear_moved_heap_source(
+                                body,
+                                function,
+                                param_count,
+                                operand,
+                                layout,
+                                Some(frame),
+                                type_definitions,
+                                cleanup_base,
+                                heap_locals,
+                            )?;
+                        }
                     }
                 }
                 ArrayInit::Zeroed => {
@@ -3764,10 +3605,14 @@ fn compile_instruction(
                         });
                     }
                 }
-                if struct_layout
-                    .string_offsets
-                    .contains(&struct_layout.offsets[index])
-                {
+                let field_ty = &type_definitions[type_id.0 as usize].kind;
+                let TypeDefKind::Struct { fields: declared } = field_ty else {
+                    return Err("struct creation output has an enum definition".into());
+                };
+                let owns_nested_string = declared
+                    .get(index)
+                    .is_some_and(|field| type_has_string_storage(type_definitions, &field.ty));
+                if owns_nested_string {
                     clear_moved_heap_source(
                         body,
                         function,
@@ -3775,6 +3620,8 @@ fn compile_instruction(
                         operand,
                         layout,
                         Some(frame),
+                        type_definitions,
+                        cleanup_base,
                         heap_locals,
                     )?;
                 }
@@ -3824,17 +3671,23 @@ fn compile_instruction(
                     }
                 }
             }
-            if enum_layout.string_success && *variant == 0 {
-                // The Result owns this descriptor until the consuming match.
-                clear_moved_heap_source(
-                    body,
-                    function,
-                    param_count,
-                    &payload[0],
-                    layout,
-                    Some(frame),
-                    heap_locals,
-                )?;
+            let TypeDefKind::Enum { variants } = &type_definitions[type_id.0 as usize].kind else {
+                return Err("enum creation output has a struct definition".into());
+            };
+            for (operand, field_ty) in payload.iter().zip(&variants[*variant as usize].payload) {
+                if type_has_string_storage(type_definitions, field_ty) {
+                    clear_moved_heap_source(
+                        body,
+                        function,
+                        param_count,
+                        operand,
+                        layout,
+                        Some(frame),
+                        type_definitions,
+                        cleanup_base,
+                        heap_locals,
+                    )?;
+                }
             }
             emit_address(body, frame, cell.offset);
             body.instruction(&WasmInstruction::I32Const(*variant as i32));
@@ -3879,6 +3732,26 @@ fn compile_instruction(
                         dst_mem: 0,
                     });
                 }
+            }
+            let is_owned_string_tuple = match base.source {
+                Source::Local(local) => function
+                    .locals
+                    .get(local.0 as usize)
+                    .is_some_and(|local| memobits_ir::is_string_owner_transport(type_definitions, &local.ty)),
+                _ => false,
+            };
+            if base.mode == UseMode::Consume && is_owned_string_tuple {
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    base,
+                    layout,
+                    frame,
+                    type_definitions,
+                    cleanup_base,
+                    heap_locals,
+                )?;
             }
         }
         InstructionKind::EnumTag { base } => {
@@ -3960,6 +3833,19 @@ fn compile_instruction(
                         dst_mem: 0,
                     });
                 }
+            }
+            if base.mode == UseMode::Consume {
+                clear_moved_heap_source(
+                    body,
+                    function,
+                    param_count,
+                    base,
+                    layout,
+                    frame,
+                    type_definitions,
+                    cleanup_base,
+                    heap_locals,
+                )?;
             }
         }
         InstructionKind::FieldAddr { base, field, .. } => {
@@ -4145,6 +4031,8 @@ fn compile_instruction(
                 value,
                 layout,
                 frame,
+                type_definitions,
+                cleanup_base,
                 heap_locals,
             )?;
         }
@@ -4195,6 +4083,8 @@ fn compile_instruction(
                             value,
                             layout,
                             frame,
+                            type_definitions,
+                            cleanup_base,
                             heap_locals,
                         )?;
                     }
@@ -4220,7 +4110,17 @@ fn compile_instruction(
                     if list {
                         release_list_cell(body, cell, frame, heap_copy_index)?;
                     } else {
-                        release_string_local(body, *target, layout, frame, heap_copy_index)?;
+                        emit_local_string_storage_cleanup(
+                            body,
+                            type_definitions,
+                            &layout.structs,
+                            &function.locals[target.0 as usize].ty,
+                            frame.ok_or("aggregate local requires a frame")?,
+                            cell.offset,
+                            cleanup_base,
+                            heap_copy_index,
+                            true,
+                        )?;
                     }
                 }
                 emit_array_copy(body, function, param_count, cell, value, layout, frame)?;
@@ -4231,6 +4131,8 @@ fn compile_instruction(
                     value,
                     layout,
                     frame,
+                    type_definitions,
+                    cleanup_base,
                     heap_locals,
                 )?;
                 return Ok(());
@@ -4268,6 +4170,8 @@ fn compile_instruction(
                         argument,
                         layout,
                         frame,
+                        type_definitions,
+                        cleanup_base,
                         heap_locals,
                     )?;
                 }
@@ -4282,6 +4186,8 @@ fn compile_instruction(
                     argument,
                     layout,
                     frame,
+                    type_definitions,
+                    cleanup_base,
                     heap_locals,
                 )?;
             }
@@ -4643,7 +4549,28 @@ fn emit_edge(
 #[cfg(test)]
 mod frame_layout_tests {
     use super::*;
-    use memobits_ir::{Block, CanonicalFunction, LoanId, Local, Signature};
+    use memobits_ir::{Block, CanonicalFunction, LoanId, Local, Signature, TypeId};
+
+    #[test]
+    fn large_string_tuple_array_layout_does_not_expand_per_element_offsets() {
+        let layouts = [StructLayout {
+            size: 16,
+            align: 8,
+            offsets: Vec::new(),
+            fields: Vec::new(),
+            enum_layout: None,
+            error_identity: None,
+            has_string_fields: true,
+            is_tuple: true,
+            is_flat_string_owner: false,
+        }];
+        let ty = Type::Array {
+            element: Box::new(Type::Struct(TypeId(0))),
+            len: 1_000_000,
+        };
+
+        assert_eq!(type_layout(&|id| layouts.get(id as usize), &ty).unwrap(), (16_000_000, 8));
+    }
 
     fn fixture(local_types: Vec<Type>, owners: Vec<Source>) -> Function {
         let span = Span {

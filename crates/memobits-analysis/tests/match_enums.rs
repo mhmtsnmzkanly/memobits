@@ -205,6 +205,7 @@ fn enum_equality_is_gated_and_points_at_match() {
         "TE007",
         "use `match`",
     );
+    rejected("let a := 1 == make(1); 0", "TE007", "use `match`");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_syntax::{
-    templates, Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, Type,
-    TypeArgument, TypeDefinition,
+    Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, TupleBinding, Type,
+    TypeArgument, TypeDefinition, templates,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +55,7 @@ pub(crate) fn check(
                 types.insert(name.clone());
                 if let TypeDefinition::Alias(target) = definition {
                     aliases.insert(name.clone(), target);
+                    collect_anonymous_enum_variants(target, &mut variants);
                 }
                 if let TypeDefinition::Enum(v) = definition {
                     variants.insert(
@@ -78,13 +79,35 @@ pub(crate) fn check(
             _ => {}
         }
     }
+    for item in &module.items {
+        match &item.kind {
+            ItemKind::Type { definition, .. } => match definition {
+                TypeDefinition::Struct(fields) => {
+                    for field in fields {
+                        collect_anonymous_enum_variants(&field.ty, &mut variants);
+                    }
+                }
+                TypeDefinition::Enum(enum_variants) => {
+                    for variant in enum_variants {
+                        for payload in &variant.payload {
+                            collect_anonymous_enum_variants(payload, &mut variants);
+                        }
+                    }
+                }
+                TypeDefinition::Alias(_) | TypeDefinition::Bodyless => {}
+            },
+            _ => {}
+        }
+    }
     let mut checker = Checker {
         types,
         imports,
         variants,
         aliases,
         generic_types: Vec::new(),
+        const_parameters: Vec::new(),
         scopes: vec![globals],
+        variant_scopes: Vec::new(),
         diagnostics: vec![],
         qualified: vec![],
     };
@@ -98,6 +121,7 @@ pub(crate) fn check(
             ..
         } = &item.kind
         {
+            checker.variant_scopes.push(BTreeSet::new());
             checker.generic_types.push(
                 generic_parameters
                     .iter()
@@ -107,6 +131,7 @@ pub(crate) fn check(
                     .map(|parameter| parameter.name.clone())
                     .collect(),
             );
+            checker.const_parameters.push(const_names(generic_parameters));
             for bound in bounds {
                 checker.ty(&bound.interface);
             }
@@ -131,7 +156,9 @@ pub(crate) fn check(
             }
             checker.block(body);
             checker.scopes.pop();
+            checker.variant_scopes.pop();
             checker.generic_types.pop();
+            checker.const_parameters.pop();
         }
     }
     for item in &module.items {
@@ -152,6 +179,7 @@ pub(crate) fn check(
                     .map(|parameter| parameter.name.clone())
                     .collect(),
             );
+            checker.const_parameters.push(const_names(generic_parameters));
             for bound in bounds {
                 checker.ty(&bound.interface);
             }
@@ -191,6 +219,7 @@ pub(crate) fn check(
                 }
             }
             checker.generic_types.pop();
+            checker.const_parameters.pop();
         }
     }
     for item in &module.items {
@@ -207,6 +236,21 @@ pub(crate) fn check(
                 .generic_types
                 .push(associated_types.iter().cloned().collect());
         }
+        if let ItemKind::InherentExtension {
+            generic_parameters, ..
+        } = &item.kind
+        {
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker.const_parameters.push(const_names(generic_parameters));
+        }
         let (target, interface, methods) = match &item.kind {
             ItemKind::Interface { methods, .. } => (None, None, methods.as_slice()),
             ItemKind::Extension {
@@ -221,7 +265,10 @@ pub(crate) fn check(
             _ => continue,
         };
         if let Some(target) = target {
+            checker.variant_scopes.push(BTreeSet::new());
             checker.ty(target);
+        } else {
+            checker.variant_scopes.push(BTreeSet::new());
         }
         if let Some(interface) = interface {
             checker.ty(interface);
@@ -235,6 +282,7 @@ pub(crate) fn check(
                     format!("duplicate {method_owner} method '{}'", method.name),
                 );
             }
+            checker.variant_scopes.push(BTreeSet::new());
             checker.scopes.push(BTreeSet::from(["self".to_owned()]));
             for parameter in &method.parameters {
                 checker.ty(&parameter.ty);
@@ -258,12 +306,36 @@ pub(crate) fn check(
                 checker.block(body);
             }
             checker.scopes.pop();
+            checker.variant_scopes.pop();
         }
+        checker.variant_scopes.pop();
         if matches!(&item.kind, ItemKind::Interface { .. }) {
             checker.generic_types.pop();
         }
+        if matches!(&item.kind, ItemKind::InherentExtension { .. }) {
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
+        }
     }
     (checker.diagnostics, checker.qualified)
+}
+
+fn collect_anonymous_enum_variants(ty: &Type, variants: &mut BTreeMap<String, BTreeSet<String>>) {
+    if ty.path.first().is_some_and(|head| head == "\0enum") {
+        let key = format!("\0anonymous-enum:{}:{}", ty.span.source.0, ty.span.start);
+        variants.insert(key, ty.path.iter().skip(1).cloned().collect());
+    }
+    for argument in &ty.arguments {
+        match argument {
+            TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
+                collect_anonymous_enum_variants(ty, variants);
+            }
+            TypeArgument::TupleField { ty, .. } => {
+                collect_anonymous_enum_variants(ty, variants);
+            }
+            TypeArgument::Integer(_) | TypeArgument::Const(_) => {}
+        }
+    }
 }
 
 struct Checker<'a> {
@@ -274,14 +346,39 @@ struct Checker<'a> {
     /// with an alias name.
     aliases: BTreeMap<String, &'a Type>,
     generic_types: Vec<BTreeSet<String>>,
+    /// Const generic parameters in scope; they may appear as nominal type
+    /// arguments (`Tag<N>`) and resolve to values during specialization.
+    const_parameters: Vec<BTreeSet<String>>,
     scopes: Vec<BTreeSet<String>>,
+    variant_scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
     qualified: Vec<(String, Span, bool)>,
 }
+fn const_names(parameters: &[memobits_syntax::GenericParameter]) -> BTreeSet<String> {
+    parameters
+        .iter()
+        .filter(|parameter| {
+            matches!(
+                parameter.kind,
+                memobits_syntax::GenericParameterKind::Const(_)
+            )
+        })
+        .map(|parameter| parameter.name.clone())
+        .collect()
+}
 impl Checker<'_> {
+    fn is_const_parameter(&self, ty: &Type) -> bool {
+        ty.path.len() == 1
+            && ty.arguments.is_empty()
+            && self
+                .const_parameters
+                .iter()
+                .any(|names| names.contains(&ty.path[0]))
+    }
     fn ty(&mut self, ty: &Type) {
         for argument in &ty.arguments {
             match argument {
+                TypeArgument::Type(ty) if self.is_const_parameter(ty) => {}
                 TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
                     self.ty(ty)
                 }
@@ -290,7 +387,17 @@ impl Checker<'_> {
                 TypeArgument::Const(_) => {}
             }
         }
-        if ty.path.as_slice() == ["\0tuple"] {
+        if ty.path.is_empty() {
+            self.error(3, ty.span, "type path cannot be empty".into());
+            return;
+        }
+        if ty.path.first().is_some_and(|part| part == "\0enum") {
+            if let Some(scope) = self.variant_scopes.last_mut() {
+                scope.extend(ty.path.iter().skip(1).cloned());
+            }
+            return;
+        }
+        if ty.path.as_slice() == ["\0tuple"] || ty.path.as_slice() == ["\0record"] {
             return;
         }
         if templates::lookup_type(ty).is_some() {
@@ -345,6 +452,18 @@ impl Checker<'_> {
                         self.error(4, span, format!("unknown variant '{}'", path.join("::")));
                         return;
                     }
+                    if target.path.first().is_some_and(|part| part == "\0enum") {
+                        let valid = path.len() == 2
+                            && target
+                                .path
+                                .iter()
+                                .skip(1)
+                                .any(|variant| variant == &path[1]);
+                        if !valid {
+                            self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+                        }
+                        return;
+                    }
                     head = target.path.clone();
                 }
                 None => break,
@@ -385,6 +504,7 @@ impl Checker<'_> {
     }
     fn block(&mut self, block: &Block) {
         self.scopes.push(BTreeSet::new());
+        self.variant_scopes.push(BTreeSet::new());
         for statement in &block.statements {
             match &statement.kind {
                 StatementKind::Binding {
@@ -419,6 +539,14 @@ impl Checker<'_> {
                             .insert(field.binding.clone());
                     }
                 }
+                StatementKind::TupleDestructure {
+                    elements, value, ..
+                } => {
+                    self.expr(value);
+                    for element in elements {
+                        self.bind_tuple_pattern_name(element);
+                    }
+                }
                 StatementKind::Assign { target, value, .. } => {
                     self.expr(target);
                     self.expr(value);
@@ -443,12 +571,34 @@ impl Checker<'_> {
             self.expr(tail);
         }
         self.scopes.pop();
+        self.variant_scopes.pop();
+    }
+    fn bind_tuple_pattern_name(&mut self, element: &TupleBinding) {
+        if let Some(nested) = &element.nested {
+            for element in nested {
+                self.bind_tuple_pattern_name(element);
+            }
+        } else if element.binding != "_" {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(element.binding.clone());
+        }
     }
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Path(path) if path.len() == 1 => {
                 if !self.scopes.iter().rev().any(|s| s.contains(&path[0]))
                     && templates::variant(&path[0]).is_none()
+                    && !self
+                        .variants
+                        .values()
+                        .any(|variants| variants.contains(&path[0]))
+                    && !self
+                        .variant_scopes
+                        .iter()
+                        .rev()
+                        .any(|variants| variants.contains(&path[0]))
                 {
                     self.error(1, expr.span, format!("unknown name '{}'", path[0]));
                 }
@@ -494,11 +644,13 @@ impl Checker<'_> {
                 fields,
             } => {
                 // The literal names a type: resolve it like a type annotation.
-                self.ty(&Type {
-                    span: expr.span,
-                    path: path.clone(),
-                    arguments: type_arguments.clone(),
-                });
+                if !path.is_empty() {
+                    self.ty(&Type {
+                        span: expr.span,
+                        path: path.clone(),
+                        arguments: type_arguments.clone(),
+                    });
+                }
                 for field in fields {
                     self.expr(&field.value);
                 }
@@ -557,6 +709,34 @@ mod tests {
             assert_eq!(errors[0].span.unwrap().start, source.rfind(member).unwrap());
         }
     }
+
+    #[test]
+    fn local_inline_enum_annotation_registers_variants_for_its_initializer() {
+        let source = "fn main() { let phase: enum [Ready, Waiting] = Ready; }";
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let (errors, qualified) = check(&parsed.module, std::iter::empty(), false);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn local_inline_enum_variant_names_do_not_escape_their_block() {
+        let source =
+            "fn main() { { let phase: enum [Ready, Waiting] = Ready; } let other := Ready; }";
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let (errors, _) = check(&parsed.module, std::iter::empty(), false);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code.to_string(), "NE001");
+        assert!(errors[0].message.contains("unknown name 'Ready'"));
+        assert_eq!(
+            errors[0].span.unwrap().start,
+            source.rfind("Ready").unwrap()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +758,32 @@ mod alias_variant_tests {
              match s { S::Empty => 0.0, T::Circle(r) => r } }",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+
+        let (diagnostics, _) =
+            run("fn f() -> i32 { let pair := (1, 2); let (_, value) := pair; _ }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code.to_string(), "NE001");
+        assert!(diagnostics[0].message.contains("unknown name '_'"));
+    }
+
+    #[test]
+    fn alias_of_inline_payload_enum_resolves_qualified_constructors_and_patterns() {
+        let (diagnostics, qualified) = run("type Choice = enum [Number(i32), Empty]; \
+             fn make() -> Choice { Choice::Number(42) } \
+             fn read(value: Choice) -> i32 { match value { \
+                 Choice::Number(number) => number, Choice::Empty => 0 } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn an_unknown_variant_through_an_inline_enum_alias_is_ne004() {
+        let (diagnostics, qualified) = run("type Choice = enum [Number(i32), Empty]; \
+             fn make() -> Choice { Choice::Missing(42) }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code.to_string(), "NE004");
+        assert!(diagnostics[0].message.contains("Choice::Missing"));
         assert!(qualified.is_empty(), "{qualified:?}");
     }
 
@@ -608,6 +814,14 @@ mod alias_variant_tests {
             run("type E [ A(i32), B ] fn f(e: E) -> i32 { match e { E::A(n) => n, E::B => n } }");
         let codes: Vec<String> = diagnostics.iter().map(|d| d.code.to_string()).collect();
         assert_eq!(codes, ["NE001"], "{diagnostics:?}");
+    }
+
+    #[test]
+    fn nested_tuple_pattern_names_are_bound_and_wildcards_are_not_names() {
+        let (diagnostics, qualified) = run("fn f() -> i32 { let pair := ((40, true), 2); \
+             let ((number, enabled), _) := pair; if enabled { number } else { 0 } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
     }
 }
 

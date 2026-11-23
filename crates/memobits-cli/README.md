@@ -16,8 +16,9 @@ below. Resolution does not check further semantics, types or ownership, load ext
 compile, or execute code.
 
 `mb syntax FILE` parses one source file without semantic checking.
-`mb --help` documents the supported interface. `check` explicitly fails as
-unsupported. The existing `memobits` binary is unchanged.
+`mb --help` documents the supported interface. `mb check [--project PATH] [--lib]`
+runs every build stage (resolution, types, lowering, IR validation and the Wasm
+layout gates) with the same diagnostics as `build`, but writes no artifact. The existing `memobits` binary is unchanged.
 
 Errors use the shared diagnostics renderer with these stable project codes:
 
@@ -27,9 +28,23 @@ Errors use the shared diagnostics renderer with these stable project codes:
 | PE002 | TOML deserialization failure, including unknown or missing fields |
 | PE003 | Manifest validation or module discovery validation failure |
 | PE004 | Invalid command-line usage |
-| PE005 | Explicitly unsupported check command |
+| PE005 | Unused (formerly the unsupported check command) |
 | PE006 | Unsupported build target or export |
 | PE007 | Invalid `[build]` setting, such as a `stack_size` out of range or not a multiple of 16 |
+
+Warnings use the `MW` prefix (migration warnings) and render as
+`warning[MW003]: message` with the same code, file, line, column and caret
+layout as errors. They are non-failing: `check`, `build`, `run`, `resolve`,
+`analyze-project`, `ownership-project`, `syntax`, `analyze` and `ownership`
+print them to stderr as soon as the source is parsed (before any error), and a
+warning never changes the exit status or suppresses an error. Running a
+prebuilt `.wasm` artifact has no source and prints no warnings.
+
+| Code | Meaning |
+| --- | --- |
+| MW001 | Unused and reserved. `Option<T>` is accepted silently with the same meaning as `T?` (user decision 2026-11-23). |
+| MW002 | Unused and reserved. Bare `String` is not a warning: it is rejected with TE001 (`use lowercase 'string'`). |
+| MW003 | Legacy `Bytes<N>` type spelling; write `Array<u8, N>` instead. `Bytes<N>` is an alias outside the target core with identical meaning. |
 
 Successful commands exit 0 and write stdout; failures exit 1 and write stderr.
 Tests launch the real `mb` executable with isolated temporary directories and
@@ -131,7 +146,9 @@ Application builds export the manifest entry as
 The private adapter applies to `main` and uses the `memobits.entry` custom
 section. Library builds preserve export aliases and support scalar function
 signatures.
-External imports and type exports remain unsupported. The output is replaced atomically only after resolution, checking,
+The CLI host profile supports the single typed declaration
+`extern fn write_i32(value: i32);`, backed by the matching manifest capability.
+Other source-declared imports and type exports remain unsupported. The output is replaced atomically only after resolution, checking,
 lowering, and backend compilation succeed. By default, application builds write
 `target/memobits/app.wasm` and library builds write
 `target/memobits/library.wasm` relative to the manifest; `--output` is relative
@@ -139,9 +156,15 @@ to the current directory.
 
 `mb run [--project PATH]` lowers and compiles the selected application entry in
 memory, then executes its `main` WebAssembly export. `mb run FILE.wasm
-[--entry NAME]` runs an existing artifact's export, defaulting to `main`. Both
-forms use the same fuel-limited Wasm runtime; source execution does not use a
-separate interpreter.
+[--entry NAME] [--project PATH]` runs an existing artifact's export, defaulting
+to `main`. A project manifest can enable `memobits:console.write_i32(i32) ->
+unit` with `[host] profile = "cli"` and one `[[host.imports]]` declaration.
+In project source, declare it with `extern fn write_i32(value: i32);` and call
+`write_i32(42)`. The host prints the supplied integer. Imports must match the
+declared module, name, and signature; undeclared and unsupported imports fail
+before guest execution. Both forms use the same fuel-limited Wasm runtime;
+source execution does not use a separate interpreter. See the
+[host capability example](../../examples/projects/host-capability/README.md).
 
 Both forms accept `--fuel N` to set the execution budget to `N` fuel units, a
 positive integer. The default is 10000000000 (ten billion), which ordinary
@@ -158,8 +181,8 @@ Outcome entries display the same result in both modes, such as
 `Result: Failed(pkg::parser::ParseError, code=5)`. Both `Err` and `Failed`
 return the concrete error type and its `u32` code. The builtin root is printed
 as `Error`. Guest traps and other runtime failures use RE diagnostics and exit
-nonzero. The runtime accepts zero-argument exports from modules without host
-imports.
+nonzero. Without a project profile, the runtime accepts zero-argument exports
+from modules without host imports.
 
 Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported

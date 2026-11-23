@@ -1,6 +1,6 @@
 # Strings project fixture
 
-A minimal source project for owned and borrowed String operations. Its
+A minimal source project for owned and borrowed `string` operations. Its
 application root is `main::main`; concat, borrow, share and push_str are checked
 over a literal, a concat result and an owned binding.
 

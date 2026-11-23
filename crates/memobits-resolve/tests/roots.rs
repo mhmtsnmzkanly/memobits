@@ -464,6 +464,42 @@ fn extension_candidates_follow_direct_module_edges_and_public_visibility() {
 }
 
 #[test]
+fn extension_candidate_identity_includes_independent_package_name() {
+    fn candidate_for(package: &str) -> (String, String, usize, usize) {
+        let f = Fixture::new(
+            "pub type Point { x: i32 } pub interface Draw { fn draw(borrow self) -> i32; } pub extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }",
+        );
+        fs::write(
+            f.0.join("project.toml"),
+            format!("[package]\nname='{package}'\nentry='main::main'\n"),
+        )
+        .unwrap();
+        fs::write(
+            f.0.join("src/main.mb"),
+            "use model; pub type Point { x: i32 } pub interface Draw { fn draw(borrow self) -> i32; } fn main() -> i32 { 0 }",
+        )
+        .unwrap();
+        fs::write(f.0.join("src/model.mb"), "use self::main::Point; use self::main::Draw; pub extend Point of Draw { fn draw(borrow self) -> i32 { self.x } }").unwrap();
+        let project = Project::load(&f.0, None).unwrap();
+        let result = resolve(&project, Target::Application);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let candidate = result.extension_candidates("main").remove(0);
+        (
+            candidate.package,
+            candidate.module,
+            candidate.span.start,
+            candidate.span.end,
+        )
+    }
+
+    let first = candidate_for("first-package");
+    let second = candidate_for("second-package");
+    assert_eq!(first.1, second.1, "fixture module paths should collide");
+    assert_eq!((first.2, first.3), (second.2, second.3), "fixture source spans should collide");
+    assert_ne!(first.0, second.0, "package identity must distinguish candidates");
+}
+
+#[test]
 fn missing_private_and_duplicate_definitions_are_rejected() {
     for (source, expected) in [
         ("fn add() {}", "ME007"),

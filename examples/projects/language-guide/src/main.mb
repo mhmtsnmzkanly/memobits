@@ -1,5 +1,8 @@
 // Start at main, then follow the checks. Both source and Wasm runs should
 // print Result: Ok(i32(42)). Each error code identifies a failed check.
+// For a source declaration that calls a typed host import, see
+// ../../host-capability/README.md. It requires the CLI profile in project.toml;
+// the current source ABI supports only write_i32(i32) -> unit.
 
 /* Numbers and control flow. Block comments can /* nest */. */
 // Character literals contain exactly one Unicode scalar. `Char` remains a
@@ -14,6 +17,56 @@ fn character_literals() -> Bool {
 
 // Tuples preserve element order in local values and internal calls. Numeric
 // projections use `.0`, `.1`; labels are occurrence-local projection aliases.
+// Positional destructuring consumes every slot of a named tuple local,
+// including direct owned String elements. Nested tuple patterns and `_`
+// discards are supported; discarded String slots still receive normal cleanup.
+// A temporary tuple with owned String slots can move into an owned internal
+// call. Nested String-owning tuples can also move through tuple slots and
+// internal signatures, and can be stored in local nominal record fields and
+// fixed arrays. Array and tuple scope cleanup releases each owned String.
+// Enums can own Strings, tuples, or fixed-array payloads, including nested
+// String-owning tuples, and release only the active payload on a match or exit.
+// String-owning nominal structs move by value as owned internal arguments and
+// results, and nest in tuples, structs, enum payloads and fixed arrays (see
+// `owned_string_struct_argument`). Destructuring aliases, partial
+// destructuring, and moving a field or element out of a live owner remain
+// unsupported.
+type NestedTupleRecord { values: (string, string), count: u32 }
+type TextState [ Texts((string, string), u32), Discarded((string, string), (string, string)), Empty ]
+type TextBatch [ Rows(Array<(string, u32), 2>), Single((string, u32)), Plain(string), Empty ]
+// Fixed arrays can contain scalar and String-owning tuples, and tuples can
+// contain fixed arrays.
+fn sum_string_rows(rows: Array<(string, u32), 2>) -> u32 {
+    rows[0].1 + rows[1].1
+}
+fn consume_text_batches(batches: Array<TextBatch, 3>, early: Bool) -> Bool {
+    if early { return false; }
+    true
+}
+fn tuple_array_values() -> Bool {
+    let rows: Array<(i32, Bool), 2> = [(40, false), (2, true)];
+    let first := "first".concat("");
+    let second := "second".concat("");
+    let first_row: (string, u32) = (first, 20);
+    let second_row: (string, u32) = (second, 22);
+    let owned_rows: Array<(string, u32), 2> = [first_row, second_row];
+    let third := "third".concat("");
+    let fourth := "fourth".concat("");
+    let fifth := "fifth".concat("");
+    let sixth := "sixth".concat("");
+    let batch_first: (string, u32) = (third, 20);
+    let batch_second: (string, u32) = (fourth, 22);
+    let batch_single: (string, u32) = (fifth, 7);
+    let batch_plain: TextBatch = TextBatch::Plain(sixth);
+    let batch_rows: Array<(string, u32), 2> = [batch_first, batch_second];
+    let rows_state: TextBatch = TextBatch::Rows(batch_rows);
+    let single_state: TextBatch = TextBatch::Single(batch_single);
+    let batches: Array<TextBatch, 3> = [rows_state, single_state, batch_plain];
+    let nested := (rows, 0);
+    nested.0[1].1 && nested.0[0].0 + nested.0[1].0 + nested.1 == 42
+        && sum_string_rows(owned_rows) == 42
+        && consume_text_batches(batches, false)
+}
 fn echo_pair(pair: (i32, Bool)) -> (i32, Bool) { (pair.0, pair.1) }
 fn labeled_left(pair: (left: i32, right: i32)) -> i32 { pair.left }
 fn reversed_labeled_left(pair: (right: i32, left: i32)) -> i32 { pair.left }
@@ -21,13 +74,86 @@ fn forward_owned_pair(pair: (string, u32), early: Bool) -> (string, u32) {
     if early { return pair; }
     pair
 }
+fn consume_owned_texts(pair: (string, string, u32)) -> u32 {
+    let (left, right, base) := pair;
+    left.len() + right.len() + base
+}
+fn forward_nested_text(pair: ((string, string), u32)) -> ((string, string), u32) { pair }
+fn consume_nested_text(pair: ((string, string), u32)) -> u32 {
+    let ((left, right), base) := pair;
+    left.len() + right.len() + base
+}
+fn owned_tuple_temporary_call() -> Bool {
+    let left := "xy".concat("!");
+    let right := "ab".concat("?");
+    consume_owned_texts((left, right, 36 as u32)) == 42
+}
+fn nested_owned_tuple_temporary_call() -> Bool {
+    let left := "ab".concat("");
+    let right := "cd".concat("");
+    let inner := (left, right);
+    consume_nested_text(forward_nested_text((inner, 38 as u32))) == 42
+}
+fn nested_owned_tuple_record_field() -> Bool {
+    let left := "ab".concat("");
+    let right := "cd".concat("");
+    let values := (left, right);
+    let record := NestedTupleRecord { values: values, count: 38 as u32 };
+    record.values.0.len() == 2 && record.values.1.len() == 2
+        && record.count == 38
+}
+fn package_text_state(pair: (string, string), count: u32) -> TextState {
+    TextState::Texts(pair, count)
+}
+fn consume_text_state(state: TextState) -> u32 {
+    match state {
+        TextState::Texts(pair, count) => {
+            let (left, right) := pair;
+            left.len() + right.len() + count
+        },
+        TextState::Discarded(pair, _) => {
+            let (left, right) := pair;
+            left.len() + right.len()
+        },
+        TextState::Empty => 0,
+    }
+}
+fn early_text_state_exit(state: TextState, flag: Bool) -> u32 {
+    if flag { return 1; }
+    consume_text_state(state)
+}
+fn tuple_enum_payloads() -> Bool {
+    let left := "ab".concat("");
+    let right := "cd".concat("");
+    let early := early_text_state_exit(package_text_state((left, right), 90 as u32), true);
+    let first := "ab".concat("");
+    let second := "cd".concat("");
+    let a := "ab".concat("");
+    let b := "cd".concat("");
+    let c := "ef".concat("");
+    let d := "gh".concat("");
+    early + consume_text_state(package_text_state((first, second), 38 as u32)) == 43
+        && consume_text_state(TextState::Discarded((a, b), (c, d))) == 4
+}
 fn tuple_values() -> Bool {
     let pair := echo_pair((40, true));
+    let (number, enabled) := pair;
     let text := "owned".concat("!");
     let text_pair := (text, 40 as u32);
     let owned := forward_owned_pair(text_pair, true);
-    pair.0 == 40 && pair.1
-        && owned.0.len() == 6 && owned.1 == 40
+    // The returned tuple is first bound to `owned`, then fully destructured.
+    let (owned_text, count) := owned;
+    let discarded := "discarded".concat("!");
+    let nested_owned := ((42, true), discarded);
+    let ((nested_number, nested_enabled), _) := nested_owned;
+    number == 40 && enabled
+        && owned_tuple_temporary_call()
+        && nested_owned_tuple_temporary_call()
+        && nested_owned_tuple_record_field()
+        && tuple_enum_payloads()
+        && owned_text.len() == 6 && count == 40
+        && nested_number == 42 && nested_enabled
+        && tuple_array_values()
         && labeled_left((left: 40, right: 0))
             + reversed_labeled_left((right: 0, left: 2)) == 42
 }
@@ -44,6 +170,7 @@ fn numbers() -> Bool {
     let g: u32 = 320;
     let h: u64 = 640;
     let half: f32 = 5e-1;
+    let negative_half: f32 = -5e-1;
     let quarter := 0.25;
 
     // var permits assignment. let creates an immutable binding.
@@ -63,7 +190,8 @@ fn numbers() -> Bool {
     if divisor == 0 || sum / divisor > 0 {
         a < 0 && b <= -160 && c >= 3_200 && d != 0
             && e * 2 == 16 && f - 10 == 150 && g / 2 == 160 && h % 3 == 1
-            && half + 0.5 == 1.0 && quarter * 4.0 == 1.0
+            && half + 0.5 == 1.0 && negative_half == -0.5
+            && quarter * 4.0 == 1.0
     } else {
         false
     }
@@ -79,7 +207,7 @@ fn widen_byte_method(value: u8) -> u32 {
     value.to_u32()
 }
 fn widenings() -> Bool {
-    let bytes: Bytes<4> = [0, 127, 128, 255];
+    let bytes: Array<u8, 4> = [0, 127, 128, 255];
     widen_byte(bytes[0]) == 0 && widen_byte_method(bytes[1]) == 127
         && bytes[2] as u32 == 128 && bytes[3].to_u32() == 255
 }
@@ -112,15 +240,46 @@ fn bit_operations() -> Bool {
 // A direct share parameter can replace a String field. The caller retains
 // ownership and cleanup; the callee only has exclusive access during the call.
 type TextRecord { text: string, tag: u32 }
-type Box<T> { value: T }
+type Box<T> { value: T } extend {
+    fn read_value(borrow self) -> T { self.value }
+}
 type Buffer<T, const N: u32> { data: Array<T, N> }
+// Generic nominal methods may name nested instances of the receiver's type
+// parameter, such as Twin<Nest<T>>. Bounded nesting specializes per receiver;
+// unbounded polymorphic recursion stops at the 256-specialization diagnostic.
+type Twin<T> { first: T, second: T }
+type Nest<T> { value: T } extend {
+    fn twin(borrow self) -> Twin<Nest<T>> {
+        Twin<Nest<T>> { first: Nest<T> { value: self.value }, second: Nest<T> { value: self.value } }
+    }
+}
+// A const parameter in scope can be forwarded as a nested type argument
+// (Lane<N> inside a method of Gauge<const N: u32>). A method call on a field
+// or element place (`self.lane.span()`, `gauges[0].span()`) addresses the place
+// in place: `borrow self` reads it, `share self` needs a mutable owner and
+// respects field-level loans, and an owned `self` would be a partial move.
+type Lane<const N: u32> { width: i32 } extend {
+    fn span(borrow self) -> i32 { self.width }
+    fn widen(share self) { self.width += 1; }
+}
+type Gauge<const N: u32> { width: i32 } extend {
+    fn lane(borrow self) -> Lane<N> { Lane<N> { width: self.width } }
+}
+type GaugePair { first: Lane<2>, second: Lane<3> }
 type Maybe<T> [Empty, Present(T)]
 type Packet<const N: u32> [Data(Array<u8, N>)]
+// Inline anonymous enum declarations keep their nominal identity by source
+// site; unit and payload variants can be selected by an expected type.
+// Reference-bearing payloads are rejected; String payloads are supported
+// (see the enum-array example).
+type GuidePhase = enum [Ready, Waiting];
+type OtherGuidePhase = enum [Ready, Waiting];
 // Bodyless declarations preserve a nominal type identity but have no value
 // constructor in this slice. An empty struct below remains a distinct type.
 type EmptyRecord {}
 // A trailing `extend` attaches methods to its nominal declaration; methods
-// use ordinary receiver calls. Generic nominal trailing extensions are gated.
+// use ordinary receiver calls. Generic nominal methods specialize with their
+// receiver, as Box<T>::read_value above demonstrates.
 type OpaqueHandle; extend {
     fn opaque_kind(borrow self) -> Bool { true }
 }
@@ -132,6 +291,10 @@ type Signal [Start, Stop] extend {
         }
     }
 }
+type GuideCounter { value: i32 } extend {
+    fn doubled(borrow self) -> i32 { self.value * 2 }
+}
+fn guide_counter() -> GuideCounter { GuideCounter { value: 21 } }
 fn replace_record_text(record: share TextRecord) {
     record.text = "updated";
 }
@@ -147,8 +310,9 @@ fn shared_string_field_replacement() -> Bool {
 // concrete types; the result is T. A bounded const form forwards T and N only
 // through direct Array<T, N> parameters and results. Each body is checked for
 // its concrete specialization. A single interface bound on direct owned T
-// carries caller-visible evidence through nested generic calls. Other bound
-// shapes, borrowed parameters, and nested generic type patterns remain gated.
+// carries caller-visible evidence through nested generic calls and constrained
+// compound assignment. Other bound shapes, borrowed parameters, and nested
+// generic type patterns remain gated.
 fn identity<T>(value: T) -> T { value }
 fn select<T>(value: T, enabled: Bool, fallback: T) -> T {
     if enabled { value } else { fallback }
@@ -296,6 +460,434 @@ fn user_defined_rem() -> Bool {
     result.value == 1
 }
 
+// User-defined & selects BitAnd for nominal operands. Primitive u32 `&`
+// keeps its existing per-bit operation.
+use core::ops::BitAnd;
+type MaskLeft { value: u32 }
+type MaskRight { value: u32 }
+type MaskResult { value: u32 }
+extend MaskLeft of BitAnd {
+    type Rhs = MaskRight;
+    type Output = MaskResult;
+    fn bitand(self, rhs: MaskRight) -> MaskResult {
+        MaskResult { value: self.value & rhs.value }
+    }
+}
+fn mask<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitAnd {
+    lhs & operand
+}
+fn user_defined_bitand() -> Bool {
+    let lhs := MaskLeft { value: 12 };
+    let operand := MaskRight { value: 10 };
+    let result := mask(lhs, operand);
+    result.value == 8
+}
+
+// User-defined | selects BitOr for nominal operands. Primitive u32 `|`
+// remains the built-in per-bit operation.
+use core::ops::BitOr;
+type MergeLeft { value: u32 }
+type MergeRight { value: u32 }
+type MergeResult { value: u32 }
+extend MergeLeft of BitOr {
+    type Rhs = MergeRight;
+    type Output = MergeResult;
+    fn bitor(self, rhs: MergeRight) -> MergeResult {
+        MergeResult { value: self.value | rhs.value }
+    }
+}
+fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitOr {
+    lhs | operand
+}
+fn user_defined_bitor() -> Bool {
+    let lhs := MergeLeft { value: 12 };
+    let operand := MergeRight { value: 10 };
+    let result := merge(lhs, operand);
+    result.value == 14
+}
+
+// User-defined ^ selects BitXor for nominal operands. Primitive u32 `^`
+// keeps its existing per-bit operation.
+use core::ops::BitXor;
+type XorLeft { value: u32 }
+type XorRight { value: u32 }
+type XorResult { value: u32 }
+extend XorLeft of BitXor {
+    type Rhs = XorRight;
+    type Output = XorResult;
+    fn bitxor(self, rhs: XorRight) -> XorResult {
+        XorResult { value: self.value ^ rhs.value }
+    }
+}
+fn xor<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitXor {
+    lhs ^ operand
+}
+fn user_defined_bitxor() -> Bool {
+    let result := xor(XorLeft { value: 12 }, XorRight { value: 10 });
+    result.value == 6
+}
+
+// User-defined unary minus selects Neg for nominal values. The receiver is
+// owned, and Output may differ from the input type.
+use core::ops::Neg;
+type NegInput { value: i32 }
+type NegResult { value: i32 }
+extend NegInput of Neg {
+    type Output = NegResult;
+    fn neg(self) -> NegResult { NegResult { value: 0 - self.value } }
+}
+fn negate<T>(value: T) -> T::Output where T: Neg { -value }
+fn user_defined_negation() -> Bool {
+    let result := negate(NegInput { value: 42 });
+    result.value == -42
+}
+
+// Nominal equality borrows its left receiver and consumes the right operand.
+use core::ops::PartialEq;
+type EqKey { value: u32 }
+extend EqKey of PartialEq {
+    type Rhs = EqKey;
+    fn eq(borrow self, rhs: EqKey) -> Bool { self.value == rhs.value }
+}
+fn user_defined_equality() -> Bool {
+    let left := EqKey { value: 12 };
+    let same := EqKey { value: 12 };
+    let different := EqKey { value: 13 };
+    let equal := left == same;
+    let not_equal := left != different;
+    equal && not_equal && left.value == 12
+}
+
+// Nominal ordering selects the matching PartialOrd member directly.
+use core::ops::PartialOrd;
+type OrderedKey { value: u32 }
+extend OrderedKey of PartialOrd {
+    type Rhs = OrderedKey;
+    fn lt(borrow self, rhs: OrderedKey) -> Bool { self.value < rhs.value }
+    fn le(borrow self, rhs: OrderedKey) -> Bool { self.value <= rhs.value }
+    fn gt(borrow self, rhs: OrderedKey) -> Bool { self.value > rhs.value }
+    fn ge(borrow self, rhs: OrderedKey) -> Bool { self.value >= rhs.value }
+}
+fn ordered_before<T>(left: T, right: T::Rhs) -> Bool where T: PartialOrd { left < right }
+fn user_defined_ordering() -> Bool {
+    let left := OrderedKey { value: 12 };
+    let right := OrderedKey { value: 13 };
+    let same := OrderedKey { value: 12 };
+    let lower := OrderedKey { value: 11 };
+    let lower_again := OrderedKey { value: 11 };
+    let higher := OrderedKey { value: 13 };
+    let same_again := OrderedKey { value: 12 };
+    let one := OrderedKey { value: 1 };
+    let two := OrderedKey { value: 2 };
+    left < right && left <= same && higher > lower && left >= lower_again && left >= same_again
+        && ordered_before(one, two)
+        && left.value == 12
+}
+
+// Nominal += selects AddAssign with a shared mutable place and owned RHS.
+use core::ops::AddAssign;
+type Tally { value: u32 }
+type TallyDelta { value: u32 }
+extend Tally of AddAssign {
+    type Rhs = TallyDelta;
+    fn add_assign(share self, rhs: TallyDelta) { self.value += rhs.value; }
+}
+fn generic_add_assign<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign {
+    var value := target;
+    value += rhs;
+    value
+}
+fn user_defined_add_assign() -> Bool {
+    var tally := Tally { value: 7 };
+    tally += TallyDelta { value: 5 };
+    let generic := generic_add_assign(Tally { value: 10 }, TallyDelta { value: 2 });
+    var primitive: u32 = 7;
+    primitive += 5;
+    tally.value == 12 && generic.value == 12 && primitive == 12
+}
+
+// Nominal -= selects SubAssign with a shared mutable place and owned Rhs.
+// Primitive numeric -= keeps its existing checked arithmetic behavior.
+use core::ops::SubAssign;
+type Balance { value: u32 }
+type BalanceDelta { value: u32 }
+extend Balance of SubAssign {
+    type Rhs = BalanceDelta;
+    fn sub_assign(share self, rhs: BalanceDelta) { self.value -= rhs.value; }
+}
+fn generic_sub_assign<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign {
+    var value := target;
+    value -= rhs;
+    value
+}
+fn user_defined_sub_assign() -> Bool {
+    var balance := Balance { value: 19 };
+    balance -= BalanceDelta { value: 7 };
+    let generic := generic_sub_assign(Balance { value: 20 }, BalanceDelta { value: 8 });
+    var primitive: u32 = 19;
+    primitive -= 7;
+    balance.value == 12 && generic.value == 12 && primitive == 12
+}
+
+// Nominal *= selects MulAssign with a shared mutable place and owned Rhs.
+// Primitive numeric *= keeps its existing checked arithmetic behavior.
+use core::ops::MulAssign;
+type Scale { value: u32 }
+type ScaleFactor { value: u32 }
+extend Scale of MulAssign {
+    type Rhs = ScaleFactor;
+    fn mul_assign(share self, rhs: ScaleFactor) { self.value *= rhs.value; }
+}
+fn generic_mul_assign<T>(target: T, rhs: T::Rhs) -> T where T: MulAssign {
+    var value := target;
+    value *= rhs;
+    value
+}
+fn user_defined_mul_assign() -> Bool {
+    var scale := Scale { value: 6 };
+    scale *= ScaleFactor { value: 7 };
+    let generic := generic_mul_assign(Scale { value: 6 }, ScaleFactor { value: 7 });
+    var primitive: u32 = 6;
+    primitive *= 7;
+    scale.value == 42 && generic.value == 42 && primitive == 42
+}
+
+// Nominal /= selects DivAssign with a shared mutable place and owned Rhs.
+// Primitive numeric /= retains checked integer division behavior.
+use core::ops::DivAssign;
+type Portion { value: u32 }
+type PortionDelta { value: u32 }
+extend Portion of DivAssign {
+    type Rhs = PortionDelta;
+    fn div_assign(share self, rhs: PortionDelta) { self.value /= rhs.value; }
+}
+fn generic_div_assign<T>(target: T, rhs: T::Rhs) -> T where T: DivAssign {
+    var value := target;
+    value /= rhs;
+    value
+}
+fn user_defined_div_assign() -> Bool {
+    var portion := Portion { value: 24 };
+    portion /= PortionDelta { value: 3 };
+    let generic := generic_div_assign(Portion { value: 81 }, PortionDelta { value: 3 });
+    var primitive: u32 = 48;
+    primitive /= 4;
+    portion.value == 8 && generic.value == 27 && primitive == 12
+}
+
+// Nominal %= selects RemAssign with a shared mutable place and owned Rhs.
+// Primitive remainder stays checked, including zero and signed overflow rules.
+use core::ops::RemAssign;
+type Remainder { value: u32 }
+type Modulus { value: u32 }
+type RemainderHolder { items: Array<Remainder, 1> }
+extend Remainder of RemAssign {
+    type Rhs = Modulus;
+    fn rem_assign(share self, rhs: Modulus) { self.value %= rhs.value; }
+}
+fn generic_rem_assign<T>(target: T, rhs: T::Rhs) -> T where T: RemAssign {
+    var value := target;
+    value %= rhs;
+    value
+}
+fn generic_rem_array_assign<T, const N: u32>(var values: Array<T, N>, index: u32, rhs: T::Rhs) -> Array<T, N>
+    where T: RemAssign {
+    values[index] %= rhs;
+    values
+}
+fn generic_rem_projected_assign<T>(var holder: RemainderHolder, witness: T, rhs: T::Rhs) -> RemainderHolder
+    where T: RemAssign {
+    holder.items[0] %= rhs;
+    holder
+}
+fn user_defined_rem_assign() -> Bool {
+    var remainder := Remainder { value: 23 };
+    let modulus := Modulus { value: 5 };
+    remainder %= modulus;
+    let generic := generic_rem_assign(Remainder { value: 23 }, Modulus { value: 5 });
+    let indexed := generic_rem_array_assign([Remainder { value: 23 }], 0, Modulus { value: 5 });
+    remainder.value == 3 && generic.value == 3 && indexed[0].value == 3
+}
+
+// Nominal &= selects BitAndAssign with a shared mutable place and owned Rhs.
+use core::ops::BitAndAssign;
+type PermissionBits { value: u32 }
+type PermissionMask { value: u32 }
+extend PermissionBits of BitAndAssign {
+    type Rhs = PermissionMask;
+    fn bitand_assign(share self, rhs: PermissionMask) { self.value &= rhs.value; }
+}
+fn generic_bitand_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitAndAssign {
+    var value := target;
+    value &= rhs;
+    value
+}
+fn user_defined_bitand_assign() -> Bool {
+    var permissions := PermissionBits { value: 15 };
+    let mask := PermissionMask { value: 6 };
+    permissions &= mask;
+    let generic := generic_bitand_assign(PermissionBits { value: 15 }, PermissionMask { value: 6 });
+    permissions.value == 6 && generic.value == 6
+}
+
+// Nominal |= selects BitOrAssign and keeps the same single-evaluation place rules.
+use core::ops::BitOrAssign;
+type FeatureBits { value: u32 }
+type FeatureMask { value: u32 }
+extend FeatureBits of BitOrAssign {
+    type Rhs = FeatureMask;
+    fn bitor_assign(share self, rhs: FeatureMask) { self.value |= rhs.value; }
+}
+fn generic_bitor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitOrAssign {
+    var value := target;
+    value |= rhs;
+    value
+}
+fn user_defined_bitor_assign() -> Bool {
+    var features := FeatureBits { value: 8 };
+    let mask := FeatureMask { value: 3 };
+    features |= mask;
+    let generic := generic_bitor_assign(FeatureBits { value: 8 }, FeatureMask { value: 3 });
+    features.value == 11 && generic.value == 11
+}
+
+// Nominal ^= selects BitXorAssign; primitive u32 keeps per-bit XOR behavior.
+use core::ops::BitXorAssign;
+type FeatureDelta { value: u32 }
+extend FeatureBits of BitXorAssign {
+    type Rhs = FeatureDelta;
+    fn bitxor_assign(share self, rhs: FeatureDelta) { self.value ^= rhs.value; }
+}
+fn generic_bitxor_assign<T>(target: T, rhs: T::Rhs) -> T where T: BitXorAssign {
+    var value := target;
+    value ^= rhs;
+    value
+}
+fn user_defined_bitxor_assign() -> Bool {
+    var features := FeatureBits { value: 10 };
+    let delta := FeatureDelta { value: 3 };
+    features ^= delta;
+    let generic := generic_bitxor_assign(FeatureBits { value: 10 }, FeatureDelta { value: 3 });
+    features.value == 9 && generic.value == 9
+}
+
+// User-defined << selects Shl for nominal operands. Primitive u32 shifts
+// reject counts at or above 32, statically or at runtime.
+use core::ops::Shl;
+type ShiftLeft { value: u32 }
+type ShiftCount { value: u32 }
+type ShiftResult { value: u32 }
+extend ShiftLeft of Shl {
+    type Rhs = ShiftCount;
+    type Output = ShiftResult;
+    fn shl(self, rhs: ShiftCount) -> ShiftResult {
+        ShiftResult { value: self.value << rhs.value }
+    }
+}
+fn shift<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shl {
+    lhs << count
+}
+fn user_defined_shl() -> Bool {
+    let result := shift(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    result.value == 48
+}
+
+// Nominal <<= selects ShlAssign with the same checked place sequencing.
+use core::ops::ShlAssign;
+extend ShiftLeft of ShlAssign {
+    type Rhs = ShiftCount;
+    fn shl_assign(share self, rhs: ShiftCount) { self.value <<= rhs.value; }
+}
+fn generic_shl_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShlAssign {
+    var value := target;
+    value <<= rhs;
+    value
+}
+fn user_defined_shl_assign() -> Bool {
+    var value := ShiftLeft { value: 3 };
+    let count := ShiftCount { value: 4 };
+    value <<= count;
+    let generic := generic_shl_assign(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    var primitive: u32 = 3;
+    primitive <<= 4;
+    value.value == 48 && generic.value == 48 && primitive == 48
+}
+
+// Nominal >>= uses ShrAssign; primitive u32 counts must be below 32.
+use core::ops::ShrAssign;
+extend ShiftRight of ShrAssign {
+    type Rhs = ShiftAmount;
+    fn shr_assign(share self, rhs: ShiftAmount) { self.value >>= rhs.value; }
+}
+fn generic_shr_assign<T>(target: T, rhs: T::Rhs) -> T where T: ShrAssign {
+    var value := target;
+    value >>= rhs;
+    value
+}
+fn user_defined_shr_assign() -> Bool {
+    var value := ShiftRight { value: 48 };
+    let count := ShiftAmount { value: 2 };
+    value >>= count;
+    var primitive: u32 = 48;
+    primitive >>= 2;
+    let generic := generic_shr_assign(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
+    value.value == 12 && primitive == 12 && generic.value == 12
+}
+
+// A single generic bound forwards selected assignment evidence through owned
+// locals, indexed Array<T, N> elements and a field-then-index projected place.
+fn generic_compound_assignments() -> Bool {
+    let remainder := generic_rem_assign(Remainder { value: 23 }, Modulus { value: 5 });
+    let remainder_items := generic_rem_array_assign(
+        [Remainder { value: 23 }, Remainder { value: 19 }], 1, Modulus { value: 7 }
+    );
+    let remainder_holder := generic_rem_projected_assign(
+        RemainderHolder { items: [Remainder { value: 23 }] }, Remainder { value: 0 }, Modulus { value: 5 }
+    );
+    let permissions := generic_bitand_assign(
+        PermissionBits { value: 15 }, PermissionMask { value: 6 }
+    );
+    let features_or := generic_bitor_assign(FeatureBits { value: 8 }, FeatureMask { value: 3 });
+    let features_xor := generic_bitxor_assign(FeatureBits { value: 10 }, FeatureDelta { value: 3 });
+    let shifted := generic_shl_assign(ShiftLeft { value: 3 }, ShiftCount { value: 4 });
+    remainder.value == 3 && remainder_items[1].value == 5 && remainder_holder.items[0].value == 3
+        && permissions.value == 6 && features_or.value == 11
+        && features_xor.value == 9 && shifted.value == 48
+}
+
+// User-defined >> selects Shr and may use a distinct RHS type.
+use core::ops::Shr;
+type ShiftRight { value: u32 }
+type ShiftAmount { value: u32 }
+type Shifted { value: u32 }
+extend ShiftRight of Shr {
+    type Rhs = ShiftAmount;
+    type Output = Shifted;
+    fn shr(self, rhs: ShiftAmount) -> Shifted {
+        Shifted { value: self.value >> rhs.value }
+    }
+}
+fn shift_right<T>(lhs: T, count: T::Rhs) -> T::Output where T: Shr {
+    lhs >> count
+}
+fn user_defined_shr() -> Bool {
+    let result := shift_right(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
+    result.value == 12
+}
+
+fn nested_generic_methods() -> Bool {
+    let signed := Nest<i32> { value: 40 };
+    let unsigned := Nest<u32> { value: 2 };
+    let pair := signed.twin();
+    let other := unsigned.twin();
+    let gauge := Gauge<3> { width: 40 }.lane();
+    var pair_lanes := GaugePair { first: Lane<2> { width: 1 }, second: gauge };
+    let first_view := pair_lanes.first.borrow();
+    pair_lanes.second.widen();
+    pair.first.value + pair.second.value == 80 && other.second.value == 2
+        && first_view.span() == 1 && pair_lanes.second.span() == 41
+}
+
 // Generic nominal structs and enums specialize by type arguments. Const
 // arguments substitute into admitted fixed-array fields. Enum construction
 // uses the expected concrete enum type.
@@ -320,15 +912,19 @@ fn generic_structs() -> Bool {
     } + match packet_two {
         Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32,
     };
-    signed.value + 1 == 42 && unsigned.value == 42 && bytes.data[1] == 42
+    signed.read_value() + 1 == 42 && unsigned.read_value() == 42 && bytes.data[1] == 42
         && unwrapped == 42 && empty && packet_values == 42
 }
 fn trailing_enum_extension() -> Bool {
     let signal := Signal::Start;
     signal.is_active()
 }
-// Postfix `?` is the concise spelling of Option<T>; contextual Some and None
-// construction keeps the existing Option representation and match behavior.
+// Postfix `T?` is the preferred spelling of an optional type. The legacy
+// `Option<T>` spelling is still accepted silently with identical meaning;
+// this guide uses `T?` throughout. Grouping matters for
+// references: `(borrow T)?` is an optional borrow, while `borrow T?` borrows
+// an optional value. Contextual Some and None construction keeps the existing
+// Option representation and match behavior.
 fn optional_sugar() -> Bool {
     let present: i32? = Some(40);
     let absent: i32? = None;
@@ -403,22 +999,22 @@ fn stations() -> Bool {
         && pair[1].readings[2] == 9
 }
 
-// Bytes<N> is a built-in spelling for Array<u8, N>. Either spelling works
-// across assignments, calls, and returns, including borrowed and shared calls.
+// Array<u8, N> is the core fixed-byte representation. Bytes<N> remains a
+// compatibility alias outside the target core.
 fn set_first_byte(buffer: share Array<u8, 2>) {
     buffer[0] = 42;
 }
 
-fn first_byte(buffer: borrow Bytes<2>) -> u8 {
+fn first_byte(buffer: borrow Array<u8, 2>) -> u8 {
     buffer[0]
 }
 
-fn return_bytes(buffer: Array<u8, 2>) -> Bytes<2> {
+fn return_bytes(buffer: Array<u8, 2>) -> Array<u8, 2> {
     buffer
 }
 
 fn fixed_bytes() -> Bool {
-    var bytes: Bytes<2> = [0; 2];
+    var bytes: Array<u8, 2> = [0; 2];
     set_first_byte(bytes.share());
     let array: Array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
     // Validation borrows the prefix and returns its Unicode scalar count.
@@ -433,7 +1029,7 @@ fn fixed_bytes() -> Bool {
         Err(_) => false
     };
     // contains and index_of read without moving the array. Numeric and Bool
-    // arrays use == for comparisons, including Bytes and fixed-size rows.
+    // arrays use == for comparisons, including nested rows.
     // index_of returns the first zero-based match, or None for a miss.
     let first := match [0, 42, 42].index_of(42) {
         Some(index) => index == 1,
@@ -443,10 +1039,10 @@ fn fixed_bytes() -> Bool {
         && first_byte(array.borrow()) == 42
 }
 
-// Fixed arrays and Bytes iterate in index order. Each iteration binds an
-// immutable primitive copy. The read loan ends when the loop exits.
+// Fixed arrays iterate in index order. Each iteration binds an immutable
+// primitive copy. The read loan ends when the loop exits.
 fn fixed_iteration() -> Bool {
-    var bytes: Bytes<4> = [1, 0, 3, 9];
+    var bytes: Array<u8, 4> = [1, 0, 3, 9];
     var digits: u8 = 0;
     loop byte in bytes {
         if byte == 0 { continue; }
@@ -460,7 +1056,7 @@ fn fixed_iteration() -> Bool {
     digits == 13 && bytes[0] == 7
 }
 
-fn list_word_at(items: borrow List<u32>, index: u32) -> Option<u32> {
+fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
     items.get(index)
 }
 
@@ -552,8 +1148,9 @@ fn local_string_fields() -> Bool {
 // Move a named heap String into a new local struct, then move the whole
 // struct into another local. The final owner releases the String at scope exit.
 // Borrow the field to read it. Wasm gates temporary String initializers,
-// escaping or replacing a whole heap-owning struct, nesting, and passing
-// or returning the struct.
+// escaping or replacing a whole heap-owning struct, nesting, and returning
+// the struct. A flat struct can be passed and returned by value; see
+// `owned_string_struct_argument`.
 fn local_heap_string_fields() -> Bool {
     let text := "é".concat("!");
     let label := TextLabel { number: 9, text: text };
@@ -562,6 +1159,123 @@ fn local_heap_string_fields() -> Bool {
         moved.number == 9 && moved.text.len() == 3
             && byte_is(moved.text.byte_at(2), 33)
     }
+}
+
+// A flat struct whose fields are Strings and primitives moves into an owned
+// internal parameter from a named local. The callee owns it and releases the
+// String at its exit, on an early return too. The caller cannot use the moved
+// local afterwards. A function can also return such a struct by moving a named
+// local; bind the call result to a new local (`let label := make_label();`).
+// Such a struct can also be a tuple element or a fixed-array element when it
+// moves in from a named local (see `string_struct_elements`), a field of another
+// String-owning struct, or an enum payload (see `nested_string_owners`).
+// Temporaries as arguments or call results, `[l; N]` repeats, recursive
+// by-value types, exported signatures, and moving a field, element or payload
+// out of a live owner stay rejected.
+fn label_total(label: TextLabel, early: Bool) -> u32 {
+    if early { return 1; }
+    label.number + label.text.len()
+}
+
+fn make_label(number: u32) -> TextLabel {
+    let heap := "é".concat("!");
+    let label := TextLabel { number: number, text: heap };
+    label
+}
+
+fn owned_string_struct_argument() -> Bool {
+    let heap := "é".concat("!");
+    let first := TextLabel { number: 9, text: heap };
+    let second := TextLabel { number: 5, text: "ab" };
+    let spare_heap := "é".concat("!");
+    let spare := TextLabel { number: 0, text: spare_heap };
+    label_total(first, false) == 12 && label_total(second, false) == 7
+        && label_total(spare, true) == 1
+        && owned_string_struct_result()
+        && string_struct_elements()
+        && nested_string_owners()
+}
+
+fn label_pair_total(labels: Array<TextLabel, 2>, early: Bool) -> u32 {
+    if early { return 1; }
+    label_total_borrowed(labels[0].borrow()) + label_total_borrowed(labels[1].borrow())
+}
+
+fn label_total_borrowed(label: borrow TextLabel) -> u32 {
+    label.number + label.text.len()
+}
+
+fn label_row_total(row: borrow (TextLabel, u32)) -> u32 {
+    row.0.number + row.0.text.len() + row.1
+}
+
+// Elements are read through a borrow of the element or of the whole tuple.
+// Scope exit releases the Strings, and the array moves into an owned call.
+fn string_struct_elements() -> Bool {
+    let first_heap := "é".concat("!");
+    let first := TextLabel { number: 9, text: first_heap };
+    let second := TextLabel { number: 5, text: "ab" };
+    let pair := [first, second];
+    let direct := label_total_borrowed(pair[0].borrow());
+    let row_heap := "é".concat("!");
+    let row_label := TextLabel { number: 1, text: row_heap };
+    let row: (TextLabel, u32) = (row_label, 2);
+    let spare_heap := "é".concat("!");
+    let spare_first := TextLabel { number: 0, text: spare_heap };
+    let spare_second := TextLabel { number: 0, text: "" };
+    let spare := [spare_first, spare_second];
+    direct == 12 && label_row_total(row.borrow()) == 6
+        && label_pair_total(pair, false) == 19 && label_pair_total(spare, true) == 1
+}
+
+type NestedLabel {
+    label: TextLabel,
+    extra: u32,
+}
+type LabelSlot [Empty, Holds(NestedLabel), Rows(Array<TextLabel, 2>)]
+
+fn nested_label_total(nested: NestedLabel, early: Bool) -> u32 {
+    if early { return 1; }
+    nested.label.number + nested.label.text.len() + nested.extra
+}
+
+fn label_slot_total(slot: LabelSlot) -> u32 {
+    match slot {
+        LabelSlot::Holds(nested) => nested.label.text.len() + nested.extra,
+        LabelSlot::Rows(rows) => label_pair_total(rows, false),
+        LabelSlot::Empty => 0,
+    }
+}
+
+// A String-owning struct moves into a field of another struct, into an enum
+// payload, or into an array held by either. The owner then releases the inner
+// Strings once, on normal and early exits. `match` of a whole local enum
+// binds the payload struct, which is read through its fields. An array moves
+// into a payload from a named local, not from a literal.
+fn nested_string_owners() -> Bool {
+    let first_heap := "é".concat("!");
+    let first := TextLabel { number: 9, text: first_heap };
+    let nested := NestedLabel { label: first, extra: 1 };
+    let spare_heap := "é".concat("!");
+    let spare_label := TextLabel { number: 1, text: spare_heap };
+    let spare := NestedLabel { label: spare_label, extra: 2 };
+    let held_heap := "é".concat("!");
+    let held_label := TextLabel { number: 2, text: held_heap };
+    let held := NestedLabel { label: held_label, extra: 3 };
+    let slot := LabelSlot::Holds(held);
+    let row_heap := "é".concat("!");
+    let row_first := TextLabel { number: 4, text: row_heap };
+    let row_second := TextLabel { number: 5, text: "ab" };
+    let row_pair := [row_first, row_second];
+    let rows := LabelSlot::Rows(row_pair);
+    nested_label_total(nested, false) == 13 && nested_label_total(spare, true) == 1
+        && label_slot_total(slot) == 6 && label_slot_total(rows) == 14
+}
+
+fn owned_string_struct_result() -> Bool {
+    let made := make_label(4);
+    let unused := make_label(1);
+    made.number == 4 && made.text.len() == 3 && label_total(made, false) == 7
 }
 
 type EditableLabel {
@@ -717,7 +1431,8 @@ fn text() -> string {
     "café 😀"
 }
 
-// The source type has one spelling: lowercase `string`.
+// The only source type spelling is lowercase `string`. Bare `String` is
+// rejected with TE001 and migration guidance.
 fn lowercase_text() -> string {
     "café 😀"
 }
@@ -742,11 +1457,11 @@ fn fixed_text() -> Bool {
         && "".len() == 0 && "abc".len() == 3 && "é".len() == 2 && "😀".len() == 4
 }
 
-fn byte_is(byte: Option<u8>, expected: u8) -> Bool {
+fn byte_is(byte: u8?, expected: u8) -> Bool {
     match byte { Some(value) => value == expected, None => false }
 }
 
-fn no_byte(byte: Option<u8>) -> Bool {
+fn no_byte(byte: u8?) -> Bool {
     match byte { Some(_) => false, None => true }
 }
 
@@ -764,23 +1479,31 @@ fn text_bytes() -> Bool {
         && no_byte("".byte_at(0))
 }
 
-fn scalar_is(scalar: Option<u32>, expected: u32) -> Bool {
+fn scalar_is(scalar: u32?, expected: u32) -> Bool {
     match scalar { Some(value) => value == expected, None => false }
 }
 
-fn no_scalar(scalar: Option<u32>) -> Bool {
+fn no_scalar(scalar: u32?) -> Bool {
     match scalar { Some(_) => false, None => true }
 }
 
 fn text_scalars() -> Bool {
     let value := "aé€😀";
+    let ascii_text := "abc";
+    let supplementary_text := "😀";
+    let empty_text := "";
     let view := value.borrow();
-    // Indices are byte offsets. Successful results are Unicode scalar values.
+    // scalar_at takes byte offsets and returns Unicode scalar values. A walk
+    // visits four scalars, while len() reports ten UTF-8 bytes.
     let ascii := value.scalar_at(0);
     let accent := view.scalar_at(1);
     let moved := value;
     scalar_is(ascii, 97) && scalar_is(accent, 233)
         && scalar_is(moved.scalar_at(3), 8_364) && scalar_is(moved.scalar_at(6), 128_512)
+        && scalar_count(moved.borrow()) == 4 && moved.len() == 10
+        && scalar_count(ascii_text.borrow()) == 3 && ascii_text.len() == 3
+        && scalar_count(supplementary_text.borrow()) == 1 && supplementary_text.len() == 4
+        && scalar_count(empty_text.borrow()) == 0 && empty_text.len() == 0
         && no_scalar(moved.scalar_at(2)) && no_scalar(moved.scalar_at(4))
         && no_scalar(moved.scalar_at(5)) && no_scalar(moved.scalar_at(7))
         && no_scalar(moved.scalar_at(8)) && no_scalar(moved.scalar_at(9))
@@ -795,6 +1518,24 @@ fn scalar_width(value: u32) -> u32 {
     else if value <= 2_047 { 2 }
     else if value <= 65_535 { 3 }
     else { 4 }
+}
+
+// Traverse valid UTF-8 by byte offset, decoding one Unicode scalar each time.
+// String.len() remains the byte length; this loop counts scalar values.
+fn scalar_count(value: borrow string) -> u32 {
+    let byte_length := value.len();
+    var offset: u32 = 0;
+    var count: u32 = 0;
+    loop {
+        if offset == byte_length { break; }
+        let scalar := match value.scalar_at(offset) {
+            Some(decoded) => decoded,
+            None => { return count; },
+        };
+        offset += scalar_width(scalar);
+        count += 1;
+    }
+    count
 }
 
 fn walk_text(value: borrow string) -> Bool {
@@ -815,6 +1556,51 @@ fn walk_text(value: borrow string) -> Bool {
         visited += 1;
     }
     visited == 4 && offset == 10
+}
+
+// `loop ch in text` visits each Unicode scalar in order and binds it as an
+// immutable `Char`. It works on a named `string` local or a borrowed
+// parameter, evaluates the text once, and borrows it for the whole loop, so the
+// body cannot mutate or move it. `.len()` still counts bytes: this text has
+// four scalars in ten bytes. Compatibility: the legacy `Bytes<N>` type
+// spelling still compiles with the same meaning but prints warning MW003 on
+// stderr; this guide uses `string` and `Array<u8, N>`. `String` is rejected.
+fn count_wide(value: borrow string) -> u32 {
+    var wide: u32 = 0;
+    loop ch in value {
+        if ch == '€' || ch == '😀' { wide += 1; }
+    }
+    wide
+}
+
+fn first_wide(value: borrow string) -> u32 {
+    var position: u32 = 0;
+    loop ch in value {
+        position += 1;
+        if ch == '😀' { return position; } // Early return releases the loan.
+    }
+    0
+}
+
+fn text_loop() -> Bool {
+    let sample := "aé€😀";
+    var scalars: u32 = 0;
+    var last := 'a';
+    loop ch in sample {
+        scalars += 1;
+        if ch == 'é' { continue; }
+        last = ch;
+        if ch == '€' { break; }
+    }
+    let heap := sample.concat("é"); // Heap text is released after the loop.
+    var total: u32 = 0;
+    loop ch in heap { total += 1; }
+    let empty := "";
+    var none: u32 = 0;
+    loop ch in empty { none += 1; }
+    scalars == 3 && last == '€' && sample.len() == 10
+        && total == 5 && heap.len() == 12 && none == 0
+        && count_wide(heap.borrow()) == 2 && first_wide(heap.borrow()) == 4
 }
 
 fn text_boundaries() -> Bool {
@@ -918,6 +1704,27 @@ fn heap_text_result() -> Bool {
     }
 }
 
+// A Result<String, E> may be stored in a struct field or a fixed-array element
+// while its Ok payload is a String literal. Heap Ok payloads are rejected
+// there (TE018); they must be matched immediately as shown above.
+type Outcome { text: Result<string, Error>, tag: u32 }
+
+fn failure_code(items: Array<Result<string, Error>, 2>) -> u32 {
+    match items[1] { Ok(_) => 0 as u32, Err(error) => error.code }
+}
+
+fn nested_result_storage() -> Bool {
+    let ok: Result<string, Error> = Ok("é");
+    let stored := Outcome { text: ok, tag: 3 };
+    let failed: Result<string, Error> = Err(Error { code: 8 });
+    let failed_outcome := Outcome { text: failed, tag: 4 };
+    let from_field := match failed_outcome.text { Ok(_) => 0 as u32, Err(error) => error.code };
+    let first: Result<string, Error> = Ok("x");
+    let second: Result<string, Error> = Err(Error { code: 9 });
+    let items := [first, second];
+    stored.tag == 3 && from_field == 8 && failure_code(items) == 9
+}
+
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, Bool) ]
 type Sample = Reading;
@@ -950,7 +1757,78 @@ fn enums() -> Bool {
         && inspect(batch.borrow()) == 9 && take(batch) == 9
 }
 
-// References and a function-local Option<borrow T>.
+// Anonymous records use exact field-name/type shapes. Reordering fields does
+// not change the shape, while initializer effects still run in written order.
+fn record_total(value: { right: u32, left: u32 }) -> u32 {
+    value.left + value.right
+}
+// An anonymous record that owns a String moves by value like a nominal struct:
+// into owned internal arguments and results from a named local, into a struct
+// field, tuple, array or enum payload, and out of scope with exact cleanup.
+// Annotate the binding so the field types are fixed; temporaries as arguments,
+// field or element move-out, and exported signatures stay rejected.
+type RecordSlot [NoRecord, HasRecord({ name: string, size: u32 })]
+fn record_name_total(value: { name: string, size: u32 }, early: Bool) -> u32 {
+    if early { return 1; }
+    value.name.len() + value.size
+}
+fn make_named_record() -> { name: string, size: u32 } {
+    let heap := "é".concat("!");
+    let made: { name: string, size: u32 } = { name: heap, size: 4 };
+    made
+}
+fn record_slot_total(slot: RecordSlot) -> u32 {
+    match slot {
+        RecordSlot::HasRecord(value) => value.name.len() + value.size,
+        RecordSlot::NoRecord => 0,
+    }
+}
+fn string_owning_records() -> Bool {
+    let heap := "é".concat("!");
+    let named: { name: string, size: u32 } = { name: heap, size: 9 };
+    let spare_heap := "é".concat("!");
+    let spare: { name: string, size: u32 } = { name: spare_heap, size: 1 };
+    let made := make_named_record();
+    let slot_heap := "é".concat("!");
+    let slot_value: { name: string, size: u32 } = { name: slot_heap, size: 2 };
+    let slot := RecordSlot::HasRecord(slot_value);
+    record_name_total(named, false) == 12 && record_name_total(spare, true) == 1
+        && record_name_total(made, false) == 7 && record_slot_total(slot) == 5
+}
+fn guide_phase() -> GuidePhase { Ready }
+fn other_guide_phase() -> OtherGuidePhase { Ready }
+fn anonymous_shapes() -> Bool {
+    var order: u32 = 0;
+    let first := {
+        right: { order += 1; order },
+        left: { order += 1; order },
+    };
+    let reordered := {
+        left: { order += 1; order },
+        right: { order += 1; order },
+    };
+    let selected := if true { first } else { reordered };
+    let phase: GuidePhase = guide_phase();
+    let other: OtherGuidePhase = other_guide_phase();
+    let counter := guide_counter();
+    let payload: enum [GuideNumber(i32), GuideFlag(Bool), GuideAbsent] =
+        GuideNumber(40);
+    let payload_value := match payload {
+        GuideNumber(value) => value,
+        GuideFlag(enabled) => if enabled { 1 } else { 0 },
+        GuideAbsent => 0,
+    };
+    let matching := match phase {
+        Ready => match other { Ready => true, Waiting => false },
+        Waiting => false,
+    };
+    selected.right == 1 && selected.left == 2 && order == 4
+        && record_total({ left: 40, right: 2 }) == 42 && matching
+        && counter.doubled() == 42 && payload_value == 40
+        && string_owning_records()
+}
+
+// References and a function-local `(borrow T)?`.
 fn read(value: borrow i32) -> i32 {
     value.copy()
 }
@@ -962,16 +1840,16 @@ fn optional_borrow() -> Bool {
     let saved := read(editor); // Reborrow the share for read-only access.
     // The share ended at its last use. The annotation supplies the borrow
     // payload type. Moving the wrapper transfers the handle and its loan.
-    let wrapped: Option<borrow i32> = Some(owner.borrow());
+    let wrapped: (borrow i32)? = Some(owner.borrow());
     let moved := wrapped;
     let snapshot := match moved { Some(view) => read(view), None => 0 };
     owner = 9; // The consuming match and the last use of view release the loan.
 
-    let empty: Option<borrow i32> = None;
+    let empty: (borrow i32)? = None;
     let fallback := match empty { Some(view) => view.copy(), None => owner };
     saved == 8 && snapshot == 8 && fallback == 9
 }
-// Borrow Options support direct annotations on immutable locals and consuming
+// Borrow optionals support direct annotations on immutable locals and consuming
 // matches. Aliases, fields, nesting, signatures and branch results are gated.
 // Reference returns, rebinding and loans of primitive projections such as
 // row[0].borrow() are also outside the current subset.
@@ -984,7 +1862,7 @@ type RangeError: ReadingError {
     observed: i32,
 }
 type Checked = Result<Row, RangeError>;
-type Poll = Attempt<Option<i32>, RangeError>;
+type Poll = Attempt<i32?, RangeError>;
 
 fn replace_context(context: share ReadingError) {
     // A whole write through an ancestor share updates its visible fields.
@@ -1071,7 +1949,9 @@ fn outcomes() -> Bool {
 //   ownership, analyze-project, ownership-project, build, and run. See it
 //   for stack_size, fuel limits, and selecting a Wasm export with --entry.
 //   The runner calls zero-argument exports. Library exports use scalar
-//   signatures. External linking, type exports and mb check are unsupported.
+//   signatures. Source host linking is limited to the CLI profile's typed
+//   memobits:console.write_i32(i32) -> unit import; see the host-capability
+//   example. Type exports and mb check are unsupported.
 // - examples/design/language-guide.mb explores target syntax. String slicing,
 //   scalar iteration, lists, try, defaults and
 //   aggregate .copy() are gated. Generic function calls and interface evidence
@@ -1084,11 +1964,13 @@ fn outcomes() -> Bool {
 fn main() -> Result<i32, Error> {
     if !character_literals() { return Err(Error { code: 30 }); }
     if !tuple_values() { return Err(Error { code: 31 }); }
+    if !anonymous_shapes() { return Err(Error { code: 59 }); }
     if !numbers() { return Err(Error { code: 1 }); }
     if !widenings() { return Err(Error { code: 22 }); }
     if !numeric_casts() { return Err(Error { code: 26 }); }
     if !shared_string_field_replacement() { return Err(Error { code: 23 }); }
     if !generic_structs() { return Err(Error { code: 27 }); }
+    if !nested_generic_methods() { return Err(Error { code: 64 }); }
     if !generic_functions() { return Err(Error { code: 32 }); }
     if !generic_array_forwarding() { return Err(Error { code: 33 }); }
     if !generic_interface_forwarding() { return Err(Error { code: 34 }); }
@@ -1097,6 +1979,25 @@ fn main() -> Result<i32, Error> {
     if !user_defined_mul() { return Err(Error { code: 37 }); }
     if !user_defined_div() { return Err(Error { code: 38 }); }
     if !user_defined_rem() { return Err(Error { code: 39 }); }
+    if !user_defined_bitand() { return Err(Error { code: 40 }); }
+    if !user_defined_bitor() { return Err(Error { code: 41 }); }
+    if !user_defined_bitxor() { return Err(Error { code: 42 }); }
+    if !user_defined_negation() { return Err(Error { code: 44 }); }
+    if !user_defined_equality() { return Err(Error { code: 45 }); }
+    if !user_defined_ordering() { return Err(Error { code: 46 }); }
+    if !user_defined_add_assign() { return Err(Error { code: 47 }); }
+    if !user_defined_sub_assign() { return Err(Error { code: 48 }); }
+    if !user_defined_mul_assign() { return Err(Error { code: 49 }); }
+    if !user_defined_div_assign() { return Err(Error { code: 50 }); }
+    if !user_defined_rem_assign() { return Err(Error { code: 51 }); }
+    if !user_defined_bitand_assign() { return Err(Error { code: 52 }); }
+    if !user_defined_bitor_assign() { return Err(Error { code: 53 }); }
+    if !user_defined_bitxor_assign() { return Err(Error { code: 54 }); }
+    if !user_defined_shl() { return Err(Error { code: 56 }); }
+    if !user_defined_shl_assign() { return Err(Error { code: 55 }); }
+    if !user_defined_shr_assign() { return Err(Error { code: 58 }); }
+    if !generic_compound_assignments() { return Err(Error { code: 60 }); }
+    if !user_defined_shr() { return Err(Error { code: 57 }); }
     if !trailing_enum_extension() { return Err(Error { code: 29 }); }
     if !optional_sugar() { return Err(Error { code: 28 }); }
     if !wrapping_arithmetic() { return Err(Error { code: 24 }); }
@@ -1112,14 +2013,17 @@ fn main() -> Result<i32, Error> {
     if !text_scalars() { return Err(Error { code: 10 }); }
     let sample := "aé€😀";
     if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
+    if !text_loop() { return Err(Error { code: 63 }); }
     if !text_concat() { return Err(Error { code: 12 }); }
     if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
+    if !nested_result_storage() { return Err(Error { code: 61 }); }
     if !primitive_lists() { return Err(Error { code: 14 }); }
     if !fixed_iteration() { return Err(Error { code: 15 }); }
     if !list_iteration() { return Err(Error { code: 16 }); }
     if !explicit_drop() { return Err(Error { code: 17 }); }
     if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
     if !borrow_string_struct() { return Err(Error { code: 21 }); }
+    if !owned_string_struct_argument() { return Err(Error { code: 62 }); }
     if !temporary_string_fields() { return Err(Error { code: 20 }); }
     if !replace_local_string_field() { return Err(Error { code: 19 }); }
     Ok(42)

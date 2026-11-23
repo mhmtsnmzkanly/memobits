@@ -87,6 +87,13 @@ offset at or beyond the byte length returns `None`. Strings already contain
 valid immutable UTF-8. After checking the index, Wasm checks the remaining
 length against the lead byte's width before loading any trailing bytes.
 
+The language guide demonstrates scalar traversal with a loop: it reads
+`.scalar_at(offset)`, advances by the decoded scalar's UTF-8 width, and counts
+visited scalars. This keeps scalar count distinct from `.len()` while
+preserving byte-offset access. Empty, ASCII, multibyte and supplementary
+examples check both quantities. This bounded source-level traversal does not
+add a general iterator or change the existing byte-indexed `.scalar_at` API.
+
 The [runnable guide](../../examples/projects/language-guide/src/main.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,

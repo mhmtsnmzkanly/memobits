@@ -4,7 +4,12 @@ use memobits_diagnostics::Span;
 use std::collections::HashSet;
 
 mod scoped_string;
-pub use scoped_string::HeapStrings;
+pub use scoped_string::{
+    is_string_owner_struct, is_string_owner_transport, HeapStrings, OwnerFieldShape,
+};
+
+/// Reserved canonical module prefix used for imported host functions.
+pub const HOST_IMPORT_MODULE: &str = "\0host";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
@@ -352,6 +357,14 @@ pub enum InstructionKind {
     StringScalarAt {
         source: Operand,
         offset: Operand,
+    },
+    /// Decode the scalar that starts at a byte offset known to be a boundary
+    /// below the byte length (checked by the loop that emits it). `width: false`
+    /// produces the `Char`; `width: true` produces its UTF-8 byte width as u32.
+    StringScalarRead {
+        source: Operand,
+        offset: Operand,
+        width: bool,
     },
     /// Capture an operand at this point in evaluation order.
     Capture(Operand),
@@ -1650,13 +1663,17 @@ fn validate_instruction(
         }
         InstructionKind::EndStructLocal { local } => {
             if instruction.output.is_some()
-                || !function.locals.get(local.0 as usize).is_some_and(|local| {
-                    matches!(local.ty, Type::Struct(ty) if program.types.get(ty.0 as usize).is_some_and(|ty| {
-                        matches!(&ty.kind, TypeDefKind::Struct { fields } if fields.iter().any(|field| field.ty == Type::String))
-                    }))
-                })
+                || !function.locals.get(local.0 as usize).is_some_and(|local|
+                    scoped_string::owns_string_aggregate(program, &local.ty))
             {
-                push(errors, id, Some(block), "struct scope exit requires a struct local with String fields and no output");
+                let message = function.locals.get(local.0 as usize).map_or(
+                    "struct scope exit requires a String-owning struct local and no output",
+                    |binding| match &binding.ty {
+                        Type::Enum(_) => "enum scope exit requires a String-owning enum local and no output",
+                        _ => "struct scope exit requires a String-owning struct local and no output",
+                    },
+                );
+                push(errors, id, Some(block), message);
             }
         }
         InstructionKind::EndStringLocal { local } => {
@@ -1750,7 +1767,8 @@ fn validate_instruction(
         InstructionKind::StringLen { source }
         | InstructionKind::StringIsCharBoundary { source, .. }
         | InstructionKind::StringByteAt { source, .. }
-        | InstructionKind::StringScalarAt { source, .. } => {
+        | InstructionKind::StringScalarAt { source, .. }
+        | InstructionKind::StringScalarRead { source, .. } => {
             let input = operand_type(program, function, source, errors, id, block);
             if !input.as_ref().is_some_and(|ty| {
                 matches!(ty, Type::String)
@@ -1766,7 +1784,8 @@ fn validate_instruction(
             }
             if let InstructionKind::StringIsCharBoundary { offset, .. }
             | InstructionKind::StringByteAt { offset, .. }
-            | InstructionKind::StringScalarAt { offset, .. } = &instruction.kind
+            | InstructionKind::StringScalarAt { offset, .. }
+            | InstructionKind::StringScalarRead { offset, .. } = &instruction.kind
             {
                 if operand_type(program, function, offset, errors, id, block)
                     != Some(Type::Primitive(Primitive::U32))
@@ -1788,6 +1807,13 @@ fn validate_instruction(
                 }
                 InstructionKind::StringIsCharBoundary { .. } => {
                     out == Some(&Type::Primitive(Primitive::Bool))
+                }
+                InstructionKind::StringScalarRead { width, .. } => {
+                    out == Some(&Type::Primitive(if *width {
+                        Primitive::U32
+                    } else {
+                        Primitive::Char
+                    }))
                 }
                 _ => out == Some(&Type::Primitive(Primitive::U32)),
             };
@@ -3266,11 +3292,17 @@ fn validate_operand_escapes(
                             result,
                         )
                         .is_none()
+                        && !scoped_string::owned_aggregate_call_argument(
+                            program,
+                            block,
+                            position,
+                            result,
+                        )
                     {
                         let message = if matches!(result, Type::String) {
                             "heap String call result must be assigned directly to a whole String local"
                         } else {
-                            "heap String tuple call result must be assigned directly to a whole tuple local"
+                            "String-owning aggregate call result must be assigned directly to a whole local"
                         };
                         push(errors, id, block_id, message);
                     }
@@ -3307,9 +3339,10 @@ fn validate_operand_escapes(
                 errors,
                 id,
                 Some(block),
-                if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Struct(_)))
-                {
+                if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Struct(_))) {
                     "a struct owning a heap String can only move directly into a new local"
+                } else if matches!(operand.source, Source::Local(local) if matches!(function.locals[local.0 as usize].ty, Type::Enum(_))) {
+                    "an enum owning a heap String can only move to an owned destination"
                 } else {
                     "heap String requires a whole String destination for moves and a checked loan for reference access"
                 },
@@ -3325,17 +3358,110 @@ fn validate_operand_escapes(
         }
     };
 
+    let mut borrowed_payload_extractions: Vec<BlockId> = Vec::new();
     for (index, block) in function.blocks.iter().enumerate() {
         let block_id = BlockId(index as u32);
         let return_capture = scoped_string::return_capture(block);
+        let tuple_extractions =
+            scoped_string::tuple_destructure_extractions(program, function, block);
         for (position, instruction) in block.instructions.iter().enumerate() {
             match &instruction.kind {
                 InstructionKind::Capture(value) => {
-                    let returns_owned_tuple = matches!(function.signature.result.as_ref(),
-                        Type::Struct(tuple) if scoped_string::tuple_owns_string(program, tuple.0));
-                    if !return_capture.is_some_and(|(returned, source)| {
+                    let returns_owned_tuple = scoped_string::owns_string_aggregate(
+                        program,
+                        function.signature.result.as_ref(),
+                    );
+                    let feeds_owned_enum_payload = instruction.output.is_some_and(|output| {
+                        block.instructions[position + 1..].iter().enumerate().any(|(offset, candidate)| {
+                            let InstructionKind::EnumNew { ty, variant, payload } = &candidate.kind else {
+                                return false;
+                            };
+                            (scoped_string::enum_binding(
+                                function,
+                                &block.instructions[position + 1 + offset..],
+                            )
+                            .is_some()
+                                || matches!(block.terminator.kind,
+                                    TerminatorKind::Return(Some(Operand {
+                                        source: Source::Value(returned),
+                                        mode: UseMode::Consume,
+                                        ..
+                                    })) if candidate.output == Some(returned)))
+                                && payload.iter().enumerate().any(|(field, operand)| {
+                                    operand.source == Source::Value(output)
+                                        && operand.mode == UseMode::Consume
+                                        && program.types.get(ty.0 as usize).is_some_and(|definition|
+                                            matches!(&definition.kind, TypeDefKind::Enum { variants }
+                                                if variants.get(*variant as usize).is_some_and(|item|
+                                                    item.payload.get(field)
+                                                        .is_some_and(|payload_ty| scoped_string::owns_string_storage(program, payload_ty)))))
+                                })
+                        })
+                    });
+                    let feeds_owned_call_argument = instruction.output.is_some_and(|output| {
+                        let Source::Local(source) = value.source else {
+                            return false;
+                        };
+                        let Some(source_ty) = function.locals.get(source.0 as usize).map(|local| &local.ty) else {
+                            return false;
+                        };
+                        block.instructions[position + 1..].iter().any(|candidate| {
+                            let InstructionKind::Call {
+                                callee: Operand { source: Source::Function(callee), .. },
+                                arguments,
+                            } = &candidate.kind else {
+                                return false;
+                            };
+                            let Some(target) = program.functions.get(callee.0 as usize) else {
+                                return false;
+                            };
+                            arguments.iter().zip(&target.signature.parameters).any(|(argument, parameter)| {
+                                argument.source == Source::Value(output)
+                                    && argument.mode == UseMode::Consume
+                                    && parameter.access == Access::Owned
+                                    && parameter.ty == *source_ty
+                                    && scoped_string::owns_string_aggregate(program, source_ty)
+                            })
+                        })
+                    });
+                    let feeds_owned_array_element = instruction.output.is_some_and(|output| {
+                        let Source::Local(source) = value.source else {
+                            return false;
+                        };
+                        let Some(source_ty) = function.locals.get(source.0 as usize).map(|local| &local.ty) else {
+                            return false;
+                        };
+                        block.instructions[position + 1..].iter().enumerate().any(|(offset, candidate)| {
+                            let InstructionKind::ArrayNew { init: ArrayInit::Elements(elements) } = &candidate.kind else {
+                                return false;
+                            };
+                            let destination = scoped_string::array_binding(
+                                function,
+                                &block.instructions[position + 1 + offset..],
+                            ).is_some()
+                                || matches!(&block.terminator.kind,
+                                    TerminatorKind::Return(Some(Operand {
+                                        source: Source::Value(returned),
+                                        mode: UseMode::Consume,
+                                        ..
+                                    })) if candidate.output == Some(*returned));
+                            destination
+                                && candidate.output.and_then(|id| function.values.get(id.0 as usize))
+                                    .is_some_and(|ty| matches!(ty, Type::Array { element, .. }
+                                        if **element == *source_ty
+                                            && scoped_string::owns_string_aggregate(program, element)))
+                                && elements.iter().any(|element| {
+                                    element.source == Source::Value(output)
+                                        && element.mode == UseMode::Consume
+                                })
+                        })
+                    });
+                    if !feeds_owned_enum_payload
+                        && !feeds_owned_call_argument
+                        && !feeds_owned_array_element
+                        && (!return_capture.is_some_and(|(returned, source)| {
                         returned == position && heap_locals.contains(&source)
-                    }) || (*function.signature.result != Type::String && !returns_owned_tuple)
+                    }) || (*function.signature.result != Type::String && !returns_owned_tuple))
                     {
                         report(block_id, value, false, true);
                     }
@@ -3356,34 +3482,260 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::FieldAddr { base, .. }
                 | InstructionKind::VariantAddr { base, .. }
-                | InstructionKind::EnumTag { base }
-                | InstructionKind::VariantExtract { base, .. } => {
+                | InstructionKind::EnumTag { base } => {
                     report(block_id, base, false, false)
                 }
-                InstructionKind::Extract { base, .. } => report(block_id, base, true, false),
-                InstructionKind::StructNew { fields, .. } => {
-                    for field in fields {
-                        if !(field.mode == UseMode::Consume
+                InstructionKind::VariantExtract { base, variant, .. } => {
+                    // A non-local base is a temporary. Extracting an owned
+                    // String payload is only sound when that temporary owns
+                    // its storage: not when it is loaded through a reference
+                    // or read out of a field or array element.
+                    if let Source::Value(base_value) = base.source {
+                        let payload_owns_heap = function
+                            .values
+                            .get(base_value.0 as usize)
+                            .is_some_and(|ty| {
+                                scoped_string::enum_variant_owns_string_storage(program, ty, *variant)
+                            });
+                        if payload_owns_heap {
+                            let defining = block.instructions[..position]
+                                .iter()
+                                .enumerate()
+                                .find(|(_, candidate)| candidate.output == Some(base_value));
+                            let owned_temporary = match defining {
+                                Some((index, candidate)) => match &candidate.kind {
+                                    InstructionKind::Load { .. } => false,
+                                    InstructionKind::Extract { .. } => tuple_extractions.contains_key(&index),
+                                    _ => true,
+                                },
+                                // Defined in another block: only block parameters
+                                // and values the loan analysis marks are possible.
+                                None => true,
+                            };
+                            if !owned_temporary || operand_is_read_only(base, &read_only) {
+                                borrowed_payload_extractions.push(block_id);
+                            }
+                        }
+                    }
+                    let variant_owns_heap_string = match (&base.source, &instruction.kind) {
+                        (Source::Local(local), InstructionKind::VariantExtract { variant, .. }) =>
+                            function.locals.get(local.0 as usize).is_some_and(|binding|
+                                scoped_string::enum_variant_owns_string_storage(
+                                    program,
+                                    &binding.ty,
+                                    *variant,
+                                )),
+                        _ => false,
+                    };
+                    let extracted_owned_payload = match (base.source, &instruction.kind) {
+                        (
+                            Source::Local(local),
+                            InstructionKind::VariantExtract {
+                                variant: variant_index,
+                                ..
+                            },
+                        ) => {
+                            let enum_id = function.locals.get(local.0 as usize).and_then(|binding| {
+                                if let Type::Enum(id) = &binding.ty {
+                                    Some(*id)
+                                } else {
+                                    None
+                                }
+                            });
+                            enum_id.is_some_and(|enum_id| program.types
+                                .get(enum_id.0 as usize).is_some_and(|definition| {
+                            matches!(&definition.kind, TypeDefKind::Enum { variants }
+                                if variants.get(*variant_index as usize).is_some_and(|declared_variant| {
+                                    declared_variant.payload.iter().enumerate().any(|(field, payload_ty)| {
+                                        if !scoped_string::owns_string_storage(program, payload_ty) {
+                                            return false;
+                                        }
+                                        block.instructions[..position].iter().enumerate().any(|(prior_position, prior)| {
+                                            let InstructionKind::VariantExtract {
+                                                base: prior_base,
+                                                variant: prior_variant,
+                                                field: prior_field,
+                                            } = &prior.kind else {
+                                                return false;
+                                            };
+                                            prior_base.source == Source::Local(local)
+                                                && *prior_variant == *variant_index
+                                                && *prior_field as usize == field
+                                                && prior.output.is_some_and(|output| {
+                                                    // Only statements after the prior extraction can consume it.
+                                                    block.instructions[prior_position + 1..].iter().any(|next| matches!(
+                                                        &next.kind,
+                                                        InstructionKind::Assign {
+                                                            value,
+                                                            initialize: true,
+                                                            ..
+                                                        } if value.source == Source::Value(output)
+                                                            && value.mode == UseMode::Consume
+                                                    ))
+                                                })
+                                        })
+                                    })
+                                }))
+                                }))
+                        }
+                        _ => false,
+                    };
+                    let final_extract_consumes_owner = base.mode == UseMode::Consume
+                        || (matches!(base.source, Source::Local(local)
+                            if block.instructions[position + 1..].iter().any(|later| {
+                                matches!(&later.kind,
+                                    InstructionKind::VariantExtract { base: later_base, .. }
+                                        if later_base.source == Source::Local(local)
+                                            && later_base.mode == UseMode::Consume)
+                            })));
+                    // A non-owning variant contains no heap descriptor to
+                    // transfer, even when its enum's other variants own one.
+                    // Matching that branch therefore retires the enum shell
+                    // without requiring a String destination.
+                    let transferred = !variant_owns_heap_string
+                        || extracted_owned_payload
+                        || (final_extract_consumes_owner
+                        && instruction.output.is_some_and(|output| {
+                            function.values.get(output.0 as usize)
+                                .is_some_and(|ty| scoped_string::owns_string_storage(program, ty))
+                                && block.instructions[position + 1..].iter()
+                                    .find(|next| !matches!(next.kind,
+                                        InstructionKind::EndStringLocal { .. }
+                                            | InstructionKind::EndListLocal { .. }
+                                            | InstructionKind::EndStructLocal { .. }))
+                                    .is_some_and(|next| matches!(&next.kind,
+                                        InstructionKind::Assign { value, initialize: true, .. }
+                                            if value.source == Source::Value(instruction.output.unwrap())
+                                                && value.mode == UseMode::Consume))
+                        }));
+                    if !transferred {
+                        report(block_id, base, false, false);
+                    }
+                }
+                InstructionKind::Extract { base, .. } => {
+                    if !tuple_extractions.contains_key(&position) {
+                        report(block_id, base, true, false);
+                    }
+                }
+                InstructionKind::StructNew { ty, fields } => {
+                    let struct_fields = program
+                        .types
+                        .get(ty.0 as usize)
+                        .and_then(|definition| match &definition.kind {
+                            TypeDefKind::Struct { fields } => Some(fields),
+                            TypeDefKind::Enum { .. } => None,
+                        });
+                    // Tuples and admitted nominal owners may hold owners moved in
+                    // from named locals (nested structs, arrays of owners).
+                    let enclosing_owner = scoped_string::is_string_owner_transport(
+                        &program.types,
+                        &Type::Struct(*ty),
+                    ) || program.types.get(ty.0 as usize).is_some_and(|definition| {
+                        definition.path.module.as_slice() == ["\0tuple"]
+                    });
+                    for (index, field) in fields.iter().enumerate() {
+                        let direct_string_move = field.mode == UseMode::Consume
                             && matches!(field.source, Source::Local(local)
-                                if function.locals.get(local.0 as usize).is_some_and(|local| local.ty == Type::String)))
-                        {
+                                if function.locals.get(local.0 as usize)
+                                    .is_some_and(|local| local.ty == Type::String));
+                        let nested_tuple_move = field.mode == UseMode::Consume
+                            && struct_fields
+                                .and_then(|fields| fields.get(index))
+                                .is_some_and(|definition| {
+                                    let mut element = &definition.ty;
+                                    while let Type::Array { element: inner, .. } = element {
+                                        element = inner;
+                                    }
+                                    let is_array = element != &definition.ty;
+                                    matches!(element, Type::Struct(nested)
+                                        if ((!is_array
+                                            && scoped_string::tuple_owns_string(program, nested.0))
+                                            || (enclosing_owner
+                                                && !(is_array && program.types.get(nested.0 as usize).is_some_and(|d| d.path.module.as_slice() == ["\0tuple"]))
+                                                && scoped_string::is_string_owner_transport(
+                                                    &program.types,
+                                                    element,
+                                                )))
+                                            && matches!(field.source, Source::Local(local)
+                                                if function.locals.get(local.0 as usize)
+                                                    .is_some_and(|local| local.ty == definition.ty)))
+                                });
+                        if !direct_string_move && !nested_tuple_move {
                             report(block_id, field, true, false);
                         }
                     }
                 }
-                InstructionKind::EnumNew { payload, .. } => {
+                InstructionKind::EnumNew { ty, payload, .. } => {
+                    let is_heap_result_enum = program
+                        .types
+                        .get(ty.0 as usize)
+                        .is_some_and(|definition| {
+                            definition.entry_outcome == Some(EntryOutcome::Result)
+                        });
+                    let owned_enum_destination = scoped_string::enum_binding(
+                        function,
+                        &block.instructions[position..],
+                    )
+                    .is_some()
+                        || instruction.output.is_some_and(|output| {
+                            matches!(&block.terminator.kind,
+                                TerminatorKind::Return(Some(Operand {
+                                    source: Source::Value(returned),
+                                    mode: UseMode::Consume,
+                                    ..
+                                })) if *returned == output)
+                        });
                     if !instruction.output.is_some_and(|value| {
                         heap_strings[id.0 as usize].approved_ok.contains(&value)
                     }) {
                         for operand in payload {
-                            report(block_id, operand, true, false);
+                            let transferred_owned_payload = !is_heap_result_enum
+                                && owned_enum_destination
+                                && operand.mode == UseMode::Consume
+                                && matches!(operand.source, Source::Local(local)
+                                    if function.locals.get(local.0 as usize).is_some_and(|binding|
+                                        binding.ty == Type::String
+                                            || scoped_string::owns_string_aggregate(program, &binding.ty)));
+                            if !transferred_owned_payload {
+                                report(block_id, operand, true, false);
+                            }
                         }
                     }
                 }
                 InstructionKind::ArrayNew { init } => {
                     if let ArrayInit::Elements(elements) = init {
+                        let destination = scoped_string::array_binding(
+                            function,
+                            &block.instructions[position..],
+                        )
+                        .is_some()
+                            || instruction.output.is_some_and(|output| {
+                                matches!(&block.terminator.kind,
+                                    TerminatorKind::Return(Some(Operand {
+                                        source: Source::Value(returned),
+                                        mode: UseMode::Consume,
+                                        ..
+                                    })) if *returned == output)
+                            });
+                        let element_ty = instruction
+                            .output
+                            .and_then(|output| function.values.get(output.0 as usize))
+                            .and_then(|ty| match ty {
+                                Type::Array { element, .. } => Some(element.as_ref()),
+                                _ => None,
+                            });
                         for element in elements {
-                            report(block_id, element, true, false);
+                            let moved_owner = destination
+                                && element.mode == UseMode::Consume
+                                && element_ty.is_some_and(|ty| {
+                                    scoped_string::owns_string_aggregate(program, ty)
+                                        && matches!(element.source, Source::Local(local)
+                                            if function.locals.get(local.0 as usize)
+                                                .is_some_and(|binding| binding.ty == *ty))
+                                });
+                            if !moved_owner {
+                                report(block_id, element, true, false);
+                            }
                         }
                     }
                 }
@@ -3413,7 +3765,8 @@ fn validate_operand_escapes(
                 }
                 | InstructionKind::StringIsCharBoundary { source, offset }
                 | InstructionKind::StringByteAt { source, offset }
-                | InstructionKind::StringScalarAt { source, offset } => {
+                | InstructionKind::StringScalarAt { source, offset }
+                | InstructionKind::StringScalarRead { source, offset, .. } => {
                     report(block_id, source, false, false);
                     report(block_id, offset, false, false);
                 }
@@ -3438,6 +3791,9 @@ fn validate_operand_escapes(
                     if scoped_string::local_move_source(function, *target, value, *initialize)
                         .or_else(|| {
                             scoped_string::struct_move_source(function, *target, value, *initialize)
+                        })
+                        .or_else(|| {
+                            scoped_string::array_move_source(function, *target, value, *initialize)
                         })
                         .is_none()
                     {
@@ -3500,8 +3856,10 @@ fn validate_operand_escapes(
                 }
             }
             TerminatorKind::Return(Some(value)) => {
-                let tuple_move = matches!(function.signature.result.as_ref(),
-                    Type::Struct(tuple) if scoped_string::tuple_owns_string(program, tuple.0))
+                let tuple_move = scoped_string::is_string_owner_transport(
+                    &program.types,
+                    function.signature.result.as_ref(),
+                )
                     && matches!(value.source, Source::Local(_))
                     && value.mode == UseMode::Consume;
                 if !tuple_move {
@@ -3510,6 +3868,14 @@ fn validate_operand_escapes(
             }
             TerminatorKind::Return(None) | TerminatorKind::Unreachable => {}
         }
+    }
+    for block in borrowed_payload_extractions {
+        push(
+            errors,
+            id,
+            Some(block),
+            "a heap String payload cannot be extracted from borrowed, field or array-element storage",
+        );
     }
 }
 

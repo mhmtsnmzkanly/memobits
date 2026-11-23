@@ -21,6 +21,7 @@ pub struct Module {
 pub enum ItemKind {
     Function {
         public: bool,
+        external: bool,
         name: String,
         generic_parameters: Vec<GenericParameter>,
         bounds: Vec<WhereBound>,
@@ -58,6 +59,7 @@ pub enum ItemKind {
     InherentExtension {
         public: bool,
         target: Type,
+        generic_parameters: Vec<GenericParameter>,
         methods: Vec<InterfaceMethod>,
     },
 }
@@ -173,6 +175,12 @@ pub enum StatementKind {
         mutable: bool,
         path: Vec<String>,
         fields: Vec<FieldPattern>,
+        value: Expr,
+    },
+    /// `let (first, second) := value;`. Every tuple slot is bound by name.
+    TupleDestructure {
+        mutable: bool,
+        elements: Vec<TupleBinding>,
         value: Expr,
     },
     Binding {
@@ -291,6 +299,12 @@ pub struct FieldPattern {
     pub binding: String,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct TupleBinding {
+    pub span: Span,
+    pub binding: String,
+    pub nested: Option<Vec<TupleBinding>>,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct FieldInit {
     pub span: Span,
     pub name: String,
@@ -323,6 +337,8 @@ pub struct LexResult {
 pub struct ParseResult {
     pub module: Module,
     pub diagnostics: Vec<Diagnostic>,
+    /// Non-failing migration warnings (`MW` codes); they never make a parse fail.
+    pub warnings: Vec<Diagnostic>,
 }
 fn diagnostic(number: u16, span: Span, message: impl Into<String>) -> Diagnostic {
     let mut d = Diagnostic::new(
@@ -436,7 +452,7 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
             TokenKind::Number(text[start..i].into())
         } else if let Some(op) = [
             "::", ":=", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
-            "%=",
+            "%=", "&=", "|=", "^=", "<<=", ">>=",
         ]
         .into_iter()
         .find(|op| text[i..].starts_with(op))
@@ -607,6 +623,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
         pos: 0,
         no_struct: false,
         diagnostics: lexed.diagnostics,
+        warnings: Vec::new(),
         pending: Vec::new(),
     };
     let mut items = Vec::new();
@@ -654,6 +671,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
     ParseResult {
         module: Module { items },
         diagnostics: p.diagnostics,
+        warnings: p.warnings,
     }
 }
 struct Parser {
@@ -662,6 +680,7 @@ struct Parser {
     /// A following brace starts a control-flow block. Struct literals need parentheses.
     no_struct: bool,
     diagnostics: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
     pending: Vec<Item>,
 }
 type PResult<T> = Result<T, ()>;
@@ -779,6 +798,73 @@ impl Parser {
     }
     fn ty(&mut self) -> PResult<Type> {
         let start = self.current().span.start;
+        if self.at("{") {
+            self.expect("{")?;
+            if self.at("}") {
+                return self.fail("an anonymous record type needs at least one named field");
+            }
+            let mut fields = Vec::new();
+            while !self.at("}") && !self.eof() {
+                let label = self.name()?;
+                self.expect(":")?;
+                let ty = self.ty()?;
+                fields.push(TypeArgument::TupleField {
+                    label: Some(label),
+                    ty: Box::new(ty),
+                });
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}")?;
+            return Ok(Type {
+                span: self.span(start),
+                path: vec!["\0record".into()],
+                arguments: fields,
+            });
+        }
+        if self.eat("enum") {
+            self.expect("[")?;
+            let mut path = vec!["\0enum".into()];
+            let mut arguments = Vec::new();
+            while !self.at("]") && !self.eof() {
+                let variant = self.name()?;
+                path.push(variant.clone());
+                if self.at("(") {
+                    self.expect("(")?;
+                    let mut payload = Vec::new();
+                    while !self.at(")") && !self.eof() {
+                        payload.push(TypeArgument::Type(self.ty()?));
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    if !payload.is_empty() {
+                        arguments.push(TypeArgument::TupleField {
+                            label: Some(variant),
+                            ty: Box::new(Type {
+                                span: self.span(start),
+                                path: vec!["\0tuple".into()],
+                                arguments: payload,
+                            }),
+                        });
+                    }
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("]")?;
+            if path.len() == 1 {
+                return self.fail("an anonymous enum type needs at least one variant");
+            }
+            return Ok(Type {
+                span: self.span(start),
+                path,
+                arguments,
+            });
+        }
         if self.eat("(") {
             if self.eat(")") {
                 return Ok(Type {
@@ -927,6 +1013,13 @@ impl Parser {
         } else if path == ["Array"] {
             return self.fail("expected Array<element type, length>");
         }
+        if path == ["Bytes"] && !arguments.is_empty() {
+            self.warn_migration(
+                3,
+                start,
+                "legacy `Bytes<N>` type spelling; write `Array<u8, N>` instead".into(),
+            );
+        }
         let mut ty = Type {
             span: self.span(start),
             path,
@@ -940,6 +1033,16 @@ impl Parser {
             };
         }
         Ok(ty)
+    }
+    /// MW003: the legacy `Bytes<N>` spelling. Meaning is unchanged. MW001 and MW002 are unused.
+    fn warn_migration(&mut self, number: u16, start: usize, message: String) {
+        let mut warning = Diagnostic::new(
+            DiagnosticCode::new(Category::Migration, number).unwrap(),
+            Severity::Warning,
+            message,
+        );
+        warning.span = Some(self.span(start));
+        self.warnings.push(warning);
     }
     fn access(&mut self) -> Access {
         if self.eat("borrow") {
@@ -1074,12 +1177,70 @@ impl Parser {
         self.expect("}")?;
         Ok(fields)
     }
+    /// Positional tuple bindings. Nested patterns and discard bindings retain
+    /// their tuple position so lowering can consume every slot exactly once.
+    fn tuple_bindings(&mut self) -> PResult<Vec<TupleBinding>> {
+        self.expect("(")?;
+        let mut elements = Vec::new();
+        while !self.at(")") && !self.eof() {
+            let start = self.current().span.start;
+            let (binding, nested) = if self.at("(") {
+                (String::new(), Some(self.tuple_bindings()?))
+            } else {
+                let binding = self.name()?;
+                if self.at("(") || self.at("{") || self.at("::") {
+                    return self
+                        .fail("expected a tuple binding, wildcard, or nested tuple pattern");
+                }
+                if self.at(":") {
+                    return self.fail(
+                        "tuple destructuring aliases are not supported yet; use positional bindings",
+                    );
+                }
+                (binding, None)
+            };
+            elements.push(TupleBinding {
+                span: self.span(start),
+                binding,
+                nested,
+            });
+            if !self.eat(",") {
+                if !self.at(")") {
+                    return self.fail("expected `,` or `)` in tuple destructuring pattern");
+                }
+                if elements.len() == 1 {
+                    return self
+                        .fail("a one-element tuple destructuring pattern needs a trailing comma");
+                }
+                break;
+            }
+        }
+        self.expect(")")?;
+        Ok(elements)
+    }
     fn statement(&mut self) -> PResult<(Option<Statement>, Option<Expr>)> {
         let start = self.current().span.start;
         let kind = if self.at("let") || self.at("var") {
             let mutable = self.eat("var");
             if !mutable {
                 self.expect("let")?;
+            }
+            if self.at("(") {
+                let elements = self.tuple_bindings()?;
+                self.expect(":=")?;
+                let value = self.expr(0)?;
+                self.expect(";")?;
+                return Ok((
+                    Some(Statement {
+                        span: self.span(start),
+                        kind: StatementKind::TupleDestructure {
+                            mutable,
+                            elements,
+                            value,
+                        },
+                    }),
+                    None,
+                ));
             }
             if self.at_destructure() {
                 let path = self.path()?;
@@ -1153,9 +1314,11 @@ impl Parser {
             } else {
                 self.expr(0)?
             };
-            if ["=", "+=", "-=", "*=", "/=", "%="]
-                .iter()
-                .any(|s| self.at(s))
+            if [
+                "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+            ]
+            .iter()
+            .any(|s| self.at(s))
             {
                 let operator = match self.bump().kind {
                     TokenKind::Symbol(s) => s,
@@ -1454,6 +1617,20 @@ impl Parser {
             Node {
                 span: self.span(start),
                 kind,
+            }
+        } else if self.at("{") && self.looks_like_struct_fields() && self.no_struct {
+            return self.fail(
+                "an anonymous record literal is not allowed directly in an `if` condition, `match` scrutinee, or loop iterable; wrap it in parentheses",
+            );
+        } else if self.at("{") && self.looks_like_struct_fields() {
+            let fields = self.nested(Self::struct_fields)?;
+            Node {
+                span: self.span(start),
+                kind: ExprKind::Struct {
+                    path: Vec::new(),
+                    type_arguments: Vec::new(),
+                    fields,
+                },
             }
         } else if self.at("{") || self.at("if") || self.at("match") {
             self.block_like(false)?

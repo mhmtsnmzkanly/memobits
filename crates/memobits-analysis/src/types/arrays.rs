@@ -16,18 +16,34 @@ impl Checker {
         value
     }
 
-    /// Executable arrays hold non-Unit primitive, struct or nested array elements.
+    /// Executable arrays hold non-Unit primitive, struct/tuple, enum or nested
+    /// array elements. String-owning aggregates remain subject to backend gates.
     pub(super) fn check_element_support(&mut self, element: &Ty, span: Span) {
-        if self.table.is_borrow_option(element) {
+        if self.lowering
+            && matches!(element, Ty::Tuple(..))
+            && self.contains_list(element, &mut std::collections::HashSet::new())
+        {
+            self.error(
+                17,
+                span,
+                "arrays cannot contain tuples with List fields in this slice",
+            );
+        } else if self.table.is_borrow_option(element) {
             self.error(17, span, "Option<borrow T> cannot be stored in an array");
         } else if self.lowering
             && !matches!(
                 element,
-                Ty::Error | Ty::Never | Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Enum(..)
+                Ty::Error
+                    | Ty::Never
+                    | Ty::String
+                    | Ty::Array(..)
+                    | Ty::Struct(..)
+                    | Ty::Tuple(..)
+                    | Ty::Enum(..)
             )
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
         {
-            self.error(17, span, "executable arrays support non-Unit primitive, struct and nested array elements only");
+            self.error(17, span, "executable arrays support non-Unit primitive, struct/tuple, enum and nested array elements only");
         }
     }
 

@@ -2488,11 +2488,6 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "String array elements",
         ),
         (
-            "type Box [ Text(string) ] fn main() {}",
-            &["build"][..],
-            "String fields or enum payloads",
-        ),
-        (
             r#"pub fn main() -> Result<string, Error> { Ok("é") }"#,
             &["build"][..],
             "primitive success payload",
@@ -2511,21 +2506,11 @@ fn wasm_gates_string_exports_and_nested_storage() {
             r#"pub fn main() -> Result<string, Error> { let text := "é".concat("!"); Ok(text) }"#,
             &["build", "--lib"][..],
             "exported signatures cannot return enums",
-        ),
-        (
-            "type Box { text: Result<string, Error> } fn main() {}",
-            &["build"][..],
-            "nested Result<String, E> storage",
         ),
         (
             r#"pub fn main() -> Result<string, Utf8Error> { let input: Bytes<1> = [65]; input.to_utf8_string(1) }"#,
             &["build"][..],
             "primitive success payload",
-        ),
-        (
-            r#"fn main() { let result: Result<string, Error> = Ok("é"); let items := [result]; }"#,
-            &["build"][..],
-            "nested Result<String, E> storage",
         ),
     ] {
         f.write("src/main.mb", source);
@@ -2598,7 +2583,7 @@ fn wasm_gates_unsupported_string_struct_uses() {
             r#"fn take(label: Label) {}
                 fn main() { let text := "a".concat("b"); take(Label { text: text }); }"#,
             "LE900",
-            "only as borrow or share parameters",
+            "must move directly from a named local",
         ),
         (
             r#"fn main() { var label := Label { text: "a" }; label.text = if true { "b" } else { "c" }; }"#,
@@ -2616,9 +2601,9 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "concat requires",
         ),
         (
-            r#"fn make() -> Label { Label { text: "a" } } fn main() {}"#,
+            r#"fn make() -> Label { let text := "a".concat("b"); Label { text: text } } fn main() {}"#,
             "LE900",
-            "only as borrow or share parameters",
+            "requires a direct new local binding",
         ),
         (
             r#"fn main() { let label := Label { text: "a" }; let view := label.borrow(); }"#,
@@ -2631,16 +2616,6 @@ fn wasm_gates_unsupported_string_struct_uses() {
                 fn main() {}"#,
             "LE900",
             "requires a named owner",
-        ),
-        (
-            r#"fn main() { let labels := [Label { text: "a" }]; }"#,
-            "LE900",
-            "nesting structs with String fields",
-        ),
-        (
-            "type Outer { label: Label } fn main() {}",
-            "LE900",
-            "nesting structs with String fields",
         ),
     ] {
         f.write(
@@ -3202,6 +3177,61 @@ fn utf8_validator_example_checks_byte_fixtures_in_source_and_wasm() {
 }
 
 #[test]
+fn scalar_traversal_counts_scalars_separately_from_utf8_bytes_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='scalar-traversal'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn scalar_width(value: u32) -> u32 {
+            if value <= 127 { 1 }
+            else if value <= 2_047 { 2 }
+            else if value <= 65_535 { 3 }
+            else { 4 }
+        }
+        fn scalar_count(value: borrow string) -> u32 {
+            let bytes := value.len();
+            var offset: u32 = 0;
+            var count: u32 = 0;
+            loop {
+                if offset == bytes { break; }
+                let scalar := match value.scalar_at(offset) {
+                    Some(decoded) => decoded,
+                    None => { return count; },
+                };
+                offset += scalar_width(scalar);
+                count += 1;
+            }
+            count
+        }
+        fn main() -> Result<Bool, Error> {
+            let text := "aé€😀";
+            let ascii_text := "abc";
+            let supplementary_text := "😀";
+            let empty_text := "";
+            let count := scalar_count(text.borrow());
+            let moved := text;
+            Ok(count == 4 && moved.len() == 10
+                && scalar_count(ascii_text.borrow()) == 3 && ascii_text.len() == 3
+                && scalar_count(supplementary_text.borrow()) == 1 && supplementary_text.len() == 4
+                && scalar_count(empty_text.borrow()) == 0 && empty_text.len() == 0)
+        }
+    "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    let build = f.run(&["build", "--output", "scalar-traversal.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "scalar-traversal.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
 fn language_guide_checks_bytes_array_equivalence_in_source_and_wasm() {
     assert_example_runs_in_both_modes("language-guide", b"Result: Ok(i32(42))\n");
 }
@@ -3743,6 +3773,1466 @@ fn user_defined_rem_rhs_early_return_unwinds_staged_owned_operand() {
 }
 
 #[test]
+fn user_defined_bitand_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitand-interface'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Left { value: u32 } type Right { value: u32 } type MaskResult { value: u32 } extend Left of BitAnd { type Rhs = Right; type Output = MaskResult; fn bitand(self, rhs: Right) -> MaskResult { MaskResult { value: self.value & rhs.value } } } fn intersect<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitAnd { lhs & operand } fn main() -> u32 { let lhs := Left { value: 12 }; let operand := Right { value: 10 }; let result: MaskResult = intersect(lhs, operand); result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(8)\n");
+    let build = f.run(&["build", "--output", "bitand-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitand-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(8)\n");
+}
+
+#[test]
+fn user_defined_bitand_rejects_wrong_rhs_and_missing_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitand-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Left {} type Right {} type Other {} type Output { value: u32 } extend Left of BitAnd { type Rhs = Right; type Output = Output; fn bitand(self, rhs: Right) -> Output { Output { value: 42 } } } fn main() -> u32 { let result := Left {} & Other {}; result.value }",
+    );
+    let wrong = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        wrong.contains("BitAnd requires an owned receiver"),
+        "{wrong}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Left {} type Right {} fn main() -> u32 { let result := Left {} & Right {}; 0 }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible BitAnd implementation"),
+        "{missing}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use other::marker; use core::ops::BitAnd; pub type Left {} pub type Right {} pub type MaskResult { pub value: u32 } fn main() -> u32 { let result := Left {} & Right {}; result.value }",
+    );
+    f.write(
+        "src/other.mb",
+        "use self::main::Left; use self::main::Right; use self::main::MaskResult; pub fn marker() {} pub extend Left of core::ops::BitAnd { type Rhs = Right; type Output = MaskResult; fn bitand(self, rhs: Right) -> MaskResult { MaskResult { value: 42 } } }",
+    );
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible BitAnd implementation"),
+        "{inactive}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Left {} type Right {} type Output { value: u32 } extend Left of BitAnd { type Rhs = Right; type Output = Output; fn bitand(self, rhs: Right) -> Output { Output { value: 20 } } } extend Left of BitAnd { type Rhs = Right; type Output = Output; fn bitand(self, rhs: Right) -> Output { Output { value: 22 } } } fn main() -> u32 { let result := Left {} & Right {}; result.value }",
+    );
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous BitAnd implementation"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_bitand_consumes_owned_operands_and_unwinds_rhs_early_return() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitand-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Point { value: u32 } extend Point of BitAnd { type Rhs = Point; type Output = Point; fn bitand(self, rhs: Point) -> Point { Point { value: self.value & rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 15 }; let right := Point { value: 10 }; let result := left & right; take(left); result.value }",
+    );
+    let moved_left = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_left.contains("left"), "{moved_left}");
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Point { value: u32 } extend Point of BitAnd { type Rhs = Point; type Output = Point; fn bitand(self, rhs: Point) -> Point { Point { value: self.value & rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 15 }; let right := Point { value: 10 }; let result := left & right; take(right); result.value }",
+    );
+    let moved_right = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_right.contains("right"), "{moved_right}");
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Point { value: u32 } extend Point of BitAnd { type Rhs = Point; type Output = Point; fn bitand(self, rhs: Point) -> Point { Point { value: self.value & rhs.value } } } fn main() -> u32 { let left := Point { value: 15 }; let result := left & { return 42; Point { value: 10 } }; result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "bitand-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitand-early-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn user_defined_bitand_evaluates_operands_left_to_right() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitand-order'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitAnd; type Point { value: u32 } extend Point of BitAnd { type Rhs = Point; type Output = Point; fn bitand(self, rhs: Point) -> Point { Point { value: self.value & rhs.value } } } fn main() -> u32 { var order: u32 = 0; let result := { order = order * 10 + 1; Point { value: 15 } } & { if order != 1 { return 0; } order = order * 10 + 2; Point { value: 10 } }; if order != 12 { return 0; } result.value }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(10)\n");
+    let build = f.run(&["build", "--output", "bitand-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitand-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(10)\n");
+}
+
+#[test]
+fn user_defined_bitor_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitor-interface'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitOr; type Left { value: u32 } type Right { value: u32 } type MergeResult { value: u32 } extend Left of BitOr { type Rhs = Right; type Output = MergeResult; fn bitor(self, rhs: Right) -> MergeResult { MergeResult { value: self.value | rhs.value } } } fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitOr { lhs | operand } fn main() -> u32 { let result: MergeResult = merge(Left { value: 12 }, Right { value: 10 }); result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "bitor-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+}
+
+#[test]
+fn user_defined_bitor_rejects_wrong_rhs_and_missing_implementation() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitor-selection'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitOr; type Left {} type Right {} type Other {} type Output { value: u32 } extend Left of BitOr { type Rhs = Right; type Output = Output; fn bitor(self, rhs: Right) -> Output { Output { value: 42 } } } fn main() -> u32 { let result := Left {} | Other {}; result.value }");
+    let wrong = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        wrong.contains("BitOr requires an owned receiver"),
+        "{wrong}"
+    );
+    f.write("src/main.mb", "use core::ops::BitOr; type Left {} type Right {} fn main() -> u32 { let result := Left {} | Right {}; 0 }");
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible BitOr implementation"),
+        "{missing}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOr; type Left {} type Right {} type Output { value: u32 } extend Left of BitOr { type Rhs = Right; type Output = Output; fn bitor(self, rhs: Right) -> Output { Output { value: 20 } } } extend Left of BitOr { type Rhs = Right; type Output = Output; fn bitor(self, rhs: Right) -> Output { Output { value: 22 } } } fn main() -> u32 { let result := Left {} | Right {}; result.value }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous BitOr implementation"),
+        "{ambiguous}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitOr; pub type Left {} pub type Right {} pub type Output { pub value: u32 } fn main() -> u32 { let result := Left {} | Right {}; result.value }");
+    f.write("src/other.mb", "use self::main::Left; use self::main::Right; use self::main::Output; pub fn marker() {} pub extend Left of core::ops::BitOr { type Rhs = Right; type Output = Output; fn bitor(self, rhs: Right) -> Output { Output { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible BitOr implementation"),
+        "{inactive}"
+    );
+}
+
+#[test]
+fn user_defined_bitor_consumes_owned_operands_and_unwinds_rhs_early_return() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitor-move'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitOr; type Point { value: u32 } extend Point of BitOr { type Rhs = Point; type Output = Point; fn bitor(self, rhs: Point) -> Point { Point { value: self.value | rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left | right; take(left); result.value }");
+    let moved = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved.contains("left"), "{moved}");
+    f.write("src/main.mb", "use core::ops::BitOr; type Point { value: u32 } extend Point of BitOr { type Rhs = Point; type Output = Point; fn bitor(self, rhs: Point) -> Point { Point { value: self.value | rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left | right; take(right); result.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::BitOr; type Point { value: u32 } extend Point of BitOr { type Rhs = Point; type Output = Point; fn bitor(self, rhs: Point) -> Point { Point { value: self.value | rhs.value } } } fn main() -> u32 { let left := Point { value: 12 }; let result := left | { return 42; Point { value: 10 } }; result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "bitor-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-early-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn user_defined_bitor_evaluates_operands_left_to_right() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitor-order'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitOr; type Point { value: u32 } extend Point of BitOr { type Rhs = Point; type Output = Point; fn bitor(self, rhs: Point) -> Point { Point { value: self.value | rhs.value } } } fn main() -> u32 { var order: u32 = 0; let result := { order = order * 10 + 1; Point { value: 12 } } | { if order != 1 { return 0; } order = order * 10 + 2; Point { value: 10 } }; if order != 12 { return 0; } result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "bitor-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+}
+
+#[test]
+fn user_defined_bitxor_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-interface'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitXor; type Left { value: u32 } type Right { value: u32 } type MergeResult { value: u32 } extend Left of BitXor { type Rhs = Right; type Output = MergeResult; fn bitxor(self, rhs: Right) -> MergeResult { MergeResult { value: self.value ^ rhs.value } } } fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: BitXor { lhs ^ operand } fn main() -> u32 { let result: MergeResult = merge(Left { value: 12 }, Right { value: 10 }); result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(6)\n");
+    let build = f.run(&["build", "--output", "bitxor-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(6)\n");
+}
+
+#[test]
+fn user_defined_bitxor_rejects_wrong_rhs_and_missing_implementation() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-selection'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitXor; type Left {} type Right {} type Other {} type Output { value: u32 } extend Left of BitXor { type Rhs = Right; type Output = Output; fn bitxor(self, rhs: Right) -> Output { Output { value: 42 } } } fn main() -> u32 { let result := Left {} ^ Other {}; result.value }");
+    let wrong = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        wrong.contains("BitXor requires an owned receiver"),
+        "{wrong}"
+    );
+    f.write("src/main.mb", "use core::ops::BitXor; type Left {} type Right {} fn main() -> u32 { let result := Left {} ^ Right {}; 0 }");
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible BitXor implementation"),
+        "{missing}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXor; type Left {} type Right {} type Output { value: u32 } extend Left of BitXor { type Rhs = Right; type Output = Output; fn bitxor(self, rhs: Right) -> Output { Output { value: 20 } } } extend Left of BitXor { type Rhs = Right; type Output = Output; fn bitxor(self, rhs: Right) -> Output { Output { value: 22 } } } fn main() -> u32 { let result := Left {} ^ Right {}; result.value }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous BitXor implementation"),
+        "{ambiguous}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitXor; pub type Left {} pub type Right {} pub type Output { pub value: u32 } fn main() -> u32 { let result := Left {} ^ Right {}; result.value }");
+    f.write("src/other.mb", "use self::main::Left; use self::main::Right; use self::main::Output; pub fn marker() {} pub extend Left of core::ops::BitXor { type Rhs = Right; type Output = Output; fn bitxor(self, rhs: Right) -> Output { Output { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible BitXor implementation"),
+        "{inactive}"
+    );
+}
+
+#[test]
+fn user_defined_bitxor_consumes_owned_operands_and_unwinds_rhs_early_return() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-move'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitXor; type Point { value: u32 } extend Point of BitXor { type Rhs = Point; type Output = Point; fn bitxor(self, rhs: Point) -> Point { Point { value: self.value ^ rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left ^ right; take(left); result.value }");
+    let moved = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved.contains("left"), "{moved}");
+    f.write("src/main.mb", "use core::ops::BitXor; type Point { value: u32 } extend Point of BitXor { type Rhs = Point; type Output = Point; fn bitxor(self, rhs: Point) -> Point { Point { value: self.value ^ rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left ^ right; take(right); result.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::BitXor; type Point { value: u32 } extend Point of BitXor { type Rhs = Point; type Output = Point; fn bitxor(self, rhs: Point) -> Point { Point { value: self.value ^ rhs.value } } } fn main() -> u32 { let left := Point { value: 12 }; let result := left ^ { return 42; Point { value: 10 } }; result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "bitxor-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-early-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn user_defined_bitxor_consumes_rhs_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-rhs-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::BitXor; type Point { value: u32 } extend Point of BitXor { type Rhs = Point; type Output = Point; fn bitxor(self, rhs: Point) -> Point { Point { value: self.value ^ rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left ^ right; take(right); result.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_bitxor_evaluates_operands_left_to_right() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-order'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitXor; type Point { value: u32 } extend Point of BitXor { type Rhs = Point; type Output = Point; fn bitxor(self, rhs: Point) -> Point { Point { value: self.value ^ rhs.value } } } fn main() -> u32 { var order: u32 = 0; let result := { order = order * 10 + 1; Point { value: 12 } } ^ { if order != 1 { return 0; } order = order * 10 + 2; Point { value: 10 } }; if order != 12 { return 0; } result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(6)\n");
+    let build = f.run(&["build", "--output", "bitxor-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(6)\n");
+}
+
+#[test]
+fn user_defined_shl_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-interface'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shl; type Left { value: u32 } type Right { value: u32 } type MergeResult { value: u32 } extend Left of Shl { type Rhs = Right; type Output = MergeResult; fn shl(self, rhs: Right) -> MergeResult { MergeResult { value: self.value << rhs.value } } } fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: Shl { lhs << operand } fn main() -> u32 { let result: MergeResult = merge(Left { value: 12 }, Right { value: 10 }); result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(12288)\n");
+    let build = f.run(&["build", "--output", "shl-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(12288)\n");
+}
+
+#[test]
+fn user_defined_shl_rejects_wrong_rhs_and_missing_implementation() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-selection'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shl; type Left {} type Right {} type Other {} type Output { value: u32 } extend Left of Shl { type Rhs = Right; type Output = Output; fn shl(self, rhs: Right) -> Output { Output { value: 42 } } } fn main() -> u32 { let result := Left {} << Other {}; result.value }");
+    let wrong = err(f.run(&["analyze-project"]), "TE007");
+    assert!(wrong.contains("Shl requires an owned receiver"), "{wrong}");
+    f.write("src/main.mb", "use core::ops::Shl; type Left {} type Right {} fn main() -> u32 { let result := Left {} << Right {}; 0 }");
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Shl implementation"),
+        "{missing}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Shl; type Left {} type Right {} type Output { value: u32 } extend Left of Shl { type Rhs = Right; type Output = Output; fn shl(self, rhs: Right) -> Output { Output { value: 20 } } } extend Left of Shl { type Rhs = Right; type Output = Output; fn shl(self, rhs: Right) -> Output { Output { value: 22 } } } fn main() -> u32 { let result := Left {} << Right {}; result.value }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Shl implementation"),
+        "{ambiguous}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::Shl; pub type Left {} pub type Right {} pub type Output { pub value: u32 } fn main() -> u32 { let result := Left {} << Right {}; result.value }");
+    f.write("src/other.mb", "use self::main::Left; use self::main::Right; use self::main::Output; pub fn marker() {} pub extend Left of core::ops::Shl { type Rhs = Right; type Output = Output; fn shl(self, rhs: Right) -> Output { Output { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Shl implementation"),
+        "{inactive}"
+    );
+}
+
+#[test]
+fn user_defined_shl_consumes_owned_operands_and_unwinds_rhs_early_return() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-move'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shl; type Point { value: u32 } extend Point of Shl { type Rhs = Point; type Output = Point; fn shl(self, rhs: Point) -> Point { Point { value: self.value << rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left << right; take(left); result.value }");
+    let moved = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved.contains("left"), "{moved}");
+    f.write("src/main.mb", "use core::ops::Shl; type Point { value: u32 } extend Point of Shl { type Rhs = Point; type Output = Point; fn shl(self, rhs: Point) -> Point { Point { value: self.value << rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left << right; take(right); result.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::Shl; type Point { value: u32 } extend Point of Shl { type Rhs = Point; type Output = Point; fn shl(self, rhs: Point) -> Point { Point { value: self.value << rhs.value } } } fn main() -> u32 { let left := Point { value: 12 }; let result := left << { return 42; Point { value: 10 } }; result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "shl-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-early-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn user_defined_shl_consumes_rhs_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-rhs-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Shl; type Point { value: u32 } extend Point of Shl { type Rhs = Point; type Output = Point; fn shl(self, rhs: Point) -> Point { Point { value: self.value << rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 10 }; let result := left << right; take(right); result.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_shl_evaluates_operands_left_to_right() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-order'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shl; type Point { value: u32 } extend Point of Shl { type Rhs = Point; type Output = Point; fn shl(self, rhs: Point) -> Point { Point { value: self.value << rhs.value } } } fn main() -> u32 { var order: u32 = 0; let result := { order = order * 10 + 1; Point { value: 12 } } << { if order != 1 { return 0; } order = order * 10 + 2; Point { value: 10 } }; if order != 12 { return 0; } result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(12288)\n");
+    let build = f.run(&["build", "--output", "shl-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(12288)\n");
+}
+
+#[test]
+fn user_defined_neg_supports_nominal_owned_receiver_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='neg-interface'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Neg; type Input { value: i32 } type Output { value: i32 } extend Input of Neg { type Output = Output; fn neg(self) -> Output { Output { value: -self.value } } } fn main() -> i32 { let result := -Input { value: 5 }; result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(-5)\n");
+    let build = f.run(&["build", "--output", "neg-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "neg-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(-5)\n");
+}
+
+#[test]
+fn user_defined_neg_rejects_missing_implementation_and_consumes_receiver() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='neg-selection'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "type Input {} fn main() -> i32 { let result := -Input {}; 0 }",
+    );
+    let missing = f.run(&["run"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible Neg implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Neg; type Input { value: i32 } type Output { value: i32 } extend Input of Neg { type Output = Output; fn neg(self) -> Output { Output { value: -self.value } } } fn take(value: Input) {} fn main() -> i32 { let input := Input { value: 5 }; let result := -input; take(input); result.value }");
+    let moved = f.run(&["run"]);
+    assert!(!moved.status.success(), "{moved:?}");
+}
+
+#[test]
+fn user_defined_neg_rejects_inactive_private_and_ambiguous_implementations() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='neg-visibility'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use other::marker; use core::ops::Neg; pub type Input {} pub type Output { pub value: i32 } fn main() -> i32 { let result := -Input {}; result.value }");
+    f.write("src/other.mb", "use self::main::Input; use self::main::Output; pub fn marker() {} pub extend Input of core::ops::Neg { type Output = Output; fn neg(self) -> Output { Output { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Neg implementation"),
+        "{inactive}"
+    );
+
+    f.write("src/main.mb", "use other; use core::ops::Neg; pub type Input {} pub type Output { pub value: i32 } fn main() -> i32 { let result := -Input {}; result.value }");
+    f.write("src/other.mb", "use self::main::Input; use self::main::Output; pub fn marker() {} extend Input of core::ops::Neg { type Output = Output; fn neg(self) -> Output { Output { value: 42 } } }");
+    let private = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        private.contains("matching Neg implementation is private or inactive"),
+        "{private}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Neg; type Input {} type Output { value: i32 } extend Input of Neg { type Output = Output; fn neg(self) -> Output { Output { value: 20 } } } extend Input of Neg { type Output = Output; fn neg(self) -> Output { Output { value: 22 } } } fn main() -> i32 { let result := -Input {}; result.value }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Neg implementation for `-`"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn user_defined_neg_evaluates_operand_once_and_primitive_negation_stays_builtin() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='neg-order'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Neg; type Input { value: i32 } type Output { value: i32 } extend Input of Neg { type Output = Output; fn neg(self) -> Output { Output { value: -self.value } } } fn main() -> i32 { var count: i32 = 0; let result := -{ count = count + 1; Input { value: 5 } }; if count != 1 { return 0; } result.value + -2 }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(-7)\n");
+    let build = f.run(&["build", "--output", "neg-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "neg-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(-7)\n");
+}
+
+#[test]
+fn user_defined_shr_supports_heterogeneous_generic_operands_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-interface'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shr; type Left { value: u32 } type Right { value: u32 } type MergeResult { value: u32 } extend Left of Shr { type Rhs = Right; type Output = MergeResult; fn shr(self, rhs: Right) -> MergeResult { MergeResult { value: self.value >> rhs.value } } } fn merge<T>(lhs: T, operand: T::Rhs) -> T::Output where T: Shr { lhs >> operand } fn main() -> u32 { let result: MergeResult = merge(Left { value: 12 }, Right { value: 2 }); result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(3)\n");
+    let build = f.run(&["build", "--output", "shr-interface.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-interface.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(3)\n");
+}
+
+#[test]
+fn user_defined_shr_rejects_wrong_rhs_and_missing_implementation() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-selection'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shr; type Left {} type Right {} type Other {} type Output { value: u32 } extend Left of Shr { type Rhs = Right; type Output = Output; fn shr(self, rhs: Right) -> Output { Output { value: 42 } } } fn main() -> u32 { let result := Left {} >> Other {}; result.value }");
+    let wrong = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        wrong.contains(
+            "Shr requires an owned receiver and an owned operand matching its associated Rhs"
+        ),
+        "{wrong}"
+    );
+    f.write("src/main.mb", "use core::ops::Shr; type Left {} type Right {} fn main() -> u32 { let result := Left {} >> Right {}; 0 }");
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible Shr implementation"),
+        "{missing}"
+    );
+
+    f.write("src/main.mb", "use core::ops::Shr; type Left {} type Right {} type Output { value: u32 } extend Left of Shr { type Rhs = Right; type Output = Output; fn shr(self, rhs: Right) -> Output { Output { value: 20 } } } extend Left of Shr { type Rhs = Right; type Output = Output; fn shr(self, rhs: Right) -> Output { Output { value: 22 } } } fn main() -> u32 { let result := Left {} >> Right {}; result.value }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous Shr implementation"),
+        "{ambiguous}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::Shr; pub type Left {} pub type Right {} pub type Output { pub value: u32 } fn main() -> u32 { let result := Left {} >> Right {}; result.value }");
+    f.write("src/other.mb", "use self::main::Left; use self::main::Right; use self::main::Output; pub fn marker() {} pub extend Left of core::ops::Shr { type Rhs = Right; type Output = Output; fn shr(self, rhs: Right) -> Output { Output { value: 42 } } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible Shr implementation"),
+        "{inactive}"
+    );
+}
+
+#[test]
+fn user_defined_shr_consumes_owned_operands_and_unwinds_rhs_early_return() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-move'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shr; type Point { value: u32 } extend Point of Shr { type Rhs = Point; type Output = Point; fn shr(self, rhs: Point) -> Point { Point { value: self.value >> rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 2 }; let result := left >> right; take(left); result.value }");
+    let moved = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved.contains("left"), "{moved}");
+    f.write("src/main.mb", "use core::ops::Shr; type Point { value: u32 } extend Point of Shr { type Rhs = Point; type Output = Point; fn shr(self, rhs: Point) -> Point { Point { value: self.value >> rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 2 }; let result := left >> right; take(right); result.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::Shr; type Point { value: u32 } extend Point of Shr { type Rhs = Point; type Output = Point; fn shr(self, rhs: Point) -> Point { Point { value: self.value >> rhs.value } } } fn main() -> u32 { let left := Point { value: 12 }; let result := left >> { return 42; Point { value: 2 } }; result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "shr-early-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-early-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+}
+
+#[test]
+fn user_defined_shr_consumes_rhs_operand() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-rhs-move'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "use core::ops::Shr; type Point { value: u32 } extend Point of Shr { type Rhs = Point; type Output = Point; fn shr(self, rhs: Point) -> Point { Point { value: self.value >> rhs.value } } } fn take(value: Point) {} fn main() -> u32 { let left := Point { value: 12 }; let right := Point { value: 2 }; let result := left >> right; take(right); result.value }",
+    );
+    let diagnostic = err(f.run(&["ownership-project"]), "BE001");
+    assert!(diagnostic.contains("right"), "{diagnostic}");
+}
+
+#[test]
+fn user_defined_shr_evaluates_operands_left_to_right() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-order'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::Shr; type Point { value: u32 } extend Point of Shr { type Rhs = Point; type Output = Point; fn shr(self, rhs: Point) -> Point { Point { value: self.value >> rhs.value } } } fn main() -> u32 { var order: u32 = 0; let result := { order = order * 10 + 1; Point { value: 12 } } >> { if order != 1 { return 0; } order = order * 10 + 2; Point { value: 2 } }; if order != 12 { return 0; } result.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(3)\n");
+    let build = f.run(&["build", "--output", "shr-order.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-order.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(3)\n");
+}
+
+#[test]
+fn user_defined_ordering_borrows_receiver_and_runs_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='partial-ord'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } type Other { value: u32 } extend Key of PartialOrd { type Rhs = Other; fn lt(borrow self, rhs: Other) -> Bool { self.value < rhs.value } fn le(borrow self, rhs: Other) -> Bool { self.value <= rhs.value } fn gt(borrow self, rhs: Other) -> Bool { self.value > rhs.value } fn ge(borrow self, rhs: Other) -> Bool { self.value >= rhs.value } } fn before<T>(lhs: T, rhs: T::Rhs) -> Bool where T: PartialOrd { lhs < rhs } fn main() -> u32 { var order: u32 = 0; let base := { order = 1; Key { value: 10 } }; let gt_left := Key { value: 11 }; let rhs11 := Other { value: 11 }; let rhs10 := Other { value: 10 }; let rhs10d := Other { value: 10 }; let rhs10b := Other { value: 10 }; let rhs9 := Other { value: 9 }; let rhs11b := Other { value: 11 }; let rhs10c := Other { value: 10 }; let rhs11c := Other { value: 11 }; let one := Key { value: 1 }; let two := Other { value: 2 }; let tests := base < rhs11 && !(base < rhs10) && base <= rhs10b && !(base <= rhs9) && gt_left > rhs10d && !(gt_left > rhs11b) && base >= rhs10c && !(base >= rhs11c) && before(one, two); if !tests { return 0; } if order != 1 || base.value != 10 { return 0; } 42 }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(42)\n");
+    let build = f.run(&["build", "--output", "partial-ord.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "partial-ord.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(42)\n");
+
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} type Other {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} < Other {} }");
+    let wrong_rhs = err(f.run(&["analyze-project"]), "TE007");
+    assert!(wrong_rhs.contains("PartialOrd requires"), "{wrong_rhs}");
+    f.write(
+        "src/main.mb",
+        "type Key {} fn main() -> Bool { Key {} < Key {} }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible PartialOrd implementation"),
+        "{missing}"
+    );
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key { value: u32 } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 2 }; let _less := left < right; right.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } } extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { false } fn le(borrow self, rhs: Key) -> Bool { false } fn gt(borrow self, rhs: Key) -> Bool { false } fn ge(borrow self, rhs: Key) -> Bool { false } } fn main() -> Bool { Key {} < Key {} }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous PartialOrd implementation for `<`"),
+        "{ambiguous}"
+    );
+    f.write("src/main.mb", "use other; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> Bool { Key { value: 1 } < Key { value: 2 } }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } }");
+    let private = err(f.run(&["analyze-project"]), "TE007");
+    assert!(private.contains("private or inactive"), "{private}");
+    f.write("src/main.mb", "use other::marker; use core::ops::PartialOrd; pub type Key { value: u32 } fn main() -> Bool { Key { value: 1 } < Key { value: 2 } }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> Bool { true } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible PartialOrd implementation"),
+        "{inactive}"
+    );
+    f.write("src/main.mb", "use core::ops::PartialOrd; type Key {} extend Key of PartialOrd { type Rhs = Key; fn lt(borrow self, rhs: Key) -> Bool { true } fn le(borrow self, rhs: Key) -> Bool { true } fn gt(borrow self, rhs: Key) -> Bool { true } fn ge(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> Bool { Key {} < Key {} }");
+    let wrong_signature = err(f.run(&["analyze-project"]), "ME005");
+    assert!(wrong_signature.contains("Bool"), "{wrong_signature}");
+}
+
+#[test]
+fn user_defined_add_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='add-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn next_index(c: share u32) -> u32 { c += 1; 0 } fn main() -> u32 { var counter := Counter { value: 4 }; counter += 3; counter += 5; var wrapper := Wrapper { item: Counter { value: 1 } }; wrapper.item += 2; var index_calls: u32 = 0; var items := [Counter { value: 2 }, Counter { value: 3 }]; items[next_index(index_calls.share())] += 2; if index_calls == 1 { counter.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(19)\n");
+    let build = f.run(&["build", "--output", "add-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "add-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(19)\n");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of AddAssign { type Rhs = Delta; fn add_assign(share self, rhs: Delta) { self.value += rhs.value; } } fn update<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign { var value := target; value += rhs; value } fn main() -> u32 { let result := update(Counter { value: 7 }, Delta { value: 5 }); result.value }");
+    let generic = f.run(&["run"]);
+    assert!(generic.status.success(), "{generic:?}");
+    assert_eq!(generic.stdout, b"Result: u32(12)\n");
+    let generic_build = f.run(&["build", "--output", "add-assign-generic.wasm"]);
+    assert!(generic_build.status.success(), "{generic_build:?}");
+    let generic_artifact = f.run(&["run", "add-assign-generic.wasm"]);
+    assert!(generic_artifact.status.success(), "{generic_artifact:?}");
+    assert_eq!(generic_artifact.stdout, b"Result: i32(12)\n");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Plain { value: u32 } fn update<T>(target: T, rhs: T::Rhs) -> T where T: AddAssign { var value := target; value += rhs; value } fn main() -> u32 { let result := update(Plain { value: 7 }, 5); result.value }");
+    let missing_evidence = f.run(&["analyze-project"]);
+    assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
+    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::AddAssign'"), "{missing_evidence:?}");
+
+    f.write("src/main.mb", "fn main() -> u32 { var value: u32 = 7; value += 5; value }");
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(12)\n");
+    let primitive_build = f.run(&["build", "--output", "add-assign-primitive.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "add-assign-primitive.wasm"]);
+    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(12)\n");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter += { return 9; 5 }; counter.value }");
+    let early_return = f.run(&["run"]);
+    assert!(early_return.status.success(), "{early_return:?}");
+    assert_eq!(early_return.stdout, b"Result: u32(9)\n");
+    let early_build = f.run(&["build", "--output", "add-assign-return.wasm"]);
+    assert!(early_build.status.success(), "{early_build:?}");
+    let early_wasm = f.run(&["run", "add-assign-return.wasm"]);
+    assert!(early_wasm.status.success(), "{early_wasm:?}");
+    assert_eq!(early_wasm.stdout, b"Result: i32(9)\n");
+
+    // The indexed place is captured before RHS evaluation. Returning from the
+    // RHS block must skip AddAssign and its deliberate dynamic divide-by-zero.
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += 10 / rhs; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var calls: u32 = 0; var items := [Counter { value: 4 }]; items[index(calls.share())] += { return 11; 0 }; 0 }");
+    let indexed_early_return = f.run(&["run"]);
+    assert!(
+        indexed_early_return.status.success(),
+        "{indexed_early_return:?}"
+    );
+    assert_eq!(indexed_early_return.stdout, b"Result: u32(11)\n");
+    let indexed_build = f.run(&["build", "--output", "add-assign-indexed-return.wasm"]);
+    assert!(indexed_build.status.success(), "{indexed_build:?}");
+    let indexed_wasm = f.run(&["run", "add-assign-indexed-return.wasm"]);
+    assert!(indexed_wasm.status.success(), "{indexed_wasm:?}");
+    assert_eq!(indexed_wasm.stdout, b"Result: i32(11)\n");
+
+    // A field-projected target must also skip the method when RHS evaluation
+    // returns from the enclosing function.
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += 10 / rhs; } } fn main() -> u32 { var wrapper := Wrapper { item: Counter { value: 4 } }; wrapper.item += { return 12; 0 }; 0 }");
+    let field_early_return = f.run(&["run"]);
+    assert!(
+        field_early_return.status.success(),
+        "{field_early_return:?}"
+    );
+    assert_eq!(field_early_return.stdout, b"Result: u32(12)\n");
+    let field_build = f.run(&["build", "--output", "add-assign-field-return.wasm"]);
+    assert!(field_build.status.success(), "{field_build:?}");
+    let field_wasm = f.run(&["run", "add-assign-field-return.wasm"]);
+    assert!(field_wasm.status.success(), "{field_wasm:?}");
+    assert_eq!(field_wasm.stdout, b"Result: i32(12)\n");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = bool; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter += true; counter.value }");
+    let wrong_signature = f.run(&["analyze-project"]);
+    assert!(!wrong_signature.status.success(), "{wrong_signature:?}");
+    assert!(
+        String::from_utf8_lossy(&wrong_signature.stderr).contains("extension method 'add_assign'"),
+        "{wrong_signature:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn read(c: share Counter) -> u32 { c.value += 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter += read(counter.share()); counter.value }");
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter += 1; counter.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible AddAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter += 1; counter.value }");
+    let immutable = f.run(&["analyze-project"]);
+    assert!(!immutable.status.success(), "{immutable:?}");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter += true; counter.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::AddAssign; type Counter { value: u32 } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } extend Counter of AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter += 1; counter.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous AddAssign"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::AddAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter += 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} pub extend Counter of core::ops::AddAssign { type Rhs = u32; fn add_assign(share self, rhs: u32) { self.value += rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible AddAssign implementation"),
+        "{inactive:?}"
+    );
+}
+
+#[test]
+fn user_defined_sub_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } type Delta { value: u32 } type Wrapper { item: Counter } extend Counter of SubAssign { type Rhs = Delta; fn sub_assign(share self, rhs: Delta) { self.value -= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var counter := Counter { value: 20 }; let d1 := Delta { value: 3 }; counter -= d1; var wrapper := Wrapper { item: Counter { value: 10 } }; let d2 := Delta { value: 2 }; wrapper.item -= d2; var calls: u32 = 0; var items := [Counter { value: 8 }]; let d3 := Delta { value: 1 }; items[index(calls.share())] -= d3; if calls == 1 { counter.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(32)\n");
+    let build = f.run(&["build", "--output", "sub-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(32)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of SubAssign { type Rhs = Delta; fn sub_assign(share self, rhs: Delta) { self.value -= rhs.value; } } fn update<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign { var value := target; value -= rhs; value } fn main() -> u32 { let result := update(Counter { value: 20 }, Delta { value: 7 }); result.value }");
+    let generic = f.run(&["run"]);
+    assert!(generic.status.success(), "{generic:?}");
+    assert_eq!(generic.stdout, b"Result: u32(13)\n");
+    let generic_build = f.run(&["build", "--output", "sub-assign-generic.wasm"]);
+    assert!(generic_build.status.success(), "{generic_build:?}");
+    let generic_artifact = f.run(&["run", "sub-assign-generic.wasm"]);
+    assert!(generic_artifact.status.success(), "{generic_artifact:?}");
+    assert_eq!(generic_artifact.stdout, b"Result: i32(13)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Plain { value: u32 } fn update<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign { var value := target; value -= rhs; value } fn main() -> u32 { let result := update(Plain { value: 20 }, 7); result.value }");
+    let missing_evidence = f.run(&["analyze-project"]);
+    assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
+    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::SubAssign'"), "{missing_evidence:?}");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn update<T>(target: T, rhs: T::Rhs) -> T where T: SubAssign { var value := target; value -= rhs; value } fn main() -> u32 { let result := update(Counter { value: 20 }, true); result.value }");
+    let generic_wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!generic_wrong_rhs.status.success(), "{generic_wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= 10 / rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= { return 13; 0 }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(13)\n");
+    let build = f.run(&["build", "--output", "sub-assign-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(13)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= 10 / rhs; } } fn main() -> u32 { var wrapper := Wrapper { item: Counter { value: 4 } }; wrapper.item -= { return 14; 0 }; 0 }");
+    let field_early = f.run(&["run"]);
+    assert!(field_early.status.success(), "{field_early:?}");
+    assert_eq!(field_early.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "sub-assign-field-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-field-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= 10 / rhs; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var calls: u32 = 0; var items := [Counter { value: 4 }]; items[index(calls.share())] -= { return 15; 0 }; 0 }");
+    let index_early = f.run(&["run"]);
+    assert!(index_early.status.success(), "{index_early:?}");
+    assert_eq!(index_early.stdout, b"Result: u32(15)\n");
+    let build = f.run(&["build", "--output", "sub-assign-index-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-index-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(15)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 1 }; counter -= 2; counter.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible SubAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= true; counter.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter -= 1; counter.value }");
+    let immutable = f.run(&["analyze-project"]);
+    assert!(!immutable.status.success(), "{immutable:?}");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= 1; counter.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous SubAssign"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::SubAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} pub extend Counter of core::ops::SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible SubAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::SubAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} extend Counter of core::ops::SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } }");
+    // Keep the imported module live while its implementation remains private.
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 9; value -= 4; value }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(5)\n");
+    let primitive_build = f.run(&["build", "--output", "sub-assign-primitive.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "sub-assign-primitive.wasm"]);
+    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(5)\n");
+
+    f.write("src/main.mb", "use core::ops::SubAssign; type Counter { value: u32 } extend Counter of SubAssign { type Rhs = u32; fn sub_assign(share self, rhs: u32) { self.value -= rhs; } } fn read(c: share Counter) -> u32 { c.value -= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter -= read(counter.share()); counter.value }");
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+}
+
+#[test]
+fn user_defined_mul_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='sub-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } type Delta { value: u32 } type Wrapper { item: Counter } extend Counter of MulAssign { type Rhs = Delta; fn mul_assign(share self, rhs: Delta) { self.value *= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var counter := Counter { value: 20 }; let d1 := Delta { value: 3 }; counter *= d1; var wrapper := Wrapper { item: Counter { value: 10 } }; let d2 := Delta { value: 2 }; wrapper.item *= d2; var calls: u32 = 0; var items := [Counter { value: 8 }]; let d3 := Delta { value: 1 }; items[index(calls.share())] *= d3; if calls == 1 { counter.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(88)\n");
+    let build = f.run(&["build", "--output", "sub-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(88)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= 10 / rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= { return 13; 0 }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(13)\n");
+    let build = f.run(&["build", "--output", "sub-assign-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(13)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= 10 / rhs; } } fn main() -> u32 { var wrapper := Wrapper { item: Counter { value: 4 } }; wrapper.item *= { return 14; 0 }; 0 }");
+    let field_early = f.run(&["run"]);
+    assert!(field_early.status.success(), "{field_early:?}");
+    assert_eq!(field_early.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "sub-assign-field-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-field-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= 10 / rhs; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var calls: u32 = 0; var items := [Counter { value: 4 }]; items[index(calls.share())] *= { return 15; 0 }; 0 }");
+    let index_early = f.run(&["run"]);
+    assert!(index_early.status.success(), "{index_early:?}");
+    assert_eq!(index_early.stdout, b"Result: u32(15)\n");
+    let build = f.run(&["build", "--output", "sub-assign-index-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "sub-assign-index-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(15)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 1 }; counter *= 2; counter.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible MulAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= true; counter.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of MulAssign { type Rhs = Delta; fn mul_assign(share self, rhs: Delta) { self.value *= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 7 }, Delta { value: 6 }); result.value }");
+    let generic = f.run(&["run"]);
+    assert!(generic.status.success(), "{generic:?}");
+    assert_eq!(generic.stdout, b"Result: u32(42)\n");
+    let generic_build = f.run(&["build", "--output", "mul-assign-generic.wasm"]);
+    assert!(generic_build.status.success(), "{generic_build:?}");
+    let generic_artifact = f.run(&["run", "mul-assign-generic.wasm"]);
+    assert!(generic_artifact.status.success(), "{generic_artifact:?}");
+    assert_eq!(generic_artifact.stdout, b"Result: i32(42)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of MulAssign { type Rhs = Delta; fn mul_assign(share self, rhs: Delta) { self.value *= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let rhs := Delta { value: 6 }; let result := scale(Counter { value: 7 }, rhs); rhs.value + result.value }");
+    let moved_rhs = f.run(&["ownership-project"]);
+    assert!(!moved_rhs.status.success(), "{moved_rhs:?}");
+    assert!(String::from_utf8_lossy(&moved_rhs.stderr).contains("rhs"), "{moved_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Plain { value: u32 } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let result := scale(Plain { value: 7 }, 6); result.value }");
+    let missing_generic = f.run(&["analyze-project"]);
+    assert!(!missing_generic.status.success(), "{missing_generic:?}");
+    assert!(String::from_utf8_lossy(&missing_generic.stderr).contains("no visible implementation of 'core::ops::MulAssign'"), "{missing_generic:?}");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: MulAssign { var value := initial; value *= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 7 }, true); result.value }");
+    let wrong_generic_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_generic_rhs.status.success(), "{wrong_generic_rhs:?}");
+
+    f.write("src/main.mb", "fn main() -> u32 { var value: u32 = 7; value *= 6; value }");
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(42)\n");
+    let primitive_build = f.run(&["build", "--output", "mul-assign-primitive.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "mul-assign-primitive.wasm"]);
+    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(42)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter *= 1; counter.value }");
+    let immutable = f.run(&["analyze-project"]);
+    assert!(!immutable.status.success(), "{immutable:?}");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= 1; counter.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous MulAssign"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::MulAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} pub extend Counter of core::ops::MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible MulAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::MulAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} extend Counter of core::ops::MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } }");
+    // Keep the imported module live while its implementation remains private.
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 9; value *= 4; value }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(36)\n");
+
+    f.write("src/main.mb", "use core::ops::MulAssign; type Counter { value: u32 } extend Counter of MulAssign { type Rhs = u32; fn mul_assign(share self, rhs: u32) { self.value *= rhs; } } fn read(c: share Counter) -> u32 { c.value *= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter *= read(counter.share()); counter.value }");
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+}
+
+#[test]
+fn user_defined_div_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='div-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } type Wrapper { item: Counter } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var counter := Counter { value: 20 }; let d1 := Delta { value: 3 }; counter /= d1; var wrapper := Wrapper { item: Counter { value: 10 } }; let d2 := Delta { value: 2 }; wrapper.item /= d2; var calls: u32 = 0; var items := [Counter { value: 8 }]; let d3 := Delta { value: 1 }; items[index(calls.share())] /= d3; if calls == 1 { counter.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(19)\n");
+    let build = f.run(&["build", "--output", "div-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "div-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(19)\n");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= 10 / rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= { return 13; 0 }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(13)\n");
+    let build = f.run(&["build", "--output", "div-assign-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "div-assign-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(13)\n");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= 10 / rhs; } } fn main() -> u32 { var wrapper := Wrapper { item: Counter { value: 4 } }; wrapper.item /= { return 14; 0 }; 0 }");
+    let field_early = f.run(&["run"]);
+    assert!(field_early.status.success(), "{field_early:?}");
+    assert_eq!(field_early.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "div-assign-field-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "div-assign-field-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= 10 / rhs; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var calls: u32 = 0; var items := [Counter { value: 4 }]; items[index(calls.share())] /= { return 15; 0 }; 0 }");
+    let index_early = f.run(&["run"]);
+    assert!(index_early.status.success(), "{index_early:?}");
+    assert_eq!(index_early.stdout, b"Result: u32(15)\n");
+    let build = f.run(&["build", "--output", "div-assign-index-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "div-assign-index-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(15)\n");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 1 }; counter /= 2; counter.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible DivAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= true; counter.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 81 }, Delta { value: 3 }); result.value }");
+    let generic = f.run(&["run"]);
+    assert!(generic.status.success(), "{generic:?}");
+    assert_eq!(generic.stdout, b"Result: u32(27)\n");
+    let generic_build = f.run(&["build", "--output", "div-assign-generic.wasm"]);
+    assert!(generic_build.status.success(), "{generic_build:?}");
+    let generic_artifact = f.run(&["run", "div-assign-generic.wasm"]);
+    assert!(generic_artifact.status.success(), "{generic_artifact:?}");
+    assert_eq!(generic_artifact.stdout, b"Result: i32(27)\n");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let delta := Delta { value: 3 }; let result := scale(Counter { value: 81 }, delta); delta.value + result.value }");
+    let moved_rhs = f.run(&["ownership-project"]);
+    assert!(!moved_rhs.status.success(), "owned generic RHS must be consumed: {moved_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } type Delta { value: u32 } extend Counter of DivAssign { type Rhs = Delta; fn div_assign(share self, rhs: Delta) { self.value /= rhs.value; } } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let result := scale(Counter { value: 81 }, 3); result.value }");
+    let generic_wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!generic_wrong_rhs.status.success(), "{generic_wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Plain { value: u32 } fn scale<T>(initial: T, rhs: T::Rhs) -> T where T: DivAssign { var value := initial; value /= rhs; value } fn main() -> u32 { let result := scale(Plain { value: 81 }, 3); result.value }");
+    let missing_evidence = f.run(&["analyze-project"]);
+    assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
+    assert!(String::from_utf8_lossy(&missing_evidence.stderr).contains("no visible implementation of 'core::ops::DivAssign'"), "{missing_evidence:?}");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter /= 1; counter.value }");
+    let immutable = f.run(&["analyze-project"]);
+    assert!(!immutable.status.success(), "{immutable:?}");
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= 1; counter.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous DivAssign"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::DivAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} pub extend Counter of core::ops::DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible DivAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::DivAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} extend Counter of core::ops::DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } }");
+    // Keep the imported module live while its implementation remains private.
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 9; value /= 4; value }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(2)\n");
+    let primitive_build = f.run(&["build", "--output", "primitive-div-assign.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "primitive-div-assign.wasm"]);
+    assert!(primitive_artifact.status.success(), "{primitive_artifact:?}");
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(2)\n");
+
+
+
+    f.write("src/main.mb", "use core::ops::DivAssign; type Counter { value: u32 } extend Counter of DivAssign { type Rhs = u32; fn div_assign(share self, rhs: u32) { self.value /= rhs; } } fn read(c: share Counter) -> u32 { c.value /= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter /= read(counter.share()); counter.value }");
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+}
+
+#[test]
+fn user_defined_rem_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='rem-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } type Delta { value: u32 } type Wrapper { item: Counter } extend Counter of RemAssign { type Rhs = Delta; fn rem_assign(share self, rhs: Delta) { self.value %= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var counter := Counter { value: 20 }; let d1 := Delta { value: 3 }; counter %= d1; var wrapper := Wrapper { item: Counter { value: 10 } }; let d2 := Delta { value: 2 }; wrapper.item %= d2; var calls: u32 = 0; var items := [Counter { value: 8 }]; let d3 := Delta { value: 1 }; items[index(calls.share())] %= d3; if calls == 1 { counter.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(2)\n");
+    let build = f.run(&["build", "--output", "rem-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "rem-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(2)\n");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= 10 / rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= { return 13; 0 }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(13)\n");
+    let build = f.run(&["build", "--output", "rem-assign-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "rem-assign-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(13)\n");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } type Wrapper { item: Counter } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= 10 / rhs; } } fn main() -> u32 { var wrapper := Wrapper { item: Counter { value: 4 } }; wrapper.item %= { return 14; 0 }; 0 }");
+    let field_early = f.run(&["run"]);
+    assert!(field_early.status.success(), "{field_early:?}");
+    assert_eq!(field_early.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "rem-assign-field-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "rem-assign-field-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= 10 / rhs; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var calls: u32 = 0; var items := [Counter { value: 4 }]; items[index(calls.share())] %= { return 15; 0 }; 0 }");
+    let index_early = f.run(&["run"]);
+    assert!(index_early.status.success(), "{index_early:?}");
+    assert_eq!(index_early.stdout, b"Result: u32(15)\n");
+    let build = f.run(&["build", "--output", "rem-assign-index-return.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "rem-assign-index-return.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(15)\n");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 1 }; counter %= 2; counter.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible RemAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= true; counter.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; fn scale<T>(initial: T, rhs: T::Rhs) where T: RemAssign { var value := initial; value %= rhs; } fn main() -> u32 { 0 }");
+    let generic = f.run(&["analyze-project"]);
+    assert!(
+        !generic.status.success(),
+        "generic constrained RemAssign remains gated: {generic:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter %= 1; counter.value }");
+    let immutable = f.run(&["analyze-project"]);
+    assert!(!immutable.status.success(), "{immutable:?}");
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= 1; counter.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous RemAssign"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::RemAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} pub extend Counter of core::ops::RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible RemAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::RemAssign; pub type Counter { value: u32 } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= 1; counter.value }");
+    f.write("src/other.mb", "use self::main::Counter; pub fn marker() {} extend Counter of core::ops::RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } }");
+    // Keep the imported module live while its implementation remains private.
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var value: u32 = 9; value %= 4; value }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(1)\n");
+    let primitive_build = f.run(&["build", "--output", "primitive-rem-assign.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "primitive-rem-assign.wasm"]);
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(1)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { var value: i32 = -2147483648; value %= -1; value }",
+    );
+    let signed_min = f.run(&["run"]);
+    assert!(signed_min.status.success(), "{signed_min:?}");
+    assert_eq!(signed_min.stdout, b"Result: i32(0)\n");
+    let signed_min_build = f.run(&["build", "--output", "signed-min-rem-assign.wasm"]);
+    assert!(signed_min_build.status.success(), "{signed_min_build:?}");
+    let signed_min_artifact = f.run(&["run", "signed-min-rem-assign.wasm"]);
+    assert!(
+        signed_min_artifact.status.success(),
+        "{signed_min_artifact:?}"
+    );
+    assert_eq!(signed_min_artifact.stdout, b"Result: i32(0)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { var value: i32 = 7; value %= 0; value }",
+    );
+    let remainder_zero = f.run(&["run"]);
+    let remainder_zero_error = err(remainder_zero, "RE007");
+    assert!(
+        remainder_zero_error.contains("remainder by zero"),
+        "{remainder_zero_error}"
+    );
+    let remainder_zero_build = f.run(&["build", "--output", "remainder-zero.wasm"]);
+    assert!(
+        remainder_zero_build.status.success(),
+        "{remainder_zero_build:?}"
+    );
+    let remainder_zero_artifact = err(f.run(&["run", "remainder-zero.wasm"]), "RE007");
+    assert!(
+        remainder_zero_artifact.contains("remainder by zero"),
+        "{remainder_zero_artifact}"
+    );
+
+    f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } fn read(c: share Counter) -> u32 { c.value %= 1; c.value } fn main() -> u32 { var counter := Counter { value: 4 }; counter %= read(counter.share()); counter.value }");
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+}
+
+#[test]
+fn user_defined_equality_borrows_receiver_and_runs_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='partial-eq'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn same<T>(lhs: T, rhs: T::Rhs) -> Bool where T: PartialEq { lhs == rhs } fn main() -> u32 { let left := Key { value: 12 }; let same_key := Key { value: 12 }; let different := Key { value: 13 }; if !(left == same_key) { return 0; } if left != different { return left.value; } if !same(Key { value: 5 }, Key { value: 5 }) { return 0; } left.value }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(12)\n");
+    let build = f.run(&["build", "--output", "partial-eq.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "partial-eq.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(12)\n");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn main() -> u32 { let left := Key { value: 1 }; let right := Key { value: 1 }; let _equal := left == right; right.value }");
+    let moved_rhs = err(f.run(&["ownership-project"]), "BE001");
+    assert!(moved_rhs.contains("right"), "{moved_rhs}");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} type Other {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} == Other {} }");
+    let wrong_rhs = err(f.run(&["analyze-project"]), "TE007");
+    assert!(wrong_rhs.contains("PartialEq requires"), "{wrong_rhs}");
+    f.write(
+        "src/main.mb",
+        "type Key {} fn main() -> Bool { Key {} == Key {} }",
+    );
+    let missing = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        missing.contains("no visible PartialEq implementation"),
+        "{missing}"
+    );
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { false } } fn main() -> Bool { Key {} != Key {} }");
+    let ambiguous = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        ambiguous.contains("ambiguous PartialEq implementation for `!=`"),
+        "{ambiguous}"
+    );
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(self, rhs: Key) -> Bool { true } } fn main() -> Bool { Key {} == Key {} }");
+    let wrong_receiver = err(f.run(&["analyze-project"]), "ME005");
+    assert!(
+        wrong_receiver.contains("does not match interface"),
+        "{wrong_receiver}"
+    );
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> u32 { 1 } } fn main() -> Bool { Key {} == Key {} }");
+    let wrong_result = err(f.run(&["analyze-project"]), "ME005");
+    assert!(wrong_result.contains("Bool"), "{wrong_result}");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key {} extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } } fn main() -> u32 { let lhs := Key {}; let result := lhs == { return 42; Key {} }; 0 }");
+    let early_return = f.run(&["run"]);
+    assert!(early_return.status.success(), "{early_return:?}");
+    assert_eq!(early_return.stdout, b"Result: u32(42)\n");
+    f.write("src/main.mb", "use core::ops::PartialEq; type Key { value: u32 } extend Key of PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { self.value == rhs.value } } fn main() -> u32 { var order: u32 = 0; let equal := { order = 1; Key { value: 9 } } == { if order != 1 { return 0; } order = 12; Key { value: 9 } }; if order != 12 || !equal { return 0; } 42 }");
+    let order_source = f.run(&["run"]);
+    assert!(order_source.status.success(), "{order_source:?}");
+    assert_eq!(order_source.stdout, b"Result: u32(42)\n");
+    let order_build = f.run(&["build", "--output", "partial-eq-order.wasm"]);
+    assert!(order_build.status.success(), "{order_build:?}");
+    let order_artifact = f.run(&["run", "partial-eq-order.wasm"]);
+    assert!(order_artifact.status.success(), "{order_artifact:?}");
+    assert_eq!(order_artifact.stdout, b"Result: i32(42)\n");
+    f.write("src/main.mb", "use other; use core::ops::PartialEq; pub type Key {} fn main() -> Bool { Key {} == Key {} }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } }");
+    let private = err(f.run(&["analyze-project"]), "TE007");
+    assert!(private.contains("private or inactive"), "{private}");
+    f.write("src/main.mb", "use other::marker; use core::ops::PartialEq; pub type Key {} fn main() -> Bool { Key {} == Key {} }");
+    f.write("src/other.mb", "use self::main::Key; pub fn marker() {} pub extend Key of core::ops::PartialEq { type Rhs = Key; fn eq(borrow self, rhs: Key) -> Bool { true } }");
+    let inactive = err(f.run(&["analyze-project"]), "TE007");
+    assert!(
+        inactive.contains("no visible PartialEq implementation"),
+        "{inactive}"
+    );
+}
+
+#[test]
 fn user_defined_add_ignores_local_interface_named_add() {
     let f = Fixture::new();
     f.write(
@@ -4065,6 +5555,112 @@ fn tuples_own_string_elements_locally_and_release_them() {
 }
 
 #[test]
+fn tuple_destructuring_moves_owned_elements_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-destructure'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn first() -> i32 { let text := \"xy\".concat(\"!\"); let second := \"ab\".concat(\"?\"); let pair := (text, second, 36 as u32); let (moved, moved_second, count) := pair; if moved.len() == 3 && moved_second.len() == 3 { (count as i32) + 6 } else { 0 } } fn last() -> i32 { let text := \"xy\".concat(\"!\"); let second := \"ab\".concat(\"?\"); let pair := (39 as u32, text, second); let (count, moved, moved_second) := pair; if moved.len() == 3 && moved_second.len() == 3 { (count as i32) + 3 } else { 0 } } fn main() -> i32 { first() + last() }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(84)\n");
+    let build = f.run(&["build", "--output", "tuple-destructure.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-destructure.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn scalar_tuple_destructuring_runs_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-destructure-scalars'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 { let pair := (40, true); let (number, enabled) := pair; if enabled { number + 2 } else { 0 } }",
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-destructure-scalars.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-destructure-scalars.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn nested_tuple_patterns_and_string_wildcards_transfer_cleanup_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-pattern-ownership'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn main() -> i32 {
+            let text := "xy".concat("!");
+            let tuple := ((40, true), text, 0 as u32);
+            let ((number, enabled), _, _) := tuple;
+            if enabled { number + 2 } else { 0 }
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-pattern-ownership.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-pattern-ownership.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
+fn nested_string_tuple_patterns_cover_final_binding_and_all_wildcards_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='tuple-pattern-final-and-discard'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        r#"
+        fn main() -> i32 {
+            let () := ();
+            let first := "a".concat("");
+            let last := "bc".concat("");
+            let nested := ((40, true), first, last);
+            let ((number, enabled), _, final_text) := nested;
+
+            let discard_left := "left".concat("");
+            let discard_right := "right".concat("");
+            let discard := ((1, false), discard_left, discard_right);
+            let ((_, _), _, _) := discard;
+
+            if enabled { number + final_text.len() as i32 } else { 0 }
+        }
+        "#,
+    );
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: i32(42)\n");
+    let build = f.run(&["build", "--output", "tuple-pattern-final-and-discard.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let wasm = f.run(&["run", "tuple-pattern-final-and-discard.wasm"]);
+    assert!(wasm.status.success(), "{wasm:?}");
+    assert_eq!(wasm.stdout, source.stdout);
+}
+
+#[test]
 fn owned_string_tuples_move_through_internal_calls_and_returns() {
     let f = Fixture::new();
     f.write(
@@ -4111,17 +5707,26 @@ fn owned_string_tuples_move_through_internal_calls_and_returns() {
 #[test]
 fn owned_string_tuple_transport_rejects_use_after_move_and_nominal_structs() {
     let f = Fixture::new();
-    f.write("move.mb", "fn forward(pair: (string, u32)) -> (string, u32) { pair } fn main() { let pair := (\"x\", 1 as u32); forward(pair); pair.1; }");
+    f.write("move.mb", "fn forward(pair: (string, u32)) -> u32 { let (text, count) := pair; count } fn main() { let pair := (\"x\", 1 as u32); forward(pair); pair.1; }");
     let moved = err(f.run(&["ownership", "move.mb"]), "BE001");
     assert!(moved.contains("pair"), "{moved}");
     f.write("project.toml", "[package]\nname='nominal-owner-gate'\nentry='main::main'\n[export]\nforward='main::forward'\n");
     f.write("src/main.mb", "pub type Box { pub text: string } pub fn forward(value: Box) -> Box { value } fn main() {}");
     let nominal = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
-        nominal.contains(
-            "structs with String fields can cross internal calls only as borrow or share parameters"
-        ),
+        nominal.contains("exported signatures cannot take structs or struct references"),
         "{nominal}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "pub type Box { pub text: string, pub nested: (i32, Bool) } pub fn forward(value: Box) -> Box { value } fn main() {}",
+    );
+    let nominal_nested = err(f.run(&["build", "--lib"]), "LE900");
+    assert!(
+        nominal_nested
+            .contains("structs with String fields support only String and primitive fields"),
+        "{nominal_nested}"
     );
 }
 
@@ -4441,11 +6046,10 @@ entry='main::main'\n",
         String::from_utf8(source.stdout).unwrap(),
         "Result: i32(42)\n"
     );
-    assert!(
-        f.run(&["build", "--output", "/tmp/memobits-generic-identity.wasm"])
-            .status
-            .success()
-    );
+    assert!(f
+        .run(&["build", "--output", "/tmp/memobits-generic-identity.wasm"])
+        .status
+        .success());
     assert_eq!(
         String::from_utf8(
             f.run(&["run", "/tmp/memobits-generic-identity.wasm"])
@@ -5899,6 +7503,33 @@ fn borrowed_extension_receiver_remains_live_through_later_arguments() {
 }
 
 #[test]
+fn extension_receiver_loans_reject_conflicting_later_argument_access() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='interface-later-argument-loans'\nentry='main::main'\n",
+    );
+
+    for (interface, receiver, later_access) in [
+        ("BorrowCheck", "borrow", "point.x = 7; 1"),
+        ("ShareCheck", "share", "point.x = 7; 1"),
+    ] {
+        let source = format!(
+            "type Point {{ x: i32 }} interface {interface} {{ fn check({receiver} self, value: i32) -> i32; }} extend Point of {interface} {{ fn check({receiver} self, value: i32) -> i32 {{ self.x + value }} }} fn main() -> i32 {{ var point := Point {{ x: 42 }}; point.check({{ {later_access} }}) of {interface} }}"
+        );
+        f.write(
+            "src/main.mb",
+            &source,
+        );
+        let diagnostic = err(f.run(&["ownership-project"]), "BE");
+        assert!(
+            diagnostic.contains("loan") || diagnostic.contains("borrow") || diagnostic.contains("shared"),
+            "{interface}: {diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn directly_imported_public_extension_runs_from_another_module() {
     let f = Fixture::new();
     f.write(
@@ -6003,17 +7634,14 @@ fn override_uses_manifest_parent_for_sources() {
     f.write("nested/code/main.mb", "");
     let output = f.run(&["project", "--project", "nested/custom.toml"]);
     assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("Modules (1):\n  main -> main.mb\n")
-    );
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("Modules (1):\n  main -> main.mb\n"));
     let path = f.0.join("nested/custom.toml");
-    assert!(
-        f.run(&["project", "--project", path.to_str().unwrap()])
-            .status
-            .success()
-    );
+    assert!(f
+        .run(&["project", "--project", path.to_str().unwrap()])
+        .status
+        .success());
 }
 
 #[test]
@@ -6034,6 +7662,49 @@ fn typed_project_failures_have_stable_codes() {
 }
 
 #[test]
+fn cli_host_profile_is_validated_before_import_free_execution() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='host-profile'\nentry='main::main'\n\n[host]\nprofile = \"cli\"\n",
+    );
+    f.write("src/main.mb", "fn main() -> i32 { 42 }");
+    let project = f.run(&["project"]);
+    assert!(project.status.success(), "{project:?}");
+    assert!(String::from_utf8_lossy(&project.stdout).contains("Host profile: cli (import-free)"));
+    let output = f.run(&["run"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"Result: i32(42)\n");
+
+    for (manifest, code, expected) in [
+        (
+            "[package]\nname='missing-profile'\nentry='main::main'\n[host]\n",
+            "PE003",
+            "host.profile is required",
+        ),
+        (
+            "[package]\nname='unknown-profile'\nentry='main::main'\n[host]\nprofile = \"browser\"\n",
+            "PE003",
+            "unknown host profile",
+        ),
+        (
+            "[package]\nname='host-capability'\nentry='main::main'\n[host]\nprofile = \"cli\"\ncapability = \"clock\"\n",
+            "PE002",
+            "invalid project manifest",
+        ),
+        (
+            "[package]\nname='host-import'\nentry='main::main'\n[host]\nprofile = \"cli\"\n[host.imports]\nclock = \"clock.now\"\n",
+            "PE002",
+            "invalid project manifest",
+        ),
+    ] {
+        f.write("project.toml", manifest);
+        let output = err(f.run(&["run"]), code);
+        assert!(output.contains(expected), "{output}");
+    }
+}
+
+#[test]
 fn help_usage_and_unsupported_commands_are_truthful() {
     let f = Fixture::new();
     for args in [&["--help"][..], &["-h"], &["project", "--help"]] {
@@ -6044,7 +7715,11 @@ fn help_usage_and_unsupported_commands_are_truthful() {
         assert!(text.contains("Usage: mb project [--project PATH]"));
         assert!(text.contains("mb resolve [--project PATH] [--lib]"));
         assert!(text.contains("mb ownership-project [--project PATH] [--lib]"));
-        assert!(text.contains("not supported yet"));
+        assert!(text.contains("one typed source-declared Wasm import"));
+        assert!(text.contains("memobits:console.write_i32(i32) -> unit"));
+        assert!(!text.contains("source-declared imports remain unsupported"));
+        assert!(text.contains("mb check [--project PATH] [--lib]"));
+        assert!(!text.contains("not supported yet"));
     }
     for args in [
         &[][..],
@@ -6063,12 +7738,12 @@ fn help_usage_and_unsupported_commands_are_truthful() {
         &["build", "--lib", "--lib"],
         &["run", "app.wasm", "--entry"],
         &["run", "app.wasm", "--entry", "a", "--entry", "b"],
-        &["run", "app.wasm", "--project", "project.toml"],
+        &["run", "app.wasm", "--unexpected"],
         &["run", "--project", "project.toml", "--entry", "main"],
     ] {
         err(f.run(args), "PE004");
     }
-    assert!(err(f.run(&["check"]), "PE005").contains("unsupported"));
+    err(f.run(&["check"]), "PE001");
 }
 
 #[test]
@@ -6392,11 +8067,9 @@ fn syntax_reports_source_diagnostics_without_claiming_semantic_validation() {
     f.write("valid.mb", "fn main() -> i32 { unknown_name }");
     let output = f.run(&["syntax", "valid.mb"]);
     assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("semantics not checked")
-    );
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("semantics not checked"));
     f.write("broken.mb", "fn main() { let x = 1; }");
     let message = err(f.run(&["syntax", "broken.mb"]), "SE002");
     assert!(message.contains("broken.mb:1:"));
@@ -6441,10 +8114,8 @@ fn standalone_ownership_checks_moves_and_renders_source_errors() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("supported moves, loans and aggregate access checked")
-    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("supported moves, loans and aggregate access checked"));
 
     f.write(
         "reinit.mb",
@@ -6853,7 +8524,7 @@ fn u32_bitwise_and_shifts_match_source_and_standalone_wasm() {
             let pattern: u32 = 2863311530;
             let method_constant: u32 = 4294967295.bit_xor(0);
             let parity := 1 | 2 ^ 3 & 7;
-            if method_constant != 4294967295 || parity != 1
+            if method_constant != 4294967295 || parity != 1 || (12 ^ 10) != 6
                 || pattern.bit_xor(1431655765) != 4294967295
                 || pattern.bit_and(15) != 10 || pattern.bit_or(5) != 2863311535
                 || 1 << 31 != high || high >> 31 != 1 || 1 << 0 != 1
@@ -8131,4 +9802,766 @@ fn user_drop_function_takes_precedence() {
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
     assert_eq!(source.stdout, b"Result: Ok(u32(42))\n");
+}
+
+#[test]
+fn user_defined_bitand_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitand-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } type Wrapper { item: Bits } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var bits := Bits { value: 15 }; let m1 := Mask { value: 6 }; bits &= m1; var wrapper := Wrapper { item: Bits { value: 11 } }; let m2 := Mask { value: 3 }; wrapper.item &= m2; var calls: u32 = 0; var items := [Bits { value: 13 }]; let m3 := Mask { value: 5 }; items[index(calls.share())] &= m3; if calls == 1 { bits.value + wrapper.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(14)\n");
+    let build = f.run(&["build", "--output", "bitand-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitand-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(14)\n");
+
+    for (name, source, value) in [
+        ("local", "var bits := Bits { value: 4 }; bits &= { return 21; Mask { value: 1 } }; 0", 21),
+        ("field", "var wrapper := Wrapper { item: Bits { value: 4 } }; wrapper.item &= { return 22; Mask { value: 1 } }; 0", 22),
+        ("index", "var calls: u32 = 0; var items := [Bits { value: 4 }]; items[index(calls.share())] &= { return 23; Mask { value: 1 } }; 0", 23),
+    ] {
+        let generated = format!("use core::ops::BitAndAssign; type Bits {{ value: u32 }} type Mask {{ value: u32 }} type Wrapper {{ item: Bits }} extend Bits of BitAndAssign {{ type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) {{ self.value &= rhs.value; }} }} fn index(calls: share u32) -> u32 {{ calls += 1; 0 }} fn main() -> u32 {{ {source} }}");
+        f.write("src/main.mb", &generated);
+        let result = f.run(&["run"]);
+        assert!(result.status.success(), "{name}: {result:?}");
+        assert_eq!(result.stdout, format!("Result: u32({value})\n").as_bytes());
+        let artifact_name = format!("bitand-assign-{name}.wasm");
+        let build = f.run(&["build", "--output", &artifact_name]);
+        assert!(build.status.success(), "{name}: {build:?}");
+        let artifact = f.run(&["run", &artifact_name]);
+        assert!(artifact.status.success(), "{name}: {artifact:?}");
+        assert_eq!(artifact.stdout, format!("Result: i32({value})\n").as_bytes());
+    }
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    // The owner loan survives the RHS, but checked element-address formation is
+    // delayed until the RHS completes, so an early return skips bounds checking.
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn main() -> u32 { var items := [Bits { value: 1 }]; var index: u32 = 0; index += 1; items[index] &= { return 24; Mask { value: 1 } }; 0 }");
+    let out_of_bounds = f.run(&["run"]);
+    assert!(out_of_bounds.status.success(), "{out_of_bounds:?}");
+    assert_eq!(out_of_bounds.stdout, b"Result: u32(24)\n");
+    let oob_build = f.run(&["build", "--output", "bitand-assign-oob.wasm"]);
+    assert!(oob_build.status.success(), "{oob_build:?}");
+    let oob_artifact = f.run(&["run", "bitand-assign-oob.wasm"]);
+    assert!(oob_artifact.status.success(), "{oob_artifact:?}");
+    assert_eq!(oob_artifact.stdout, b"Result: i32(24)\n");
+
+    for (interface, method, operator) in [
+        ("AddAssign", "add_assign", "+="),
+        ("SubAssign", "sub_assign", "-="),
+        ("MulAssign", "mul_assign", "*="),
+        ("DivAssign", "div_assign", "/="),
+        ("RemAssign", "rem_assign", "%="),
+    ] {
+        let source_text = format!("use core::ops::{interface}; type Counter {{ value: u32 }} extend Counter of {interface} {{ type Rhs = u32; fn {method}(share self, rhs: u32) {{ self.value += rhs; }} }} fn main() -> u32 {{ var items := [Counter {{ value: 1 }}]; var index: u32 = 0; index += 1; items[index] {operator} {{ return 25; 0 }}; 0 }}");
+        f.write("src/main.mb", &source_text);
+        let source = f.run(&["run"]);
+        assert!(source.status.success(), "{interface}: {source:?}");
+        assert_eq!(source.stdout, b"Result: u32(25)\n");
+        let artifact_name = format!("{interface}-oob.wasm");
+        let build = f.run(&["build", "--output", &artifact_name]);
+        assert!(build.status.success(), "{interface}: {build:?}");
+        let artifact = f.run(&["run", &artifact_name]);
+        assert!(artifact.status.success(), "{interface}: {artifact:?}");
+        assert_eq!(artifact.stdout, b"Result: i32(25)\n");
+    }
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } extend Bits of BitAndAssign { type Rhs = Mask; fn bitand_assign(share self, rhs: Mask) { self.value &= rhs.value; } } fn read(bits: borrow Bits) -> Mask { Mask { value: bits.value } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= read(bits.borrow()); bits.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } extend Bits of BitAndAssign { type Rhs = u32; fn bitand_assign(share self, rhs: u32) { self.value &= rhs; } } fn rhs(item: share Bits) -> u32 { item.value = 5; 7 } fn main() -> u32 { var items := [Bits { value: 15 }, Bits { value: 9 }]; items[0] &= rhs(items[1].share()); items[0].value + items[1].value }");
+    let disjoint = f.run(&["run"]);
+    assert!(disjoint.status.success(), "{disjoint:?}");
+    assert_eq!(disjoint.stdout, b"Result: u32(12)\n");
+    let disjoint_build = f.run(&["build", "--output", "bitand-assign-disjoint.wasm"]);
+    assert!(disjoint_build.status.success(), "{disjoint_build:?}");
+    let disjoint_artifact = f.run(&["run", "bitand-assign-disjoint.wasm"]);
+    assert!(disjoint_artifact.status.success(), "{disjoint_artifact:?}");
+    assert_eq!(disjoint_artifact.stdout, b"Result: i32(12)\n");
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } type Mask { value: u32 } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= Mask { value: 1 }; bits.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible BitAndAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitAndAssign; pub type Bits { value: u32 } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= 1; bits.value }");
+    f.write("src/other.mb", "use self::main::Bits; pub fn marker() {} pub extend Bits of core::ops::BitAndAssign { type Rhs = u32; fn bitand_assign(share self, rhs: u32) { self.value &= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr)
+            .contains("no visible BitAndAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitAndAssign; pub type Bits { value: u32 } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= 1; bits.value }");
+    f.write("src/other.mb", "use self::main::Bits; pub fn marker() {} extend Bits of core::ops::BitAndAssign { type Rhs = u32; fn bitand_assign(share self, rhs: u32) { self.value &= rhs; } }");
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; type Bits { value: u32 } extend Bits of BitAndAssign { type Rhs = u32; fn bitand_assign(share self, rhs: u32) { self.value &= rhs; } } fn main() -> u32 { var bits := Bits { value: 3 }; bits &= true; bits.value }");
+    let malformed = f.run(&["analyze-project"]);
+    assert!(!malformed.status.success(), "{malformed:?}");
+
+    f.write("src/main.mb", "use core::ops::BitAndAssign; fn mask<T>(initial: T, rhs: T::Rhs) where T: BitAndAssign { var value := initial; value &= rhs; } fn main() -> u32 { 0 }");
+    let generic = f.run(&["analyze-project"]);
+    assert!(
+        !generic.status.success(),
+        "generic constrained BitAndAssign remains gated: {generic:?}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 15; bits &= 6; bits }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(6)\n");
+    let primitive_build = f.run(&["build", "--output", "primitive-bitand-assign.wasm"]);
+    assert!(primitive_build.status.success(), "{primitive_build:?}");
+    let primitive_artifact = f.run(&["run", "primitive-bitand-assign.wasm"]);
+    assert!(
+        primitive_artifact.status.success(),
+        "{primitive_artifact:?}"
+    );
+    assert_eq!(primitive_artifact.stdout, b"Result: i32(6)\n");
+}
+
+#[test]
+fn user_defined_bitor_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitor-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } type Mask { value: u32 } type Boxed { item: Flags } extend Flags of BitOrAssign { type Rhs = Mask; fn bitor_assign(share self, rhs: Mask) { self.value |= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var flags := Flags { value: 8 }; let m1 := Mask { value: 3 }; flags |= m1; var boxed := Boxed { item: Flags { value: 4 } }; let m2 := Mask { value: 1 }; boxed.item |= m2; var calls: u32 = 0; var items := [Flags { value: 16 }]; let m3 := Mask { value: 2 }; items[index(calls.share())] |= m3; if calls == 1 { flags.value + boxed.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(34)\n");
+    let build = f.run(&["build", "--output", "bitor-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(34)\n");
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitOrAssign { type Rhs = Mask; fn bitor_assign(share self, rhs: Mask) { self.value |= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] |= { return 29; Mask { value: 1 } }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(29)\n");
+    let build = f.run(&["build", "--output", "bitor-assign-early.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-assign-early.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(29)\n");
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitOrAssign { type Rhs = Mask; fn bitor_assign(share self, rhs: Mask) { self.value |= rhs.value; } } fn read(flags: borrow Flags) -> Mask { Mask { value: flags.value } } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= read(flags.borrow()); flags.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } extend Flags of BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } } fn change(other: share Flags) -> u32 { other.value = 4; 2 } fn main() -> u32 { var items := [Flags { value: 1 }, Flags { value: 8 }]; items[0] |= change(items[1].share()); items[0].value + items[1].value }");
+    let disjoint = f.run(&["run"]);
+    assert!(disjoint.status.success(), "{disjoint:?}");
+    assert_eq!(disjoint.stdout, b"Result: u32(7)\n");
+    let build = f.run(&["build", "--output", "bitor-assign-disjoint.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-assign-disjoint.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(7)\n");
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitOrAssign { type Rhs = Mask; fn bitor_assign(share self, rhs: Mask) { self.value |= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] |= { index = 0; Mask { value: 1 } }; 0 }");
+    let out_of_bounds = f.run(&["run"]);
+    assert!(!out_of_bounds.status.success(), "{out_of_bounds:?}");
+    assert!(
+        String::from_utf8_lossy(&out_of_bounds.stderr).contains("RE007"),
+        "{out_of_bounds:?}"
+    );
+    let build = f.run(&["build", "--output", "bitor-assign-oob.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitor-assign-oob.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } type Mask { value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= Mask { value: 2 }; flags.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible BitOrAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } extend Flags of BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= true; flags.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; fn update<T>(target: T, rhs: T::Rhs) where T: BitOrAssign { var value := target; value |= rhs; } fn main() -> u32 { 0 }");
+    let generic = f.run(&["analyze-project"]);
+    assert!(
+        !generic.status.success(),
+        "generic constrained BitOrAssign remains gated: {generic:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitOrAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} pub extend Flags of core::ops::BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible BitOrAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitOrAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} extend Flags of core::ops::BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } }");
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+    assert!(
+        String::from_utf8_lossy(&private.stderr).contains("BitOrAssign"),
+        "{private:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } extend Flags of BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } } extend Flags of BitOrAssign { type Rhs = u32; fn bitor_assign(share self, rhs: u32) { self.value |= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= 2; flags.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitOrAssign; type Flags { value: u32 } extend Flags of BitOrAssign { type Rhs = u32; fn bitor_assign(borrow self, rhs: u32) { self.value |= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= 2; flags.value }");
+    let malformed = f.run(&["analyze-project"]);
+    assert!(!malformed.status.success(), "{malformed:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 8; bits |= 3; bits }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(11)\n");
+    let build = f.run(&["build", "--output", "primitive-bitor-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-bitor-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(11)\n");
+}
+#[test]
+fn user_defined_bitxor_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='bitxor-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } type Mask { value: u32 } type Boxed { item: Flags } extend Flags of BitXorAssign { type Rhs = Mask; fn bitxor_assign(share self, rhs: Mask) { self.value ^= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var flags := Flags { value: 10 }; let m1 := Mask { value: 3 }; flags ^= m1; var boxed := Boxed { item: Flags { value: 4 } }; let m2 := Mask { value: 1 }; boxed.item ^= m2; var calls: u32 = 0; var items := [Flags { value: 16 }]; let m3 := Mask { value: 2 }; items[index(calls.share())] ^= m3; if calls == 1 { flags.value + boxed.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(32)\n");
+    let build = f.run(&["build", "--output", "bitxor-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(32)\n");
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitXorAssign { type Rhs = Mask; fn bitxor_assign(share self, rhs: Mask) { self.value ^= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] ^= { return 29; Mask { value: 1 } }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(29)\n");
+    let build = f.run(&["build", "--output", "bitxor-assign-early.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-assign-early.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(29)\n");
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitXorAssign { type Rhs = Mask; fn bitxor_assign(share self, rhs: Mask) { self.value ^= rhs.value; } } fn read(flags: borrow Flags) -> Mask { Mask { value: flags.value } } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= read(flags.borrow()); flags.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } extend Flags of BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } } fn change(other: share Flags) -> u32 { other.value = 4; 2 } fn main() -> u32 { var items := [Flags { value: 1 }, Flags { value: 8 }]; items[0] ^= change(items[1].share()); items[0].value + items[1].value }");
+    let disjoint = f.run(&["run"]);
+    assert!(disjoint.status.success(), "{disjoint:?}");
+    assert_eq!(disjoint.stdout, b"Result: u32(7)\n");
+    let build = f.run(&["build", "--output", "bitxor-assign-disjoint.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-assign-disjoint.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(7)\n");
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of BitXorAssign { type Rhs = Mask; fn bitxor_assign(share self, rhs: Mask) { self.value ^= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] ^= { index = 0; Mask { value: 1 } }; 0 }");
+    let out_of_bounds = f.run(&["run"]);
+    assert!(!out_of_bounds.status.success(), "{out_of_bounds:?}");
+    assert!(
+        String::from_utf8_lossy(&out_of_bounds.stderr).contains("RE007"),
+        "{out_of_bounds:?}"
+    );
+    let build = f.run(&["build", "--output", "bitxor-assign-oob.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "bitxor-assign-oob.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } type Mask { value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= Mask { value: 2 }; flags.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible BitXorAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } extend Flags of BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= true; flags.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; fn update<T>(target: T, rhs: T::Rhs) where T: BitXorAssign { var value := target; value ^= rhs; } fn main() -> u32 { 0 }");
+    let generic = f.run(&["analyze-project"]);
+    assert!(
+        !generic.status.success(),
+        "generic constrained BitXorAssign remains gated: {generic:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitXorAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} pub extend Flags of core::ops::BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr)
+            .contains("no visible BitXorAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::BitXorAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} extend Flags of core::ops::BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } }");
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+    assert!(
+        String::from_utf8_lossy(&private.stderr).contains("BitXorAssign"),
+        "{private:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } extend Flags of BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } } extend Flags of BitXorAssign { type Rhs = u32; fn bitxor_assign(share self, rhs: u32) { self.value ^= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= 2; flags.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::BitXorAssign; type Flags { value: u32 } extend Flags of BitXorAssign { type Rhs = u32; fn bitxor_assign(borrow self, rhs: u32) { self.value ^= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= 2; flags.value }");
+    let malformed = f.run(&["analyze-project"]);
+    assert!(!malformed.status.success(), "{malformed:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 10; bits ^= 3; bits }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(9)\n");
+    let build = f.run(&["build", "--output", "primitive-bitxor-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-bitxor-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(9)\n");
+}
+#[test]
+fn user_defined_shl_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shl-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } type Mask { value: u32 } type Boxed { item: Flags } extend Flags of ShlAssign { type Rhs = Mask; fn shl_assign(share self, rhs: Mask) { self.value <<= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var flags := Flags { value: 10 }; let m1 := Mask { value: 3 }; flags <<= m1; var boxed := Boxed { item: Flags { value: 4 } }; let m2 := Mask { value: 1 }; boxed.item <<= m2; var calls: u32 = 0; var items := [Flags { value: 16 }]; let m3 := Mask { value: 2 }; items[index(calls.share())] <<= m3; if calls == 1 { flags.value + boxed.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(152)\n");
+    let build = f.run(&["build", "--output", "shl-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(152)\n");
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShlAssign { type Rhs = Mask; fn shl_assign(share self, rhs: Mask) { self.value <<= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] <<= { return 29; Mask { value: 1 } }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(29)\n");
+    let build = f.run(&["build", "--output", "shl-assign-early.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-assign-early.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(29)\n");
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShlAssign { type Rhs = Mask; fn shl_assign(share self, rhs: Mask) { self.value <<= rhs.value; } } fn read(flags: borrow Flags) -> Mask { Mask { value: flags.value } } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= read(flags.borrow()); flags.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } extend Flags of ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } } fn change(other: share Flags) -> u32 { other.value = 4; 2 } fn main() -> u32 { var items := [Flags { value: 1 }, Flags { value: 8 }]; items[0] <<= change(items[1].share()); items[0].value + items[1].value }");
+    let disjoint = f.run(&["run"]);
+    assert!(disjoint.status.success(), "{disjoint:?}");
+    assert_eq!(disjoint.stdout, b"Result: u32(8)\n");
+    let build = f.run(&["build", "--output", "shl-assign-disjoint.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-assign-disjoint.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(8)\n");
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShlAssign { type Rhs = Mask; fn shl_assign(share self, rhs: Mask) { self.value <<= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] <<= { index = 0; Mask { value: 1 } }; 0 }");
+    let out_of_bounds = f.run(&["run"]);
+    assert!(!out_of_bounds.status.success(), "{out_of_bounds:?}");
+    assert!(
+        String::from_utf8_lossy(&out_of_bounds.stderr).contains("RE007"),
+        "{out_of_bounds:?}"
+    );
+    let build = f.run(&["build", "--output", "shl-assign-oob.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shl-assign-oob.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } type Mask { value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= Mask { value: 2 }; flags.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible ShlAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } extend Flags of ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= true; flags.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; fn update<T>(target: T, rhs: T::Rhs) where T: ShlAssign { var value := target; value <<= rhs; } fn main() -> u32 { 0 }");
+    let generic = f.run(&["analyze-project"]);
+    assert!(
+        !generic.status.success(),
+        "generic constrained ShlAssign remains gated: {generic:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::ShlAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} pub extend Flags of core::ops::ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible ShlAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::ShlAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} extend Flags of core::ops::ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } }");
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+    assert!(
+        String::from_utf8_lossy(&private.stderr).contains("ShlAssign"),
+        "{private:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } extend Flags of ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } } extend Flags of ShlAssign { type Rhs = u32; fn shl_assign(share self, rhs: u32) { self.value <<= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= 2; flags.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Flags { value: u32 } extend Flags of ShlAssign { type Rhs = u32; fn shl_assign(borrow self, rhs: u32) { self.value <<= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= 2; flags.value }");
+    let malformed = f.run(&["analyze-project"]);
+    assert!(!malformed.status.success(), "{malformed:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 10; bits <<= 3; bits }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(80)\n");
+    let build = f.run(&["build", "--output", "primitive-shl-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shl-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(80)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits <<= 0; bits <<= 31; bits }",
+    );
+    let boundaries = f.run(&["run"]);
+    assert!(boundaries.status.success(), "{boundaries:?}");
+    assert_eq!(boundaries.stdout, b"Result: u32(2147483648)\n");
+    let build = f.run(&["build", "--output", "primitive-shl-assign-boundaries.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shl-assign-boundaries.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(-2147483648)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits <<= 32; bits }",
+    );
+    let static_count = f.run(&["analyze-project"]);
+    assert!(!static_count.status.success(), "{static_count:?}");
+    assert!(
+        String::from_utf8_lossy(&static_count.stderr).contains("LE003"),
+        "{static_count:?}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits <<= 16 + 16; bits }",
+    );
+    let static_expression = f.run(&["analyze-project"]);
+    assert!(!static_expression.status.success(), "{static_expression:?}");
+    assert!(
+        String::from_utf8_lossy(&static_expression.stderr).contains("LE003"),
+        "{static_expression:?}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn count() -> u32 { 32 } fn main() -> u32 { var bits: u32 = 1; bits <<= count(); bits }",
+    );
+    let dynamic_count = f.run(&["run"]);
+    assert!(!dynamic_count.status.success(), "{dynamic_count:?}");
+    assert!(
+        String::from_utf8_lossy(&dynamic_count.stderr).contains("RE007"),
+        "{dynamic_count:?}"
+    );
+    let build = f.run(&["build", "--output", "primitive-shl-assign-dynamic.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shl-assign-dynamic.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShlAssign; type Bits { value: u32 } type Count { value: u32 } extend Bits of ShlAssign { type Rhs = Count; fn shl_assign(share self, rhs: Count) { self.value += 1; } } fn main() -> u32 { var bits := Bits { value: 1 }; let count := Count { value: 32 }; bits <<= count; bits.value }");
+    let custom_rhs = f.run(&["run"]);
+    assert!(custom_rhs.status.success(), "{custom_rhs:?}");
+    assert_eq!(custom_rhs.stdout, b"Result: u32(2)\n");
+}
+
+#[test]
+fn user_defined_shr_assign_mutates_nominal_target_in_source_and_wasm() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='shr-assign'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } type Mask { value: u32 } type Boxed { item: Flags } extend Flags of ShrAssign { type Rhs = Mask; fn shr_assign(share self, rhs: Mask) { self.value >>= rhs.value; } } fn index(calls: share u32) -> u32 { calls += 1; 0 } fn main() -> u32 { var flags := Flags { value: 10 }; let m1 := Mask { value: 3 }; flags >>= m1; var boxed := Boxed { item: Flags { value: 4 } }; let m2 := Mask { value: 1 }; boxed.item >>= m2; var calls: u32 = 0; var items := [Flags { value: 16 }]; let m3 := Mask { value: 2 }; items[index(calls.share())] >>= m3; if calls == 1 { flags.value + boxed.item.value + items[0].value } else { 0 } }");
+    let source = f.run(&["run"]);
+    assert!(source.status.success(), "{source:?}");
+    assert_eq!(source.stdout, b"Result: u32(7)\n");
+    let build = f.run(&["build", "--output", "shr-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(7)\n");
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShrAssign { type Rhs = Mask; fn shr_assign(share self, rhs: Mask) { self.value >>= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] >>= { return 29; Mask { value: 1 } }; 0 }");
+    let early = f.run(&["run"]);
+    assert!(early.status.success(), "{early:?}");
+    assert_eq!(early.stdout, b"Result: u32(29)\n");
+    let build = f.run(&["build", "--output", "shr-assign-early.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-assign-early.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(29)\n");
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShrAssign { type Rhs = Mask; fn shr_assign(share self, rhs: Mask) { self.value >>= rhs.value; } } fn read(flags: borrow Flags) -> Mask { Mask { value: flags.value } } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= read(flags.borrow()); flags.value }");
+    let alias = f.run(&["ownership-project"]);
+    assert!(!alias.status.success(), "{alias:?}");
+    assert!(
+        String::from_utf8_lossy(&alias.stderr).contains("while it is shared"),
+        "{alias:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } } fn change(other: share Flags) -> u32 { other.value = 4; 2 } fn main() -> u32 { var items := [Flags { value: 1 }, Flags { value: 8 }]; items[0] >>= change(items[1].share()); items[0].value + items[1].value }");
+    let disjoint = f.run(&["run"]);
+    assert!(disjoint.status.success(), "{disjoint:?}");
+    assert_eq!(disjoint.stdout, b"Result: u32(4)\n");
+    let build = f.run(&["build", "--output", "shr-assign-disjoint.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-assign-disjoint.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(4)\n");
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } type Mask { value: u32 } extend Flags of ShrAssign { type Rhs = Mask; fn shr_assign(share self, rhs: Mask) { self.value >>= rhs.value; } } fn main() -> u32 { var items := [Flags { value: 1 }]; var index: u32 = 0; index += 1; items[index] >>= { index = 0; Mask { value: 1 } }; 0 }");
+    let out_of_bounds = f.run(&["run"]);
+    assert!(!out_of_bounds.status.success(), "{out_of_bounds:?}");
+    assert!(
+        String::from_utf8_lossy(&out_of_bounds.stderr).contains("RE007"),
+        "{out_of_bounds:?}"
+    );
+    let build = f.run(&["build", "--output", "shr-assign-oob.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-assign-oob.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } type Mask { value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= Mask { value: 2 }; flags.value }");
+    let missing = f.run(&["analyze-project"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no visible ShrAssign implementation"),
+        "{missing:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= true; flags.value }");
+    let wrong_rhs = f.run(&["analyze-project"]);
+    assert!(!wrong_rhs.status.success(), "{wrong_rhs:?}");
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } } fn update<T>(target: T, rhs: T::Rhs) -> T where T: ShrAssign { var value := target; value >>= rhs; value } fn main() -> u32 { let result := update(Flags { value: 64 }, 3); result.value }");
+    let generic = f.run(&["run"]);
+    assert!(generic.status.success(), "{generic:?}");
+    assert_eq!(generic.stdout, b"Result: u32(8)\n");
+    let build = f.run(&["build", "--output", "shr-assign-generic.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "shr-assign-generic.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(8)\n");
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Plain { value: u32 } fn update<T>(target: T, rhs: T::Rhs) -> T where T: ShrAssign { var value := target; value >>= rhs; value } fn main() -> u32 { let result := update(Plain { value: 64 }, 3); result.value }");
+    let missing_evidence = f.run(&["analyze-project"]);
+    assert!(!missing_evidence.status.success(), "{missing_evidence:?}");
+    assert!(
+        String::from_utf8_lossy(&missing_evidence.stderr)
+            .contains("no visible implementation of 'core::ops::ShrAssign'"),
+        "{missing_evidence:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::ShrAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} pub extend Flags of core::ops::ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } }");
+    let inactive = f.run(&["analyze-project"]);
+    assert!(!inactive.status.success(), "{inactive:?}");
+    assert!(
+        String::from_utf8_lossy(&inactive.stderr).contains("no visible ShrAssign implementation"),
+        "{inactive:?}"
+    );
+
+    f.write("src/main.mb", "use other::marker; use core::ops::ShrAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= 2; flags.value }");
+    f.write("src/other.mb", "use self::main::Flags; pub fn marker() {} extend Flags of core::ops::ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } }");
+    let private = f.run(&["analyze-project"]);
+    assert!(!private.status.success(), "{private:?}");
+    assert!(
+        String::from_utf8_lossy(&private.stderr).contains("ShrAssign"),
+        "{private:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(share self, rhs: u32) { self.value >>= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= 2; flags.value }");
+    let ambiguous = f.run(&["analyze-project"]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"),
+        "{ambiguous:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Flags { value: u32 } extend Flags of ShrAssign { type Rhs = u32; fn shr_assign(borrow self, rhs: u32) { self.value >>= rhs; } } fn main() -> u32 { var flags := Flags { value: 1 }; flags >>= 2; flags.value }");
+    let malformed = f.run(&["analyze-project"]);
+    assert!(!malformed.status.success(), "{malformed:?}");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 10; bits >>= 3; bits }",
+    );
+    let primitive = f.run(&["run"]);
+    assert!(primitive.status.success(), "{primitive:?}");
+    assert_eq!(primitive.stdout, b"Result: u32(1)\n");
+    let build = f.run(&["build", "--output", "primitive-shr-assign.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shr-assign.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(1)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits >>= 0; bits >>= 31; bits }",
+    );
+    let boundaries = f.run(&["run"]);
+    assert!(boundaries.status.success(), "{boundaries:?}");
+    assert_eq!(boundaries.stdout, b"Result: u32(0)\n");
+    let build = f.run(&["build", "--output", "primitive-shr-assign-boundaries.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shr-assign-boundaries.wasm"]);
+    assert!(artifact.status.success(), "{artifact:?}");
+    assert_eq!(artifact.stdout, b"Result: i32(0)\n");
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits >>= 32; bits }",
+    );
+    let static_count = f.run(&["analyze-project"]);
+    assert!(!static_count.status.success(), "{static_count:?}");
+    assert!(
+        String::from_utf8_lossy(&static_count.stderr).contains("LE003"),
+        "{static_count:?}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn main() -> u32 { var bits: u32 = 1; bits >>= 16 + 16; bits }",
+    );
+    let static_expression = f.run(&["analyze-project"]);
+    assert!(!static_expression.status.success(), "{static_expression:?}");
+    assert!(
+        String::from_utf8_lossy(&static_expression.stderr).contains("LE003"),
+        "{static_expression:?}"
+    );
+
+    f.write(
+        "src/main.mb",
+        "fn count() -> u32 { 32 } fn main() -> u32 { var bits: u32 = 1; bits >>= count(); bits }",
+    );
+    let dynamic_count = f.run(&["run"]);
+    assert!(!dynamic_count.status.success(), "{dynamic_count:?}");
+    assert!(
+        String::from_utf8_lossy(&dynamic_count.stderr).contains("RE007"),
+        "{dynamic_count:?}"
+    );
+    let build = f.run(&["build", "--output", "primitive-shr-assign-dynamic.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let artifact = f.run(&["run", "primitive-shr-assign-dynamic.wasm"]);
+    assert!(!artifact.status.success(), "{artifact:?}");
+    assert!(
+        String::from_utf8_lossy(&artifact.stderr).contains("RE007"),
+        "{artifact:?}"
+    );
+
+    f.write("src/main.mb", "use core::ops::ShrAssign; type Bits { value: u32 } type Count { value: u32 } extend Bits of ShrAssign { type Rhs = Count; fn shr_assign(share self, rhs: Count) { self.value += 1; } } fn main() -> u32 { var bits := Bits { value: 1 }; let count := Count { value: 32 }; bits >>= count; bits.value }");
+    let custom_rhs = f.run(&["run"]);
+    assert!(custom_rhs.status.success(), "{custom_rhs:?}");
+    assert_eq!(custom_rhs.stdout, b"Result: u32(2)\n");
 }

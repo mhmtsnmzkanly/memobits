@@ -6,15 +6,17 @@ use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
     Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
     Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UseMode, ValueId, VariantDef,
+    UnaryOp, UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
     Block, Expr, ExprKind, FieldPattern, ItemKind, MatchArm, Module, Statement, StatementKind,
+    TupleBinding,
 };
 
 mod arrays;
+mod calls;
 mod operations;
 use operations::{binary_op, primitive_type, unary_op};
 
@@ -32,8 +34,8 @@ fn struct_field_index(definition: &TypeFact, name: &str) -> Option<usize> {
 }
 
 use crate::types::{
-    check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
-    PathTarget, SelectedCall, TypeFact, VariantUse,
+    CheckMode, ExprId, FunctionFacts, MatchFact, PathTarget, SelectedCall, TypeFact, VariantUse,
+    check_resolved_mode, check_typed_module,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -48,7 +50,10 @@ fn program_types(
         .map(|definition| TypeDef {
             path: CanonicalType {
                 package: package.into(),
-                module: if definition.module == "\0tuple" {
+                module: if matches!(
+                    definition.module.as_str(),
+                    "\0tuple" | "\0record" | "\0anonymous-enum"
+                ) {
                     vec![definition.module.clone()]
                 } else if definition.module == "__prelude" {
                     vec![definition.module.clone()]
@@ -216,6 +221,51 @@ pub fn lower_resolved(
     resolution: &Resolution,
 ) -> Result<Program, Vec<Diagnostic>> {
     let typed = check_resolved_mode(project, resolution, CheckMode::Execution)?;
+    for (module_name, source) in &resolution.modules {
+        for item in &source.syntax.items {
+            let ItemKind::Function {
+                external: true,
+                name,
+                generic_parameters,
+                parameters,
+                result,
+                ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            let root_module = project
+                .manifest
+                .package
+                .entry
+                .as_deref()
+                .unwrap_or("")
+                .split("::")
+                .next()
+                .unwrap_or("");
+            let signature_matches = generic_parameters.is_empty()
+                && parameters.len() == 1
+                && !parameters[0].mutable
+                && parameters[0].access == memobits_syntax::Access::Owned
+                && parameters[0].ty.path.len() == 1
+                && parameters[0].ty.path[0] == "i32"
+                && parameters[0].ty.arguments.is_empty()
+                && result.is_none();
+            let declared = project
+                .manifest
+                .host
+                .as_ref()
+                .is_some_and(|host| host.imports.iter().any(|import| import.name == *name));
+            if module_name != root_module || !signature_matches || !declared {
+                return Err(vec![error(
+                    item.span,
+                    format!(
+                        "external function '{name}' must be declared in the application root as `extern fn write_i32(value: i32);` and match [host.imports]"
+                    ),
+                )]);
+            }
+        }
+    }
     let mut constant_errors = Vec::new();
     for (module_name, source) in &resolution.modules {
         let module_facts = typed
@@ -256,68 +306,122 @@ pub fn lower_resolved(
                 return None;
             }
             if let ItemKind::Function {
+                external,
                 name,
                 body,
                 parameters,
                 ..
             } = &item.kind
             {
-                (name == &fact.source_name).then_some((name.as_str(), body, parameters.len()))
+                (name == &fact.source_name).then_some((
+                    name.as_str(),
+                    body,
+                    parameters.len(),
+                    *external,
+                ))
             } else {
                 None
             }
         });
-        let (ir_name, body, parameter_count) = if let Some((name, body, count)) = source_function {
-            let ir_name = fact.specialization_key.as_ref().map_or_else(
-                || name.to_owned(),
-                |_| format!("{name}$specialization${}", fact.id.0),
-            );
-            (ir_name, body, count)
-        } else {
-            let extension = source.syntax.items.iter().find_map(|item| {
-                let (interface, methods) = match &item.kind {
-                    ItemKind::Extension {
-                        interface, methods, ..
-                    } => (Some(interface), methods),
-                    ItemKind::InherentExtension { methods, .. } => (None, methods),
-                    _ => return None,
+        let (ir_name, body, parameter_count, external) =
+            if let Some((name, body, count, external)) = source_function {
+                let ir_name = fact.specialization_key.as_ref().map_or_else(
+                    || name.to_owned(),
+                    |_| format!("{name}$specialization${}", fact.id.0),
+                );
+                (ir_name, body, count, external)
+            } else {
+                let extension = source.syntax.items.iter().find_map(|item| {
+                    let (interface, methods) = match &item.kind {
+                        ItemKind::Extension {
+                            interface, methods, ..
+                        } => (Some(interface), methods),
+                        ItemKind::InherentExtension { methods, .. } => (None, methods),
+                        _ => return None,
+                    };
+                    methods
+                        .iter()
+                        .find(|method| method.span == fact.span && method.name == fact.source_name)
+                        .and_then(|method| method.body.as_ref())
+                        .map(|body| {
+                            let name = interface.map_or_else(
+                                || inherent_function_name(item.span.start, &fact.source_name),
+                                |interface| {
+                                    extension_function_name(
+                                        module_name,
+                                        item.span.start,
+                                        interface,
+                                        &fact.source_name,
+                                    )
+                                },
+                            );
+                            let name =
+                                fact.specialization_key.as_ref().map_or(name.clone(), |_| {
+                                    format!("{name}$specialization${}", fact.id.0)
+                                });
+                            (
+                                name,
+                                body,
+                                methods
+                                    .iter()
+                                    .find(|m| m.span == fact.span)
+                                    .unwrap()
+                                    .parameters
+                                    .len()
+                                    + 1,
+                                false,
+                            )
+                        })
+                });
+                let Some(extension) = extension else {
+                    return Err(vec![error(
+                        fact.span,
+                        "typed fact has no source function body",
+                    )]);
                 };
-                methods
-                    .iter()
-                    .find(|method| method.span == fact.span && method.name == fact.source_name)
-                    .and_then(|method| method.body.as_ref())
-                    .map(|body| {
-                        let name = interface.map_or_else(
-                            || inherent_function_name(item.span.start, &fact.source_name),
-                            |interface| {
-                                extension_function_name(
-                                    module_name,
-                                    item.span.start,
-                                    interface,
-                                    &fact.source_name,
-                                )
-                            },
-                        );
-                        (
-                            name,
-                            body,
-                            methods
-                                .iter()
-                                .find(|m| m.span == fact.span)
-                                .unwrap()
-                                .parameters
-                                .len()
-                                + 1,
-                        )
-                    })
-            });
-            let Some(extension) = extension else {
+                extension
+            };
+        let (module_path, ir_name) = if external {
+            let Some(import) = project
+                .manifest
+                .host
+                .as_ref()
+                .and_then(|host| host.imports.iter().find(|import| import.name == ir_name))
+            else {
                 return Err(vec![error(
                     fact.span,
-                    "typed fact has no source function body",
+                    format!(
+                        "external function '{ir_name}' has no matching [host.imports] declaration"
+                    ),
                 )]);
             };
-            extension
+            if module_name
+                != project
+                    .manifest
+                    .package
+                    .entry
+                    .as_deref()
+                    .unwrap_or("")
+                    .split("::")
+                    .next()
+                    .unwrap_or("")
+            {
+                // External declarations are project-level ABI names, so only
+                // the target root may bind the manifest capability.
+                return Err(vec![error(
+                    fact.span,
+                    "host imports must be declared in the application entry module",
+                )]);
+            }
+            (
+                vec![
+                    memobits_ir::HOST_IMPORT_MODULE.to_owned(),
+                    import.module.clone(),
+                ],
+                import.name.clone(),
+            )
+        } else {
+            (module_path, ir_name)
         };
         let function = Function {
             path: CanonicalFunction {
@@ -355,7 +459,11 @@ pub fn lower_resolved(
             entry: BlockId(0),
         };
         let mut builder = Builder::new(function, fact, &typed.types);
-        builder.lower_body(body);
+        if !external {
+            builder.lower_body(body);
+        } else {
+            builder.set_terminator(BlockId(0), TerminatorKind::Return(None), Some(fact.span));
+        }
         functions.push(builder.function);
     }
     let program = Program {
@@ -426,7 +534,7 @@ fn op(source: Source, span: Span) -> Operand {
 /// One step of a place: an indexed element (its position already evaluated and
 /// captured) or a named field.
 enum Projection {
-    Index(Operand),
+    Index(Operand, bool),
     Field(String),
     FieldSlot(u32),
 }
@@ -448,6 +556,7 @@ struct Builder<'a> {
     explicit_drops: HashSet<ExprId>,
     selected_calls: HashMap<ExprId, SelectedCall>,
     selected_operators: HashMap<ExprId, SelectedCall>,
+    selected_assignments: HashMap<ExprId, SelectedCall>,
     matches: HashMap<ExprId, &'a MatchFact>,
     tuple_projections: HashMap<usize, u32>,
     tuple_initializers: HashMap<usize, Vec<u32>>,
@@ -459,6 +568,98 @@ struct Builder<'a> {
     /// before it can be used as an owned value.
     loaded: HashSet<u32>,
 }
+
+fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
+    fn contains_owned_string(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Type::String => true,
+            Type::Struct(id) => {
+                let Some(info) = types.get(id.0 as usize) else {
+                    return false;
+                };
+                if info.module != "\0tuple" || !visited.insert(id.0) {
+                    return false;
+                }
+                let owns = info
+                    .fields
+                    .iter()
+                    .any(|field| contains_owned_string(types, &field.ty, visited));
+                visited.remove(&id.0);
+                owns
+            }
+            _ => false,
+        }
+    }
+    matches!(ty, Type::Struct(id)
+        if types.get(id.0 as usize).is_some_and(|info| info.module == "\0tuple")
+            && contains_owned_string(types, ty, &mut HashSet::new()))
+}
+
+/// Nominal String-owning struct (flat or nested), classified by the shared
+/// memobits-ir rule; the recursion and visited set live here because
+/// `TypeFact` is this crate's type model.
+fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
+    fn admitted(types: &[TypeFact], id: u32, visited: &mut HashSet<u32>) -> bool {
+        use memobits_ir::OwnerFieldShape as Shape;
+        let Some(info) = types.get(id as usize) else {
+            return false;
+        };
+        if info.module == "\0tuple" || info.is_enum || !visited.insert(id) {
+            return false;
+        }
+        fn shape(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> Shape {
+            match ty {
+                Type::String => Shape::String,
+                Type::Primitive(_) => Shape::Primitive,
+                Type::Struct(child) if admitted(types, child.0, visited) => Shape::Owner,
+                Type::Array { element, len } if *len != 0 => {
+                    match shape(types, element, visited) {
+                        Shape::Owner => Shape::Owner,
+                        _ => Shape::Other,
+                    }
+                }
+                _ => Shape::Other,
+            }
+        }
+        let fields: Vec<Shape> = info
+            .fields
+            .iter()
+            .map(|field| shape(types, &field.ty, visited))
+            .collect();
+        visited.remove(&id);
+        memobits_ir::is_string_owner_struct(info.error_ancestry.is_some(), fields)
+    }
+    let Type::Struct(id) = ty else {
+        return false;
+    };
+    admitted(types, id.0, &mut HashSet::new())
+}
+
+fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
+    fn owns(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Type::String => true,
+            Type::Array { element, len } => *len != 0 && owns(types, element, visited),
+            Type::Struct(id) | Type::Enum(id) => {
+                let Some(info) = types.get(id.0 as usize) else {
+                    return false;
+                };
+                if !visited.insert(id.0) {
+                    return false;
+                }
+                let result = info.fields.iter().any(|field| owns(types, &field.ty, visited))
+                    || info.variants.iter().flat_map(|variant| &variant.payload)
+                        .any(|field| owns(types, field, visited));
+                visited.remove(&id.0);
+                result
+            }
+            _ => false,
+        }
+    }
+    matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+        && owns(types, ty, &mut HashSet::new())
+}
+
 impl<'a> Builder<'a> {
     fn new(function: Function, facts: &'a FunctionFacts, types: &'a [TypeFact]) -> Self {
         let expression_ids = facts
@@ -504,15 +705,24 @@ impl<'a> Builder<'a> {
             .cloned()
             .map(|operator| (operator.expression, operator))
             .collect();
+        let selected_assignments = facts
+            .selected_assignments
+            .iter()
+            .cloned()
+            .map(|assignment| (assignment.expression, assignment))
+            .collect();
         let owned_locals = function
             .parameter_locals
             .iter()
             .copied()
-            .filter(|local| {
-                matches!(
-                    function.locals[local.0 as usize].ty,
-                    Type::String | Type::List(_)
-                )
+            .enumerate()
+            .filter_map(|(position, local)| {
+                let parameter = function.signature.parameters.get(position)?;
+                let ty = &function.locals[local.0 as usize].ty;
+                (parameter.access == Access::Owned
+                    && (matches!(ty, Type::String | Type::List(_))
+                        || is_string_owner_aggregate_type(types, ty)))
+                    .then_some(local)
             })
             .collect();
         Self {
@@ -526,6 +736,7 @@ impl<'a> Builder<'a> {
             explicit_drops: facts.explicit_drops.iter().copied().collect(),
             selected_calls,
             selected_operators,
+            selected_assignments,
             matches,
             tuple_projections,
             tuple_initializers,
@@ -590,6 +801,69 @@ impl<'a> Builder<'a> {
             };
             let target = self.local_at(pattern as *const FieldPattern as usize);
             self.initialize_local(target, consume(extracted), pattern.span);
+        }
+    }
+    /// Tuple patterns bind or discard every slot, then recursively destructure
+    /// staged nested tuple locals. This keeps each source extraction ordered
+    /// and gives owning discard slots an ordinary local cleanup path.
+    fn lower_tuple_destructure(&mut self, elements: &[TupleBinding], value: &Expr) {
+        let Some(source) = self.lower_expr(value) else {
+            return;
+        };
+        let Some(ty @ Type::Struct(_)) = self.operand_type(source) else {
+            unreachable!("checked tuple destructuring source");
+        };
+        self.lower_tuple_patterns(elements, source, ty);
+    }
+    fn lower_tuple_patterns(&mut self, elements: &[TupleBinding], source: Operand, ty: Type) {
+        let Type::Struct(id) = ty else {
+            unreachable!("checked nested tuple pattern");
+        };
+        let moved_string_tuple = self
+            .is_string_tuple(&Type::Struct(id))
+            .then_some(source.source)
+            .and_then(|source| match source {
+                Source::Local(local) => Some(local),
+                _ => None,
+            });
+        if elements.is_empty() {
+            self.capture_consumed(source);
+            if let Some(local) = moved_string_tuple {
+                self.owned_locals.retain(|owned| *owned != local);
+            }
+            return;
+        }
+        let definition = &self.types[id.0 as usize];
+        let mut nested = Vec::new();
+        for (index, element) in elements.iter().enumerate() {
+            let field_ty = definition.fields[index].ty.clone();
+            let mut base = source;
+            base.mode = if index + 1 == elements.len() {
+                UseMode::Consume
+            } else {
+                UseMode::Read
+            };
+            let Some(extracted) = self.emit(
+                element.span,
+                InstructionKind::Extract {
+                    base,
+                    field: index as u32,
+                },
+                Some(field_ty.clone()),
+            ) else {
+                return;
+            };
+            let target = self.local_at(element as *const TupleBinding as usize);
+            self.initialize_local(target, consume(extracted), element.span);
+            if let Some(pattern) = &element.nested {
+                nested.push((pattern.as_slice(), target, field_ty));
+            }
+        }
+        for (pattern, source, ty) in nested {
+            self.lower_tuple_patterns(pattern, op(Source::Local(source), self.function.span), ty);
+        }
+        if let Some(local) = moved_string_tuple {
+            self.owned_locals.retain(|owned| *owned != local);
         }
     }
     fn capture_consumed(&mut self, source: Operand) {
@@ -719,12 +993,14 @@ impl<'a> Builder<'a> {
         Some(consume(self.capture(operand)?))
     }
     fn is_string_tuple(&self, ty: &Type) -> bool {
-        let Type::Struct(id) = ty else {
-            return false;
-        };
-        self.types.get(id.0 as usize).is_some_and(|info| {
-            info.module == "\0tuple" && info.fields.iter().any(|field| field.ty == Type::String)
-        })
+        is_string_tuple_type(self.types, ty)
+    }
+    /// Aggregates admitted for by-value transport (tuples and flat nominal structs).
+    fn is_string_transport_owner(&self, ty: &Type) -> bool {
+        is_string_tuple_type(self.types, ty) || is_flat_string_owner_struct_type(self.types, ty)
+    }
+    fn is_string_owner_struct(&self, ty: &Type) -> bool {
+        is_string_owner_aggregate_type(self.types, ty)
     }
     fn borrow(&mut self, mut owner: Operand, access: Access) -> Option<Operand> {
         let ty = self.operand_type(owner).expect("checked borrow source");
@@ -805,8 +1081,7 @@ impl<'a> Builder<'a> {
             None,
         );
         let ty = &self.function.locals[local.0 as usize].ty;
-        if matches!(ty, Type::String | Type::List(_))
-            || matches!(ty, Type::Struct(id) if self.types[id.0 as usize].fields.iter().any(|field| field.ty == Type::String))
+        if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty)
         {
             self.owned_locals.push(local);
         }
@@ -1037,7 +1312,9 @@ impl<'a> Builder<'a> {
             let local = self.owned_locals[index];
             let end = match self.function.locals[local.0 as usize].ty {
                 Type::List(_) => InstructionKind::EndListLocal { local },
-                Type::Struct(_) => InstructionKind::EndStructLocal { local },
+                Type::Struct(_) | Type::Enum(_) | Type::Array { .. } => {
+                    InstructionKind::EndStructLocal { local }
+                }
                 _ => InstructionKind::EndStringLocal { local },
             };
             self.emit(span, end, None);
@@ -1122,12 +1399,20 @@ impl<'a> Builder<'a> {
                 StatementKind::Destructure { fields, value, .. } => {
                     self.lower_destructure(fields, value);
                 }
+                StatementKind::TupleDestructure {
+                    elements, value, ..
+                } => self.lower_tuple_destructure(elements, value),
                 StatementKind::Assign {
                     target,
                     operator,
                     value,
                 } => {
-                    if matches!(target.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                    if matches!(target.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
+                        || (matches!(
+                            operator.as_str(),
+                            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+                        ) && self.selected_assignments.contains_key(&self.id(target)))
+                    {
                         self.lower_place_assign(statement.span, target, operator, value);
                         continue;
                     }
@@ -1293,6 +1578,9 @@ impl<'a> Builder<'a> {
     /// point. No address is formed yet, so index effects precede any bounds
     /// check and the right-hand side of a write.
     fn lower_place(&mut self, expr: &Expr) -> Option<(Operand, Vec<Projection>)> {
+        if matches!(expr.kind, ExprKind::Path(_)) {
+            return Some((self.lower_expr(expr)?, Vec::new()));
+        }
         let (base, step) = match &expr.kind {
             ExprKind::Index { base, .. } => (base, None),
             ExprKind::Field { base, name } => (base, Some(name)),
@@ -1308,7 +1596,8 @@ impl<'a> Builder<'a> {
             (ExprKind::Index { index, .. }, _) => {
                 let position = self.lower_expr(index)?;
                 let position = self.scalar(position)?;
-                projections.push(Projection::Index(self.capture(position)?));
+                let statically_known = matches!(index.kind, ExprKind::Number(_));
+                projections.push(Projection::Index(self.capture(position)?, statically_known));
             }
             (_, Some(name)) => {
                 if let Some(slot) = self.tuple_projections.get(&(expr as *const Expr as usize)) {
@@ -1334,7 +1623,7 @@ impl<'a> Builder<'a> {
         let mut current = root;
         for projection in projections {
             current = match projection {
-                Projection::Index(position) => {
+                Projection::Index(position, _) => {
                     self.element_addr(current, *position, access, span)?
                 }
                 Projection::Field(name) => self.field_addr(current, name, access, span)?,
@@ -1366,6 +1655,68 @@ impl<'a> Builder<'a> {
         value: &Expr,
     ) -> Option<()> {
         let (root, positions) = self.lower_place(target)?;
+        if matches!(
+            operator,
+            "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        ) {
+            if let Some(selected) = self.selected_assignments.get(&self.id(target)).cloned() {
+                let scope_start = self.owned_locals.len();
+                let result = (|| {
+                    // Capture the narrowest safely addressable owner before RHS.
+                    // Field projections do not trap; the first index does.
+                    let first_index = positions
+                        .iter()
+                        .position(|projection| matches!(projection, Projection::Index(_, false)));
+                    let (receiver, delayed_index) = if let Some(index) = first_index {
+                        let prefix = &positions[..index];
+                        let array_owner = if prefix.is_empty() {
+                            self.borrow(root, Access::Share)?
+                        } else {
+                            self.address_chain(root, prefix, Access::Share, target.span)?
+                        };
+                        (array_owner, Some(index))
+                    } else if positions.is_empty() {
+                        (self.borrow(root, Access::Share)?, None)
+                    } else {
+                        (
+                            self.address_chain(root, &positions, Access::Share, target.span)?,
+                            None,
+                        )
+                    };
+                    let rhs = self.lower_expr(value)?;
+                    // Forming the indexed address after RHS keeps bounds traps
+                    // after RHS effects and lets early return skip the access.
+                    let receiver = if let Some(index) = delayed_index {
+                        self.address_chain(
+                            receiver,
+                            &positions[index..],
+                            Access::Share,
+                            target.span,
+                        )?
+                    } else {
+                        receiver
+                    };
+                    let receiver =
+                        self.lower_selected_argument(receiver, &selected.signature.parameters[0])?;
+                    let rhs =
+                        self.lower_selected_argument(rhs, &selected.signature.parameters[1])?;
+                    self.emit(
+                        span,
+                        InstructionKind::Call {
+                            callee: read(op(Source::Function(selected.function), span)),
+                            arguments: vec![receiver, rhs],
+                        },
+                        Some(selected.signature.result.as_ref().clone()),
+                    )?;
+                    Some(())
+                })();
+                if result.is_some() {
+                    self.end_owned_locals(scope_start, span);
+                }
+                self.owned_locals.truncate(scope_start);
+                return result;
+            }
+        }
         if operator == "=" {
             if let Some((local, field)) = self.local_string_field(target, root) {
                 if matches!(value.kind, ExprKind::Path(_) | ExprKind::StringLiteral(_))
@@ -1605,6 +1956,13 @@ impl<'a> Builder<'a> {
                 },
                 Some(u32_ty.clone()),
             )?,
+            Type::String => self.emit(
+                span,
+                InstructionKind::StringLen {
+                    source: read(receiver),
+                },
+                Some(u32_ty.clone()),
+            )?,
             _ => unreachable!("checked iteration collection"),
         };
         let counter = self.hidden_local("iteration index", u32_ty.clone(), span);
@@ -1643,6 +2001,16 @@ impl<'a> Builder<'a> {
         );
         self.current = Some(entry);
         let copy = match *inner {
+            // The counter is a byte offset that always sits on a scalar start.
+            Type::String => consume(self.emit(
+                items.span,
+                InstructionKind::StringScalarRead {
+                    source: read(receiver),
+                    offset: read(position),
+                    width: false,
+                },
+                Some(Type::Primitive(Primitive::Char)),
+            )?),
             Type::List(element) => consume(self.emit(
                 items.span,
                 InstructionKind::ListRead {
@@ -1660,13 +2028,25 @@ impl<'a> Builder<'a> {
         self.initialize_local(self.local(statement), copy, span);
 
         // Advance before user code so continue uses the same header as a bare loop.
-        let one = self.constant(span, Constant::Integer("1".into()), u32_ty.clone())?;
+        let step = if *inner == Type::String {
+            self.emit(
+                span,
+                InstructionKind::StringScalarRead {
+                    source: read(receiver),
+                    offset: read(position),
+                    width: true,
+                },
+                Some(u32_ty.clone()),
+            )?
+        } else {
+            self.constant(span, Constant::Integer("1".into()), u32_ty.clone())?
+        };
         let next = self.emit(
             span,
             InstructionKind::Binary {
                 op: BinaryOp::Add,
                 left: read(position),
-                right: read(one),
+                right: read(step),
             },
             Some(u32_ty),
         )?;
@@ -1709,6 +2089,18 @@ impl<'a> Builder<'a> {
                     };
                     let Some(mut value) = (if *field_ty == Type::String {
                         self.owned_to(value, field_ty)
+                    } else if self.is_string_transport_owner(field_ty) {
+                        let Some(value) = self.owned_to(value, field_ty) else {
+                            self.owned_locals.truncate(scope_start);
+                            return None;
+                        };
+                        let staged = self.hidden_local(
+                            "nested String owner element",
+                            field_ty.clone(),
+                            element.span,
+                        );
+                        self.initialize_local(staged, value, element.span);
+                        Some(consume(op(Source::Local(staged), element.span)))
                     } else {
                         self.owned_captured(value, field_ty)
                     }) else {
@@ -1808,6 +2200,9 @@ impl<'a> Builder<'a> {
                 Some(op(source, expr.span))
             }
             ExprKind::Unary { operator, operand } => {
+                if operator == "-" && self.selected_operators.contains_key(&self.id(expr)) {
+                    return self.lower_selected_unary_operator(expr, operand);
+                }
                 // Signed minimum is a single negative constant: its positive
                 // literal cannot be represented in the target signed type.
                 if operator == "-"
@@ -2037,95 +2432,7 @@ impl<'a> Builder<'a> {
                     let owner = self.lower_expr(base)?;
                     return self.borrow(owner, access);
                 }
-                let Type::Function(signature) = self.ty(callee).expect("checked callee") else {
-                    unreachable!("checked function")
-                };
-                let callee = self.lower_expr(callee)?;
-                let callee = self.capture(callee)?;
-                let scope_start = self.owned_locals.len();
-                let result = (|| {
-                    let mut args = Vec::new();
-                    for (index, (argument, parameter)) in
-                        arguments.iter().zip(&signature.parameters).enumerate()
-                    {
-                        let direct = matches!(callee.source, Source::Function(_));
-                        let direct_string = direct && parameter.ty == Type::String;
-                        let direct_list = direct && matches!(parameter.ty, Type::List(_));
-                        let direct_string_tuple = direct
-                            && parameter.access == Access::Owned
-                            && self.is_string_tuple(&parameter.ty);
-                        let temporary_receiver = match &argument.kind {
-                            ExprKind::Call { .. }
-                                if (direct_string || direct_list)
-                                    && parameter.access == Access::Owned =>
-                            {
-                                Some(argument)
-                            }
-                            ExprKind::Call {
-                                callee: conversion, ..
-                            } if (direct_string || direct_list)
-                                && parameter.access == Access::Borrow =>
-                            {
-                                match &conversion.kind {
-                                    ExprKind::Field { base, name }
-                                        if name == "borrow"
-                                            && matches!(base.kind, ExprKind::Call { .. }) =>
-                                    {
-                                        Some(base.as_ref())
-                                    }
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        };
-                        let value = if let Some(base) = temporary_receiver {
-                            self.lower_with_temporary_owner(base)?
-                        } else {
-                            self.lower_expr(argument)?
-                        };
-                        let value = if parameter.access != Access::Owned {
-                            // Keep the original pointee and loan.
-                            let mut reference = self.borrow(value, parameter.access)?;
-                            reference.mode = access_mode(parameter.access);
-                            reference
-                        } else if direct_string || direct_list || direct_string_tuple {
-                            let owned = self.owned_to(value, &parameter.ty)?;
-                            if index + 1 < arguments.len()
-                                && temporary_receiver.is_none()
-                                && matches!(owned.source, Source::Local(_))
-                            {
-                                // Move now. A later argument can exit, so hold
-                                // the descriptor in a local with lexical cleanup.
-                                let staged = self.hidden_local(
-                                    "owned call argument",
-                                    parameter.ty.clone(),
-                                    argument.span,
-                                );
-                                self.function.locals[staged.0 as usize].mutable = false;
-                                self.initialize_local(staged, owned, argument.span);
-                                consume(op(Source::Local(staged), argument.span))
-                            } else {
-                                owned
-                            }
-                        } else {
-                            self.owned_captured(value, &parameter.ty)?
-                        };
-                        args.push(value);
-                    }
-                    self.emit(
-                        expr.span,
-                        InstructionKind::Call {
-                            callee: read(callee),
-                            arguments: args,
-                        },
-                        self.ty(expr),
-                    )
-                })();
-                if result.is_some() {
-                    self.end_owned_locals(scope_start, expr.span);
-                }
-                self.owned_locals.truncate(scope_start);
-                result
+                self.lower_call(expr, callee, arguments)
             }
             ExprKind::Struct { fields, .. } => {
                 let Some(Type::Struct(id)) = self.ty(expr) else {
@@ -2171,6 +2478,21 @@ impl<'a> Builder<'a> {
                         );
                         self.initialize_local(staged, consume(value), init.value.span);
                         consume(op(Source::Local(staged), init.value.span))
+                    } else if self.is_string_tuple(ty)
+                        || self.is_string_transport_owner(ty)
+                        || (matches!(ty, Type::Array { .. }) && self.is_string_owner_struct(ty))
+                    {
+                        let Some(owned) = self.owned_to(value, ty) else {
+                            self.owned_locals.truncate(scope_start);
+                            return None;
+                        };
+                        let staged = self.hidden_local(
+                            "nested String tuple field",
+                            ty.clone(),
+                            init.value.span,
+                        );
+                        self.initialize_local(staged, owned, init.value.span);
+                        consume(op(Source::Local(staged), init.value.span))
                     } else if let Some(operand) = self.owned_captured(value, ty) {
                         operand
                     } else {
@@ -2201,85 +2523,6 @@ impl<'a> Builder<'a> {
                 else_branch,
             } => self.lower_if(expr, condition, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => self.lower_match(expr, scrutinee, arms),
-        }
-    }
-    fn lower_selected_call(
-        &mut self,
-        expr: &Expr,
-        callee: &Expr,
-        arguments: &[Expr],
-    ) -> Option<Operand> {
-        let selected = self.selected_calls[&self.id(expr)].clone();
-        let ExprKind::Field { base, .. } = &callee.kind else {
-            unreachable!("selected call has a receiver method callee")
-        };
-        let scope_start = self.owned_locals.len();
-        let result = (|| {
-            let mut values = Vec::with_capacity(arguments.len() + 1);
-            let receiver = self.lower_expr(base)?;
-            values.push(self.lower_selected_argument(receiver, &selected.signature.parameters[0])?);
-            for (argument, parameter) in arguments
-                .iter()
-                .zip(selected.signature.parameters.iter().skip(1))
-            {
-                let value = self.lower_expr(argument)?;
-                values.push(self.lower_selected_argument(value, parameter)?);
-            }
-            self.emit(
-                expr.span,
-                InstructionKind::Call {
-                    callee: read(op(Source::Function(selected.function), expr.span)),
-                    arguments: values,
-                },
-                self.ty(expr),
-            )
-        })();
-        if result.is_some() {
-            self.end_owned_locals(scope_start, expr.span);
-        }
-        self.owned_locals.truncate(scope_start);
-        result
-    }
-    fn lower_selected_operator(
-        &mut self,
-        expr: &Expr,
-        left: &Expr,
-        right: &Expr,
-    ) -> Option<Operand> {
-        let selected = self.selected_operators[&self.id(expr)].clone();
-        let scope_start = self.owned_locals.len();
-        let result = (|| {
-            let lhs = self.lower_expr(left)?;
-            let lhs = self.lower_selected_argument(lhs, &selected.signature.parameters[0])?;
-            let rhs = self.lower_expr(right)?;
-            let rhs = self.lower_selected_argument(rhs, &selected.signature.parameters[1])?;
-            self.emit(
-                expr.span,
-                InstructionKind::Call {
-                    callee: read(op(Source::Function(selected.function), expr.span)),
-                    arguments: vec![lhs, rhs],
-                },
-                self.ty(expr),
-            )
-        })();
-        if result.is_some() {
-            self.end_owned_locals(scope_start, expr.span);
-        }
-        self.owned_locals.truncate(scope_start);
-        result
-    }
-
-    fn lower_selected_argument(
-        &mut self,
-        value: Operand,
-        parameter: &memobits_ir::ParameterType,
-    ) -> Option<Operand> {
-        if parameter.access != Access::Owned {
-            let mut reference = self.borrow(value, parameter.access)?;
-            reference.mode = access_mode(parameter.access);
-            Some(reference)
-        } else {
-            self.owned_captured(value, &parameter.ty)
         }
     }
     /// `match` on an owned enum. The scrutinee is consumed once, into a hidden
@@ -2449,12 +2692,30 @@ impl<'a> Builder<'a> {
                         );
                     }
                 }
-                for (position, (index, local)) in bound.iter().enumerate() {
-                    if fact.borrowed {
-                        break; // borrowing bindings were addressed above
+                let mut extracted = if fact.borrowed {
+                    Vec::new()
+                } else {
+                    bound.clone()
+                };
+                if !fact.borrowed {
+                    for (index, ty) in payload.iter().enumerate() {
+                        if arm_fact.bindings.get(index).is_some_and(Option::is_none)
+                            && (matches!(ty, Type::String)
+                                || is_string_owner_aggregate_type(types, ty))
+                        {
+                            let local = self.hidden_local(
+                                "discarded match payload",
+                                ty.clone(),
+                                arm.pattern.span,
+                            );
+                            extracted.push((index, local));
+                        }
                     }
+                }
+                extracted.sort_by_key(|(index, _)| *index);
+                for (position, (index, local)) in extracted.iter().enumerate() {
                     let mut base = op(Source::Local(cell), arm.pattern.span);
-                    base.mode = if position + 1 == bound.len() {
+                    base.mode = if position + 1 == extracted.len() {
                         UseMode::Consume
                     } else {
                         UseMode::Read
@@ -2508,6 +2769,15 @@ impl<'a> Builder<'a> {
                 && variant == 0
             {
                 self.owned_to(value, ty)?
+            } else if self.is_string_tuple(ty) {
+                let owned = self.owned_to(value, ty)?;
+                let staged = self.hidden_local(
+                    "enum String tuple payload",
+                    ty.clone(),
+                    argument.span,
+                );
+                self.initialize_local(staged, owned, argument.span);
+                consume(op(Source::Local(staged), argument.span))
             } else {
                 self.owned_captured(value, ty)?
             };

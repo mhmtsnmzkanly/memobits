@@ -1,14 +1,14 @@
 type TextLabel {
     number: u32,
-    text: String,
+    text: string,
 }
 
-fn add_bang(value: borrow String) -> String {
+fn add_bang(value: borrow string) -> string {
     let text := value.concat("!");
     text
 }
 
-fn add_question(value: share String) {
+fn add_question(value: share string) {
     value.push_str("?");
 }
 

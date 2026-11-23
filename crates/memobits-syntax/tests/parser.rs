@@ -109,10 +109,27 @@ fn parses_trailing_inherent_extension_as_a_type_associated_item() {
 }
 
 #[test]
-fn generic_trailing_inherent_extensions_have_a_clear_gate() {
-    syntax_error(
+fn generic_trailing_inherent_extensions_parse_and_alias_extensions_remain_gated() {
+    for source in [
         "type Box<T> { value: T } extend { fn value(borrow self) -> T { self.value } }",
-        "trailing inherent extensions on generic nominal types are not supported yet",
+        "type Packet<const N: u32> { value: Array<u32, N> } extend { fn value(borrow self) -> u32 { self.value[0] } }",
+    ] {
+        let parsed = parse(SourceId(41), source);
+        assert!(parsed.diagnostics.is_empty(), "{source}: {:?}", parsed.diagnostics);
+        assert_eq!(parsed.module.items.len(), 2, "{source}");
+        let ItemKind::InherentExtension { target, generic_parameters, methods, .. } =
+            &parsed.module.items[1].kind
+        else {
+            panic!("expected trailing inherent extension: {source}");
+        };
+        assert_eq!(target.arguments.len(), 1, "{source}");
+        assert_eq!(generic_parameters.len(), 1, "{source}");
+        assert_eq!(methods.len(), 1, "{source}");
+    }
+
+    syntax_error(
+        "type Alias<T> = Array<T, 1>; extend { fn value(borrow self) -> i32 { 0 } }",
+        "inherent extensions require a nominal type declaration",
     );
 }
 
@@ -926,6 +943,60 @@ fn malformed_struct_literals_and_destructuring_have_clear_diagnostics() {
     }
 }
 
+#[test]
+fn parses_positional_nested_and_wildcard_tuple_destructuring() {
+    let parsed = parse(
+        SourceId(42),
+        "fn f() { let (first, second,) := pair; var () := empty; }",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    let StatementKind::TupleDestructure { elements, .. } = &body.statements[0].kind else {
+        panic!("expected tuple destructuring")
+    };
+    assert_eq!(
+        elements
+            .iter()
+            .map(|element| element.binding.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    let StatementKind::TupleDestructure { elements, .. } = &body.statements[1].kind else {
+        panic!("expected empty tuple destructuring")
+    };
+    assert!(elements.is_empty());
+
+    let parsed = parse(SourceId(43), "fn f() { let (_, (inner, _)) := pair; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!()
+    };
+    let StatementKind::TupleDestructure { elements, .. } = &body.statements[0].kind else {
+        panic!("expected nested tuple pattern")
+    };
+    assert_eq!(elements[0].binding, "_");
+    let nested = elements[1].nested.as_ref().expect("nested tuple pattern");
+    assert_eq!(nested[0].binding, "inner");
+    assert_eq!(nested[1].binding, "_");
+
+    for (source, expected) in [
+        ("fn f() { let (one) := pair; }", "one-element tuple"),
+        ("fn f() { let (one: alias, two) := pair; }", "aliases"),
+    ] {
+        let parsed = parse(SourceId(43), source);
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
 fn first_body(source: &str) -> memobits_syntax::Block {
     let result = parse(SourceId(40), source);
     assert!(
@@ -1094,4 +1165,73 @@ fn associated_type_declarations_and_bindings_parse_in_interface_extensions() {
     assert_eq!(associated_types.len(), 2);
     assert_eq!(associated_types[0].name, "Rhs");
     assert_eq!(associated_types[0].ty.as_ref().unwrap().path, ["Right"]);
+}
+
+#[test]
+fn parses_bitand_compound_assignment_statement() {
+    let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 15; bits &= 6; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function body");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment statement");
+    };
+    assert_eq!(operator, "&=");
+}
+
+#[test]
+fn parses_bitor_compound_assignment_statement() {
+    let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 8; bits |= 3; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function body");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment statement");
+    };
+    assert_eq!(operator, "|=");
+}
+#[test]
+fn parses_shift_left_compound_assignment_statement() {
+    let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 10; bits <<= 2; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function body");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment statement");
+    };
+    assert_eq!(operator, "<<=");
+}
+
+#[test]
+fn parses_bitxor_compound_assignment_statement() {
+    let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 10; bits ^= 3; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else {
+        panic!("expected function body");
+    };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else {
+        panic!("expected assignment statement");
+    };
+    assert_eq!(operator, "^=");
+}
+
+#[test]
+fn parses_shift_right_compound_assignment_statement() {
+    let parsed = parse(SourceId(0), "fn main() { var bits: u32 = 10; bits >>= 2; }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else { panic!("expected function body"); };
+    let StatementKind::Assign { operator, .. } = &body.statements[1].kind else { panic!("expected assignment statement"); };
+    assert_eq!(operator, ">>=");
+}
+
+#[test]
+fn parses_shift_right_assignment_after_nested_generic_closer() {
+ let parsed = parse(SourceId(0), "fn main() { var x: Box<Box<u32>> = value; x >>= 1; }");
+ assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+ let ItemKind::Function { body, .. } = &parsed.module.items[0].kind else { panic!("expected function"); };
+ let StatementKind::Assign { operator, .. } = &body.statements[1].kind else { panic!("expected assignment"); };
+ assert_eq!(operator, ">>=");
 }

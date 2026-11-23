@@ -1,0 +1,245 @@
+//! Lowering of direct, selected receiver and indirect calls: argument staging
+//! and owned-temporary cleanup.
+use super::*;
+
+impl Builder<'_> {
+    pub(super) fn lower_call(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[Expr],
+    ) -> Option<Operand> {
+        let Type::Function(signature) = self.ty(callee).expect("checked callee") else {
+            unreachable!("checked function")
+        };
+        let callee = self.lower_expr(callee)?;
+        let callee = self.capture(callee)?;
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let mut args = Vec::new();
+            for (index, (argument, parameter)) in
+                arguments.iter().zip(&signature.parameters).enumerate()
+            {
+                let direct = matches!(callee.source, Source::Function(_));
+                let direct_string = direct && parameter.ty == Type::String;
+                let direct_list = direct && matches!(parameter.ty, Type::List(_));
+                let direct_result_enum = matches!(parameter.ty, Type::Enum(id)
+                    if self.types.get(id.0 as usize).is_some_and(|info|
+                        info.entry_outcome == Some(memobits_ir::EntryOutcome::Result)));
+                let direct_owned_string_aggregate = direct
+                    && parameter.access == Access::Owned
+                    && (self.is_string_transport_owner(&parameter.ty)
+                        || matches!(parameter.ty, Type::Enum(_) | Type::Array { .. })
+                            && !direct_result_enum
+                            && self.is_string_owner_struct(&parameter.ty));
+                let temporary_receiver = match &argument.kind {
+                    ExprKind::Call { .. }
+                        if (direct_string || direct_list) && parameter.access == Access::Owned =>
+                    {
+                        Some(argument)
+                    }
+                    ExprKind::Call {
+                        callee: conversion, ..
+                    } if (direct_string || direct_list) && parameter.access == Access::Borrow => {
+                        match &conversion.kind {
+                            ExprKind::Field { base, name }
+                                if name == "borrow"
+                                    && matches!(base.kind, ExprKind::Call { .. }) =>
+                            {
+                                Some(base.as_ref())
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let value = if let Some(base) = temporary_receiver {
+                    self.lower_with_temporary_owner(base)?
+                } else {
+                    self.lower_expr(argument)?
+                };
+                let value = if parameter.access != Access::Owned {
+                    // Keep the original pointee and loan.
+                    let mut reference = self.borrow(value, parameter.access)?;
+                    reference.mode = access_mode(parameter.access);
+                    reference
+                } else if direct_string || direct_list || direct_owned_string_aggregate {
+                    let owned = self.owned_to(value, &parameter.ty)?;
+                    // Nominal String structs are admitted only from named
+                    // locals, so their temporaries are left unstaged and the
+                    // call-site gate rejects them.
+                    let must_stage_owned_aggregate_temporary = direct_owned_string_aggregate
+                        && !is_flat_string_owner_struct_type(self.types, &parameter.ty)
+                        && matches!(owned.source, Source::Value(_));
+                    let must_stage_before_later_argument = index + 1 < arguments.len()
+                        && temporary_receiver.is_none()
+                        && matches!(owned.source, Source::Local(_));
+                    if must_stage_owned_aggregate_temporary || must_stage_before_later_argument {
+                        // Give an owned tuple temporary a local descriptor
+                        // before transfer. This also keeps ownership
+                        // available for cleanup if a later argument exits.
+                        let staged = self.hidden_local(
+                            "owned call argument",
+                            parameter.ty.clone(),
+                            argument.span,
+                        );
+                        self.function.locals[staged.0 as usize].mutable = false;
+                        self.initialize_local(staged, owned, argument.span);
+                        consume(op(Source::Local(staged), argument.span))
+                    } else {
+                        owned
+                    }
+                } else {
+                    self.owned_captured(value, &parameter.ty)?
+                };
+                args.push(value);
+            }
+            self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(callee),
+                    arguments: args,
+                },
+                self.ty(expr),
+            )
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+
+    pub(super) fn lower_selected_call(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[Expr],
+    ) -> Option<Operand> {
+        let selected = self.selected_calls[&self.id(expr)].clone();
+        let ExprKind::Field { base, .. } = &callee.kind else {
+            unreachable!("selected call has a receiver method callee")
+        };
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let mut values = Vec::with_capacity(arguments.len() + 1);
+            let receiver_parameter = &selected.signature.parameters[0];
+            if receiver_parameter.access != Access::Owned
+                && matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
+            {
+                // A projected receiver (`t.first.read()`, `xs[0].m()`) is
+                // addressed in place, never loaded as a whole aggregate.
+                let (root, projections) = self.lower_place(base)?;
+                let mut reference =
+                    self.address_chain(root, &projections, receiver_parameter.access, base.span)?;
+                reference.mode = access_mode(receiver_parameter.access);
+                values.push(reference);
+            } else {
+                let receiver = self.lower_expr(base)?;
+                values.push(self.lower_selected_argument(receiver, receiver_parameter)?);
+            }
+            for (argument, parameter) in arguments
+                .iter()
+                .zip(selected.signature.parameters.iter().skip(1))
+            {
+                let value = self.lower_expr(argument)?;
+                values.push(self.lower_selected_argument(value, parameter)?);
+            }
+            self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(op(Source::Function(selected.function), expr.span)),
+                    arguments: values,
+                },
+                self.ty(expr),
+            )
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+    pub(super) fn lower_selected_operator(
+        &mut self,
+        expr: &Expr,
+        left: &Expr,
+        right: &Expr,
+    ) -> Option<Operand> {
+        let selected = self.selected_operators[&self.id(expr)].clone();
+        let negate_result =
+            matches!(expr.kind, ExprKind::Binary { ref operator, .. } if operator == "!=");
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let lhs = self.lower_expr(left)?;
+            let lhs = self.lower_selected_argument(lhs, &selected.signature.parameters[0])?;
+            let rhs = self.lower_expr(right)?;
+            let rhs = self.lower_selected_argument(rhs, &selected.signature.parameters[1])?;
+            let call = self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(op(Source::Function(selected.function), expr.span)),
+                    arguments: vec![lhs, rhs],
+                },
+                self.ty(expr),
+            )?;
+            if negate_result {
+                self.emit(
+                    expr.span,
+                    InstructionKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: read(call),
+                    },
+                    self.ty(expr),
+                )
+            } else {
+                Some(call)
+            }
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+
+    pub(super) fn lower_selected_unary_operator(
+        &mut self,
+        expr: &Expr,
+        operand: &Expr,
+    ) -> Option<Operand> {
+        let selected = self.selected_operators[&self.id(expr)].clone();
+        let scope_start = self.owned_locals.len();
+        let result = (|| {
+            let value = self.lower_expr(operand)?;
+            let value = self.lower_selected_argument(value, &selected.signature.parameters[0])?;
+            self.emit(
+                expr.span,
+                InstructionKind::Call {
+                    callee: read(op(Source::Function(selected.function), expr.span)),
+                    arguments: vec![value],
+                },
+                self.ty(expr),
+            )
+        })();
+        if result.is_some() {
+            self.end_owned_locals(scope_start, expr.span);
+        }
+        self.owned_locals.truncate(scope_start);
+        result
+    }
+
+    pub(super) fn lower_selected_argument(
+        &mut self,
+        value: Operand,
+        parameter: &memobits_ir::ParameterType,
+    ) -> Option<Operand> {
+        if parameter.access != Access::Owned {
+            let mut reference = self.borrow(value, parameter.access)?;
+            reference.mode = access_mode(parameter.access);
+            Some(reference)
+        } else {
+            self.owned_captured(value, &parameter.ty)
+        }
+    }
+}

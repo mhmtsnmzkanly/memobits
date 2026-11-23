@@ -98,6 +98,9 @@ only where explicitly stated; unresolved API spellings remain proposals.
   evidence forwarded through nested generic calls. Other constraint shapes,
   borrowed parameters, and generic const-plus-evidence combinations remain
   gated while G1 continues.
+- `Array<T, N>` remains in the portable core. `Bytes<N>` is a compatibility
+  alias for `Array<u8, N>` outside the target core; existing `Bytes` sources
+  remain accepted during migration.
 - A postfix `T?` is shorthand for `Option<T>`. Grouped `(borrow T)?` parses as
   `Option<borrow T>`, while `borrow T?` keeps the borrow outside the optional
   type. This does not expand the current reference transport subset.
@@ -153,11 +156,26 @@ only where explicitly stated; unresolved API spellings remain proposals.
   order and store by mapped slot. Internal tuple arguments/results and local
   tuples with owned String fields are supported. Named local tuples with direct
   String fields can move through internal owned parameters and results; Wasm
-  transfers their cleanup with the tuple. Nominal String-owning struct transport
-  retains its separate gate. Tuple patterns/destructuring remain outside this slice.
+  transfers their cleanup with the tuple. A temporary tuple with direct String
+  fields can also move directly into an owned internal call; lowering stages it
+  in a cleanup-tracked local before transfer. Nominal String-owning struct
+  transport retains its separate gate. Positional tuple destructuring binds every slot
+  from a named owned tuple local and transfers direct String fields to their
+  new local owners, clearing source tuple descriptors before scope cleanup.
+  Nested positional patterns and wildcard slots consume their complete tuple
+  shape; wildcard-owned Strings use normal local cleanup. Nested tuple elements
+  that own Strings transfer recursively through construction and internal
+  signatures, with exact descriptor clearing at each move. Local nominal
+  records can contain String-owning tuple fields and clean them recursively.
+  By-value nominal String-owner transport, String-owning tuple placement in
+  arrays/enums, other owner placements, destructuring aliases, and partial
+  destructuring remain open pending the full D2 scope.
 - Strings are UTF-8. The only source type spelling is lowercase `string`.
-  Byte length and Unicode scalar iteration are separate APIs;
-  integer indexing is unsupported. Initial interpolation accepts identifiers
+  Byte length and Unicode scalar traversal are separate operations: `.len()`
+  counts UTF-8 bytes, and `.scalar_at(offset)` reads at a byte offset. A source
+  loop can advance across valid scalars by their UTF-8 widths; this does not
+  promise an iterator API.
+  Integer indexing is unsupported. Initial interpolation accepts identifiers
   only, reads without consuming, and formats basic types only. String literals
   appear as owned `String`; storage may be optimized without changing semantics.
 - Property/getter/setter systems, static storage, tasks, and parallel execution
@@ -186,6 +204,60 @@ only where explicitly stated; unresolved API spellings remain proposals.
   `core::ops::Rem` interfaces for nominal operands. Both follow the same owned
   `Rhs`/`Output` and constrained evidence-forwarding contract. Primitive
   numeric division and remainder retain their built-in checked semantics.
+- User-defined `&` selects the compiler-provided `core::ops::BitAnd` interface
+  for nominal operands. It uses the same owned `Rhs`/`Output` and constrained
+  evidence-forwarding contract. Primitive `u32 & u32` keeps its existing
+  per-bit semantics. User-defined `|` selects `core::ops::BitOr` for nominal
+  operands with the same contract; primitive `u32 | u32` keeps its per-bit
+  semantics. User-defined `^` selects `core::ops::BitXor` for nominal operands
+  with the same contract; primitive `u32 ^ u32` keeps its per-bit semantics.
+  Nominal equality and inequality select `core::ops::PartialEq`; the borrowed
+  left receiver stays available and the right operand follows owned argument
+  rules. `!=` negates the selected equality result. Nominal ordering selects
+  `core::ops::PartialOrd` by operator and calls its matching `lt`, `le`, `gt`,
+  or `ge` method directly. Each method borrows the left receiver, takes an
+  owned associated `Rhs`, and returns `Bool`; ordering is never inferred from
+  equality. Primitive equality and ordering remain built in. Nominal `+=`
+  selects `core::ops::AddAssign` with `share self`, an owned associated `Rhs`,
+  and implicit `Unit` result. It captures the writable target once, evaluates
+  the RHS before invoking the method, and preserves primitive checked `+=`.
+  Early-return tests for indexed and field-projected targets prove the method is
+  skipped; they do not establish separate frame or allocation-cleanup guarantees.
+  Nominal `-=` selects `core::ops::SubAssign` under the same receiver, RHS,
+  target capture, and evaluation-order contract; primitive checked `-=` remains
+  built in. Nominal `*=` selects `core::ops::MulAssign` with `share self`, an
+  owned associated `Rhs`, and implicit `Unit` result. It preserves the same
+  single place capture and RHS-before-method sequencing; primitive checked `*=`
+  stays built in. Nominal `/=` selects `core::ops::DivAssign` under the same
+  receiver, owned `Rhs`, single place capture, and RHS-before-method sequencing
+  contract; primitive checked `/=` stays built in. Nominal `%=` selects
+  `core::ops::RemAssign` under the same receiver, owned `Rhs`, single place capture,
+  and RHS-before-method sequencing contract; primitive checked `%=` stays built in. Nominal `&=` selects `core::ops::BitAndAssign` with the same shared receiver, owned associated `Rhs`, single place capture, and RHS-before-method sequencing; primitive `u32 &= u32` follows existing per-bit `&` semantics. Nominal `|=` selects `core::ops::BitOrAssign` with the same shared receiver, owned associated `Rhs`, single place capture, and RHS-before-method sequencing; primitive `u32 |= u32` follows existing per-bit `|` semantics. Nominal `^=` selects `core::ops::BitXorAssign` with the same shared receiver, owned associated `Rhs`, single place capture, and RHS-before-method sequencing; primitive `u32 ^= u32` follows existing per-bit `^` semantics. Nominal `<<=` selects `core::ops::ShlAssign` with the same shared receiver, owned associated `Rhs`, single place capture, and RHS-before-method sequencing; primitive `u32 <<=` keeps checked shift-count behavior. Nominal `>>=` selects `core::ops::ShrAssign` with the same shared receiver, owned associated `Rhs`, single place capture, and RHS-before-method sequencing; primitive `u32 >>=` keeps checked shift-count behavior. All concrete nominal compound assignment families are enabled; generic constrained compound
+  selection is supported for owned generic parameters whose selected interface
+  evidence is caller-forwarded; `AddAssign`, `SubAssign`, `MulAssign`, `ShrAssign`, and `DivAssign` have
+  source/Wasm proof, including distinct associated `Rhs`, missing/wrong-evidence
+  rejection, and owned RHS consumption. Generic
+  projected/indexed targets and remaining nominal compound operators stay gated.
+  Selected indexed compounds defer dynamic bounds validation until RHS completes
+  while preserving an exclusive loan on the nearest owner. Literal indices keep
+  checked place capture before RHS because invalid constants are compile-time
+  errors. Dynamic-index loans conservatively cover the nearest array owner while
+  RHS executes, so uncertain accesses into that owner remain overlapping.
+- User-defined `<<` selects the compiler-provided `core::ops::Shl` interface
+  for nominal operands. It follows the same owned `Rhs`/`Output` and
+  constrained evidence-forwarding contract. Primitive `u32 << u32` keeps its
+  built-in behavior, with counts at or above 32 rejected statically or trapped
+  dynamically.
+- User-defined `>>` selects the compiler-provided `core::ops::Shr` interface
+  for nominal operands, with the same owned `Rhs`/`Output` and constrained
+  evidence-forwarding contract. Primitive `u32 >> u32` remains a built-in
+  zero-filling shift with counts at or above 32 rejected statically or trapped
+  dynamically.
+- User-defined unary `-` selects compiler-provided `core::ops::Neg` for
+  nominal operands. `Neg` has an associated `Output` and an owned `neg(self)`
+  method; constrained generic evidence is forwarded to the selected method.
+  Primitive numeric negation remains built in, including signed-minimum
+  literal handling and checked runtime overflow.
 
 ## Repetition and implementation order
 
@@ -264,3 +336,77 @@ only where explicitly stated; unresolved API spellings remain proposals.
   is a controlled runtime error.
 - Enum tags use the smallest unsigned integer width that fits the variant
   count. Tag width and field layout are not a stable ABI.
+
+## Ownership direction after the D2 aggregate work (2026-11-23)
+
+- **Composition is allowed by default.** String-owning values may be composed
+  into any aggregate placement (struct field, tuple element, fixed-array
+  element, enum payload, nesting of these) once the type-directed ownership
+  facts and cleanup cover that placement. A single shared predicate decides
+  which String-owning aggregates may be transported; per-shape gates are
+  temporary and are removed as each placement gains source/Wasm, capped-memory
+  and negative evidence. Only compositions that cannot be proven sound stay
+  rejected, each with a specific diagnostic and test.
+- **References stay second-class.** References are parameter and local-loan
+  forms only: no reference-returning functions, no references stored in
+  struct, tuple, array or enum storage, and no named lifetime parameters.
+  Data moves by value; `borrow`/`share` parameters and local loans provide
+  access. This is a direction for future work, not a change to shipped
+  behavior.
+- **No implicit partial moves.** Moving a value out of a field, element or
+  payload of a live owner stays rejected. The intended explicit forms are a
+  place replacement that returns the old value (spelling open, e.g.
+  `replace(place, new_value)`) and a same-type `swap` of two disjoint places;
+  neither needs a default value or leaves a hole in the owner. Whole-owner
+  destructuring and consuming `match` of a whole owner remain supported.
+- **Fixed-array spelling.** `Array<T, N>` is the target spelling, consistent
+  with `List<T>`, `Option<T>` and other applied types. The earlier
+  `array(T; N)` proposal is withdrawn. `Bytes<N>` remains a compatibility
+  alias outside the target core.
+- **Anonymous records use the same ownership predicate.** String-owning
+  anonymous records are admitted through the shared transport predicate
+  together with nominal structs, not through a separate gate.
+
+## Optional spelling (2026-11-23, user decision)
+
+- `T?` is the preferred source spelling for optional types and is shorthand
+  for `Option<T>`. The `Option<T>` spelling stays accepted with identical
+  meaning and reports no warning (user decision; the earlier MW001 migration
+  warning was removed). D3's legacy migration-diagnostic clause is waived by
+  this decision.
+- The compiler keeps a non-failing warning channel: warnings are printed with
+  code and span on `check`, `build` and `run`, never change the exit status
+  of an otherwise successful command, and never suppress errors. MW001 and
+  MW002 are unused and reserved.
+- Maintained guide sources use `T?`.
+
+## Text traversal and spelling migration (2026-11-23)
+
+- Scalar traversal reuses the existing collection loop: `loop ch in text`
+  over a borrowed or named `string` visits Unicode scalars in order and binds
+  each as an immutable `Char`. `.len()` remains the byte length. The loop
+  borrows the text for its duration, like other collection loops. No general
+  iterator protocol is introduced by this decision.
+- `Bytes<N>` stays accepted as a compatibility alias of `Array<u8, N>` and
+  reports migration warning MW003 on the non-failing channel. Maintained guide
+  and fixture sources migrate; protected example directories are left
+  unchanged.
+- `String` is NOT a compatibility spelling: the earlier accepted decision
+  "The only source type spelling is lowercase `string`" stands, and bare
+  `String` stays rejected with TE001 and its migration guidance. (Corrected
+  2026-11-23: an architect note briefly listed `String` as accepted with a
+  warning; that contradicted the committed decision and was reverted.)
+
+### Shipped C1 receiver rules (2026-11-23)
+
+- `loop ch in text` accepts a named `string` local or a borrowed parameter
+  (a single-segment path), like the primitive List loop. Fields, call results,
+  literals and `concat` temporaries are rejected with TE017. The text is
+  borrowed for the whole loop, so mutating, replacing, moving or dropping it
+  inside the body is rejected by the existing loan checks (BE005). The binding
+  is an immutable `Char`; `Char` supports equality only.
+- Decoding happens in generated code: the loop keeps a byte offset, reads the
+  scalar at the offset and advances by the lead byte's UTF-8 width, using the
+  internal `StringScalarRead` instruction. No allocator or runtime change.
+- MW003 reports on the bare `Bytes<N>` spelling. Bare `String` remains a
+  TE001 error with migration guidance; MW002 is not used.

@@ -180,6 +180,12 @@ fn division_failures_report_zero_and_signed_overflow() {
         14,
     );
     reports(
+        "fn main() -> i32 {\n    var value := 5;\n    var divisor := 0;\n    value /= divisor;\n    value\n}",
+        "division by zero",
+        4,
+        5,
+    );
+    reports(
         "fn main() -> i32 {\n    var z := 0;\n    7 % z\n}",
         "remainder by zero",
         3,
@@ -187,6 +193,12 @@ fn division_failures_report_zero_and_signed_overflow() {
     );
     reports(
         "fn main() -> i32 {\n    var a := -2147483647 - 1;\n    var b := -1;\n    a / b\n}",
+        "integer overflow in division",
+        4,
+        5,
+    );
+    reports(
+        "fn main() -> i32 {\n    var value: i32 = -2147483647 - 1;\n    var divisor: i32 = -1;\n    value /= divisor;\n    value\n}",
         "integer overflow in division",
         4,
         5,

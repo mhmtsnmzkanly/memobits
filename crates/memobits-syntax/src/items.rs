@@ -1,8 +1,8 @@
 //! Top-level function, import, and type declaration parsing.
 use super::{
     Access, AssociatedTypeBinding, Field, GenericParameter, GenericParameterKind, InterfaceMethod,
-    Item, ItemKind, Node, PResult, Parameter, Parser, Type, TypeDefinition, UseMember, Variant,
-    WhereBound,
+    Item, ItemKind, Node, PResult, Parameter, Parser, Type, TypeArgument, TypeDefinition,
+    UseMember, Variant, WhereBound,
 };
 
 impl Parser {
@@ -10,6 +10,7 @@ impl Parser {
         let start = self.current().span.start;
         let public = self.eat("pub");
         let mut item_span = None;
+        let external = self.eat("extern");
         let kind = if self.eat("fn") {
             let name = self.name()?;
             let generic_parameters = self.generic_parameters()?;
@@ -40,9 +41,19 @@ impl Parser {
                 None
             };
             let bounds = self.where_bounds()?;
-            let body = self.block()?;
+            let body = if external {
+                self.expect(";")?;
+                super::Block {
+                    span: self.span(start),
+                    statements: Vec::new(),
+                    tail: None,
+                }
+            } else {
+                self.block()?
+            };
             ItemKind::Function {
                 public,
+                external,
                 name,
                 generic_parameters,
                 bounds,
@@ -159,11 +170,6 @@ impl Parser {
                 if matches!(&definition, TypeDefinition::Alias(_)) {
                     return self.fail("inherent extensions require a nominal type declaration");
                 }
-                if !generic_parameters.is_empty() {
-                    return self.fail(
-                        "trailing inherent extensions on generic nominal types are not supported yet",
-                    );
-                }
                 let extension_start = self.current().span.start;
                 self.bump();
                 let (associated_types, methods) = self.interface_methods(true)?;
@@ -177,8 +183,21 @@ impl Parser {
                         target: Type {
                             span: declaration_span,
                             path: vec![name.clone()],
-                            arguments: Vec::new(),
+                            arguments: generic_parameters
+                                .iter()
+                                .map(|parameter| match &parameter.kind {
+                                    GenericParameterKind::Type => TypeArgument::Type(Type {
+                                        span: parameter.span,
+                                        path: vec![parameter.name.clone()],
+                                        arguments: Vec::new(),
+                                    }),
+                                    GenericParameterKind::Const(_) => {
+                                        TypeArgument::Const(parameter.name.clone())
+                                    }
+                                })
+                                .collect(),
                         },
+                        generic_parameters: generic_parameters.clone(),
                         methods,
                     },
                 });
@@ -225,6 +244,7 @@ impl Parser {
                 ItemKind::InherentExtension {
                     public,
                     target,
+                    generic_parameters: Vec::new(),
                     methods,
                 }
             }

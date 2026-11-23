@@ -95,6 +95,64 @@ the implemented subset; a milestone is not complete merely because its crate exi
   references. Address-taken owners live in authoritative frame cells in
   a configurable stack region of linear memory. Allocation is checked and the
   stack pointer is restored on each normal return.
+- **Core operators**: nominal `+ - * / % & | ^ << >>` use their compiler-provided
+  `core::ops` interfaces with owned associated `Rhs`/`Output` and constrained
+  generic evidence forwarding. Primitive `u32` bitwise and shift operators
+  retain their built-in behavior, including bounded shift counts. Operator
+  contracts and current limits are recorded in [decisions](decisions.md).
+  Nominal `==`/`!=` use `PartialEq`; nominal `<`, `<=`, `>`, and `>=` select
+  `PartialOrd`'s matching `eq`, `lt`, `le`, `gt`, or `ge` member. Comparison
+  receivers are borrowed, their associated `Rhs` is owned, and each result is
+  `Bool`; primitive comparisons remain built in.
+  Nominal unary `-` selects `core::ops::Neg` with an owned receiver and
+  associated `Output`; primitive negation keeps its existing checked behavior.
+- **Compound assignment**: nominal `+=` selects compiler-provided
+  `core::ops::AddAssign` with `share self`, owned associated `Rhs`, and implicit
+  `Unit` result. The target place is captured once before RHS evaluation, and
+  the selected method runs only after the RHS completes. Source and standalone
+  Wasm coverage includes named, field-projected, and indexed places, an index
+  side effect, early RHS return that skips the selected method, overlapping-loan
+  rejection, and primitive checked arithmetic. These early-return checks do not
+  claim independent frame or allocation-cleanup proof. Nominal `-=` also selects
+  compiler-provided `core::ops::SubAssign` under the same receiver, RHS, target
+  capture, and sequencing contract; source/Wasm tests cover a distinct nominal
+  RHS, field and indexed targets, early return, aliasing, diagnostics and
+  primitive behavior. Nominal `*=` now selects compiler-provided
+  `core::ops::MulAssign` under the same receiver, RHS, target capture, and
+  sequencing contract; source/Wasm coverage includes distinct nominal RHS,
+  locals, projected/indexed places, early return, aliasing, diagnostics, and
+  primitive behavior. Nominal `/=` now selects compiler-provided
+  `core::ops::DivAssign` under the same receiver, RHS, target capture, and sequencing contract; source/Wasm coverage
+  includes distinct nominal RHS, locals, projected/indexed places, early return,
+  aliasing, diagnostics, and primitive checked division. Nominal `%=` now selects
+  compiler-provided `core::ops::RemAssign` with the same receiver, RHS, target
+  capture, and sequencing contract; source/Wasm coverage includes heterogeneous
+  RHS, local/projected/indexed places, early return, aliasing, diagnostics and
+  primitive checked remainder. Nominal `&=` now selects `core::ops::BitAndAssign`
+  with the same shared receiver, owned `Rhs`, single place capture, and RHS-before-method
+  sequencing; primitive `u32 &= u32` uses the existing per-bit operation.
+  Nominal `|=` selects `core::ops::BitOrAssign` under the same receiver, owned
+  `Rhs`, target capture, and sequencing contract; primitive `u32 |= u32` uses
+  the existing per-bit operation. Source/Wasm coverage includes local, field,
+  indexed, early-return, alias, disjoint-index, selection-error, and primitive
+  behavior, plus dynamic bounds trapping after RHS evaluation.
+  Nominal `^=` selects `core::ops::BitXorAssign` with a shared receiver, owned
+  `Rhs`, single place capture, and RHS-before-method sequencing. Primitive
+  `u32 ^=` uses the existing per-bit XOR operation; source/Wasm cases mirror
+  the `|=` place, early-return, loan, diagnostic, and primitive coverage.
+  Nominal `>>=` selects `core::ops::ShrAssign` with the same shared receiver, owned `Rhs`, target capture, and sequencing contract. Primitive `u32 >>=` retains checked shift-count semantics; source/Wasm coverage includes nominal places, ownership and counts 0/31/32. Nominal `<<=` selects `core::ops::ShlAssign` with the same shared receiver,
+  owned `Rhs`, target capture, and sequencing contract. Primitive `u32 <<=`
+  keeps checked shift-count semantics; source/Wasm coverage mirrors prior
+  compound slices, including checked counts and RHS early return.
+  Dynamic indexed selected-compound bounds checks run after RHS completion while
+  the nearest owner loan is held; uncertain dynamic accesses to that owner overlap.
+  Generic constrained compound assignment now forwards caller-selected evidence
+  for owned generic parameters and associated `Rhs`; source/Wasm coverage proves
+  this for `AddAssign`, `SubAssign`, `MulAssign`, `ShrAssign`, and `DivAssign`,
+  including distinct associated `Rhs`, missing/wrong evidence, moved RHS, and
+  primitive arithmetic parity for `MulAssign` and checked division for `DivAssign`.
+  Generic projected/indexed
+  targets and later nominal compound operators remain gated.
 - **Runtime and execution** (`memobits-runtime`, wasmi): fresh instance per run,
   a default fuel budget of ten billion units (overridable with `mb run --fuel N`
   or `--no-fuel-limit`), structured host errors for traps. Source and artifact

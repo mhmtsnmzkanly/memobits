@@ -12,9 +12,9 @@ pub use traps::{
     TRAP_SECTION,
 };
 
+use std::io::Write as IoWrite;
 use wasmi::{
-    Config, Engine, Error as WasmiError, ExternType, Instance, Module, Store, TrapCode, Val,
-    ValType,
+    Config, Engine, Error as WasmiError, ExternType, Linker, Module, Store, TrapCode, Val, ValType,
 };
 
 /// Export name of the backend's stack-exhaustion flag global (the value of
@@ -34,6 +34,14 @@ pub struct RunOptions {
     /// for unlimited execution. Unlimited execution disables fuel metering
     /// entirely, so guest loops are not counted at all.
     pub fuel: Option<u64>,
+}
+
+/// Typed host capabilities that a caller explicitly enables for one run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostCapability {
+    /// `memobits:console.write_i32(i32) -> unit` writes one signed integer to
+    /// the host's standard output.
+    ConsoleWriteI32,
 }
 
 impl Default for RunOptions {
@@ -62,7 +70,7 @@ pub enum RunValue {
 pub enum RunError {
     /// The module could not be parsed or validated.
     Validate(String),
-    /// The module requires a host import, which this runner does not provide.
+    /// The module requires a host import that was not explicitly enabled.
     UnsupportedImport { module: String, name: String },
     /// The module could not be instantiated.
     Instantiate(String),
@@ -134,6 +142,16 @@ pub fn run(bytes: &[u8], export: &str) -> Result<RunValue, RunError> {
 /// is not enabled at all. Modules with imports are rejected before
 /// instantiation.
 pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunValue, RunError> {
+    run_with_capabilities(bytes, export, options, &[])
+}
+
+/// Run a module with the explicitly enabled, typed host capabilities.
+pub fn run_with_capabilities(
+    bytes: &[u8],
+    export: &str,
+    options: &RunOptions,
+    capabilities: &[HostCapability],
+) -> Result<RunValue, RunError> {
     let mut config = Config::default();
     config.consume_fuel(options.fuel.is_some());
     config.ignore_custom_sections(true);
@@ -141,11 +159,18 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
     let module =
         Module::new(&engine, bytes).map_err(|error| RunError::Validate(error.to_string()))?;
 
-    if let Some(import) = module.imports().next() {
-        return Err(RunError::UnsupportedImport {
-            module: import.module().to_owned(),
-            name: import.name().to_owned(),
-        });
+    for import in module.imports() {
+        let enabled = import.module() == "memobits:console"
+            && import.name() == "write_i32"
+            && capabilities.contains(&HostCapability::ConsoleWriteI32)
+            && matches!(import.ty(), ExternType::Func(ty)
+                if ty.params() == &[ValType::I32] && ty.results().is_empty());
+        if !enabled {
+            return Err(RunError::UnsupportedImport {
+                module: import.module().to_owned(),
+                name: import.name().to_owned(),
+            });
+        }
     }
 
     let metadata = if export == entry_abi::ENTRY_EXPORT {
@@ -211,7 +236,17 @@ pub fn run_with(bytes: &[u8], export: &str, options: &RunOptions) -> Result<RunV
             .set_fuel(fuel)
             .map_err(|error| RunError::Instantiate(error.to_string()))?;
     }
-    let instance = Instance::new(&mut store, &module, &[]).map_err(classify_instantiation)?;
+    let mut linker = Linker::new(&engine);
+    if capabilities.contains(&HostCapability::ConsoleWriteI32) {
+        linker
+            .func_wrap("memobits:console", "write_i32", |value: i32| {
+                let _ = writeln!(std::io::stdout().lock(), "Host i32: {value}");
+            })
+            .map_err(|error| RunError::Instantiate(error.to_string()))?;
+    }
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .map_err(classify_instantiation)?;
     let function = instance
         .get_func(&store, export)
         .ok_or_else(|| RunError::MissingExport(export.to_owned()))?;
