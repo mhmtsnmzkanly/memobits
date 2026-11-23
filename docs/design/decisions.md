@@ -410,3 +410,17 @@ only where explicitly stated; unresolved API spellings remain proposals.
   internal `StringScalarRead` instruction. No allocator or runtime change.
 - MW003 reports on the bare `Bytes<N>` spelling. Bare `String` remains a
   TE001 error with migration guidance; MW002 is not used.
+
+## Source-level tests (accepted direction, 2026-11-23)
+
+- The language will gain a source-level test mechanism so that checked
+  examples need no hand-numbered error codes: test functions (proposed
+  spelling `test fn name() { ... }`), a built-in `assert(condition)`, and an
+  `mb test` command that runs each test in source and standalone Wasm and
+  reports failures by test name.
+- Open details to settle before implementation: exact spelling, whether a
+  failed `assert` traps (discarding the instance, per the trap contract) or
+  returns a reported failure, test discovery and filtering, and whether test
+  functions are excluded from normal builds.
+- Until then, the runnable guide uses module-ranged check codes (1xx–9xx)
+  documented in examples/guide/README.md.

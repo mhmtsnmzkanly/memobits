@@ -6,7 +6,8 @@
 //
 // The guide is split into topic modules next to this file. Each exports check
 // functions that return Bool; main calls them in topic order and reports a
-// distinct Err code for each failed check.
+// distinct Err code for each failed check. The hundreds digit names the
+// defining module (1xx numbers ... 9xx operators); see ../README.md.
 //   numbers.mb         integers, floats, casts, wrapping and bit operations
 //   text.mb            Char, string literals, bytes, scalars, loops, concat
 //   tuples.mb          tuple values, destructuring, tuples with owned strings
@@ -64,77 +65,77 @@ use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defin
 // or the concrete error type and code.
 fn main() -> Result<i32, Error> {
     // Numbers, casts and bit operations.
-    if !numbers() { return Err(Error { code: 1 }); }
-    if !widenings() { return Err(Error { code: 22 }); }
-    if !numeric_casts() { return Err(Error { code: 26 }); }
-    if !wrapping_arithmetic() { return Err(Error { code: 24 }); }
-    if !bit_operations() { return Err(Error { code: 25 }); }
+    if !numbers() { return Err(Error { code: 101 }); }
+    if !widenings() { return Err(Error { code: 102 }); }
+    if !numeric_casts() { return Err(Error { code: 103 }); }
+    if !wrapping_arithmetic() { return Err(Error { code: 104 }); }
+    if !bit_operations() { return Err(Error { code: 105 }); }
     // Characters and text.
-    if !character_literals() { return Err(Error { code: 30 }); }
-    if !fixed_text() { return Err(Error { code: 7 }); }
-    if !text_boundaries() { return Err(Error { code: 8 }); }
-    if !text_bytes() { return Err(Error { code: 9 }); }
-    if !text_scalars() { return Err(Error { code: 10 }); }
+    if !character_literals() { return Err(Error { code: 201 }); }
+    if !fixed_text() { return Err(Error { code: 202 }); }
+    if !text_boundaries() { return Err(Error { code: 203 }); }
+    if !text_bytes() { return Err(Error { code: 204 }); }
+    if !text_scalars() { return Err(Error { code: 205 }); }
     let sample := "aé€😀";
-    if !walk_text(sample.borrow()) { return Err(Error { code: 11 }); }
-    if !text_loop() { return Err(Error { code: 63 }); }
-    if !text_concat() { return Err(Error { code: 12 }); }
-    if !static_text_result() || !heap_text_result() { return Err(Error { code: 13 }); }
+    if !walk_text(sample.borrow()) { return Err(Error { code: 206 }); }
+    if !text_loop() { return Err(Error { code: 207 }); }
+    if !text_concat() { return Err(Error { code: 208 }); }
+    if !static_text_result() || !heap_text_result() { return Err(Error { code: 209 }); }
     // Tuples.
-    if !tuple_values() { return Err(Error { code: 31 }); }
+    if !tuple_values() { return Err(Error { code: 301 }); }
     // Records, anonymous shapes and opaque types.
-    if !anonymous_shapes() { return Err(Error { code: 59 }); }
-    if !shared_string_field_replacement() { return Err(Error { code: 23 }); }
+    if !anonymous_shapes() { return Err(Error { code: 401 }); }
+    if !shared_string_field_replacement() { return Err(Error { code: 402 }); }
     // Owned strings in structs and explicit drop.
-    if !explicit_drop() { return Err(Error { code: 17 }); }
-    if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 18 }); }
-    if !borrow_string_struct() { return Err(Error { code: 21 }); }
-    if !owned_string_struct_argument() { return Err(Error { code: 62 }); }
-    if !temporary_string_fields() { return Err(Error { code: 20 }); }
-    if !replace_local_string_field() { return Err(Error { code: 19 }); }
+    if !explicit_drop() { return Err(Error { code: 501 }); }
+    if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 502 }); }
+    if !borrow_string_struct() { return Err(Error { code: 503 }); }
+    if !owned_string_struct_argument() { return Err(Error { code: 504 }); }
+    if !temporary_string_fields() { return Err(Error { code: 505 }); }
+    if !replace_local_string_field() { return Err(Error { code: 506 }); }
     // Fixed arrays and lists.
-    if !stations() { return Err(Error { code: 2 }); }
-    if !fixed_bytes() { return Err(Error { code: 6 }); }
-    if !primitive_lists() { return Err(Error { code: 14 }); }
-    if !fixed_iteration() { return Err(Error { code: 15 }); }
-    if !list_iteration() { return Err(Error { code: 16 }); }
+    if !stations() { return Err(Error { code: 601 }); }
+    if !fixed_bytes() { return Err(Error { code: 602 }); }
+    if !primitive_lists() { return Err(Error { code: 603 }); }
+    if !fixed_iteration() { return Err(Error { code: 604 }); }
+    if !list_iteration() { return Err(Error { code: 605 }); }
     // Enums, optionals and outcomes.
-    if !trailing_enum_extension() { return Err(Error { code: 29 }); }
-    if !optional_sugar() { return Err(Error { code: 28 }); }
-    if !enums() { return Err(Error { code: 3 }); }
-    if !optional_borrow() { return Err(Error { code: 4 }); }
-    if !outcomes() { return Err(Error { code: 5 }); }
-    if !nested_result_storage() { return Err(Error { code: 61 }); }
+    if !trailing_enum_extension() { return Err(Error { code: 701 }); }
+    if !optional_sugar() { return Err(Error { code: 702 }); }
+    if !enums() { return Err(Error { code: 703 }); }
+    if !optional_borrow() { return Err(Error { code: 704 }); }
+    if !outcomes() { return Err(Error { code: 705 }); }
+    if !nested_result_storage() { return Err(Error { code: 706 }); }
     // Generic functions, structs and interface bounds.
-    if !generic_structs() { return Err(Error { code: 27 }); }
-    if !nested_generic_methods() { return Err(Error { code: 64 }); }
-    if !generic_functions() { return Err(Error { code: 32 }); }
-    if !generic_array_forwarding() { return Err(Error { code: 33 }); }
-    if !generic_interface_forwarding() { return Err(Error { code: 34 }); }
+    if !generic_structs() { return Err(Error { code: 801 }); }
+    if !nested_generic_methods() { return Err(Error { code: 802 }); }
+    if !generic_functions() { return Err(Error { code: 803 }); }
+    if !generic_array_forwarding() { return Err(Error { code: 804 }); }
+    if !generic_interface_forwarding() { return Err(Error { code: 805 }); }
     // User-defined operators (core::ops).
-    if !user_defined_add() { return Err(Error { code: 35 }); }
-    if !user_defined_sub() { return Err(Error { code: 36 }); }
-    if !user_defined_mul() { return Err(Error { code: 37 }); }
-    if !user_defined_div() { return Err(Error { code: 38 }); }
-    if !user_defined_rem() { return Err(Error { code: 39 }); }
-    if !user_defined_bitand() { return Err(Error { code: 40 }); }
-    if !user_defined_bitor() { return Err(Error { code: 41 }); }
-    if !user_defined_bitxor() { return Err(Error { code: 42 }); }
-    if !user_defined_negation() { return Err(Error { code: 44 }); }
-    if !user_defined_equality() { return Err(Error { code: 45 }); }
-    if !user_defined_ordering() { return Err(Error { code: 46 }); }
-    if !user_defined_add_assign() { return Err(Error { code: 47 }); }
-    if !user_defined_sub_assign() { return Err(Error { code: 48 }); }
-    if !user_defined_mul_assign() { return Err(Error { code: 49 }); }
-    if !user_defined_div_assign() { return Err(Error { code: 50 }); }
-    if !user_defined_rem_assign() { return Err(Error { code: 51 }); }
-    if !user_defined_bitand_assign() { return Err(Error { code: 52 }); }
-    if !user_defined_bitor_assign() { return Err(Error { code: 53 }); }
-    if !user_defined_bitxor_assign() { return Err(Error { code: 54 }); }
-    if !user_defined_shl() { return Err(Error { code: 56 }); }
-    if !user_defined_shl_assign() { return Err(Error { code: 55 }); }
-    if !user_defined_shr_assign() { return Err(Error { code: 58 }); }
-    if !generic_compound_assignments() { return Err(Error { code: 60 }); }
-    if !user_defined_shr() { return Err(Error { code: 57 }); }
+    if !user_defined_add() { return Err(Error { code: 901 }); }
+    if !user_defined_sub() { return Err(Error { code: 902 }); }
+    if !user_defined_mul() { return Err(Error { code: 903 }); }
+    if !user_defined_div() { return Err(Error { code: 904 }); }
+    if !user_defined_rem() { return Err(Error { code: 905 }); }
+    if !user_defined_bitand() { return Err(Error { code: 906 }); }
+    if !user_defined_bitor() { return Err(Error { code: 907 }); }
+    if !user_defined_bitxor() { return Err(Error { code: 908 }); }
+    if !user_defined_negation() { return Err(Error { code: 909 }); }
+    if !user_defined_equality() { return Err(Error { code: 910 }); }
+    if !user_defined_ordering() { return Err(Error { code: 911 }); }
+    if !user_defined_add_assign() { return Err(Error { code: 912 }); }
+    if !user_defined_sub_assign() { return Err(Error { code: 913 }); }
+    if !user_defined_mul_assign() { return Err(Error { code: 914 }); }
+    if !user_defined_div_assign() { return Err(Error { code: 915 }); }
+    if !user_defined_rem_assign() { return Err(Error { code: 916 }); }
+    if !user_defined_bitand_assign() { return Err(Error { code: 917 }); }
+    if !user_defined_bitor_assign() { return Err(Error { code: 918 }); }
+    if !user_defined_bitxor_assign() { return Err(Error { code: 919 }); }
+    if !user_defined_shl() { return Err(Error { code: 920 }); }
+    if !user_defined_shl_assign() { return Err(Error { code: 921 }); }
+    if !user_defined_shr_assign() { return Err(Error { code: 922 }); }
+    if !generic_compound_assignments() { return Err(Error { code: 923 }); }
+    if !user_defined_shr() { return Err(Error { code: 924 }); }
     Ok(42)
 }
