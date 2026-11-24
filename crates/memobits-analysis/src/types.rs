@@ -407,6 +407,9 @@ fn constant_index(expr: &Expr) -> Option<i128> {
         {
             raw.replace('_', "").parse().ok()
         }
+        ExprKind::TypedNumber { raw, ty } if !ty.path.iter().any(|p| p.starts_with('f')) => {
+            raw.parse().ok()
+        }
         ExprKind::Unary { operator, operand } if operator == "-" => {
             constant_index(operand)?.checked_neg()
         }
@@ -477,6 +480,7 @@ fn flow_block(block: &Block) -> Flow {
 fn flow_expr(expr: &Expr) -> Flow {
     match &expr.kind {
         ExprKind::Number(_)
+        | ExprKind::TypedNumber { .. }
         | ExprKind::StringLiteral(_)
         | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
@@ -4963,6 +4967,7 @@ impl Checker {
                 }
                 chosen
             }
+            ExprKind::TypedNumber { ty, .. } => self.type_path(ty),
             ExprKind::StringLiteral(_) => Ty::String,
             ExprKind::Interpolation(parts) => {
                 self.require_alloc(expr.span, "string interpolation");
@@ -6616,6 +6621,7 @@ fn check_standalone(
                     && matches!(path.as_slice(), [_] | [_, _]) => {}
             ItemKind::Use { .. } => c.error(15, item.span, "imports require module resolution"),
             ItemKind::Type { .. }
+            | ItemKind::Const { .. }
             | ItemKind::Interface { .. }
             | ItemKind::Extension { .. }
             | ItemKind::InherentExtension { .. } => {}
@@ -6766,6 +6772,7 @@ fn install_function_environment(
                 }
             }
             ItemKind::Type { .. }
+            | ItemKind::Const { .. }
             | ItemKind::Interface { .. }
             | ItemKind::Extension { .. }
             | ItemKind::InherentExtension { .. } => {}
@@ -6959,6 +6966,7 @@ pub(crate) fn check_resolved_mode(
                     );
                 }
                 ItemKind::Type { .. }
+                | ItemKind::Const { .. }
                 | ItemKind::Use { .. }
                 | ItemKind::Interface { .. }
                 | ItemKind::Extension { .. }

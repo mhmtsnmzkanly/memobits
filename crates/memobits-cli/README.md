@@ -105,6 +105,31 @@ type TE017 "cannot interpolate a value of type". An interpolating literal is an
 owned heap `string` built with one length pass and one allocation, valid in
 any position that accepts a String value; under `[build] alloc = false` it is
 TE033. A literal without placeholders stays a static literal.
+Module constants: `const NAME: T = expr;` and `pub const NAME: T = expr;` at module
+level. `T` is required (SE002 without it) and must be an integer type, `f32`, `f64`,
+`bool`, `char` or `string` (TE017). The value is computed at compile time from
+literals, other constants (same or imported modules, any order) and the built-in
+operators (arithmetic, casts, `u32` bit and shift operators, comparisons, `&&`,
+`||`, `!`, unary `-`; string constants are a literal or another string constant)
+with the checked semantics of other static expressions: LE001 overflow, LE002 zero
+divisor, LE003 shift count, TE008 literal does not fit, TE002 initializer type is not
+the declared type, TE007 operand types. LE004 is a cycle and names it
+(`constant cycle: A -> B -> A`; constants of different modules are shown as
+`module::NAME`). LE005 is a non-constant initializer (a call, a function or type
+name, a block, `if`, `match`, an array or string interpolation). Errors are
+reported even for a constant nothing uses. Every use is replaced by the value (no
+storage, so string constants are static literals and work under `alloc = false`);
+uses are checked like a typed literal, so `let x: u32 = SMALL_U8` is TE002 and
+`TOP + 1` with `TOP: u8 = 255` is LE001. A `u32` constant can be an array length
+(`array<u8, SIZE>`), a nominal const argument (`Lane<SIZE>`) or a repeat count
+(`[0; SIZE]`); any other type is TE017. `{NAME}` in a string literal folds to text
+(floats are TE017 as for any interpolation, and an interpolation of only constants
+is a static literal). Constants are private unless `pub`, imported with
+`use m::NAME;` or named `m::NAME` (ME007 private, ME006 missing, ME008 when used as a
+type, ME009 as an entry or export), and share the value namespace with functions
+and types (ME005). A local name shadows a constant; assigning to one is TE004; a
+`match` arm named like a constant is TE017 (constant patterns are not supported
+yet).
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

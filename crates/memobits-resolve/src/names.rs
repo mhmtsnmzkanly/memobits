@@ -5,6 +5,15 @@ use memobits_syntax::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// What kind of definition a qualified reference must name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Requires {
+    Any,
+    Type,
+    /// A single-name type argument: a type, or a `const` used as a length.
+    TypeOrConst,
+}
+
 /// Check unqualified expression names. Qualified paths are returned to the
 /// module loader for visibility checking and dependency discovery.
 pub(crate) fn check(
@@ -12,7 +21,7 @@ pub(crate) fn check(
     prelude: impl Iterator<Item = (String, String)>,
     allow_self_type: bool,
     alloc_enabled: bool,
-) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
+) -> (Vec<Diagnostic>, Vec<(String, Span, Requires)>) {
     let prelude: BTreeMap<String, String> = prelude.collect();
     let mut imports = prelude.clone();
     let mut globals: BTreeSet<String> = prelude.keys().cloned().collect();
@@ -27,7 +36,8 @@ pub(crate) fn check(
             }
             ItemKind::Function { name, .. }
             | ItemKind::Type { name, .. }
-            | ItemKind::Interface { name, .. } => {
+            | ItemKind::Interface { name, .. }
+            | ItemKind::Const { name, .. } => {
                 globals.insert(name.clone());
             }
             ItemKind::Use { path, alias, .. } => {
@@ -123,9 +133,24 @@ pub(crate) fn check(
         variant_scopes: Vec::new(),
         diagnostics: vec![],
         qualified: vec![],
+        local_consts: module
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Const { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
         test_names,
     };
     for item in &module.items {
+        // A const initializer is checked for unknown and qualified names here;
+        // its evaluation happens in the const pass after module loading.
+        if let ItemKind::Const { value, .. } = &item.kind {
+            checker.variant_scopes.push(BTreeSet::new());
+            checker.expr(value);
+            checker.variant_scopes.pop();
+        }
         if let ItemKind::Function {
             generic_parameters,
             bounds,
@@ -376,7 +401,9 @@ struct Checker<'a> {
     scopes: Vec<BTreeSet<String>>,
     variant_scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
-    qualified: Vec<(String, Span, bool)>,
+    qualified: Vec<(String, Span, Requires)>,
+    /// Names of the module's own `const` items.
+    local_consts: BTreeSet<String>,
     /// Names of the module's `test fn` items, for a better unknown-name hint.
     test_names: BTreeSet<String>,
 }
@@ -401,10 +428,29 @@ impl Checker<'_> {
                 .iter()
                 .any(|names| names.contains(&ty.path[0]))
     }
+    /// A lone name used as a type argument may be a module `const` (an array
+    /// length or const argument): a local one needs no further check here;
+    /// an imported one is verified by the loader as a type or a const, and
+    /// the const pass substitutes it.
+    fn const_argument(&mut self, ty: &Type) -> bool {
+        if ty.path.len() != 1 || !ty.arguments.is_empty() {
+            return false;
+        }
+        let name = &ty.path[0];
+        if self.local_consts.contains(name) {
+            return true;
+        }
+        if let Some(path) = self.imports.get(name).cloned() {
+            self.qualified.push((path, ty.span, Requires::TypeOrConst));
+            return true;
+        }
+        false
+    }
     fn ty(&mut self, ty: &Type) {
         for argument in &ty.arguments {
             match argument {
                 TypeArgument::Type(ty) if self.is_const_parameter(ty) => {}
+                TypeArgument::Type(ty) if self.const_argument(ty) => {}
                 TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
                     self.ty(ty)
                 }
@@ -463,9 +509,10 @@ impl Checker<'_> {
                 }
                 return;
             }
-            self.qualified.push((ty.path.join("::"), ty.span, true));
+            self.qualified
+                .push((ty.path.join("::"), ty.span, Requires::Type));
         } else if let Some(path) = self.imports.get(&ty.path[0]) {
-            self.qualified.push((path.clone(), ty.span, true));
+            self.qualified.push((path.clone(), ty.span, Requires::Type));
         } else if !self.types.contains(&ty.path[0])
             && !templates::is_removed_spelling(&ty.path[0])
             && !self
@@ -528,7 +575,7 @@ impl Checker<'_> {
             } else {
                 full.join("::")
             };
-            self.qualified.push((expanded, span, false));
+            self.qualified.push((expanded, span, Requires::Any));
         }
     }
     /// `List<T>` needs `use alloc::List;` (any alias-free symbol import or the
@@ -836,7 +883,7 @@ mod alias_variant_tests {
     use super::*;
     use memobits_diagnostics::SourceId;
 
-    fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
+    fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, Requires)>) {
         let parsed = memobits_syntax::parse(SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         check(&parsed.module, std::iter::empty(), false, true)
@@ -949,6 +996,6 @@ mod array_tests {
         assert!(diagnostics.is_empty());
         assert_eq!(qualified.len(), 1);
         assert_eq!(qualified[0].0, "self::model::Value");
-        assert!(qualified[0].2);
+        assert_eq!(qualified[0].2, Requires::Type);
     }
 }

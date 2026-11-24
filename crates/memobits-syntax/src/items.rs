@@ -99,6 +99,24 @@ impl Parser {
                 result,
                 body,
             }
+        } else if self.eat("const") {
+            let name = self.name()?;
+            if !self.at(":") {
+                return self.fail(format!(
+                    "a const needs a type annotation: `const {name}: T = value;`"
+                ));
+            }
+            self.bump();
+            let ty = self.ty()?;
+            self.expect("=")?;
+            let value = self.expr(0)?;
+            self.expect(";")?;
+            ItemKind::Const {
+                public,
+                name,
+                ty,
+                value,
+            }
         } else if self.eat("use") {
             let path = self.import_path()?;
             let (alias, group) = if self.eat("::") {

@@ -1,4 +1,5 @@
 use text::{byte_is, no_byte};
+use numbers::DAYS_PER_WEEK;
 use alloc;
 use alloc::List;
 
@@ -467,4 +468,11 @@ test fn nested_lists() {
     row.push("hello");
     words.push(row);
     assert(words[0][0].len() == 5);
+}
+test fn constant_array_length() {
+    // An imported `u32` constant can be an array length or a repeat count.
+    let week: array<u32, DAYS_PER_WEEK> = [1; DAYS_PER_WEEK];
+    var total: u32 = 0;
+    loop i in 0..DAYS_PER_WEEK { total += week[i]; }
+    assert(total == 7);
 }

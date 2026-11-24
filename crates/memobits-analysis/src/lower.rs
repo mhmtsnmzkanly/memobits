@@ -1859,7 +1859,10 @@ impl<'a> Builder<'a> {
             (ExprKind::Index { index, .. }, _) => {
                 let position = self.lower_expr(index)?;
                 let position = self.scalar(position)?;
-                let statically_known = matches!(index.kind, ExprKind::Number(_));
+                let statically_known = matches!(
+                    index.kind,
+                    ExprKind::Number(_) | ExprKind::TypedNumber { .. }
+                );
                 projections.push(Projection::Index(self.capture(position)?, statically_known));
             }
             (_, Some(name)) => {
@@ -2740,6 +2743,15 @@ impl<'a> Builder<'a> {
             ExprKind::Number(raw) => {
                 let ty = self.ty(expr).expect("checked number type");
                 let value = if raw.contains(['.', 'e', 'E']) {
+                    Constant::Float(raw.clone())
+                } else {
+                    Constant::Integer(raw.clone())
+                };
+                self.constant(expr.span, value, ty)
+            }
+            ExprKind::TypedNumber { raw, .. } => {
+                let ty = self.ty(expr).expect("checked constant type");
+                let value = if matches!(ty, Type::Primitive(Primitive::F32 | Primitive::F64)) {
                     Constant::Float(raw.clone())
                 } else {
                     Constant::Integer(raw.clone())

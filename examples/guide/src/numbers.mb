@@ -131,3 +131,39 @@ test fn range_loops() {
 // Integer arithmetic and array indexing are checked. Proven invalid cases
 // can fail compilation. Dynamic overflow, zero divisors and invalid indices
 // trap at runtime. Floats use IEEE arithmetic.
+// Module constants: `const NAME: T = expr;` (`pub const` to share). The type
+// is required and is an integer type, f32, f64, bool, char or string. The
+// value is computed at compile time from literals, other constants (in this
+// or an imported module, declared in any order) and the built-in operators,
+// with the same overflow and zero-divisor errors as other static expressions.
+// A cycle, a call or any non-constant name is a compile error. Constants have
+// no storage: every use is replaced by the value. A local name shadows a
+// constant. `array<u32, DAYS_PER_WEEK>` in collections.mb uses an imported one.
+const SECONDS_PER_DAY: u32 = SECONDS_PER_HOUR * HOURS_PER_DAY;
+const SECONDS_PER_HOUR: u32 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_MINUTE: u32 = 60;
+const HOURS_PER_DAY: u32 = 24;
+pub const DAYS_PER_WEEK: u32 = 7;
+const HALF: f32 = 0.5;
+const SHORT_WEEK: bool = DAYS_PER_WEEK < 7;
+const INITIAL: char = 'm';
+const UNIT: string = "seconds";
+test fn module_constants() {
+    assert(SECONDS_PER_DAY == 86_400);
+    assert(DAYS_PER_WEEK * HOURS_PER_DAY == 168);
+    assert(HALF * 4.0 == 2.0);
+    assert(!SHORT_WEEK);
+    assert(INITIAL == 'm');
+    assert(UNIT.len() == 7);
+    // A constant keeps its declared type; a binding takes it.
+    let day := SECONDS_PER_DAY;
+    let wide: u64 = day as u64 * 365;
+    assert(wide == 31_536_000);
+    // A constant works as a range bound.
+    var days: u32 = 0;
+    loop day in 0..DAYS_PER_WEEK { days += 1; }
+    assert(days == 7);
+    // A local binding with the same name shadows the constant.
+    let HOURS_PER_DAY: u32 = 12;
+    assert(HOURS_PER_DAY == 12);
+}

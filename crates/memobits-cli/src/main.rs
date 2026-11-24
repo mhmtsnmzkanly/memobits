@@ -815,6 +815,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 eprint!("{}", render(warning, Some(source)));
             }
         }
+        if command != "syntax" && parsed.diagnostics.is_empty() {
+            parsed
+                .diagnostics
+                .extend(memobits_resolve::fold_standalone_constants(
+                    &mut parsed.module,
+                ));
+        }
         if command == "analyze" && parsed.diagnostics.is_empty() {
             parsed
                 .diagnostics

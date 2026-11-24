@@ -75,6 +75,7 @@ fn check_block(block: &Block, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) 
 fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
     match &expr.kind {
         ExprKind::Number(_)
+        | ExprKind::TypedNumber { .. }
         | ExprKind::StringLiteral(_)
         | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)

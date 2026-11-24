@@ -807,6 +807,60 @@ Facts about the shipped behavior; no new decisions.
   specifiers; interpolating expressions or fields (bind a local first);
   interpolation in `const` initializers (a later step); raw literals.
 
+### Shipped G5 details (2026-11-24)
+
+- Grammar: `[pub] const NAME: Type = expr;` is a module item (`ItemKind::Const`);
+  `const` is now a reserved word (generic `<const N: u32>` is unchanged). The
+  annotation is mandatory (SE002 otherwise). Allowed types: `i8`..`i64`,
+  `u8`..`u64`, `f32`, `f64`, `bool`, `char`, `string`; anything else (aliases,
+  arrays, `String`, optionals) is TE017. A repeat count `[v; NAME]` accepts an
+  identifier that starts with an uppercase letter.
+- Evaluation (`memobits-resolve/src/consts.rs`, after names, imports and
+  visibility are validated, over every loaded module, used or not): a typed
+  evaluator that follows the checker's literal rules (an untyped literal takes
+  the expected or the other operand's type; `i32`/`f64` otherwise; the `-`
+  literal form reaches the signed minimum; casts use their operand's own type,
+  so `300 as u8` has an `i32` operand) and the static-expression rules of
+  NUM-01/NUM-04/NUM-05: checked integer arithmetic per width (LE001, LE002 with
+  `MIN % -1 == 0`), `as` casts with Rust semantics, bitwise and shift operators
+  only on `u32` (count >= 32 is LE003), IEEE floats (f32 operations round to
+  f32), comparisons (ordering on numbers, equality on numbers, bool and char),
+  `&&`, `||`, `!`, unary `-` (signed only) and `+`. A string constant is a
+  literal or another string constant. Values are memoized; a dependency cycle
+  is LE004 and names the path; a cycle failure or an error in one constant
+  does not hide errors elsewhere. Names resolve through the module's own
+  constants and `use m::NAME [as X];`, or the qualified `m::NAME`.
+- Inlining: each use is replaced in the syntax tree by the value, so later
+  passes see a literal and the const items and their imports are removed
+  (programs without constants and without a named repeat count skip the pass
+  and lower byte-identically). Bool, char and string become the ordinary
+  literals; numbers become `ExprKind::TypedNumber { raw, ty }`, a literal with a
+  fixed type (not adaptable like `5`): the checker types it as `ty`, lowering
+  emits one constant, the constant analysis treats it as a known value, and a
+  constant array index is checked statically.
+- Use sites: expressions anywhere (arguments, `let`, `return`, operands,
+  conditions, `loop i in 0..LIMIT`, array indexes, struct fields, method
+  bodies), `{NAME}` in a string literal (folded to text at compile time;
+  adjacent text merges, so `"{A}{B}"` of constants is one static literal and
+  needs no allocator), and, for `u32` constants only, array lengths
+  `array<T, SIZE>`, nominal const arguments `Lane<SIZE>` and repeat counts
+  `[v; SIZE]` (other integer types are TE017). Float constants cannot be
+  interpolated (TE017, as for floats today).
+- Names: constants share the module's value namespace (ME005 against
+  functions, types, imports and other constants); private by default
+  (ME007), `pub` for other modules; a const cannot be an application entry or
+  a library export (ME009) and is not a type (ME008). Locals, parameters,
+  loop variables and tuple/destructure bindings shadow a constant; assigning
+  to one is TE004. A bare identifier in a `match` arm that names a visible
+  constant is TE017 (a literal-pattern decision belongs to G7: until then the
+  identifier would silently bind a new variable).
+- Standalone commands `mb analyze` / `mb ownership` on one file fold that
+  file's constants too (`fold_standalone_constants`); `mb syntax` only parses.
+- Limits: no `static`/global storage, no mutation, no calls (including
+  `wrapping_*`/`checked_*` methods), no `if`/`match`/blocks in initializers, no
+  aggregates, no interpolation in initializers, no constant patterns, no
+  non-`u32` array lengths, no type aliases as the const type.
+
 ### Shipped G2 details (2026-11-24)
 
 - Divergence: an `if`/`else` or `match` arm that cannot fall through

@@ -40,6 +40,14 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             .parse::<i128>()
             .map(Value::Integer)
             .unwrap_or(Value::Unknown),
+        ExprKind::TypedNumber { raw, .. } if !raw.contains(['.', 'e', 'E', 'N', 'i']) => raw
+            .parse::<i128>()
+            .map(Value::Integer)
+            .unwrap_or(Value::Unknown),
+        ExprKind::TypedNumber { raw, .. } => raw
+            .parse::<f64>()
+            .map(Value::Float)
+            .unwrap_or(Value::Unknown),
         ExprKind::CharLiteral(_) => Value::Unknown,
         ExprKind::Number(raw) => raw
             .replace('_', "")
@@ -276,6 +284,7 @@ fn check_expr(
 ) {
     match &expr.kind {
         ExprKind::Number(_)
+        | ExprKind::TypedNumber { .. }
         | ExprKind::StringLiteral(_)
         | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
@@ -414,6 +423,9 @@ pub(crate) fn shift_assignment_count_out_of_range(expr: &Expr) -> bool {
                     .all(|byte| byte.is_ascii_digit() || byte == b'_') =>
             {
                 raw.replace('_', "").parse().ok()
+            }
+            ExprKind::TypedNumber { raw, ty } if !ty.path.iter().any(|p| p.starts_with('f')) => {
+                raw.parse().ok()
             }
             ExprKind::Unary { operator, operand } if operator == "+" || operator == "-" => {
                 let value = integer(operand)?;

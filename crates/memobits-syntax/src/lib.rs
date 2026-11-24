@@ -64,6 +64,15 @@ pub enum ItemKind {
         generic_parameters: Vec<GenericParameter>,
         methods: Vec<InterfaceMethod>,
     },
+    /// `const NAME: T = expr;` at module level. The resolver evaluates it at
+    /// compile time and inlines its value at every use; later passes never
+    /// see this item.
+    Const {
+        public: bool,
+        name: String,
+        ty: Type,
+        value: Expr,
+    },
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct UseMember {
@@ -230,6 +239,14 @@ pub enum ExprKind {
         index: Box<Expr>,
     },
     Number(String),
+    /// A numeric value with a fixed type, produced when a module `const` is
+    /// inlined. `raw` is a decimal integer (possibly negative) or a float in
+    /// Rust `Debug` form (`1.5`, `1e300`, `inf`, `NaN`, `-0.0`); `ty` is the
+    /// primitive type name. Only the resolver creates it.
+    TypedNumber {
+        raw: String,
+        ty: Type,
+    },
     StringLiteral(String),
     CharLiteral(char),
     Bool(bool),
@@ -911,7 +928,7 @@ impl Parser {
                 if ![
                     "pub", "fn", "use", "as", "type", "let", "var", "borrow", "share", "return",
                     "loop", "break", "continue", "if", "else", "true", "false", "while", "struct",
-                    "enum", "import", "export", "match", "try",
+                    "enum", "import", "export", "match", "try", "const",
                 ]
                 .contains(&s.as_str()) =>
             {
@@ -1978,7 +1995,17 @@ impl Parser {
         }
         let first = self.expr(0)?;
         if self.eat(";") {
-            let count = self.integer_literal()?;
+            // A module `const` name is kept in `raw` and replaced by the
+            // resolver; an unresolved name is reported there.
+            let count = match self.current().kind.clone() {
+                TokenKind::Word(name)
+                    if name.as_bytes().first().is_some_and(u8::is_ascii_uppercase) =>
+                {
+                    let span = self.bump().span;
+                    IntegerLiteral { span, raw: name }
+                }
+                _ => self.integer_literal()?,
+            };
             self.expect("]")?;
             Ok(ExprKind::RepeatArray {
                 value: Box::new(first),

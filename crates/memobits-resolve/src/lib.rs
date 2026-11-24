@@ -1,5 +1,6 @@
 //! Target-rooted local module loading and import visibility validation.
 //! Includes lexical expression-name checking; type checking is a later pass.
+mod consts;
 mod names;
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
 use memobits_project::Project;
@@ -148,6 +149,8 @@ struct Reference {
     span: Option<Span>,
     public: bool,
     requires_type: bool,
+    /// With `requires_type`: a `const` is also accepted (type argument).
+    or_const: bool,
     module_only: bool,
 }
 fn error(number: u16, message: String, span: Option<Span>) -> Diagnostic {
@@ -276,6 +279,13 @@ fn variant_exists(
     }
 }
 
+/// Fold module-level constants of one standalone module (no imports): evaluate
+/// them, inline their uses and drop the const items.
+pub fn fold_standalone_constants(module: &mut Module) -> Vec<Diagnostic> {
+    let mut modules = [("source".to_owned(), module)];
+    consts::fold(&mut modules, &|_| None, &BTreeSet::new())
+}
+
 /// Resolve explicit imports from a target's modules. Binary/source dependency
 /// loading are not implemented by this pass yet.
 pub fn resolve(project: &Project, target: Target) -> Resolution {
@@ -319,6 +329,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 span: None,
                 public: false,
                 requires_type: false,
+                or_const: false,
                 module_only: false,
             }),
             None => result.diagnostics.push(error(
@@ -335,6 +346,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                     span: None,
                     public: false,
                     requires_type: false,
+                    or_const: false,
                     module_only: true,
                 });
             }
@@ -352,6 +364,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                     span: None,
                     public: true,
                     requires_type: false,
+                    or_const: false,
                     module_only: false,
                 });
             }
@@ -440,7 +453,8 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             let name = match &item.kind {
                 ItemKind::Function { name, .. }
                 | ItemKind::Type { name, .. }
-                | ItemKind::Interface { name, .. } => Some(name.clone()),
+                | ItemKind::Interface { name, .. }
+                | ItemKind::Const { name, .. } => Some(name.clone()),
                 ItemKind::Extension { .. } | ItemKind::InherentExtension { .. } => None,
                 ItemKind::Use { path, alias, .. } => {
                     let module_only = path.join("::") == "core::ops"
@@ -451,6 +465,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                         span: Some(item.span),
                         public: true,
                         requires_type: false,
+                        or_const: false,
                         module_only,
                     });
                     (!module_only)
@@ -482,6 +497,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 span: None,
                 public: true,
                 requires_type: false,
+                or_const: false,
                 module_only: false,
             });
         }
@@ -632,13 +648,14 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             project.manifest.alloc(),
         );
         result.diagnostics.extend(diagnostics);
-        for (path, span, requires_type) in qualified {
+        for (path, span, requires) in qualified {
             pending.push(Reference {
                 from: Some(module.clone()),
                 path,
                 span: Some(span),
                 public: true,
-                requires_type,
+                requires_type: requires != names::Requires::Any,
+                or_const: requires == names::Requires::TypeOrConst,
                 module_only: false,
             });
         }
@@ -674,6 +691,9 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             .find_map(|item| match &item.kind {
                 // Test functions cannot be named from any source.
                 ItemKind::Function { test: true, .. } => None,
+                ItemKind::Const {
+                    public, name: n, ..
+                } if n == definition_name => Some((*public, false, true)),
                 ItemKind::Function {
                     public, name: n, ..
                 }
@@ -687,7 +707,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                         item.kind,
                         ItemKind::Type { .. } | ItemKind::Interface { .. }
                     );
-                    Some((*public, is_type))
+                    Some((*public, is_type, false))
                 }
                 _ => None,
             });
@@ -697,14 +717,14 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 format!("definition '{}::{name}' does not exist", module),
                 reference.span,
             )),
-            Some((false, _)) if reference.public && reference.from.as_deref() != Some(&module) => {
+            Some((false, ..)) if reference.public && reference.from.as_deref() != Some(&module) => {
                 result.diagnostics.push(error(
                     7,
                     format!("definition '{}::{name}' is private", module),
                     reference.span,
                 ))
             }
-            Some((_, is_type))
+            Some((_, is_type, _))
                 if variant.is_some_and(|variant| {
                     !is_type
                         || !variant_exists(
@@ -723,14 +743,20 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                     reference.span,
                 ))
             }
-            Some((_, is_type)) if reference.requires_type && (!is_type || variant.is_some()) => {
+            Some((_, _, true)) if reference.requires_type && reference.or_const => {}
+            Some((_, is_type, _)) if reference.requires_type && (!is_type || variant.is_some()) => {
                 result.diagnostics.push(error(
                     8,
                     format!("definition '{}::{name}' is not a type", module),
                     reference.span,
                 ))
             }
-            Some((_, is_type))
+            Some((_, _, true)) if reference.from.is_none() => result.diagnostics.push(error(
+                9,
+                "a const cannot be an application entry or a library export".into(),
+                reference.span,
+            )),
+            Some((_, is_type, _))
                 if reference.from.is_none()
                     && !reference.public
                     && (is_type || variant.is_some()) =>
@@ -743,6 +769,16 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             }
             _ => {}
         }
+    }
+    {
+        let prelude: BTreeSet<String> = project.manifest.prelude.keys().cloned().collect();
+        let mut modules: Vec<(String, &mut Module)> = result
+            .modules
+            .iter_mut()
+            .map(|(name, source)| (name.clone(), &mut source.syntax))
+            .collect();
+        let diagnostics = consts::fold(&mut modules, &|path| split(path, project), &prelude);
+        result.diagnostics.extend(diagnostics);
     }
     result.modules.remove(templates::ALLOC_MODULE);
     check_extension_conformance(project, &mut result);
