@@ -87,6 +87,26 @@ fn normalize(body: &mut WasmFunction, kind: Kind) {
     }
 }
 
+/// Push the bitwise complement of the integer in local `input`. Signed narrow
+/// values stay sign-extended under `xor -1`; unsigned ones are masked.
+pub(super) fn emit_complement(
+    body: &mut WasmFunction,
+    input: u32,
+    primitive: Primitive,
+) -> Result<(), String> {
+    let kind = Kind::of(primitive)?;
+    body.instruction(&I::LocalGet(input));
+    if kind.wide() {
+        body.instruction(&I::I64Const(-1));
+        body.instruction(&I::I64Xor);
+    } else {
+        body.instruction(&I::I32Const(-1));
+        body.instruction(&I::I32Xor);
+        normalize(body, kind);
+    }
+    Ok(())
+}
+
 fn arith_of(op: BinaryOp) -> Option<Arith> {
     Some(match op {
         BinaryOp::WrappingAdd | BinaryOp::SaturatingAdd | BinaryOp::CheckedAdd => Arith::Add,

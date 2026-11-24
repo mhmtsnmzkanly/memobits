@@ -160,6 +160,35 @@ test fn bit_operations_on_every_width() {
     signed &= -2;
     assert(signed == -4);
 }
+// `~x` is the bitwise complement of an integer at the operand's own width
+// (Rust's `!x`): `~0u8` is 255, `~(-128i8)` is 127. It is a prefix operator
+// with the precedence of unary `-` and `!`, applies to integers only
+// (floats, bool and nominal types are TE007; there is no overloading) and
+// folds in `const` items and static expressions like the other operators.
+// An untyped literal operand without type context takes u32 like the other
+// bitwise operators.
+const LOW_NIBBLE_MASK: u8 = ~240;
+test fn bitwise_complement() {
+    let zero: u8 = 0;
+    let top: u8 = 255;
+    let low: i8 = -128;
+    let high: i8 = 127;
+    let word: u32 = 0;
+    let wide: i64 = -9223372036854775808;
+    assert(~zero == 255);
+    assert(~top == 0);
+    assert(~low == 127);
+    assert(~high == -128);
+    assert(~word == 4294967295);
+    assert(~wide == 9223372036854775807);
+    assert(~~top == top);
+    let value: i32 = 7;
+    assert(~value == -8);
+    assert(-~value == 8);
+    assert(~value & 255 == 248);
+    assert(~zero as u32 == 255);
+    assert(LOW_NIBBLE_MASK == 15);
+}
 // `loop i in a..b` counts from `a` up to but not including `b`; `a..=b`
 // includes `b`. Both bounds are evaluated once, left to right, before the
 // first iteration, and must have one integer type (an untyped literal takes

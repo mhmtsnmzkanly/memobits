@@ -276,7 +276,7 @@ fn unary_plus_not_complement_range_update_and_optional_have_no_overload() {
     let cases = [
         ("+x", "TE007"),
         ("!x", "TE002"),
-        ("~x", "SE001"),
+        ("~x", "TE007"),
         ("x++", "SE002"),
         ("x ?? y", "SE002"),
         ("x..y", "SE002"),
@@ -296,6 +296,7 @@ fn unary_plus_not_complement_range_update_and_optional_have_no_overload() {
                 "{stderr}"
             ),
             "!x" => assert!(stderr.contains("expected bool, found Cell"), "{stderr}"),
+            "~x" => assert!(stderr.contains("`~` requires an integer"), "{stderr}"),
             _ => {}
         }
     }

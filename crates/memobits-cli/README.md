@@ -149,6 +149,18 @@ fails nothing was consumed and matching goes on. A guard cannot see an aggregate
 owns Strings, or anything bound out of a String-owning tuple inside an enum payload, and
 a literal inside such a tuple is not supported yet (TE017); a literal on a `string ! E`
 `Ok` payload stays TE018.
+Complement and `Self` (G8): `~x` is the bitwise complement of an integer at its own
+width (Rust's `!x`; `~0u8` is 255, `~(-128i8)` is 127), a prefix operator with the
+precedence of unary `-` and `!`. Floats, `bool` and nominal types are TE007 (`~` is
+primitive-only, there is no `Not` interface); an untyped literal operand with no type
+context is `u32` like the other bitwise operators; `const` items and static folds use the
+same integer module as the runtime lowering. Inside an `extend` block (inherent, trailing
+or `extend T of Interface`) `Self` names the extended type with its generic and const
+arguments: it works in parameter and result types, `let` annotations, `Self { .. }`
+literals and destructuring and `Self::Variant` paths (expressions and patterns). Outside
+`extend` blocks it is SE002 ("only available inside an `extend` block"), and in
+`interface` declarations SE002 "not supported yet". `Self<..>`, a bare `Self` value and
+`Self::X` as a type are SE002.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

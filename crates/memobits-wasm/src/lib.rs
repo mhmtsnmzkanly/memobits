@@ -2688,6 +2688,9 @@ fn emit_unary(
             body.instruction(&WasmInstruction::LocalGet(input));
             body.instruction(&WasmInstruction::I32Eqz);
         }
+        (UnaryOp::Complement, Type::Primitive(kind)) => {
+            numerics::emit_complement(body, input, *kind)?;
+        }
         (UnaryOp::Negate, Type::Primitive(Primitive::F32)) => {
             body.instruction(&WasmInstruction::LocalGet(input));
             body.instruction(&WasmInstruction::F32Neg);

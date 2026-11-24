@@ -119,3 +119,39 @@ test fn generic_structs() {
     assert(empty);
     assert(packet_values == 42);
 }
+// Inside an `extend` block (inherent, trailing, or `extend T of Interface`)
+// `Self` names the extended type, with its generic and const arguments:
+// `Self` in `extend Pair<T>` is `Pair<T>`. It works in parameter and result
+// types, `let` annotations, struct literals (`Self { ... }`) and enum variant
+// paths (`Self::Variant`, also in patterns). Outside `extend` blocks, and in
+// interface declarations (not supported yet), `Self` is a compile error.
+type SwapPair<T> { left: T, right: T } extend {
+    fn swapped(self) -> Self { Self { left: self.right, right: self.left } }
+    fn left_value(borrow self) -> T { self.left }
+}
+type Doubler<const N: u32> { width: i32 } extend {
+    fn doubled(self) -> Self {
+        let result: Self = Self { width: self.width * 2 };
+        result
+    }
+    fn size(borrow self) -> i32 { self.width }
+}
+type SelfSlot<T> [Vacant, Held(T)] extend {
+    fn or_hold(self, fallback: T) -> Self {
+        match self {
+            Self::Vacant => Self::Held(fallback),
+            Self::Held(value) => Self::Held(value),
+        }
+    }
+}
+test fn self_in_extend_blocks() {
+    let pair := SwapPair<i32> { left: 1, right: 41 };
+    let flipped := pair.swapped();
+    assert(flipped.left_value() == 41);
+    let doubler := Doubler<8> { width: 21 };
+    let twice := doubler.doubled();
+    assert(twice.size() == 42);
+    let slot: SelfSlot<i32> = SelfSlot::Vacant;
+    let held := slot.or_hold(42);
+    assert(match held { SelfSlot::Held(value) => value == 42, SelfSlot::Vacant => false });
+}

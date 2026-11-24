@@ -113,6 +113,21 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
                 Value::Integer(value)
             }
         }
+        ExprKind::Unary { operator, operand } if operator == "~" => {
+            let Some(kind) = types
+                .get(&(expr as *const Expr as usize))
+                .and_then(Option::as_ref)
+                .and_then(int_kind)
+            else {
+                return Value::Unknown;
+            };
+            match evaluate(operand, types) {
+                Value::Integer(value) if kind.contains(value) => {
+                    Value::Integer(numeric::complement(kind, value))
+                }
+                _ => Value::Unknown,
+            }
+        }
         ExprKind::Cast {
             value: source_expr,
             target,

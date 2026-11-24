@@ -34,6 +34,7 @@ pub(super) fn unary_op(value: &str) -> UnaryOp {
         "+" => UnaryOp::Plus,
         "-" => UnaryOp::Negate,
         "!" => UnaryOp::Not,
+        "~" => UnaryOp::Complement,
         _ => unreachable!("checked operator"),
     }
 }

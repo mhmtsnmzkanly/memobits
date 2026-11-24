@@ -522,3 +522,20 @@ test fn user_defined_shr() {
     let result := shift_right(ShiftRight { value: 48 }, ShiftAmount { value: 2 });
     assert(result.value == 12);
 }
+// `Self` also names the target inside `extend T of Interface`, including the
+// associated type bindings and the operand and result types.
+type SelfCents { value: i32 }
+extend SelfCents of Add {
+    type Rhs = Self;
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self { Self { value: self.value + rhs.value } }
+}
+extend SelfCents of Neg {
+    type Output = Self;
+    fn neg(self) -> Self { Self { value: 0 - self.value } }
+}
+test fn self_in_interface_extensions() {
+    let sum := SelfCents { value: 40 } + SelfCents { value: 2 };
+    let negated := -sum;
+    assert(negated.value == -42);
+}

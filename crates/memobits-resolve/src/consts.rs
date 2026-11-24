@@ -611,6 +611,22 @@ impl Folder<'_> {
                     )
                 }
             }
+            "~" => {
+                let int_hint = hint.filter(|ty| ty.is_int());
+                let fallback = numeric::is_literal_tree(operand).then_some(CTy::U32);
+                let (ty, value) = self.eval(operand, int_hint.or(fallback), module)?;
+                match (value, ty.int_kind()) {
+                    (CVal::Int(value), Some(kind)) => {
+                        Some((ty, CVal::Int(numeric::complement(kind, value))))
+                    }
+                    _ => self.fail(
+                        Category::Type,
+                        7,
+                        expr.span,
+                        &format!("`~` requires an integer, found {}", ty.name()),
+                    ),
+                }
+            }
             "!" => {
                 let (ty, value) = self.eval(operand, Some(CTy::Bool), module)?;
                 match value {

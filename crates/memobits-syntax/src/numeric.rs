@@ -16,7 +16,7 @@ pub fn is_literal_tree(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Number(raw) => !raw.contains(['.', 'e', 'E']),
         ExprKind::Unary { operator, operand } => {
-            (operator == "+" || operator == "-") && is_literal_tree(operand)
+            matches!(operator.as_str(), "+" | "-" | "~") && is_literal_tree(operand)
         }
         ExprKind::Binary {
             operator,
@@ -154,6 +154,11 @@ pub fn wrapping_neg(kind: IntKind, value: i128) -> i128 {
 /// `checked_neg` is `0 - value` and fails on overflow.
 pub fn checked_neg(kind: IntKind, value: i128) -> Option<i128> {
     Some(-value).filter(|result| kind.contains(*result))
+}
+
+/// `~value`: the bitwise complement at the operand width (`!value` in Rust).
+pub fn complement(kind: IntKind, value: i128) -> i128 {
+    kind.wrap(!value)
 }
 
 /// A bitwise operator on two in-range operands.

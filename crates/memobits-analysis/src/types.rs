@@ -5937,6 +5937,11 @@ impl Checker {
                 }
                 let wanted = if operator == "!" {
                     Some(&BOOL)
+                } else if operator == "~" {
+                    // Untyped literal operands keep the bitwise hashing default.
+                    expected.filter(|t| integer(t)).or_else(|| {
+                        memobits_syntax::numeric::is_literal_tree(operand).then_some(&U32)
+                    })
                 } else {
                     expected.filter(|t| numeric(t))
                 };
@@ -5945,6 +5950,17 @@ impl Checker {
                     return Ty::Never;
                 }
                 match operator.as_str() {
+                    "~" if integer(&ty) => ty,
+                    "~" => {
+                        if ty != Ty::Error {
+                            self.error(
+                                7,
+                                expr.span,
+                                format!("`~` requires an integer, found {}", name(&ty)),
+                            );
+                        }
+                        Ty::Error
+                    }
                     "!" => {
                         self.ensure(&ty, &BOOL, operand.span);
                         BOOL

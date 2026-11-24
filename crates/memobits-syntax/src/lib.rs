@@ -2,6 +2,7 @@
 //! Parsing does not perform name, type, ownership, or control-flow checks.
 mod items;
 pub mod numeric;
+mod self_type;
 pub mod templates;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};
@@ -517,7 +518,7 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
         {
             i += op.len();
             TokenKind::Symbol(op.into())
-        } else if "(){}[],:;=+-*/%!<>&|^.?".contains(c) {
+        } else if "(){}[],:;=+-*/%!<>&|^.?~".contains(c) {
             i += 1;
             TokenKind::Symbol(c.to_string())
         } else {
@@ -855,8 +856,10 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
         }
         items.append(&mut p.pending);
     }
+    let mut module = Module { items };
+    self_type::resolve(&mut module, &mut p.diagnostics);
     ParseResult {
-        module: Module { items },
+        module,
         diagnostics: p.diagnostics,
         warnings: p.warnings,
     }
@@ -2153,7 +2156,7 @@ impl Parser {
         if self.at("..") || self.at("..=") {
             return self.range_outside_header();
         }
-        let mut left = if self.at("-") || self.at("!") || self.at("+") {
+        let mut left = if self.at("-") || self.at("!") || self.at("+") || self.at("~") {
             let operator = match self.bump().kind {
                 TokenKind::Symbol(s) => s,
                 _ => unreachable!(),

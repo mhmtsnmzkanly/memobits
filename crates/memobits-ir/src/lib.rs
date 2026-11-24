@@ -257,6 +257,8 @@ pub enum UnaryOp {
     Plus,
     Negate,
     Not,
+    /// Bitwise complement of an integer (`~x`).
+    Complement,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -3118,6 +3120,7 @@ fn validate_instruction(
                 let okay = match op {
                     UnaryOp::Not => input == Type::Primitive(Primitive::Bool) && output == &input,
                     UnaryOp::Plus | UnaryOp::Negate => is_numeric(&input) && output == &input,
+                    UnaryOp::Complement => is_integer(&input) && output == &input,
                 };
                 if !okay {
                     push(
