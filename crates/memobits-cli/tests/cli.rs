@@ -5725,9 +5725,10 @@ fn owned_string_tuple_transport_rejects_use_after_move_and_nominal_structs() {
         "pub type Box { pub text: string, pub nested: (i32, bool) } pub fn forward(value: Box) -> Box { value } fn main() {}",
     );
     let nominal_nested = err(f.run(&["build", "--lib"]), "LE900");
+    // F3 admits tuple fields in the shared transport rule; an exported
+    // signature still cannot take a struct at all.
     assert!(
-        nominal_nested
-            .contains("structs with String fields support only String and primitive fields"),
+        nominal_nested.contains("exported signatures cannot take structs or struct references"),
         "{nominal_nested}"
     );
 }

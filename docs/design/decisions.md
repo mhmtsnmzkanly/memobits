@@ -763,13 +763,11 @@ Facts about the shipped behavior; no new decisions.
   `Value(Path)` parts.
 - Typing: the identifier is read like any value read (NE001 unknown name, BE001
   after a move, BE005 while it is exclusively shared). Supported value types
-  are all integer widths, `bool`, `char` and `string` (also through
-  `borrow`/`share` parameters). Floats are rejected with TE017 "formatting
-  floating-point values in string interpolation is not supported yet": a
-  shortest round-trip (Rust `Display`) float formatter needs Ryu-style
-  tables or big-number arithmetic that the hand-assembled guest backend does
-  not have, which is disproportionate for this step; the diagnostic keeps the
-  decision visible and floats can be added later without a source change.
+  are all integer widths, floats (F3), `bool`, `char` and `string` (also through
+  `borrow`/`share` parameters). Floats were rejected with TE017 "formatting
+  floating-point values in string interpolation is not supported yet" in G4
+  (a shortest round-trip formatter was judged disproportionate then); F3
+  supports them with Rust's `Display` text, see "Shipped F3 details".
   Every other type (structs, enums, tuples, arrays, `List`, optionals,
   functions) is TE017 "cannot interpolate a value of type 'T'". The result
   type is `string`. Under `[build] alloc = false` an interpolating literal is
@@ -1100,11 +1098,9 @@ the G1, G2 and G7 details above for everything named here.
   `fn f() -> (Kind, i32)`, arrays of such tuples); destructuring and matching a
   tuple with an enum field moves or lends the enum by the existing extraction
   sequence. A tuple that holds a nominal String-owning struct keeps the earlier
-  TE017 gates for destructuring and owned calls. A nominal struct that has a direct String or List field and an
-  enum or tuple field that owns heap storage stays outside the shared transport
-  predicate: it can be built, matched in place and released in its scope, but
-  moving it into a call is TE017 ("a field that is an enum or tuple is not
-  admitted yet") or LE900.
+  TE017 gates for destructuring and owned calls. (F2 kept a nominal struct with
+  a direct String or List field plus a heap-owning enum or tuple field out of
+  the transport predicate; F3 admitted it, see "Shipped F3 details".)
 - Mixed variants: a variant that mixes a String with other payloads may leave
   the String unbound (`K::Two(_, b)`, `K::One(_, n)`): the unbound String is
   extracted into a discarded local and released with the arm. The IR check that
@@ -1113,8 +1109,9 @@ the G1, G2 and G7 details above for everything named here.
 - Diagnostics: an integer pattern and a constant array index in a diagnostic
   echo the literal as written (`0x1FF`, `-0b1000_0001`, `1_6`); the lexer
   records the original spelling of every literal whose canonical decimal
-  differs (thread-local, keyed by span and checked against the canonical text),
-  checks keep using the canonical value. The negative literal pattern's operand
+  differs (F2 kept it in a thread-local table keyed by span; F3 moved it into
+  the AST literal node, see "Shipped F3 details"), checks keep using the
+  canonical value. The negative literal pattern's operand
   span now covers only the digits.
 - Wasm backend: `supported_type` accepts List array elements, `has_string_fields`
   counts List fields, `construction_aliases` skips `EndListLocal` after a struct
@@ -1136,5 +1133,91 @@ the G1, G2 and G7 details above for everything named here.
   (`tuples_with_string_owning_enums`): 122 tests.
 - Limits: moving a List out of a field, element or payload of a live owner
   (use `replace`, `swap`, `pop`); struct with a direct String/List field plus a
-  heap-owning enum or tuple field by value across a call; reference elements and
-  fields stay rejected; a guard still cannot move anything.
+  heap-owning enum or tuple field by value across a call (lifted in F3);
+  reference elements and fields stay rejected; a guard still cannot move anything.
+
+### Shipped F3 details (2026-11-24)
+
+Facts about the shipped behavior; no new decisions (principle A: compositions
+are allowed once cleanup is proven, and the float text is exactly Rust's).
+
+- Float interpolation: `{x}` for `f32` and `f64` prints exactly Rust's `Display`
+  text (`format!("{}", x)`): the shortest digits that read back as the same
+  value of that width (an `f32` uses its own shortest text, so `0.1f32` prints
+  `0.1` while the same value widened to `f64` prints `0.10000000149011612`),
+  never an exponent (`1e20` is `100000000000000000000`, `1e-7` is
+  `0.0000001`), no `.0` for integral values (`3.0` is `3`), `-0` for negative
+  zero, `NaN` (any NaN, no sign), `inf` and `-inf`. G4's TE017 "not supported
+  yet" for floats is gone; other unsupported types keep their TE017, whose
+  text now lists floats among the supported types.
+- Guest algorithm (`crates/memobits-wasm/src/float_format.rs`): Burger-Dybvig
+  free-format shortest digit generation on fixed 1,280-bit big integers
+  (`r`, `s`, `m+`, `m-` and a temporary, 40 little-endian `u32` limbs each),
+  with no tables. The scale is estimated from the binary exponent
+  (`ceil(log10(2) * floor(log2 v) - 1e-10)`, never above the true exponent and
+  at most one below, repaired by one fix-up step); digits come from repeated
+  `x10` and subtraction; the boundaries are inclusive exactly when the mantissa
+  is even; the gap below the smallest power of two in a binade is half as wide;
+  a digit decision that is both "low" and "high" rounds by comparing `2r` with
+  `s` (ties up). The text is built in a static scratch region (five big
+  integers, 32 digit bytes and a 336-byte text buffer, 1,168 bytes, reserved
+  after the string data) and copied into the interpolation block; `float_text`
+  returns the length for the length pass and `float_write` formats again for
+  the write pass. The eight functions are written in a small text assembler
+  with named locals and labels (`assemble` in the same file) and are appended
+  after the three integer helpers.
+- Reachability: the formatter functions, their eight function types and the
+  scratch region exist only when a reachable `InitInterpolatedString` has an
+  `f32` or `f64` part. A program without a float placeholder is byte-identical
+  to the F2 output (`.local-design/g5/equivalence.sh` against a HEAD build:
+  14 artifacts and 337 command outputs identical; the guide's new float test is
+  left out of the compared copy because the F2 compiler cannot compile it). The
+  formatter adds about 1.7 KB of code to a minimal program (3,307 bytes with a
+  float placeholder against 1,601 with an integer one).
+- Constants: `{NAME}` of a float `const` folds at compile time with Rust's
+  formatter (`f32` constants as `f32`); a program whose float placeholders all
+  fold keeps no formatter, and an all-constant literal is a static literal as
+  before.
+- Literal spellings (F2 tech debt): the lexer returns a `NumberLiteral`
+  (`canonical`, plus `written` when the source spelling differs: radix prefix
+  or `_` separators). It is the payload of `TokenKind::Number` and
+  `ExprKind::Number`; `Deref<Target = str>` keeps every check on the canonical
+  text and `NumberLiteral::written()` is what diagnostics echo (integer
+  patterns, constant array index). The thread-local side table and
+  `literal_spelling` are deleted. Diagnostics are unchanged.
+- Transport: the shared predicate (`is_nominal_string_owner`) admits a nominal
+  struct whose fields are String, List, primitives, nested admitted owners,
+  non-empty arrays of owners and, new, enums and tuples: one that owns heap
+  storage is a `Heap` field (cleaned type-directed; it never makes a struct an
+  owner on its own), a plain enum or tuple counts as a primitive field. A struct
+  still needs at least one direct String, List or nested owner field, so a
+  struct holding only an enum field stays outside. Such a struct moves by value
+  into calls (consumed, ignored, returned, dropped on an early return) with the
+  aggregate-parameter prologue clearing moved descriptors by type and active
+  tag, as for other owners. The TE017 text for owned struct calls no longer
+  mentions enum or tuple fields.
+- Tests: `crates/memobits-cli/tests/f3_floats.rs` (9): an f64 table of more than
+  7,000 values (`MAX`, `MIN`, `MIN_POSITIVE`, subnormals, `EPSILON`, every power
+  of ten from `1e-323` to `1e308` with both neighbors and the negative, every
+  power of two from `2^-1074` to `2^1023`, 2,500 seeded random finite bit
+  patterns), an f32 table of more than 3,000 values (same families, 2,500
+  random), NaN, infinities and zeros, mixed placeholders and parameters,
+  constants, reachability (`f64.ceil` present only with a float placeholder),
+  capped-memory loops (4,096 iterations, memory capped to initial plus one
+  page, plus a mutation program that keeps every string and must trap with
+  "guest heap allocation failed"), the struct transport stress under the same
+  cap with the same mutation, and plain enum and tuple fields. Expected texts
+  are `format!("{}", v)` in the test; the guest hashes each formatted string
+  and the test hashes Rust's, and every value matched from source and from the
+  standalone Wasm. A unit test in `float_format.rs` drives the helpers directly
+  against Rust over about 10,000 more values, and
+  `memobits-syntax/tests/f3_literals.rs` covers the literal node. The workspace
+  `Cargo.toml` builds the `wasmi` crates with `opt-level = 3` and without debug
+  assertions in the dev profile, which turns the table tests from many minutes
+  into seconds.
+- Limits: matching a `List`-payload enum field of a struct in place
+  (`match m.k { Many(l) => .. }` where `Many` holds a `List`) fails IR
+  validation (TE018), with or without a call (found while testing; a String
+  payload works); a struct holding only an enum or tuple field is still not a
+  transport owner; there are no precision, width or exponent options (format
+  specifiers remain open).

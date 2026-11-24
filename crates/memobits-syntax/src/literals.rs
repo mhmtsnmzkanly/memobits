@@ -8,34 +8,77 @@
 //! decimal literal. Source spans still cover the original spelling.
 
 use crate::{Diagnostic, SourceId, Span};
-use std::{cell::RefCell, collections::HashMap};
+use std::{fmt, ops::Deref};
 
-thread_local! {
-    /// Original spelling of every numeric literal whose canonical spelling
-    /// differs (radix prefixes, `_` separators), by source span. Compilation
-    /// lexes and checks on one thread, so diagnostics can echo the literal as
-    /// the user wrote it while every check keeps using the canonical value.
-    static SPELLINGS: RefCell<HashMap<Span, (String, String)>> = RefCell::new(HashMap::new());
+/// A numeric literal: the canonical spelling every check uses and, when the
+/// source spelling differs (radix prefix, `_` separators), the text as
+/// written, so diagnostics can echo what the user typed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NumberLiteral {
+    /// Decimal digits (or the float text) without separators.
+    pub canonical: String,
+    /// The source spelling, only when it differs from `canonical`.
+    pub written: Option<String>,
 }
 
-/// The literal as written at `span`, when it differs from its canonical
-/// spelling `canonical`. The stored canonical text must match, so a span from
-/// an earlier compilation of different text never leaks into a message.
-pub fn literal_spelling(span: Span, canonical: &str) -> Option<String> {
-    SPELLINGS.with(|map| {
-        map.borrow()
-            .get(&span)
-            .filter(|(stored, _)| stored == canonical)
-            .map(|(_, original)| original.clone())
-    })
+impl NumberLiteral {
+    /// A literal spelled exactly like its canonical text.
+    pub fn plain(canonical: impl Into<String>) -> Self {
+        Self {
+            canonical: canonical.into(),
+            written: None,
+        }
+    }
+
+    fn spelled(text: &str, canonical: String) -> Self {
+        let written = (text != canonical).then(|| text.to_owned());
+        Self { canonical, written }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.canonical
+    }
+
+    /// The literal as the user wrote it.
+    pub fn written(&self) -> &str {
+        self.written.as_deref().unwrap_or(&self.canonical)
+    }
 }
 
-fn remember(span: Span, text: &str, canonical: &str) {
-    if text != canonical {
-        SPELLINGS.with(|map| {
-            map.borrow_mut()
-                .insert(span, (canonical.to_owned(), text.to_owned()));
-        });
+impl Deref for NumberLiteral {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.canonical
+    }
+}
+
+impl fmt::Display for NumberLiteral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.canonical)
+    }
+}
+
+impl From<&str> for NumberLiteral {
+    fn from(canonical: &str) -> Self {
+        Self::plain(canonical)
+    }
+}
+
+impl From<String> for NumberLiteral {
+    fn from(canonical: String) -> Self {
+        Self::plain(canonical)
+    }
+}
+
+impl PartialEq<str> for NumberLiteral {
+    fn eq(&self, other: &str) -> bool {
+        self.canonical == other
+    }
+}
+
+impl PartialEq<&str> for NumberLiteral {
+    fn eq(&self, other: &&str) -> bool {
+        self.canonical == *other
     }
 }
 
@@ -47,7 +90,7 @@ pub(crate) fn lex_number(
     text: &str,
     start: usize,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (usize, String) {
+) -> (usize, NumberLiteral) {
     let bytes = text.as_bytes();
     if bytes[start] == b'0' {
         let radix = match bytes.get(start + 1) {
@@ -94,8 +137,7 @@ pub(crate) fn lex_number(
         return (i, "0".into());
     }
     let canonical = text[start..i].replace('_', "");
-    remember(span, &text[start..i], &canonical);
-    (i, canonical)
+    (i, NumberLiteral::spelled(&text[start..i], canonical))
 }
 
 /// A run of digits and `_` starting at a digit; a trailing `_` is an error.
@@ -120,7 +162,7 @@ fn lex_radix(
     name: &str,
     prefix: &str,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (usize, String) {
+) -> (usize, NumberLiteral) {
     let digits_start = start + 2;
     let mut i = digits_start;
     while text[i..]
@@ -155,11 +197,10 @@ fn lex_radix(
     }
     let digits: String = body.chars().filter(|c| *c != '_').collect();
     match u128::from_str_radix(&digits, radix) {
-        Ok(value) => {
-            let canonical = value.to_string();
-            remember(span, &text[start..i], &canonical);
-            (i, canonical)
-        }
+        Ok(value) => (
+            i,
+            NumberLiteral::spelled(&text[start..i], value.to_string()),
+        ),
         Err(_) => {
             diagnostics.push(crate::diagnostic(
                 1,

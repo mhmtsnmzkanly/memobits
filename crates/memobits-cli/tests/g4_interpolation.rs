@@ -583,18 +583,6 @@ fn unsupported_and_unknown_values_are_clear_diagnostics() {
     project(&f, "", "fn main() {}\n");
     let prelude = "use alloc::List;\ntype P { x: i32 }\ntype E [ A, B ]\n";
     for (lets, name, message) in [
-        // Floats are deliberately not formatted yet.
-        (
-            "let v: f64 = 1.5;",
-            "v",
-            "floating-point values in string interpolation is not supported yet",
-        ),
-        (
-            "let v: f32 = 1.5;",
-            "v",
-            "floating-point values in string interpolation is not supported yet",
-        ),
-        ("let v := 2.5;", "v", "not supported yet"),
         // Aggregates and other types.
         (
             "let v := P { x: 1 };",

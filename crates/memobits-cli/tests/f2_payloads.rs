@@ -831,19 +831,17 @@ fn moves_out_of_list_storage_stay_rejected() {
 }
 
 #[test]
-fn structs_mixing_a_string_with_an_owning_enum_field_keep_a_clear_gate() {
-    // A nominal struct is transported by value only while every field is a
-    // String, a List, a primitive or a nested admitted owner. An enum field
-    // that owns heap storage stays outside the shared transport rule; such a
-    // struct can still be built, matched in place and released in a scope.
+fn structs_mixing_a_string_with_an_owning_enum_field_move_into_calls() {
+    // F3 widened the shared transport rule: a nominal struct with a String or
+    // List field may also hold enum and tuple fields that own heap storage
+    // (the F3 stress test covers cleanup in capped memory).
     let f = Fixture::new();
     let prelude = "type Kind [ Word(string), Num(i32) ]\ntype M { name: string, k: Kind }\n\
         fn g() -> string { let s := \"ab\".concat(\"cd\"); s }\n";
-    f.rejects(
-        &format!(
-            "{prelude}fn take(m: M) -> i32 {{ 0 }}\nfn main() -> i32 {{ let m := M {{ name: g(), k: Kind::Num(1) }}; take(m) }}\n"
-        ),
-        "TE017",
-        "a field that is an enum or tuple is not admitted yet",
+    assert_eq!(
+        f.result(&format!(
+            "{prelude}fn take(m: M) -> i32 {{ match m.k {{ Word(w) => w.len() as i32, Num(n) => n }} }}\nfn main() -> i32 {{ let m := M {{ name: g(), k: Kind::Num(1) }}; take(m) }}\n"
+        )),
+        "Result: i32(1)"
     );
 }

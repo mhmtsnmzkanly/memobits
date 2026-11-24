@@ -104,7 +104,9 @@ a lone `}`, an unterminated or empty `{` and anything but one identifier inside
 the braces (expressions, field access, calls, format specifiers) is SE001.
 Integers of every width format in decimal (`-` for negatives, exact at the
 64-bit extremes), `bool` as `true`/`false`, `char` as its UTF-8 bytes and
-`string` as its bytes; floats are TE017 "not supported yet" and every other
+`string` as its bytes; floats print Rust's `Display` text (shortest round-trip digits,
+no exponent, `3` for 3.0, `-0`, `NaN`, `inf`, `-inf`; the formatter is in the
+artifact only when a float placeholder is reachable) and every other
 type TE017 "cannot interpolate a value of type". An interpolating literal is an
 owned heap `string` built with one length pass and one allocation, valid in
 any position that accepts a String value; under `[build] alloc = false` it is
@@ -127,7 +129,7 @@ uses are checked like a typed literal, so `let x: u32 = SMALL_U8` is TE002 and
 `TOP + 1` with `TOP: u8 = 255` is LE001. A `u32` constant can be an array length
 (`array<u8, SIZE>`), a nominal const argument (`Lane<SIZE>`) or a repeat count
 (`[0; SIZE]`); any other type is TE017. `{NAME}` in a string literal folds to text
-(floats are TE017 as for any interpolation, and an interpolation of only constants
+(a float constant prints Rust's `Display` text, and an interpolation of only constants
 is a static literal). Constants are private unless `pub`, imported with
 `use m::NAME;` or named `m::NAME` (ME007 private, ME006 missing, ME008 when used as a
 type, ME009 as an entry or export), and share the value namespace with functions
@@ -405,5 +407,5 @@ with exact cleanup including early returns. A `string ! E` (or any heap-success 
 or tuple, or `try` it; the old "immediate consuming match" rule is gone. A variant that
 mixes a String with other payloads may leave the String unbound. A tuple may hold a
 String-owning enum, array or List. A nominal struct with a direct String or List field
-plus a heap-owning enum or tuple field still cannot move by value into a call (TE017).
+may also hold heap-owning (or plain) enum and tuple fields and moves by value into calls (F3).
 Range diagnostics echo a radix or separated literal as written (`0x1FF`, `-0b1000_0001`).

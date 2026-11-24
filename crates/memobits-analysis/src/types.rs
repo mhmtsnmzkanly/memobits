@@ -419,9 +419,8 @@ fn render_pattern(pattern: &Pattern) -> String {
 fn literal_text(literal: &Expr) -> String {
     match &literal.kind {
         // A radix or separated literal is echoed as written.
-        ExprKind::Number(raw) | ExprKind::TypedNumber { raw, .. } => {
-            memobits_syntax::literal_spelling(literal.span, raw).unwrap_or_else(|| raw.clone())
-        }
+        ExprKind::Number(number) => number.written().to_owned(),
+        ExprKind::TypedNumber { raw, .. } => raw.clone(),
         ExprKind::Unary { operand, .. } => format!("-{}", literal_text(operand)),
         ExprKind::Bool(value) => value.to_string(),
         ExprKind::CharLiteral(value) => format!("{value:?}"),
@@ -3193,7 +3192,7 @@ impl Checker {
             self.error(
                 17,
                 arg.span,
-                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, List, primitive and nested owner fields; a field that is an enum or tuple is not admitted yet)",
+                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, List, primitive, nested owner, enum and tuple fields)",
             );
         }
         if param.is_some_and(|parameter| {
@@ -5672,17 +5671,13 @@ impl Checker {
                     let ty = read_type(self.expr(value, None));
                     match &ty {
                         Ty::String | Ty::Error | Ty::Never => {}
-                        Ty::Primitive(kind) if integer(&ty) || matches!(*kind, "bool" | "char") => {}
-                        Ty::Primitive("f32" | "f64") => self.error(
-                            17,
-                            value.span,
-                            "formatting floating-point values in string interpolation is not supported yet",
-                        ),
+                        Ty::Primitive(kind)
+                            if integer(&ty) || matches!(*kind, "bool" | "char" | "f32" | "f64") => {}
                         _ => self.error(
                             17,
                             value.span,
                             format!(
-                                "cannot interpolate a value of type '{}'; string interpolation supports integers, bool, char and string",
+                                "cannot interpolate a value of type '{}'; string interpolation supports integers, floats, bool, char and string",
                                 name(&ty)
                             ),
                         ),
@@ -8360,6 +8355,10 @@ impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
         match ty {
             Ty::String | Ty::List(_) => View::String,
             Ty::Primitive(_) => View::Primitive,
+            Ty::Enum(..) | Ty::Tuple(..) if table_owns_heap(self.0, ty, &mut HashSet::new()) => {
+                View::Heap
+            }
+            Ty::Enum(..) | Ty::Tuple(..) => View::Primitive,
             Ty::Struct(id, _) => View::Struct(*id),
             Ty::Array(element, len) => View::Array {
                 element,
@@ -8377,5 +8376,28 @@ impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
             has_error_ancestry: self.0.error_ancestry(id).is_some(),
             fields: info.fields.iter().map(|field| field.ty.clone()).collect(),
         })
+    }
+}
+
+/// Whether an enum or tuple type holds a String or List anywhere inside.
+fn table_owns_heap(table: &TypeTable, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
+    match ty {
+        Ty::String | Ty::List(_) => true,
+        Ty::Array(element, len) => *len != 0 && table_owns_heap(table, element, visited),
+        Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
+            if !visited.insert(*id) {
+                return false;
+            }
+            let info = table.info(*id);
+            info.fields
+                .iter()
+                .any(|field| table_owns_heap(table, &field.ty, visited))
+                || info
+                    .variants
+                    .iter()
+                    .flat_map(|variant| &variant.payload)
+                    .any(|payload| table_owns_heap(table, payload, visited))
+        }
+        _ => false,
     }
 }

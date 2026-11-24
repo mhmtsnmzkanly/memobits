@@ -418,12 +418,10 @@ fn main() -> i32 {
 }
 "#,
     );
-    // Floating-point values are not interpolated yet, for constants as well.
-    rejects(
+    // Float constants fold with Rust's `Display` text (see f3_floats.rs).
+    runs(
         &f,
-        "const RATE: f64 = 1.5;\nfn main() -> i32 { let s := \"{RATE}\"; 0 }\n",
-        "TE017",
-        "floating-point values in string interpolation",
+        "const RATE: f64 = 1.5;\nfn main() -> i32 { let s := \"{RATE}\"; assert(s.len() == 3); 42 }\n",
     );
 }
 

@@ -228,6 +228,10 @@ enum Kind {
         signed: bool,
         wide: bool,
     },
+    /// `f32` (`wide` false) or `f64`; formatted from its bit pattern.
+    Float {
+        wide: bool,
+    },
 }
 
 fn kind_of(ty: &Type) -> Result<Kind, String> {
@@ -251,8 +255,34 @@ fn kind_of(ty: &Type) -> Result<Kind, String> {
             ),
             wide: matches!(kind, Primitive::I64 | Primitive::U64),
         }),
+        Type::Primitive(Primitive::F32) => Ok(Kind::Float { wide: false }),
+        Type::Primitive(Primitive::F64) => Ok(Kind::Float { wide: true }),
         _ => Err("unsupported interpolation operand type".into()),
     }
+}
+
+/// Push the operand's IEEE bit pattern as an `i64` plus the width flag
+/// (`1` for `f32`) for the float helpers.
+fn push_float(
+    body: &mut WasmFunction,
+    function: &Function,
+    param_count: u32,
+    operand: &Operand,
+    layout: &FrameLayout,
+    frame: Option<FrameState>,
+    wide: bool,
+) -> Result<(), String> {
+    emit_operand(body, function, param_count, operand, layout, frame)?;
+    body.instruction(&if wide {
+        I::I64ReinterpretF64
+    } else {
+        I::I32ReinterpretF32
+    });
+    if !wide {
+        body.instruction(&I::I64ExtendI32U);
+    }
+    body.instruction(&I::I32Const(i32::from(!wide)));
+    Ok(())
 }
 
 /// Push the operand as an `i64` plus its signedness flag for the helpers.
@@ -299,6 +329,10 @@ pub(super) fn emit(
     let int_len = helpers.ok_or("missing formatting helpers")?;
     let int_write = int_len + 1;
     let char_write = int_len + 2;
+    // `float_text` and `float_write` are the last two of the float helpers
+    // that follow the three above (present only when a float is reachable).
+    let float_text = int_len + HELPER_COUNT + super::float_format::FUNCTION_COUNT - 2;
+    let float_write = float_text + 1;
     let frame_state = frame.ok_or("interpolation local requires a frame")?;
     let cell = array_cell_of(layout, Slot::Local(target.0))?;
 
@@ -343,6 +377,11 @@ pub(super) fn emit(
                         wide,
                     )?;
                     body.instruction(&I::Call(int_len));
+                    body.instruction(&I::I64ExtendI32U);
+                }
+                Kind::Float { wide } => {
+                    push_float(body, function, param_count, operand, layout, frame, wide)?;
+                    body.instruction(&I::Call(float_text));
                     body.instruction(&I::I64ExtendI32U);
                 }
             },
@@ -466,6 +505,13 @@ pub(super) fn emit(
                             wide,
                         )?;
                         body.instruction(&I::Call(int_write));
+                        advance(body);
+                    }
+                    Kind::Float { wide } => {
+                        body.instruction(&I::LocalGet(cursor));
+                        push_float(body, function, param_count, operand, layout, frame, wide)?;
+                        // `float_write(destination, bits, is32)`.
+                        body.instruction(&I::Call(float_write));
                         advance(body);
                     }
                 }

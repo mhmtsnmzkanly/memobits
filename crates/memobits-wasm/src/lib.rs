@@ -21,6 +21,7 @@ use wasm_encoder::{
 };
 
 mod arrays;
+mod float_format;
 mod interpolation;
 mod layout;
 mod list_descriptor;
@@ -1580,6 +1581,35 @@ fn encode_frames_traced(
             functions.function(signatures.len() as u32 + prior);
             (selected.len() as u32 + prior, program)
         });
+    let has_float = reachable.iter().any(|id| {
+        let function = &program.functions[*id as usize];
+        function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|inst| match &inst.kind {
+                InstructionKind::InitInterpolatedString { parts, .. } => parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        memobits_ir::InterpolationPart::Value(operand)
+                            if matches!(
+                                value_type(function, operand),
+                                Ok(Type::Primitive(Primitive::F32 | Primitive::F64))
+                            )
+                    )
+                }),
+                _ => false,
+            })
+    });
+    let float_scratch = if has_float {
+        Some(
+            static_layout
+                .reserve(float_format::SCRATCH_BYTES)
+                .map_err(|_| "float formatting scratch exceeds the supported memory size")?,
+        )
+    } else {
+        None
+    };
     let fmt = has_interpolation.then(|| {
         let prior = u32::from(entry.is_some())
             + if use_heap {
@@ -1599,6 +1629,14 @@ fn encode_frames_traced(
             .function([ValType::I32, ValType::I32], [ValType::I32]); // char_write
         for offset in 0..interpolation::HELPER_COUNT {
             functions.function(signatures.len() as u32 + prior + offset);
+        }
+        if has_float {
+            for (offset, (params, results)) in float_format::signatures().into_iter().enumerate() {
+                types.ty().function(params, results);
+                functions.function(
+                    signatures.len() as u32 + prior + interpolation::HELPER_COUNT + offset as u32,
+                );
+            }
         }
         selected.len() as u32 + prior
     });
@@ -1668,6 +1706,12 @@ fn encode_frames_traced(
         code.function(&interpolation::int_len());
         code.function(&interpolation::int_write());
         code.function(&interpolation::char_write());
+        if let Some(scratch) = float_scratch {
+            let first = fmt.ok_or("missing formatting helpers")? + interpolation::HELPER_COUNT;
+            for function in float_format::functions(first, scratch) {
+                code.function(&function);
+            }
+        }
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.

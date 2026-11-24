@@ -1740,9 +1740,7 @@ fn validate_instruction(
                         access: Access::Borrow,
                         inner,
                     }) => **inner == Type::String,
-                    Some(Type::Primitive(kind)) => {
-                        !matches!(kind, Primitive::Unit | Primitive::F32 | Primitive::F64)
-                    }
+                    Some(Type::Primitive(kind)) => !matches!(kind, Primitive::Unit),
                     _ => false,
                 };
                 if !formattable || source.mode != UseMode::Read {
@@ -1750,7 +1748,7 @@ fn validate_instruction(
                         errors,
                         id,
                         Some(block),
-                        "string interpolation requires read-only String borrows or integer, bool and char values",
+                        "string interpolation requires read-only String borrows or integer, float, bool and char values",
                     );
                 }
             }

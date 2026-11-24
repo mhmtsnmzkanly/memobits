@@ -932,6 +932,9 @@ enum OwnerFieldShape {
     /// A nominal struct (or non-empty fixed array of them) that is itself
     /// admitted by the predicate.
     Owner,
+    /// An enum or tuple that owns heap storage. It is cleaned up type-directed
+    /// like any aggregate, but never makes a struct an owner by itself.
+    Heap,
     Other,
 }
 
@@ -941,6 +944,9 @@ enum OwnerFieldShape {
 pub enum OwnerTyView<'a, T> {
     String,
     Primitive,
+    /// An enum or tuple that owns heap storage (a String or List somewhere
+    /// inside); the adapter decides, the rule only admits it as a field.
+    Heap,
     /// A nominal struct id (never a tuple or enum).
     Struct(u32),
     /// A fixed array; `nonempty` is false for zero-length arrays.
@@ -989,7 +995,7 @@ fn admitted<M: OwnerTypeModel>(model: &M, id: u32, visited: &mut HashSet<u32>) -
         for field in &definition.fields {
             match field_shape(model, field, visited) {
                 OwnerFieldShape::String | OwnerFieldShape::Owner => owns = true,
-                OwnerFieldShape::Primitive => {}
+                OwnerFieldShape::Primitive | OwnerFieldShape::Heap => {}
                 OwnerFieldShape::Other => {
                     admitted_fields = false;
                     break;
@@ -1010,6 +1016,7 @@ fn field_shape<M: OwnerTypeModel>(
     match model.view(ty) {
         OwnerTyView::String => OwnerFieldShape::String,
         OwnerTyView::Primitive => OwnerFieldShape::Primitive,
+        OwnerTyView::Heap => OwnerFieldShape::Heap,
         OwnerTyView::Struct(child) if admitted(model, child, visited) => OwnerFieldShape::Owner,
         OwnerTyView::Array {
             element,
@@ -1031,6 +1038,17 @@ impl OwnerTypeModel for IrOwnerModel<'_> {
         match ty {
             Type::String | Type::List(_) => OwnerTyView::String,
             Type::Primitive(_) => OwnerTyView::Primitive,
+            Type::Enum(_) if owns_string_aggregate_in(self.0, ty) => OwnerTyView::Heap,
+            Type::Enum(_) => OwnerTyView::Primitive,
+            Type::Struct(id) if tuple_owns_string_in(self.0, id.0) => OwnerTyView::Heap,
+            Type::Struct(id)
+                if self
+                    .0
+                    .get(id.0 as usize)
+                    .is_some_and(|definition| definition.path.module.as_slice() == ["\0tuple"]) =>
+            {
+                OwnerTyView::Primitive
+            }
             Type::Struct(id) => OwnerTyView::Struct(id.0),
             Type::Array { element, len } => OwnerTyView::Array {
                 element,

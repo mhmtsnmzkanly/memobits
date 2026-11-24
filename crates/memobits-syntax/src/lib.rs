@@ -2,7 +2,7 @@
 //! Parsing does not perform name, type, ownership, or control-flow checks.
 mod items;
 mod literals;
-pub use literals::literal_spelling;
+pub use literals::NumberLiteral;
 pub mod numeric;
 mod self_type;
 pub mod templates;
@@ -242,7 +242,7 @@ pub enum ExprKind {
         base: Box<Expr>,
         index: Box<Expr>,
     },
-    Number(String),
+    Number(NumberLiteral),
     /// A numeric value with a fixed type, produced when a module `const` is
     /// inlined. `raw` is a decimal integer (possibly negative) or a float in
     /// Rust `Debug` form (`1.5`, `1e300`, `inf`, `NaN`, `-0.0`); `ty` is the
@@ -380,7 +380,7 @@ pub struct TupleElement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Word(String),
-    Number(String),
+    Number(NumberLiteral),
     StringLiteral(String),
     CharLiteral(char),
     Symbol(String),
@@ -1265,7 +1265,10 @@ impl Parser {
         match self.current().kind.clone() {
             TokenKind::Number(raw) if raw.bytes().all(|b| b.is_ascii_digit() || b == b'_') => {
                 let span = self.bump().span;
-                Ok(IntegerLiteral { span, raw })
+                Ok(IntegerLiteral {
+                    span,
+                    raw: raw.canonical,
+                })
             }
             _ => self.fail("expected nonnegative integer literal"),
         }

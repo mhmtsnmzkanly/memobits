@@ -1411,16 +1411,11 @@ impl Rewriter<'_, '_> {
                                 Lookup::Value((_, CVal::Bool(v))) => Some(v.to_string()),
                                 Lookup::Value((_, CVal::Char(v))) => Some(v.to_string()),
                                 Lookup::Value((_, CVal::Str(v))) => Some(v),
-                                Lookup::Value((_, CVal::Float(_))) => {
-                                    let span = value.span;
-                                    self.error(
-                                        Category::Type,
-                                        17,
-                                        span,
-                                        "formatting floating-point values in string interpolation is not supported yet".into(),
-                                    );
-                                    Some(String::new())
+                                // Rust's `Display`, the exact text the guest formatter produces.
+                                Lookup::Value((CTy::F32, CVal::Float(v))) => {
+                                    Some(format!("{}", v as f32))
                                 }
+                                Lookup::Value((_, CVal::Float(v))) => Some(format!("{v}")),
                                 _ => None,
                             },
                             _ => None,

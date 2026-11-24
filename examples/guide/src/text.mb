@@ -333,8 +333,10 @@ test fn text_length_and_concat() {
 // String interpolation. In a string literal, `{name}` inserts the value of an
 // identifier that is in scope: a local, a parameter, or a `borrow`/`share`
 // parameter. Supported values are every integer width (decimal, `-` for a
-// negative number), `bool` (`true` / `false`), `char` (its UTF-8 bytes) and
-// `string` (its bytes). Floats, structs, enums, lists and other types are
+// negative number), floats (Rust's `Display` text: the shortest digits that
+// read back as the same value, never an exponent, `1` for 1.0, `-0`, `NaN`,
+// `inf`, `-inf`), `bool` (`true` / `false`), `char` (its UTF-8 bytes) and
+// `string` (its bytes). Structs, enums, lists and other types are
 // rejected with a diagnostic; only a plain identifier may appear between the
 // braces (no expressions, field access or calls). A literal with a
 // placeholder builds an owned heap `string` in one allocation (the alloc
@@ -367,6 +369,36 @@ test fn string_interpolation() {
     // `true` is 4 bytes, the emoji is 4 UTF-8 bytes.
     assert("{flag}{ch}".len() == 8);
     assert(interpolate_parts(7, label.borrow(), false).len() == 17);
+}
+// Float placeholders are exact: `f32` and `f64` use their own shortest text.
+// The guest carries the float formatter only when a float placeholder is
+// reachable; constants fold at compile time with the same text.
+const HALF_SUM: f64 = 0.1 + 0.2;
+test fn float_interpolation() {
+    let third: f64 = 1.0 / 3.0;
+    let small: f32 = 0.1;
+    let widened: f64 = 0.1 as f32 as f64;
+    let big: f64 = 1e20;
+    let tiny: f64 = 1e-7;
+    let whole: f64 = 3.0;
+    let negative_zero: f64 = -0.0;
+    let nan: f64 = 0.0 / 0.0;
+    let infinity: f64 = 1.0 / 0.0;
+    // "0.3333333333333333" is 18 bytes; the f32 0.1 is "0.1" but widened to
+    // f64 it shows its binary value "0.10000000149011612" (19 bytes).
+    assert("{third}".len() == 18);
+    assert("{small}".len() == 3);
+    assert("{widened}".len() == 19);
+    // No exponent: 1e20 is 21 digits, 1e-7 is "0.0000001".
+    assert("{big}".len() == 21);
+    assert("{tiny}".len() == 9);
+    // Integral values have no ".0"; special values use Rust's words.
+    assert("{whole}".len() == 1);
+    assert("{negative_zero}".len() == 2);
+    assert("{nan}".len() == 3);
+    assert("{infinity}".len() == 3);
+    // A constant folds at compile time: 0.1 + 0.2 is "0.30000000000000004".
+    assert("{HALF_SUM}".len() == 19);
 }
 // `{{` and `}}` write literal braces. A literal that only escapes braces has
 // no placeholder and stays a static literal.

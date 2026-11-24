@@ -688,6 +688,25 @@ impl memobits_ir::OwnerTypeModel for FactOwnerModel<'_> {
         match ty {
             Type::String | Type::List(_) => View::String,
             Type::Primitive(_) => View::Primitive,
+            Type::Enum(_) if is_string_owner_aggregate_type(self.0, ty) => View::Heap,
+            Type::Enum(_) => View::Primitive,
+            Type::Struct(id)
+                if self
+                    .0
+                    .get(id.0 as usize)
+                    .is_some_and(|info| info.module == "\0tuple")
+                    && is_string_owner_aggregate_type(self.0, ty) =>
+            {
+                View::Heap
+            }
+            Type::Struct(id)
+                if self
+                    .0
+                    .get(id.0 as usize)
+                    .is_some_and(|info| info.module == "\0tuple") =>
+            {
+                View::Primitive
+            }
             Type::Struct(id) => View::Struct(id.0),
             Type::Array { element, len } => View::Array {
                 element,
@@ -2799,9 +2818,9 @@ impl<'a> Builder<'a> {
             ExprKind::Number(raw) => {
                 let ty = self.ty(expr).expect("checked number type");
                 let value = if raw.contains(['.', 'e', 'E']) {
-                    Constant::Float(raw.clone())
+                    Constant::Float(raw.canonical.clone())
                 } else {
-                    Constant::Integer(raw.clone())
+                    Constant::Integer(raw.canonical.clone())
                 };
                 self.constant(expr.span, value, ty)
             }
