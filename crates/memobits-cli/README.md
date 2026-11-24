@@ -78,7 +78,14 @@ An `if`/`match` expression may produce a `string`, List or String-owning
 aggregate anywhere a value is accepted (binding, argument, assignment, tail
 result): each branch moves its value into one hidden destination before the
 join, and the unchosen branch's inputs are released with their own scopes. A
-struct literal may be a function's tail expression.
+struct literal may be a function's tail expression. A branch that cannot fall
+through (`return`, `break`, `continue`) joins with the other branch's type.
+`try expr else [name] { handler }` unwraps a `T ! E` or `T?` (the `!` layer of
+`T ?! E`): the handler yields the success type or exits, and an `Err` payload
+binds as an owned `name`. `target = try expr;` leaves the target unchanged on a
+failure and `try expr;` discards one; `try` without `else` anywhere else is
+SE002, a non-fallible operand is TE029, a name on a `T?` is TE030, and a
+handler of the wrong type is TE013.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

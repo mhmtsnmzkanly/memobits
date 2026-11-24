@@ -688,6 +688,16 @@ struct Parser {
     pending: Vec<Item>,
 }
 type PResult<T> = Result<T, ()>;
+/// How a parsed `try` is lowered to match arms.
+enum TryArms {
+    /// `try e else [name] { handler }`.
+    Handler((Option<String>, Block)),
+    /// `try e;` discards a failure and the success value.
+    Discard,
+    /// `target = try e;` assigns the success value and leaves the target alone
+    /// on failure.
+    Assign(Expr),
+}
 impl Parser {
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
@@ -749,7 +759,7 @@ impl Parser {
                 if ![
                     "pub", "fn", "use", "as", "type", "let", "var", "borrow", "share", "return",
                     "loop", "break", "continue", "if", "else", "true", "false", "while", "struct",
-                    "enum", "import", "export", "match",
+                    "enum", "import", "export", "match", "try",
                 ]
                 .contains(&s.as_str()) =>
             {
@@ -1342,6 +1352,23 @@ impl Parser {
         } else if self.eat("continue") {
             self.expect(";")?;
             StatementKind::Continue
+        } else if self.at("try") {
+            let (try_span, operand, handler) = self.try_parts()?;
+            let arms = match handler {
+                Some(handler) => {
+                    // `try e else { ... }` ends at its closing brace.
+                    self.eat(";");
+                    TryArms::Handler(handler)
+                }
+                None => {
+                    if !self.at(";") {
+                        return self.try_needs_else(try_span);
+                    }
+                    self.expect(";")?;
+                    TryArms::Discard
+                }
+            };
+            StatementKind::Expression(Self::try_match(try_span, operand, arms))
         } else {
             // A block-like expression at the start of a statement ends at its
             // closing brace: no postfix or binary continuation.
@@ -1361,6 +1388,36 @@ impl Parser {
                     TokenKind::Symbol(s) => s,
                     _ => unreachable!(),
                 };
+                if self.at("try") {
+                    let saved = self.pos;
+                    let (try_span, operand, handler) = self.try_parts()?;
+                    if handler.is_none() {
+                        if operator != "=" {
+                            self.diagnostics.push(diagnostic(
+                                2,
+                                try_span,
+                                format!(
+                                    "`try` without `else` supports only plain `=` assignment, not `{operator}`; write `try expr else name {{ ... }}`"
+                                ),
+                            ));
+                            return Err(());
+                        }
+                        self.expect(";")?;
+                        let kind = StatementKind::Expression(Self::try_match(
+                            try_span,
+                            operand,
+                            TryArms::Assign(e),
+                        ));
+                        return Ok((
+                            Some(Node {
+                                span: self.span(start),
+                                kind,
+                            }),
+                            None,
+                        ));
+                    }
+                    self.pos = saved;
+                }
                 let value = self.expr(0)?;
                 self.expect(";")?;
                 StatementKind::Assign {
@@ -1466,6 +1523,130 @@ impl Parser {
             span: self.span(start),
             kind: ExprKind::Match { scrutinee, arms },
         })
+    }
+    fn try_needs_else<T>(&mut self, span: Span) -> PResult<T> {
+        self.diagnostics.push(diagnostic(
+            2,
+            span,
+            "`try` needs `else`; write `try expr else name { ... }`, or use it without `else` only as `target = try expr;` or as a statement `try expr;`",
+        ));
+        Err(())
+    }
+    /// `try operand [else [name] { handler }]`, starting at `try`. The operand
+    /// is a unary-level expression, so `try a.b(c) else e { ... }` reads
+    /// `try (a.b(c))`; a following `else` belongs to this (nearest) `try`.
+    #[allow(clippy::type_complexity)]
+    fn try_parts(&mut self) -> PResult<(Span, Expr, Option<(Option<String>, Block)>)> {
+        let start = self.current().span.start;
+        self.expect("try")?;
+        let operand = self.expr(13)?;
+        let handler = if self.eat("else") {
+            let name = if self.at("{") {
+                None
+            } else {
+                Some(self.name()?)
+            };
+            Some((name, self.block()?))
+        } else {
+            None
+        };
+        Ok((self.span(start), operand, handler))
+    }
+    /// `try` is matching sugar. The built-in variant markers `$try_ok` and
+    /// `$try_err` resolve to `Ok`/`Err` on a `T ! E` value and to
+    /// `Some`/`None` on a `T?` value when the match is checked.
+    fn try_match(span: Span, operand: Expr, arms: TryArms) -> Expr {
+        const VALUE: &str = "$try_value";
+        let marker = |name: &str, slots: Vec<Pattern>| Pattern {
+            span,
+            kind: PatternKind::Variant {
+                path: vec![name.to_string()],
+                slots,
+            },
+        };
+        let binding = |name: &str| Pattern {
+            span,
+            kind: PatternKind::Binding(name.to_string()),
+        };
+        let empty_block = || Node {
+            span,
+            kind: ExprKind::Block(Block {
+                span,
+                statements: Vec::new(),
+                tail: None,
+            }),
+        };
+        let value_path = || Node {
+            span,
+            kind: ExprKind::Path(vec![VALUE.to_string()]),
+        };
+        let (ok, err) = match arms {
+            TryArms::Handler((name, handler)) => (
+                MatchArm {
+                    span,
+                    pattern: marker("$try_ok", vec![binding(VALUE)]),
+                    body: value_path(),
+                },
+                MatchArm {
+                    span: handler.span,
+                    pattern: marker("$try_err", name.iter().map(|n| binding(n)).collect()),
+                    body: Node {
+                        span: handler.span,
+                        kind: ExprKind::Block(handler),
+                    },
+                },
+            ),
+            TryArms::Discard => (
+                MatchArm {
+                    span,
+                    // Bound (not `_`) so an owned success value is moved into
+                    // the arm and released there.
+                    pattern: marker("$try_ok", vec![binding(VALUE)]),
+                    body: empty_block(),
+                },
+                MatchArm {
+                    span,
+                    pattern: marker("$try_err", Vec::new()),
+                    body: empty_block(),
+                },
+            ),
+            TryArms::Assign(target) => {
+                let assign = Node {
+                    span,
+                    kind: StatementKind::Assign {
+                        target,
+                        operator: "=".to_string(),
+                        value: value_path(),
+                    },
+                };
+                (
+                    MatchArm {
+                        span,
+                        pattern: marker("$try_ok", vec![binding(VALUE)]),
+                        body: Node {
+                            span,
+                            kind: ExprKind::Block(Block {
+                                span,
+                                statements: vec![assign],
+                                tail: None,
+                            }),
+                        },
+                    },
+                    MatchArm {
+                        span,
+                        pattern: marker("$try_err", Vec::new()),
+                        body: empty_block(),
+                    },
+                )
+            }
+        };
+        Node {
+            span,
+            kind: ExprKind::Match {
+                scrutinee: Box::new(operand),
+                arms: vec![ok, err],
+            },
+        }
     }
     /// `return [expr]`, `break` or `continue` written directly as an arm body.
     /// It is parsed as a one-statement block, which never falls through.
@@ -1675,6 +1856,12 @@ impl Parser {
                 span: self.span(start),
                 kind: ExprKind::Unary { operator, operand },
             }
+        } else if self.at("try") {
+            let (try_span, operand, handler) = self.try_parts()?;
+            let Some(handler) = handler else {
+                return self.try_needs_else(try_span);
+            };
+            Self::try_match(try_span, operand, TryArms::Handler(handler))
         } else if self.eat("[") {
             let kind = self.nested(Self::array_literal_rest)?;
             Node {

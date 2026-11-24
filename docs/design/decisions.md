@@ -719,3 +719,38 @@ Facts about the shipped behavior; no new decisions.
   `if` guards; exhaustiveness treats guarded arms as non-covering.
 - `~` bitwise complement for integers; `Self` names the extended type inside
   `extend` blocks.
+
+### Shipped G2 details (2026-11-24)
+
+- Divergence: an `if`/`else` or `match` arm that cannot fall through
+  (`return`, `break`, `continue`, or a block ending in one) joins with the other
+  branch's type, in any position and for owner values (value-sink lowering
+  already skips diverging branches). Genuinely different branch types stay
+  TE013.
+- `try` is a reserved word. Grammar: `try operand [else [name] { handler }]`,
+  where the operand is a unary-level expression (`try a.b(c) else e { ... }`,
+  `1 + try f() else { 0 } * 2` is `1 + ((try f() else { 0 }) * 2)`), the
+  handler is a block, and an `else` belongs to the nearest `try` (no ambiguity
+  with `if ... else`). A `try ... else` that starts a statement ends at its
+  closing brace; the `;` is optional there.
+- Lowering: the parser builds an ordinary `match` with two arms and marker
+  patterns `$try_ok(v)` / `$try_err(name)` that the checker resolves by the
+  scrutinee's built-in enum (`Ok`/`Err` on `T ! E`, `Some`/`None` on `T?`).
+  On `T ?! E` (`(T?) ! E`) the markers select the `!` layer, so the result is
+  the `T?` payload. Evaluation, moves, exhaustiveness and cleanup are the
+  existing match rules: the operand runs once, an owned success value moves out,
+  an unused owned success value is released once, traps are not caught.
+- Without `else`: `target = try expr;` (plain `=` only; `+=` etc. are SE002)
+  assigns on success and does nothing on failure (the target place is only
+  evaluated on the success arm; if the RHS moved the target, the target is
+  unavailable on the failure path and later uses are BE001). `try expr;` as an
+  expression statement discards the failure and any success value. In every
+  other position (binding initializer, tail, argument, condition, `return`) a
+  `try` without `else` is SE002 "`try` needs `else`".
+- Diagnostics: handler type mismatch TE013 ("`try` handler must produce T or
+  exit"), name on `T?` TE030, non-fallible operand TE029, missing `else` SE002.
+- Error types cannot own heap storage (LE900), so error payloads are plain
+  data and nothing heap is released on the failure path; the owner paths are
+  success payloads (bound, moved, discarded or overwritten) and handler locals.
+  `Ok(Some(heap))`, `Ok(list)` constructors and a struct literal inside `Ok(...)`
+  remain existing gates.

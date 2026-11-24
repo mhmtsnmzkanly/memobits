@@ -1,4 +1,5 @@
 use collections::{Row, total};
+use alloc::List;
 
 type Signal [Start, Stop] extend {
     fn is_active(borrow self) -> bool {
@@ -182,18 +183,16 @@ fn check(value: i32) -> Checked {
 fn poll(enabled: bool, value: i32) -> Poll {
     // Ok(None) means the operation was skipped.
     if !enabled { return Ok(None); }
-    match check(value) {
-        Ok(row) => {
-            // Some can infer an owned Option from its payload. Bare None
-            // needs an expected type, here supplied by the Poll return type.
-            if row[0] == 0 {
-                Ok(Some(None))
-            } else {
-                let reading := Some(total(row.borrow()));
-                Ok(Some(reading))
-            }
-        },
-        Err(error) => Err(error),
+    // `try ... else` unwraps the Ok value and hands the error to its handler;
+    // this handler returns it unchanged (see "try ... else" below).
+    let row := try check(value) else error { return Err(error); };
+    // Some can infer an owned Option from its payload. Bare None needs an
+    // expected type, here supplied by the Poll return type.
+    if row[0] == 0 {
+        Ok(Some(None))
+    } else {
+        let reading := Some(total(row.borrow()));
+        Ok(Some(reading))
     }
 }
 test fn outcomes() {
@@ -221,6 +220,100 @@ test fn outcomes() {
     assert(empty);
     assert(skipped);
     assert(failed);
+}
+// try ... else. `try expr else name { handler }` is matching sugar. On a
+// `T ! E` value, `Ok(v)` yields `v` and `Err(e)` binds `e` (owned) in the
+// handler, whose value must have the success type or which must leave with
+// `return`, `break` or `continue`. The name may be omitted (`else { ... }`).
+// On a `T?` value the handler runs for `None` and takes no name. On a
+// `T ?! E` value `try` unwraps only the `!` layer and yields a `T?`. The
+// operand is a unary-level expression: `try a.b(c) else e { ... }`, and an
+// `else` belongs to the nearest `try`. Without `else`, `target = try expr;`
+// leaves the target unchanged on failure and `try expr;` discards a failure.
+// Every other position needs an `else`. `try` never catches traps, evaluates
+// its operand once, and releases an unused owned value exactly once.
+fn row_head(value: i32) -> i32 {
+    let row := try check(value) else error { return error.observed; };
+    row[0]
+}
+fn row_fallback(value: i32) -> i32 {
+    // The handler yields a value of the success type instead of exiting.
+    let row := try check(value) else error { [error.observed, 0, 0] };
+    row[0] + row[1]
+}
+fn row_unnamed(value: i32) -> i32 {
+    let row := try check(value) else { return 99; };
+    row[2]
+}
+fn first_or(items: borrow List<u32>, fallback: u32) -> u32 {
+    let first := try items.get(0) else { return fallback; };
+    first
+}
+fn skipped_or_value(enabled: bool, value: i32) -> i32 {
+    // `T ?! E`: `try` handles the error layer only; the optional layers stay.
+    let reading := try poll(enabled, value) else { return -1; };
+    match reading {
+        Some(Some(reading)) => reading,
+        Some(None) => 0,
+        None => -2,
+    }
+}
+fn words_len(label: string, flag: bool) -> u32 {
+    let owned := label.concat("!");
+    var target := "x".concat("");
+    // On a failure the target keeps its previous value; on success the old
+    // value is released and the new one moves in.
+    target = try owned_text(flag, owned);
+    target.len()
+}
+fn owned_text(ok: bool, text: string) -> string ! Error {
+    if !ok { return Err(Error { code: 3 }); }
+    Ok(text)
+}
+test fn try_else() {
+    assert(row_head(5) == 5);
+    assert(row_head(-4) == -4);
+    assert(row_fallback(5) == 11);
+    assert(row_fallback(-4) == -4);
+    assert(row_unnamed(5) == 7);
+    assert(row_unnamed(-4) == 99);
+    var items: List<u32> = [];
+    assert(first_or(items.borrow(), 7) == 7);
+    items.push(3);
+    assert(first_or(items.borrow(), 7) == 3);
+    assert(skipped_or_value(true, 2) == 9);
+    assert(skipped_or_value(true, 0) == 0);
+    assert(skipped_or_value(false, 2) == -2);
+    assert(skipped_or_value(true, -4) == -1);
+}
+// A branch that cannot fall through (`return`, `break`, `continue`) joins with
+// the other branch's type, so `if` and `match` can yield an owner or a number
+// while another path leaves early. This is what `try ... else { return ...; }`
+// relies on.
+fn diverging_branch(flag: bool) -> u32 {
+    let text := "abc".concat("");
+    let chosen := if flag { text } else { return 0; };
+    let probe: u32? = Some(chosen.len());
+    let size: u32 = match probe { Some(n) => n, None => { return 1; } };
+    size
+}
+test fn diverging_branches() {
+    assert(diverging_branch(true) == 3);
+    assert(diverging_branch(false) == 0);
+}
+test fn try_without_else() {
+    // Assignment context: a failure leaves the target alone.
+    var best: i32 = 1;
+    best = try Some(5);
+    assert(best == 5);
+    let none: i32? = None;
+    best = try none;
+    assert(best == 5);
+    assert(words_len("ab", true) == 3);
+    assert(words_len("ab", false) == 1);
+    // Statement context: a failure, or an unused success value, is discarded.
+    try check(-1);
+    try check(1);
 }
 // Ancestor reference conversion works at direct internal calls. Owned
 // conversion to an ancestor is unavailable. `T ! E` and `T ?! E` require Error

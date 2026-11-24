@@ -333,6 +333,15 @@ fn reference_access_matches(actual: &Ty, access: IrAccess) -> bool {
         ) | (_, Ty::Error | Ty::Never)
     )
 }
+/// Parser-built `try` variant markers (see `Parser::try_match`).
+const TRY_OK: &str = "$try_ok";
+const TRY_ERR: &str = "$try_err";
+fn is_try_match(arms: &[MatchArm]) -> bool {
+    matches!(
+        arms.first().map(|arm| &arm.pattern.kind),
+        Some(PatternKind::Variant { path, .. }) if path.as_slice() == [TRY_OK]
+    )
+}
 /// Most uncovered example patterns a non-exhaustive `match` names.
 const MAX_MISSING_PATTERNS: usize = 4;
 
@@ -4003,6 +4012,14 @@ impl Checker {
                 column = Some((**inner).clone());
             }
             Ty::Never | Ty::Error => {}
+            other if is_try_match(arms) => self.error(
+                29,
+                scrutinee.span,
+                format!(
+                    "`try` requires a `T ! E` or `T?` value, found {}",
+                    name(other)
+                ),
+            ),
             other => self.error(
                 29,
                 scrutinee.span,
@@ -4036,6 +4053,7 @@ impl Checker {
         let mut tainted = false;
         let mut result: Option<Ty> = None;
         let mut facts = Vec::new();
+        let is_try = is_try_match(arms);
         for arm in arms {
             self.scopes.push(HashMap::new());
             let mut arm_tainted = false;
@@ -4101,15 +4119,20 @@ impl Checker {
                 None => ty,
                 Some(previous) => {
                     if !compatible(&ty, &previous) && !compatible(&previous, &ty) {
-                        self.error(
-                            13,
-                            arm.body.span,
+                        let message = if is_try {
+                            format!(
+                                "`try` handler must produce {} or exit (return, break, continue), found {}",
+                                name(&previous),
+                                name(&ty)
+                            )
+                        } else {
                             format!(
                                 "match arms have incompatible types: {} and {}",
                                 name(&previous),
                                 name(&ty)
-                            ),
-                        );
+                            )
+                        };
+                        self.error(13, arm.body.span, message);
                         Ty::Error
                     } else if previous == Ty::Never {
                         ty
@@ -4242,6 +4265,13 @@ impl Checker {
                 MatchPattern::Bind(local)
             }
             PatternKind::Variant { path, slots } => {
+                if let [marker] = path.as_slice() {
+                    if marker == TRY_OK || marker == TRY_ERR {
+                        return self.check_try_pattern(
+                            pattern, marker, slots, expected, borrowed, names, tainted,
+                        );
+                    }
+                }
                 self.check_variant_pattern(pattern, path, slots, expected, borrowed, names, tainted)
             }
             PatternKind::Tuple(elements) => {
@@ -4295,6 +4325,70 @@ impl Checker {
                 }
             }
         }
+    }
+    /// A `try` marker pattern: `$try_ok` is `Ok`/`Some` and `$try_err` is
+    /// `Err`/`None`, chosen by the built-in enum of the scrutinee.
+    #[allow(clippy::too_many_arguments)]
+    fn check_try_pattern(
+        &mut self,
+        pattern: &Pattern,
+        marker: &str,
+        slots: &[Pattern],
+        expected: &Ty,
+        borrowed: bool,
+        names: &mut Vec<String>,
+        tainted: &mut bool,
+    ) -> MatchPattern {
+        let template = match expected {
+            Ty::Enum(id, _) => self.table.enum_template(*id).map(|template| template.id),
+            _ => None,
+        };
+        let (variant, slots): (&str, Vec<Pattern>) = match (template, marker == TRY_OK) {
+            (Some(registry::TemplateId::Result), true) => ("Ok", slots.to_vec()),
+            (Some(registry::TemplateId::Result), false) => {
+                let slots = if slots.is_empty() {
+                    vec![Pattern {
+                        span: pattern.span,
+                        kind: PatternKind::Wildcard,
+                    }]
+                } else {
+                    slots.to_vec()
+                };
+                ("Err", slots)
+            }
+            (Some(registry::TemplateId::Option), true) => ("Some", slots.to_vec()),
+            (Some(registry::TemplateId::Option), false) => {
+                if !slots.is_empty() {
+                    self.error(
+                        30,
+                        pattern.span,
+                        "`try` on an optional value has no error to bind; write `else { ... }` without a name",
+                    );
+                    *tainted = true;
+                }
+                ("None", Vec::new())
+            }
+            _ => {
+                // Non-enum scrutinees are reported by `match_expr`.
+                if marker == TRY_OK && matches!(expected, Ty::Enum(..)) {
+                    self.error(
+                        29,
+                        pattern.span,
+                        format!(
+                            "`try` requires a `T ! E` or `T?` value, found {}",
+                            name(expected)
+                        ),
+                    );
+                }
+                *tainted = true;
+                for slot in slots {
+                    self.check_pattern(slot, &Ty::Error, borrowed, false, names, tainted);
+                }
+                return MatchPattern::Wildcard;
+            }
+        };
+        let path = [variant.to_string()];
+        self.check_variant_pattern(pattern, &path, &slots, expected, borrowed, names, tainted)
     }
     #[allow(clippy::too_many_arguments)]
     fn check_variant_pattern(
@@ -6083,7 +6177,7 @@ impl Checker {
                     if cond == Ty::Never {
                         return Ty::Never;
                     }
-                    if !compatible(&then_ty, &else_ty) {
+                    if !compatible(&then_ty, &else_ty) && !compatible(&else_ty, &then_ty) {
                         self.error(
                             13,
                             other.span,

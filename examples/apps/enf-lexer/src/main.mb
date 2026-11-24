@@ -106,12 +106,12 @@ fn main() -> i32 ! Error {
     let input: Bytes = [32, 48, 48, 55, 9, 52, 50, 57, 0, 0, 0, 0, 0, 0, 0, 0];
     var cursor := 0;
     loop {
-        match scan(input.borrow(), 8, cursor.share()) {
-            Ok(token) => match token {
-                Some(_) => { continue; },
-                None => { break; },
-            },
-            Err(error) => { return Err(Error { code: error.code }); },
+        let token := try scan(input.borrow(), 8, cursor.share()) else error {
+            return Err(Error { code: error.code });
+        };
+        match token {
+            Some(_) => { continue; },
+            None => { break; },
         }
     }
     Ok(0)

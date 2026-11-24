@@ -28,13 +28,11 @@ fn error_is(bytes: array<u8, 8>, length: i32, code: u32, expected: i32?) -> bool
 // UTF-8, or the validator's error code otherwise.
 fn main() -> i32 ! Error {
     let sample: array<u8, 8> = [195, 169, 0, 127, 255, 0, 0, 0];
-    match sample.validate_utf8(4) {
-        Ok(_) => Ok(0),
-        Err(error) => {
-            let Utf8Error { code: code, offset: _ } := error;
-            Err(Error { code: code })
-        },
+    try sample.validate_utf8(4) else error {
+        let Utf8Error { code: code, offset: _ } := error;
+        return Err(Error { code: code });
     }
+    Ok(0)
 }
 
 // é, NUL and ASCII DEL. The invalid byte after the logical end is padding.
