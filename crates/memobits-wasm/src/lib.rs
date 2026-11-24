@@ -326,6 +326,20 @@ fn compile_target(
             errors.push(diagnostic(error.message, error.span));
         }
         let aliases = construction_aliases(function, &uses);
+        let swapped_places: HashSet<memobits_ir::ValueId> = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match &instruction.kind {
+                InstructionKind::SwapPlaces { left, right } => Some([left, right]),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|operand| match operand.source {
+                Source::Value(value) => Some(value),
+                _ => None,
+            })
+            .collect();
         for block in &function.blocks {
             // Literal descriptors have zero allocation provenance.
             let mut string_literals = HashSet::new();
@@ -364,6 +378,9 @@ fn compile_target(
                     InstructionKind::FieldAddr { access, base, .. }
                         if matches!(instruction.output.map(|id| &function.values[id.0 as usize]),
                             Some(Type::Reference { inner, .. }) if **inner == Type::String)
+                            && !instruction
+                                .output
+                                .is_some_and(|id| swapped_places.contains(&id))
                             && (*access != memobits_ir::Access::Borrow
                                 || !field_addr_rooted_at_local(function, base.source)) =>
                     {
@@ -788,6 +805,10 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 InstructionKind::Store { reference, value } => {
                     count(reference);
                     count(value);
+                }
+                InstructionKind::SwapPlaces { left, right } => {
+                    count(left);
+                    count(right);
                 }
                 InstructionKind::Binary { left, right, .. } => {
                     count(left);
@@ -1853,6 +1874,17 @@ fn emit_address(body: &mut WasmFunction, frame: FrameState, offset: u32) {
     body.instruction(&WasmInstruction::LocalGet(frame.base));
     body.instruction(&WasmInstruction::I32Const(offset as i32));
     body.instruction(&WasmInstruction::I32Add);
+}
+
+/// Unaligned-safe memory argument: the hint is the weakest, so any struct
+/// offset validates.
+fn swap_arg(offset: u32, _natural: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(offset),
+        align: 0,
+        target: wasm_encoder::MemArgTarget::Memory(0),
+        ordering: None,
+    }
 }
 
 fn memory_arg(kind: Primitive) -> MemArg {
@@ -4311,6 +4343,68 @@ fn compile_instruction(
                 cleanup_base,
                 heap_locals,
             )?;
+        }
+        InstructionKind::SwapPlaces { left, right } => {
+            let Type::Reference { inner, .. } = value_type(function, left)? else {
+                return Err("swap operand is not a reference".into());
+            };
+            let size = if let Type::Primitive(kind) = inner.as_ref() {
+                storage_layout(*kind)?.0
+            } else {
+                aggregate_bytes(&layout.structs, &inner)?
+            };
+            let mut offset = 0u32;
+            while offset < size {
+                let remaining = size - offset;
+                let (width, load, store): (u32, WasmInstruction, WasmInstruction) =
+                    if remaining >= 8 {
+                        (
+                            8,
+                            WasmInstruction::I64Load(swap_arg(offset, 3)),
+                            WasmInstruction::I64Store(swap_arg(offset, 3)),
+                        )
+                    } else if remaining >= 4 {
+                        (
+                            4,
+                            WasmInstruction::I64Load32U(swap_arg(offset, 2)),
+                            WasmInstruction::I64Store32(swap_arg(offset, 2)),
+                        )
+                    } else if remaining >= 2 {
+                        (
+                            2,
+                            WasmInstruction::I64Load16U(swap_arg(offset, 1)),
+                            WasmInstruction::I64Store16(swap_arg(offset, 1)),
+                        )
+                    } else {
+                        (
+                            1,
+                            WasmInstruction::I64Load8U(swap_arg(offset, 0)),
+                            WasmInstruction::I64Store8(swap_arg(offset, 0)),
+                        )
+                    };
+                // scratch = *left; *left = *right; *right = scratch
+                emit_operand(body, function, param_count, left, layout, frame)?;
+                body.instruction(&load);
+                body.instruction(&WasmInstruction::LocalSet(scratch64));
+                emit_operand(body, function, param_count, left, layout, frame)?;
+                emit_operand(body, function, param_count, right, layout, frame)?;
+                body.instruction(&match width {
+                    8 => WasmInstruction::I64Load(swap_arg(offset, 3)),
+                    4 => WasmInstruction::I64Load32U(swap_arg(offset, 2)),
+                    2 => WasmInstruction::I64Load16U(swap_arg(offset, 1)),
+                    _ => WasmInstruction::I64Load8U(swap_arg(offset, 0)),
+                });
+                body.instruction(&store);
+                emit_operand(body, function, param_count, right, layout, frame)?;
+                body.instruction(&WasmInstruction::LocalGet(scratch64));
+                body.instruction(&match width {
+                    8 => WasmInstruction::I64Store(swap_arg(offset, 3)),
+                    4 => WasmInstruction::I64Store32(swap_arg(offset, 2)),
+                    2 => WasmInstruction::I64Store16(swap_arg(offset, 1)),
+                    _ => WasmInstruction::I64Store8(swap_arg(offset, 0)),
+                });
+                offset += width;
+            }
         }
         InstructionKind::Store { reference, value } => {
             if let Type::Reference { inner, .. } = value_type(function, reference)? {

@@ -1662,7 +1662,7 @@ impl TypeTable {
                         Ty::List(_) => {
                             return Err(failure(
                                 17,
-                                "nested List<List<T>> is not supported yet; use a struct that wraps a List only after struct List fields land, or flatten the storage".into(),
+                                "nested lists are not supported yet; use a struct that wraps a List only after struct List fields land, or flatten the storage".into(),
                             ))
                         }
                         _ => {}

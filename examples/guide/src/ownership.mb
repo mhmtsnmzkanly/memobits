@@ -229,3 +229,46 @@ test fn replace_local_string_field() {
     assert(note.len() == 4);
     assert(label.text.len() == 0);
 }
+
+// replace(place, value) installs value in a local, field, array element or
+// List element and returns the old value, which the caller now owns. The
+// value is evaluated first (it may read the old one), then the place is
+// addressed and bounds-checked, then the two are exchanged. The owner of the
+// place must be a `var` or a `share` parameter.
+test fn replace_returns_the_old_value() {
+    var title := "draft".concat("");
+    let old := replace(title, "final".concat(""));
+    assert(old.len() == 5);
+    assert(title.len() == 5);
+    var counter: u32 = 7;
+    assert(replace(counter, 9) == 7);
+    assert(counter == 9);
+}
+// swap(a, b) exchanges two places of one type without copying heap data. The
+// places must be provably disjoint: different locals or fields, or distinct
+// constant indices. Two dynamic indices into one collection are rejected
+// (BE005); swapping them is a later extension.
+test fn swap_exchanges_disjoint_places() {
+    let first := "alpha".concat("");
+    let second := "be".concat("");
+    var words: array<string, 2> = [first, second];
+    swap(words[0], words[1]);
+    assert(words[0].len() == 2);
+    assert(words[1].len() == 5);
+    var low: u32 = 1;
+    var high: u32 = 2;
+    swap(low, high);
+    assert(low == 2);
+}
+// Assigning an owning element or field is an RHS-first replacement: the new
+// value is evaluated before the old one is released, exactly once.
+test fn overwrite_releases_the_old_value() {
+    let first := "alpha".concat("");
+    let second := "be".concat("");
+    var words: array<string, 2> = [first, second];
+    words[0] = words[0].concat("!");
+    assert(words[0].len() == 6);
+    let extra := "x".concat("");
+    words[1] = extra;
+    assert(words[1].len() == 1);
+}

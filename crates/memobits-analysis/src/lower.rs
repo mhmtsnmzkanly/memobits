@@ -603,6 +603,8 @@ struct Builder<'a> {
     variants: HashMap<ExprId, VariantUse>,
     explicit_drops: HashSet<ExprId>,
     explicit_asserts: HashSet<ExprId>,
+    explicit_replaces: HashSet<ExprId>,
+    explicit_swaps: HashSet<ExprId>,
     selected_calls: HashMap<ExprId, SelectedCall>,
     selected_operators: HashMap<ExprId, SelectedCall>,
     selected_assignments: HashMap<ExprId, SelectedCall>,
@@ -788,6 +790,8 @@ impl<'a> Builder<'a> {
             variants,
             explicit_drops: facts.explicit_drops.iter().copied().collect(),
             explicit_asserts: facts.explicit_asserts.iter().copied().collect(),
+            explicit_replaces: facts.explicit_replaces.iter().copied().collect(),
+            explicit_swaps: facts.explicit_swaps.iter().copied().collect(),
             selected_calls,
             selected_operators,
             selected_assignments,
@@ -1861,6 +1865,27 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        if operator == "=" {
+            if let Some(place_ty) = self.ty(target) {
+                if matches!(place_ty, Type::String | Type::List(_))
+                    || self.is_string_owner_struct(&place_ty)
+                {
+                    // Owning overwrite: stage the value first (it may read the
+                    // old one), exchange it into the place, then release what
+                    // came out exactly once.
+                    let scope_start = self.owned_locals.len();
+                    let result = (|| {
+                        let staged = self.stage_replacement(value, &place_ty)?;
+                        self.swap_into_place(root, &positions, staged, span)
+                    })();
+                    if result.is_some() {
+                        self.end_owned_locals(scope_start, span);
+                    }
+                    self.owned_locals.truncate(scope_start);
+                    return result;
+                }
+            }
+        }
         let previous = if operator == "=" {
             None
         } else {
@@ -1897,6 +1922,100 @@ impl<'a> Builder<'a> {
             None,
         );
         Some(())
+    }
+    /// Reference to a place: the projection chain's checked address, or a
+    /// whole-local borrow when the place is a bare local.
+    fn place_reference(
+        &mut self,
+        root: Operand,
+        positions: &[Projection],
+        access: Access,
+        span: Span,
+    ) -> Option<Operand> {
+        let mut reference = if positions.is_empty() {
+            self.borrow(root, access)?
+        } else {
+            self.address_chain(root, positions, access, span)?
+        };
+        reference.mode = access_mode(access);
+        Some(reference)
+    }
+    /// Evaluate the replacement value into a fresh hidden owner local that the
+    /// place will exchange with. The local is registered for cleanup.
+    fn stage_replacement(&mut self, value: &Expr, place_ty: &Type) -> Option<LocalId> {
+        let scope_start = self.owned_locals.len();
+        let span = value.span;
+        let rhs = if matches!(place_ty, Type::Primitive(_)) {
+            let rhs = self.lower_expr(value)?;
+            let rhs = self.scalar(rhs)?;
+            self.owned(rhs)?
+        } else if *place_ty == Type::String && self.is_direct_string_call(value) {
+            self.lower_with_temporary_owner(value)?
+        } else if !matches!(value.kind, ExprKind::Path(_))
+            && (self.is_string_transport_owner(place_ty)
+                || (matches!(place_ty, Type::Enum(_)) && self.is_string_owner_struct(place_ty)))
+        {
+            self.owned_element(value, place_ty)?
+        } else {
+            let rhs = self.lower_expr(value)?;
+            self.owned_to(rhs, place_ty)?
+        };
+        if let Source::Local(local) = rhs.source {
+            if self.owned_locals[scope_start..].contains(&local) {
+                return Some(local);
+            }
+        }
+        let staged = self.hidden_local("replacement value", place_ty.clone(), span);
+        self.initialize_local(staged, consume(rhs), span);
+        Some(staged)
+    }
+    /// Exchange the place with the staged local. Index paths were evaluated
+    /// and captured earlier; the checked address is formed last, after the
+    /// right-hand side.
+    fn swap_into_place(
+        &mut self,
+        root: Operand,
+        positions: &[Projection],
+        staged: LocalId,
+        span: Span,
+    ) -> Option<()> {
+        let place = self.place_reference(root, positions, Access::Share, span)?;
+        let other = self.borrow(op(Source::Local(staged), span), Access::Share)?;
+        let mut other = other;
+        other.mode = UseMode::Share;
+        self.emit(
+            span,
+            InstructionKind::SwapPlaces {
+                left: place,
+                right: other,
+            },
+            None,
+        );
+        Some(())
+    }
+    /// `replace(place, value)`: value first, then the checked address, then a
+    /// bitwise exchange; the old value is the result and is not released.
+    fn lower_replace(&mut self, expr: &Expr, arguments: &[Expr]) -> Option<Operand> {
+        let place_ty = self.ty(expr)?;
+        let (root, positions) = self.lower_place(&arguments[0])?;
+        let staged = self.stage_replacement(&arguments[1], &place_ty)?;
+        self.swap_into_place(root, &positions, staged, expr.span)?;
+        let old = op(Source::Local(staged), expr.span);
+        if matches!(place_ty, Type::Primitive(_)) {
+            self.owned(old)
+        } else {
+            Some(consume(old))
+        }
+    }
+    /// `swap(a, b)`: both place paths are evaluated left to right, then both
+    /// checked addresses are formed and their values exchanged.
+    fn lower_swap(&mut self, expr: &Expr, arguments: &[Expr]) -> Option<Operand> {
+        let (left_root, left_positions) = self.lower_place(&arguments[0])?;
+        let (right_root, right_positions) = self.lower_place(&arguments[1])?;
+        let left = self.place_reference(left_root, &left_positions, Access::Share, expr.span)?;
+        let right = self.place_reference(right_root, &right_positions, Access::Share, expr.span)?;
+        self.emit(expr.span, InstructionKind::SwapPlaces { left, right }, None);
+        self.unit(expr.span)
     }
     fn local_string_field(&self, target: &Expr, root: Operand) -> Option<(LocalId, u32)> {
         let (ExprKind::Field { base, name }, Source::Local(local)) = (&target.kind, root.source)
@@ -2134,6 +2253,9 @@ impl<'a> Builder<'a> {
             Type::List(_) => {
                 // A non-copyable element is lent: the binding is a read-only
                 // reference into the list, which stays loaned for the loop.
+                consume(self.element_addr(receiver, position, Access::Borrow, items.span)?)
+            }
+            Type::Array { ref element, .. } if !matches!(**element, Type::Primitive(_)) => {
                 consume(self.element_addr(receiver, position, Access::Borrow, items.span)?)
             }
             _ => {
@@ -2409,6 +2531,12 @@ impl<'a> Builder<'a> {
                     None,
                 );
                 self.unit(expr.span)
+            }
+            ExprKind::Call { arguments, .. } if self.explicit_replaces.contains(&self.id(expr)) => {
+                self.lower_replace(expr, arguments)
+            }
+            ExprKind::Call { arguments, .. } if self.explicit_swaps.contains(&self.id(expr)) => {
+                self.lower_swap(expr, arguments)
             }
             ExprKind::Call { arguments, .. } if self.explicit_drops.contains(&self.id(expr)) => {
                 let value = consume(self.lower_expr(&arguments[0])?);

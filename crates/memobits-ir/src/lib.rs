@@ -424,6 +424,14 @@ pub enum InstructionKind {
         field: u32,
         access: Access,
     },
+    /// Exchange the values of two disjoint places of the same type. Both
+    /// operands are `Share` references to the same aggregate type; the bytes
+    /// (descriptors) are exchanged without copying heap data or releasing
+    /// anything. `replace` and owning overwrite are built on it.
+    SwapPlaces {
+        left: Operand,
+        right: Operand,
+    },
     /// Replace a String field of a mutable struct local with a consumed String local.
     ReplaceStringField {
         target: LocalId,
@@ -2832,6 +2840,44 @@ fn validate_instruction(
                 None => {}
             }
         }
+        InstructionKind::SwapPlaces { left, right } => {
+            if instruction.output.is_some() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "swap cannot define an output value",
+                );
+            }
+            let left_ty = operand_type(program, function, left, errors, id, block);
+            let right_ty = operand_type(program, function, right, errors, id, block);
+            match (left_ty, right_ty) {
+                (
+                    Some(Type::Reference {
+                        access: Access::Share,
+                        inner: left_inner,
+                    }),
+                    Some(Type::Reference {
+                        access: Access::Share,
+                        inner: right_inner,
+                    }),
+                ) => {
+                    if left_inner != right_inner {
+                        push(errors, id, Some(block), "swap operands differ in type");
+                    }
+                    if left.mode != UseMode::Share || right.mode != UseMode::Share {
+                        push(errors, id, Some(block), "swap requires Share operand mode");
+                    }
+                }
+                (None, _) | (_, None) => {}
+                _ => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "swap requires two exclusive Share references",
+                ),
+            }
+        }
         InstructionKind::ReplaceStringField {
             target,
             field,
@@ -3877,6 +3923,10 @@ fn validate_operand_escapes(
                             }
                         }
                     }
+                }
+                InstructionKind::SwapPlaces { left, right } => {
+                    report(block_id, left, false, false);
+                    report(block_id, right, false, false);
                 }
                 InstructionKind::Store { reference, value } => {
                     report(block_id, reference, false, false);

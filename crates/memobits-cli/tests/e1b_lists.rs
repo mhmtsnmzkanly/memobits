@@ -484,13 +484,7 @@ fn element_places_and_lists_reject_unsafe_forms() {
             "`replace`, `swap` or `pop`",
         );
     }
-    // Overwriting an owning element in place would drop the old value.
-    rejects(
-        &f,
-        &format!("{items}fn main() -> u32 {{\n    var items: List<string> = [\"ab\"];\n    items[0] = \"c\";\n    1\n}}"),
-        "TE022",
-        "cannot be overwritten in place",
-    );
+    // Overwriting an owning element is an RHS-first replacement since R1 (see r1_replace_swap.rs).
     // A live element loan blocks push, pop, clear, move and reassignment.
     for (call, what) in [
         (
@@ -549,7 +543,7 @@ fn element_places_and_lists_reject_unsafe_forms() {
         &f,
         &format!("{items}fn main() -> u32 {{\n    var items: List<List<u8>> = [];\n    0\n}}"),
         "TE017",
-        "nested List<List<T>>",
+        "nested lists are not supported yet",
     );
     rejects(
         &f,

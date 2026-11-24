@@ -100,7 +100,7 @@ impl Checker {
                 "a struct or array element cannot be moved out by indexing"
             };
             let advice = if matches!(expr.kind, ExprKind::Index { .. }) {
-                "borrow or share the element, read a primitive inside it, or take an element out of its owner with `replace`, `swap` or `pop` (`pop` is available on a List; `replace` and `swap` are not available yet)"
+                "borrow or share the element, read a primitive inside it, or take an element out of its owner with `replace`, `swap` or `pop` (`replace(place, value)` and `swap(a, b)` work on any place; `pop` is available on a List)"
             } else {
                 "borrow or share the aggregate, or read a primitive inside it"
             };

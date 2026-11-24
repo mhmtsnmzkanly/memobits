@@ -268,6 +268,13 @@ pub(super) fn validate_string_struct_borrows(
                     projection_reborrows.entry(*value).or_default().push(output);
                 }
             }
+            InstructionKind::SwapPlaces { left, right } => {
+                for operand in [left, right] {
+                    if let Source::Value(value) = operand.source {
+                        *projection_fields.entry(value).or_default() += 1;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -462,6 +469,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         InstructionKind::Borrow { .. }
         | InstructionKind::Load { .. }
         | InstructionKind::Store { .. }
+        | InstructionKind::SwapPlaces { .. }
         | InstructionKind::ReplaceStringField { .. } => None,
         InstructionKind::ArrayNew { .. } | InstructionKind::ElementAddr { .. } => None,
         InstructionKind::StructNew { .. }

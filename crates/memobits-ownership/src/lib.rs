@@ -302,6 +302,11 @@ fn transfer_instruction(
             };
             transfer_operand(&owner, state, diagnostics, function);
         }
+        InstructionKind::SwapPlaces { left, right } => {
+            let mut diagnostics = diagnostics;
+            transfer_operand(left, state, diagnostics.as_deref_mut(), function);
+            transfer_operand(right, state, diagnostics, function);
+        }
         InstructionKind::Store { reference, value } => {
             let mut diagnostics = diagnostics;
             transfer_operand(reference, state, diagnostics.as_deref_mut(), function);

@@ -703,7 +703,10 @@ impl Checker<'_> {
             } => {
                 // An unbound `drop` or `assert` is a built-in only in call position.
                 if !matches!(&callee.kind, ExprKind::Path(path)
-                    if (path.as_slice() == ["drop"] || path.as_slice() == ["assert"])
+                    if (path.as_slice() == ["drop"]
+                        || path.as_slice() == ["assert"]
+                        || path.as_slice() == ["replace"]
+                        || path.as_slice() == ["swap"])
                     && !self.scopes.iter().rev().any(|scope| scope.contains(&path[0])))
                 {
                     self.expr(callee);

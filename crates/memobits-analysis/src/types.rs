@@ -685,6 +685,8 @@ pub struct FunctionFacts {
     pub variant_uses: Vec<VariantUse>,
     pub explicit_drops: Vec<ExprId>,
     pub explicit_asserts: Vec<ExprId>,
+    pub explicit_replaces: Vec<ExprId>,
+    pub explicit_swaps: Vec<ExprId>,
     /// Interface extension selected for each explicitly constrained call.
     pub selected_calls: Vec<SelectedCall>,
     /// User-defined binary operator implementations selected for lowering.
@@ -2174,16 +2176,6 @@ impl Checker {
                             // Reads the place (privacy, existence, bounds of constant
                             // indices) and yields its type.
                             let place = self.expr(target, None);
-                            if self.lowering
-                                && matches!(target.kind, ExprKind::Index { .. })
-                                && self.contains_string_owner(&place, &mut HashSet::new())
-                            {
-                                self.error(
-                                    22,
-                                    target.span,
-                                    "an element that owns String storage cannot be overwritten in place; take the old element out with `replace`, `swap` or `pop` (`pop` is available on a List; `replace` and `swap` are not available yet), or rebuild the collection",
-                                );
-                            }
                             match place_root(target) {
                                 Some(path) if path.len() == 1 => {
                                     if let Some(binding) = self.lookup(&path[0]).cloned() {
@@ -2244,6 +2236,7 @@ impl Checker {
                                                 && self.parameter_origins.contains(&binding.origin)))
                                 }))
                         }
+                        ExprKind::Index { .. } => target_ty == Ty::String,
                         _ => false,
                     };
                     if operator == "=" && concat_target {
@@ -2513,6 +2506,26 @@ impl Checker {
                     self.allow_array_value(items);
                     let ty = match read_type(self.expr(items, None)) {
                         Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
+                        Ty::Array(element, _)
+                            if place_root(items).is_some()
+                                && !matches!(*element, Ty::Primitive(_) | Ty::Reference { .. }) =>
+                        {
+                            // Non-copyable elements are lent read-only for each
+                            // iteration, like List elements.
+                            let origin = match place_root(items) {
+                                Some(path) if path.len() == 1 => self
+                                    .lookup(&path[0])
+                                    .map_or(ReferenceOrigin::Temporary, |binding| {
+                                        ReferenceOrigin::Binding(binding.origin)
+                                    }),
+                                _ => ReferenceOrigin::Temporary,
+                            };
+                            Ty::Reference {
+                                access: IrAccess::Borrow,
+                                inner: element,
+                                origin,
+                            }
+                        }
                         Ty::List(element) if self.list_read_receiver(items) => {
                             if matches!(*element, Ty::Primitive(_)) {
                                 *element
@@ -2635,6 +2648,207 @@ impl Checker {
         }
         UNIT
     }
+    /// Type of one `replace`/`swap` place argument: a writable local, field or
+    /// element at any projection depth. Reports why a place is rejected.
+    fn replacement_place(&mut self, place: &Expr, builtin: &str) -> Ty {
+        match &place.kind {
+            ExprKind::Path(path) if path.len() == 1 => {
+                let Some(binding) = self.lookup(&path[0]).cloned() else {
+                    self.expr(place, None);
+                    self.error(
+                        5,
+                        place.span,
+                        format!("unknown local binding '{}'", path[0]),
+                    );
+                    return Ty::Error;
+                };
+                self.allow_array_value(place);
+                self.expr(place, None);
+                match &binding.ty {
+                    Ty::Reference {
+                        access: IrAccess::Share,
+                        inner,
+                        ..
+                    } if binding.mutable || binding.access == IrAccess::Share => {
+                        inner.as_ref().clone()
+                    }
+                    Ty::Reference { inner, .. } => {
+                        self.error(
+                            4,
+                            place.span,
+                            format!(
+                                "{builtin}() cannot write through the immutable or borrowed binding '{}'; its owner must be a `var` or a `share` parameter",
+                                path[0]
+                            ),
+                        );
+                        inner.as_ref().clone()
+                    }
+                    ty if binding.access == IrAccess::Share || binding.mutable => ty.clone(),
+                    ty => {
+                        self.error(
+                            4,
+                            place.span,
+                            format!(
+                                "{builtin}() requires a mutable place; '{}' is immutable (declare it with var)",
+                                path[0]
+                            ),
+                        );
+                        ty.clone()
+                    }
+                }
+            }
+            ExprKind::Index { .. } | ExprKind::Field { .. } => {
+                let ty = self.expr(place, None);
+                match place_root(place) {
+                    Some(path) if path.len() == 1 => {
+                        if let Some(binding) = self.lookup(&path[0]).cloned() {
+                            let before = self.diagnostics.len();
+                            self.check_place_writable(place, &path[0], &binding);
+                            if self.diagnostics.len() != before {
+                                if let Some(last) = self.diagnostics.last_mut() {
+                                    last.help = Some(format!(
+                                        "{builtin}() writes the place, so its owner must be a `var` or a `share` parameter"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    _ => self.error(
+                        6,
+                        place.span,
+                        format!("{builtin}() requires a place rooted at a named local"),
+                    ),
+                }
+                ty
+            }
+            _ => {
+                self.expr(place, None);
+                self.error(
+                    6,
+                    place.span,
+                    format!(
+                        "{builtin}() requires a place (a local, field or element) as its first argument, not a computed value"
+                    ),
+                );
+                Ty::Error
+            }
+        }
+    }
+    fn place_type_supported(&mut self, ty: &Ty, span: Span, builtin: &str) -> bool {
+        match ty {
+            Ty::Error | Ty::Never => false,
+            Ty::Reference { .. } => {
+                self.error(
+                    17,
+                    span,
+                    format!(
+                        "{builtin}() cannot move a reference; references are not stored in places"
+                    ),
+                );
+                false
+            }
+            Ty::Primitive(kind) if *kind == "Unit" => {
+                self.error(
+                    17,
+                    span,
+                    format!("{builtin}() requires a place with a value type"),
+                );
+                false
+            }
+            _ => true,
+        }
+    }
+    /// `replace(place, value) -> T`.
+    fn explicit_replace(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
+        let [place, value] = arguments else {
+            self.error(
+                10,
+                span,
+                format!(
+                    "replace() expects two arguments (place, value), found {}",
+                    arguments.len()
+                ),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        let place_ty = self.replacement_place(place, "replace");
+        self.allow_array_value(value);
+        let previous_concat = self.concat_destination;
+        if place_ty == Ty::String {
+            self.concat_destination = Some(value as *const Expr as usize);
+        }
+        let value_ty = self.expr(value, Some(&place_ty));
+        self.concat_destination = previous_concat;
+        self.reject_extraction(value, &value_ty);
+        if matches!(value_ty, Ty::Reference { .. }) {
+            self.error(
+                17,
+                value.span,
+                "reference handle rebinding is not supported",
+            );
+            return Ty::Error;
+        }
+        if place_ty == Ty::Error || value_ty == Ty::Error {
+            return Ty::Error;
+        }
+        if !self.place_type_supported(&place_ty, place.span, "replace") {
+            return Ty::Error;
+        }
+        let before = self.diagnostics.len();
+        self.ensure(&value_ty, &place_ty, value.span);
+        if self.diagnostics.len() != before {
+            return Ty::Error;
+        }
+        if let Some((facts, id)) = self.facts.as_mut().zip(id) {
+            facts.explicit_replaces.push(id);
+        }
+        place_ty
+    }
+    /// `swap(a, b)`: two places of the same type.
+    fn explicit_swap(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
+        let [left, right] = arguments else {
+            self.error(
+                10,
+                span,
+                format!(
+                    "swap() expects two places, found {} arguments",
+                    arguments.len()
+                ),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        let left_ty = self.replacement_place(left, "swap");
+        let right_ty = self.replacement_place(right, "swap");
+        if left_ty == Ty::Error || right_ty == Ty::Error {
+            return Ty::Error;
+        }
+        if !self.place_type_supported(&left_ty, left.span, "swap") {
+            return Ty::Error;
+        }
+        if left_ty != right_ty {
+            self.error(
+                7,
+                right.span,
+                format!(
+                    "swap() requires two places of the same type, found {} and {}",
+                    name(&left_ty),
+                    name(&right_ty)
+                ),
+            );
+            return Ty::Error;
+        }
+        if let Some((facts, id)) = self.facts.as_mut().zip(id) {
+            facts.explicit_swaps.push(id);
+        }
+        UNIT
+    }
+
     fn explicit_drop(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
         let [value] = arguments else {
             self.error(
@@ -5388,6 +5602,20 @@ impl Checker {
                     {
                         return self.explicit_drop(expr.span, arguments, id);
                     }
+                    if path.as_slice() == ["replace"]
+                        && self.lookup("replace").is_none()
+                        && !self.functions.contains_key("replace")
+                        && !self.imports.contains_key("replace")
+                    {
+                        return self.explicit_replace(expr.span, arguments, id);
+                    }
+                    if path.as_slice() == ["swap"]
+                        && self.lookup("swap").is_none()
+                        && !self.functions.contains_key("swap")
+                        && !self.imports.contains_key("swap")
+                    {
+                        return self.explicit_swap(expr.span, arguments, id);
+                    }
                     if path.as_slice() == ["assert"]
                         && self.lookup("assert").is_none()
                         && !self.functions.contains_key("assert")
@@ -6253,6 +6481,8 @@ fn check_standalone(
                     variant_uses: Vec::new(),
                     explicit_drops: Vec::new(),
                     explicit_asserts: Vec::new(),
+                    explicit_replaces: Vec::new(),
+                    explicit_swaps: Vec::new(),
                     selected_calls: Vec::new(),
                     selected_operators: Vec::new(),
                     selected_assignments: Vec::new(),
@@ -6626,6 +6856,8 @@ pub(crate) fn check_resolved_mode(
                             variant_uses: Vec::new(),
                             explicit_drops: Vec::new(),
                             explicit_asserts: Vec::new(),
+                            explicit_replaces: Vec::new(),
+                            explicit_swaps: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
                             selected_assignments: Vec::new(),
@@ -6704,6 +6936,8 @@ pub(crate) fn check_resolved_mode(
                             variant_uses: Vec::new(),
                             explicit_drops: Vec::new(),
                             explicit_asserts: Vec::new(),
+                            explicit_replaces: Vec::new(),
+                            explicit_swaps: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
                             selected_assignments: Vec::new(),
@@ -6835,6 +7069,8 @@ pub(crate) fn check_resolved_mode(
                     variant_uses: Vec::new(),
                     explicit_drops: Vec::new(),
                     explicit_asserts: Vec::new(),
+                    explicit_replaces: Vec::new(),
+                    explicit_swaps: Vec::new(),
                     selected_calls: Vec::new(),
                     selected_operators: Vec::new(),
                     selected_assignments: Vec::new(),
@@ -6980,6 +7216,8 @@ pub(crate) fn check_resolved_mode(
                         variant_uses: Vec::new(),
                         explicit_drops: Vec::new(),
                         explicit_asserts: Vec::new(),
+                        explicit_replaces: Vec::new(),
+                        explicit_swaps: Vec::new(),
                         selected_calls: Vec::new(),
                         selected_operators: Vec::new(),
                         selected_assignments: Vec::new(),

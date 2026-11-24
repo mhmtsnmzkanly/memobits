@@ -657,6 +657,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::StringScalarRead { source, offset, .. } => vec![source, offset],
         InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
         InstructionKind::Store { reference, value } => vec![reference, value],
+        InstructionKind::SwapPlaces { left, right } => vec![left, right],
         InstructionKind::ReplaceStringField { value, .. } => vec![value],
         InstructionKind::ElementAddr { base, index, .. } => vec![base, index],
         InstructionKind::FieldAddr { base, .. }
@@ -1613,6 +1614,29 @@ fn check_instruction(
                     (function, program),
                     conflict,
                 ));
+            }
+        }
+        InstructionKind::SwapPlaces { left, right } => {
+            for reference in [left, right] {
+                let provenance = operand_provenance(function, state, reference);
+                if immutable_root(function, &provenance.roots) {
+                    diagnostics.push(diagnostic(
+                        5,
+                        instruction.span,
+                        "cannot write through Share access to an immutable owner",
+                    ));
+                }
+                let own = parent_closure(&provenance.loans, infos);
+                if let Some(conflict) =
+                    active_conflict(&provenance.roots, Access::Share, active_before, &own)
+                {
+                    diagnostics.push(conflict_diagnostic(
+                        instruction.span,
+                        "write",
+                        (function, program),
+                        conflict,
+                    ));
+                }
             }
         }
         InstructionKind::Store { reference, .. } => {

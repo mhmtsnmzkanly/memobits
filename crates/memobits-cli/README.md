@@ -67,16 +67,20 @@ application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. `List<T>` (after `use alloc::List;`) holds any
 admitted element type (primitives of every width, `bool`, `char`, `string`,
-structs, tuples, enums and arrays). `List<List<T>>` is rejected with TE017.
+structs, tuples, enums and arrays). Nested lists (`List<List<T>>`) are rejected
+with TE017 ("nested lists are not supported yet").
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share
-receiver or argument, in-place `match`, projections); moving one out and
-overwriting an owning element are TE022, and a live element loan blocks `push`,
+receiver or argument, in-place `match`, projections); moving one out is TE022 (use `replace`, `swap` or `pop`); an owning
+element is overwritten with `items[i] = v` (the old value is released once),
+`replace(items[i], v)` (returns the old value) or `swap(a, b)`; a live element
+loan blocks `push`,
 `pop`, `clear`, moves and reassignment (BE005). `.get(i)` is primitive-only
 (TE022 points to `items[i]` otherwise), `.contains`/`.index_of` need primitive
 elements (TE017 otherwise), `.pop()` moves an owner out, and `loop x in items`
-binds copies of primitive elements and read-only loans of other elements. The
+binds copies of primitive elements and read-only loans of other elements (the
+same holds for `loop x in array` over non-copyable array elements). The
 List releases every owned element exactly once on `clear`, reassignment, drop
 and scope exit. A List supports local moves, and non-consuming `.len()`.
 `.push(value)` appends through a whole mutable local. Empty construction

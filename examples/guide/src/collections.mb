@@ -408,3 +408,28 @@ test fn list_of_tuples_and_arrays() {
     let rows: List<array<u32, 2>> = [[1, 2], [3, 4]];
     assert(rows[1][0] + rows[0][1] == 5);
 }
+// `loop x in array` over non-copyable elements binds read-only borrows, as for
+// a List. The array cannot be mutated inside the loop (BE005).
+test fn loop_over_an_array_of_strings() {
+    let first := "abc".concat("");
+    let second := "de".concat("");
+    let words: array<string, 2> = [first, second];
+    var total: u32 = 0;
+    loop word in words {
+        total += word.len();
+    }
+    assert(total == 5);
+}
+// List elements are places too: replace and swap work on them, and `xs[i] = v`
+// releases the old element once.
+test fn replace_and_swap_list_elements() {
+    let first := "one".concat("");
+    let second := "three".concat("");
+    var words: List<string> = [first, second];
+    let old := replace(words[0], "x".concat(""));
+    assert(old.len() == 3);
+    swap(words[0], words[1]);
+    assert(words[0].len() == 5);
+    words[1] = "yy".concat("");
+    assert(words[1].len() == 2);
+}

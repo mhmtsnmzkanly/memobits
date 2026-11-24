@@ -602,3 +602,43 @@ and "no implicit partial moves"; no new user-facing principle.
   iteration is not part of this step.
 - Element-borrow limits recorded during D2 (`grid[i][j].borrow()`,
   `bag.items[0].borrow()`, `d.title.size()`) are lifted under these rules.
+
+### Shipped E1 and R1 details (2026-11-24)
+
+Facts about the shipped behavior; no new decisions.
+
+- E1a/E1b: `array<T, N>` and `List<T>` hold any admitted element type
+  (primitives of every width, `bool`, `char`, `string`, owner structs, tuples,
+  enums, arrays). Element cleanup is type-directed: scope exit, `clear`,
+  reassignment, `drop` and early returns release each owned element once. A
+  List grows by doubling and moves elements bitwise; `pop` moves an owner into
+  the `T?` payload. `get`, `contains` and `index_of` stay primitive-only
+  (`get` on other elements is TE022 pointing at `items[i]`, the searches are
+  TE017). Nested `List<List<T>>` is TE017 ("nested lists are not supported
+  yet"), as are reference elements. Live element loans block `push`, `pop`,
+  `clear`, moves and reassignment (BE005).
+- R1 `replace(place, value) -> T`: a built-in; an in-scope function, import or
+  value named `replace` (or `swap`) takes precedence. The first argument is a
+  place: a `var` local or `share` parameter, or a field, array element or List
+  element at any depth, whose owner is a `var` or a `share` parameter.
+  Evaluation order: the place path (indices) once, then `value` into a hidden
+  owner local, then the checked address (bounds trap RE007), then a bitwise
+  exchange; the old value is the result and is not released. A read of the old
+  value in `value` is fine because its loans end before the exchange. An early
+  `return` while evaluating `value` leaves the place untouched and releases the
+  staged values.
+- R1 `swap(a, b)`: two places of the same type; the exchange is bitwise (no
+  heap data is copied or released). Overlap is decided by the loan checker:
+  the same local, the same constant element, or dynamic indices into one
+  collection are BE005 (conservative). A runtime-equal-index check is a
+  possible later extension.
+- R1 owning overwrite: `items[i] = v` and `x.field = v` on String, List and
+  String-owning aggregate places lower to the same RHS-first exchange, then
+  release the old value exactly once. Errors: TE002 type mismatch, TE004
+  immutable owner, TE006 non-place first argument, TE007 `swap` type
+  mismatch, BE005 overlapping or live loans.
+- `loop x in array` over non-copyable array elements binds read-only borrows,
+  as for a List; mutating the array inside the loop is BE005.
+- Known limits: an `if`/`match` expression as the replacement value of an owner
+  is rejected by the heap-ownership validator (TE018); evaluate it into a local
+  first. `concat` as a replacement value is accepted for `string` places.

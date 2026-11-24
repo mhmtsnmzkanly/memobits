@@ -1,6 +1,6 @@
 //! E1a: owned elements in `array<T, N>`. `array<string, N>`, arrays of owner
 //! structs, element places (`items[i]`) used in place, lifted element-borrow
-//! limits, loans and the rejected neighbours (move-out, repeat, overwrite).
+//! limits, loans and the rejected neighbours (move-out, repeat).
 use std::{
     fs,
     path::PathBuf,
@@ -389,7 +389,7 @@ fn main() -> u32 {{
 }
 
 #[test]
-fn element_places_reject_moves_repeats_overwrites_and_overlapping_loans() {
+fn element_places_reject_moves_repeats_and_overlapping_loans() {
     let f = Fixture::new();
     project(&f, "e1-negatives", "fn main() -> u32 { 0 }");
     // Moving an element out of a live owner is a partial move.
@@ -422,13 +422,7 @@ fn element_places_reject_moves_repeats_overwrites_and_overlapping_loans() {
         "TE017",
         "would copy a String-owning element",
     );
-    // Overwriting an owning element in place would drop the old value.
-    rejects(
-        &f,
-        "fn main() -> u32 {\n    let h := \"ab\".concat(\"c\");\n    var items: array<string, 1> = [\"a\"];\n    items[0] = h;\n    1\n}",
-        "TE022",
-        "cannot be overwritten in place",
-    );
+    // Overwriting an owning element is an RHS-first replacement since R1 (see r1_replace_swap.rs).
     // Overlapping element loans (same constant index, dynamic indices).
     let pair = "fn both(a: borrow string, b: share string) -> u32 { a.len() }\n";
     for (call, label) in [

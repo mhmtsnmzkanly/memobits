@@ -343,6 +343,33 @@ impl super::Program {
                                     .push(destination);
                             }
                         }
+                        InstructionKind::SwapPlaces { left, right } => {
+                            let slots = [left, right].map(|reference| {
+                                swap_root(function, reference).map(|(local, shared)| {
+                                    (
+                                        local,
+                                        match shared {
+                                            Some(parameter) => Slot::ShareWrite(index, parameter),
+                                            None => Slot::Local(index, local),
+                                        },
+                                        shared.is_some(),
+                                    )
+                                })
+                            });
+                            if let [Some((left_local, left_slot, left_shared)), Some((right_local, right_slot, right_shared))] =
+                                slots
+                            {
+                                moves.entry(left_slot).or_default().push(right_slot);
+                                moves.entry(right_slot).or_default().push(left_slot);
+                                // The contents of a shared parameter are unknown here.
+                                if left_shared && !right_shared {
+                                    pending.push(Slot::Local(index, right_local));
+                                }
+                                if right_shared && !left_shared {
+                                    pending.push(Slot::Local(index, left_local));
+                                }
+                            }
+                        }
                         InstructionKind::Store { reference, value } => {
                             if let (Some(parameter), Source::Local(source)) =
                                 (string_share_parameter(function, reference), value.source)
@@ -682,6 +709,43 @@ pub(super) fn string_share_parameter(function: &Function, reference: &Operand) -
         .then_some(position)
 }
 
+/// The local at the root of a place reference built from borrows and
+/// element, field and variant addresses, with the parameter position when the
+/// root is a `share` parameter.
+fn swap_root(function: &Function, reference: &Operand) -> Option<(LocalId, Option<usize>)> {
+    let mut source = reference.source;
+    for _ in 0..64 {
+        match source {
+            Source::Local(local) => {
+                let parameter = function
+                    .parameter_locals
+                    .iter()
+                    .position(|id| *id == local)
+                    .filter(|position| {
+                        function.signature.parameters[*position].access == Access::Share
+                    });
+                return Some((local, parameter));
+            }
+            Source::Value(value) => {
+                let producer = function
+                    .blocks
+                    .iter()
+                    .flat_map(|block| &block.instructions)
+                    .find(|inst| inst.output == Some(value))?;
+                source = match &producer.kind {
+                    InstructionKind::Borrow { owner, .. } => owner.source,
+                    InstructionKind::ElementAddr { base, .. }
+                    | InstructionKind::FieldAddr { base, .. }
+                    | InstructionKind::VariantAddr { base, .. } => base.source,
+                    _ => return None,
+                };
+            }
+            Source::Function(_) => return None,
+        }
+    }
+    None
+}
+
 pub(super) fn share_borrows(function: &Function) -> HashMap<ValueId, Source> {
     function
         .blocks
@@ -722,7 +786,12 @@ pub(super) fn direct_share_owner(
     function
         .locals
         .get(local.0 as usize)
-        .is_some_and(|local| matches!(local.ty, Type::String | Type::Struct(_)) && local.mutable)
+        .is_some_and(|local| {
+            matches!(
+                local.ty,
+                Type::String | Type::Struct(_) | Type::Array { .. } | Type::List(_) | Type::Enum(_)
+            ) && local.mutable
+        })
         .then_some(*local)
 }
 

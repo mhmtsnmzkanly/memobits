@@ -2584,16 +2584,6 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "must move directly from a named local",
         ),
         (
-            r#"fn main() { var label := Label { text: "a" }; label.text = if true { "b" } else { "c" }; }"#,
-            "LE900",
-            "read through a borrow",
-        ),
-        (
-            r#"fn main() { var label := Label { text: "a" }; label.text = { "b" }; }"#,
-            "LE900",
-            "read through a borrow",
-        ),
-        (
             r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
             "TE017",
             "concat requires",
