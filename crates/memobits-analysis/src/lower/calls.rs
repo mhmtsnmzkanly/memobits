@@ -58,14 +58,10 @@ impl Builder<'_> {
     ) -> Option<Operand> {
         let direct_string = direct && parameter.ty == Type::String;
         let direct_list = direct && matches!(parameter.ty, Type::List(_));
-        let direct_result_enum = matches!(parameter.ty, Type::Enum(id)
-            if self.types.get(id.0 as usize).is_some_and(|info|
-                info.entry_outcome == Some(memobits_ir::EntryOutcome::Result)));
         let direct_owned_string_aggregate = direct
             && parameter.access == Access::Owned
             && (self.is_string_transport_owner(&parameter.ty)
                 || matches!(parameter.ty, Type::Enum(_) | Type::Array { .. })
-                    && !direct_result_enum
                     && self.is_string_owner_struct(&parameter.ty));
         let temporary_receiver = match &argument.kind {
             ExprKind::Call { .. } | ExprKind::Interpolation(_)

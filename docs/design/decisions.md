@@ -691,9 +691,9 @@ Facts about the shipped behavior; no new decisions.
     `Some(list)` and user enums with List payloads stay gated by the List-move
     rule). Cleanup is type-directed: scope exit, `clear`, overwrite, `drop` and
     early returns release each inner List (elements, then block) exactly once;
-    growth moves inner descriptors bitwise. Still gated: arrays of Lists (TE017),
-    List fields in structs/tuples, moving an inner List out of `outer[i]`
-    (TE022; use `pop`, `replace` or `swap`).
+    growth moves inner descriptors bitwise. Moving an inner List out of
+    `outer[i]` stays TE022 (use `pop`, `replace` or `swap`); arrays of Lists and
+    List fields in structs and tuples are lifted by F2 (below).
 
 ## Stage 3 ergonomics (2026-11-24, user approved architect defaults)
 
@@ -902,7 +902,7 @@ Facts about the shipped behavior; no new decisions.
   data and nothing heap is released on the failure path; the owner paths are
   success payloads (bound, moved, discarded or overwritten) and handler locals.
   `Ok(Some(heap))`, `Ok(list)` constructors and a struct literal inside `Ok(...)`
-  remain existing gates.
+  were gates here and are lifted by F2 (below).
 
 ### Shipped G7 details (2026-11-24)
 
@@ -968,14 +968,11 @@ Facts about the shipped behavior; no new decisions.
   leaf re-evaluates the guard expression (lowering duplicates guard code, never
   arm bodies); guard temporaries are released inside the guard. Guards may use
   `&&`/`||`, calls and `return`.
-- Limits: a guard of an owned match cannot see a binding of an aggregate that
-  owns Strings, or a binding inside a String-owning tuple that sits in an enum
-  payload (TE017; the backend cannot hold such a borrow in a local); a literal
-  inside such a tuple is TE017 too; a literal on the `Ok` payload of
-  `string ! E` stays TE018 (consuming-match rule); a variant mixing a String
-  payload with other payloads that leaves the String unbound still fails
-  validation (LE900/TE018) as before. `@` bindings, struct patterns, ranges and
-  float patterns remain open.
+- Limits: the guard, literal and unbound-String limits that G7 recorded here
+  (aggregate bindings and String-owning tuples in payloads, a literal on the
+  `Ok` payload of `string ! E`, a variant that leaves a String unbound) are
+  lifted by F2 (below). `@` bindings, struct patterns, ranges and float
+  patterns remain open.
 - Tests: `crates/memobits-cli/tests/g7_patterns.rs` (20), parser/analysis tests
   updated for the removed gates; guide `enums_outcomes.mb` (`literal_patterns`,
   `constant_patterns`, `or_patterns`, `guards`: 109 tests).
@@ -1035,6 +1032,109 @@ are allowed once cleanup is proven).
   longer adds NE003 "unknown type 'Self'" at the same span.
 - Tests: `crates/memobits-cli/tests/f1_followups.rs`. Stale negatives that
   pinned the lifted gates were updated (see launch-progress F1).
-- Limits: unchanged otherwise; a tuple holding an enum that owns a String is
-  still rejected at validation (F2), and `string ! E` call results still need
-  the immediate match.
+- Limits: unchanged otherwise; the tuple-with-enum validation error, the
+  `string ! E` immediate-match rule and the List call-result rule are lifted by
+  F2 (below).
+
+### Shipped F2 details (2026-11-24)
+
+Facts about the shipped behavior; no new decisions (principle A: compositions
+are allowed once cleanup is proven). This supersedes the "still gated" lists in
+the G1, G2 and G7 details above for everything named here.
+
+- Ownership model: `List<T>` is a heap leaf like `String` in every shared
+  owner predicate (`owns_string_aggregate`, the nominal-owner rule
+  `is_nominal_string_owner` through its `OwnerTypeModel` adapters, the tuple
+  rule, the analysis `contains_string_owner`). A struct, tuple, array or enum
+  that holds a List anywhere is therefore a heap owner: its locals are tracked
+  like String owners, moves clear the source descriptor, and scope exit, early
+  returns, overwrite, `replace`, `swap`, `clear` and `drop` release it
+  type-directed (elements first, then the block). Wasm layout stores a List
+  field or payload as the 12-byte descriptor.
+- Payload composition: a freshly built owner used as an enum payload (a nested
+  variant, struct or record literal, array) is staged in a hidden
+  `enum owner payload` local first (`lower_variant`), as owner elements already
+  were. `Ok(Some(heap))`, `Ok(list)`, `Ok(Label { .. })`, `Some(Pair { .. })`,
+  `Some(list)`, a user variant with a List payload and a heap `Ok(x)` in `if` /
+  `match` branches work; a List captured for a payload or a field moves in like
+  a String (the IR validator accepts a List capture that feeds `ListPush`,
+  `EnumNew`, `StructNew` or `ArrayNew`).
+- `string ! E` is an ordinary String-owning enum now: the special rules for
+  `Result<String, E>` (the "immediate consuming match" requirement, the
+  `approved_ok` / `ResultReturn` flow, the `String enum payloads require a
+  consuming match` check on `VariantAddr` and the call-argument exclusion) are
+  gone from the validator. A heap `string ! E` call result can be bound,
+  passed as an owned argument, returned, tail-called, stored in a struct field,
+  a tuple, an array or a List, wrapped in `Some(..)`, or consumed by `try ...
+  else`, with the same staging and cleanup as `Kind::Word(string)`. The
+  entry-outcome tag stays only for the entry ABI and the UTF-8 validation
+  result.
+- Literal patterns on the `Ok` payload of `string ! E` (`Ok("abcd")`,
+  `Ok("a" | "b")`) work: the decision tree reaches the payload through a
+  `VariantAddr` like for any enum. A literal or a guard binding inside a
+  String-owning tuple that sits in an enum payload works too: references into
+  an owner held by decision-tree and guard-view locals are accepted by the Wasm
+  borrow validation when every assignment comes from an element, field or
+  variant-payload address (`lent_elements`, previously elements only), and
+  chains rooted at such a local count as rooted at a named owner. A guard in an
+  owned match may therefore bind a whole String-owning aggregate or parts of a
+  String-owning tuple in a payload (the twin is a read-only reference; nothing
+  moves until the arm is taken). The two TE017 messages for these cases are
+  gone.
+- Lists in aggregates: construction in struct and record literals, tuples,
+  arrays (`array<List<T>, N>`, including tuples with List fields as array
+  elements) and enum payloads; the place chain `s.l`, `t.0`, `a[i]`, `a[i].l`
+  is a List place for `len`, `get`, `push`, `pop`, `clear`, `contains`,
+  `index_of`, `loop x in ..`, `replace`, `swap`, `s.l = v`, `a[i] = v` and
+  `.borrow()` / `.share()`. A mutating method needs a `var` or `share` root
+  (TE017 otherwise). Moving a List out of a field or element is still a partial
+  move (TE022). A struct that holds a List and a String as fields is admitted by
+  the transport rule (List and String are the two leaf kinds).
+- List call results: a call that returns a `List` is staged in a hidden owner
+  like a String call result (`stage_fresh_call`), so it works as a function tail
+  or `return` operand, a `push` argument, an element or payload, a struct or
+  tuple field, a receiver (`ml(5).len()`), a replacement value and a discarded
+  statement.
+- Tuples holding String-owning enums or arrays: the tuple transport rule accepts
+  enum, array and List fields (`(gk(), 1)`, `take((k, 2))`,
+  `fn f() -> (Kind, i32)`, arrays of such tuples); destructuring and matching a
+  tuple with an enum field moves or lends the enum by the existing extraction
+  sequence. A tuple that holds a nominal String-owning struct keeps the earlier
+  TE017 gates for destructuring and owned calls. A nominal struct that has a direct String or List field and an
+  enum or tuple field that owns heap storage stays outside the shared transport
+  predicate: it can be built, matched in place and released in its scope, but
+  moving it into a call is TE017 ("a field that is an enum or tuple is not
+  admitted yet") or LE900.
+- Mixed variants: a variant that mixes a String with other payloads may leave
+  the String unbound (`K::Two(_, b)`, `K::One(_, n)`): the unbound String is
+  extracted into a discarded local and released with the arm. The IR check that
+  every String `VariantExtract` consumes its base accepts a non-final extraction
+  when a later extraction of the same owner local consumes the cell.
+- Diagnostics: an integer pattern and a constant array index in a diagnostic
+  echo the literal as written (`0x1FF`, `-0b1000_0001`, `1_6`); the lexer
+  records the original spelling of every literal whose canonical decimal
+  differs (thread-local, keyed by span and checked against the canonical text),
+  checks keep using the canonical value. The negative literal pattern's operand
+  span now covers only the digits.
+- Wasm backend: `supported_type` accepts List array elements, `has_string_fields`
+  counts List fields, `construction_aliases` skips `EndListLocal` after a struct
+  constructor, and the borrow validation counts enums and Lists as heap storage.
+- Tests: `crates/memobits-cli/tests/f2_payloads.rs` (14): payload composition,
+  `string ! E` in every position and literal patterns, List call results, List
+  storage in structs, tuples and arrays with `replace` / `swap`, tuples with
+  enums, unbound String payloads, guards and literals in String tuples, range
+  echo, rejected partial moves, and the struct gate; capped-memory stress
+  (memory capped to initial + 1 page, 4,096 iterations, half of them returning
+  early with every composition live) for payloads, storage and guards, plus a
+  mutation program that keeps a list-carrying variant and a heap `string ! E` in
+  a never-emptied List and must trap with "guest heap allocation failed". Stale
+  negatives were rewritten as positives in `d2_nested_result_storage.rs`,
+  `g1_limits.rs` and `tuple_nested_arrays.rs`. Guide: `collections.mb`
+  (`list_call_results`, `lists_inside_aggregates`), `enums_outcomes.mb`
+  (`heap_payload_composition`, `string_results_everywhere`,
+  `unbound_string_payloads`, `guards_in_string_tuples`), `tuples.mb`
+  (`tuples_with_string_owning_enums`): 122 tests.
+- Limits: moving a List out of a field, element or payload of a live owner
+  (use `replace`, `swap`, `pop`); struct with a direct String/List field plus a
+  heap-owning enum or tuple field by value across a call; reference elements and
+  fields stay rejected; a guard still cannot move anything.

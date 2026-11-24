@@ -19,16 +19,7 @@ impl Checker {
     /// Executable arrays hold non-Unit primitive, struct/tuple, enum or nested
     /// array elements. String-owning aggregates remain subject to backend gates.
     pub(super) fn check_element_support(&mut self, element: &Ty, span: Span) {
-        if self.lowering
-            && matches!(element, Ty::Tuple(..))
-            && self.contains_list(element, &mut std::collections::HashSet::new())
-        {
-            self.error(
-                17,
-                span,
-                "arrays cannot contain tuples with List fields in this slice",
-            );
-        } else if self.table.is_borrow_option(element) {
+        if self.table.is_borrow_option(element) {
             self.error(17, span, "(borrow T)? cannot be stored in an array");
         } else if self.lowering
             && !matches!(
@@ -36,6 +27,7 @@ impl Checker {
                 Ty::Error
                     | Ty::Never
                     | Ty::String
+                    | Ty::List(..)
                     | Ty::Array(..)
                     | Ty::Struct(..)
                     | Ty::Tuple(..)

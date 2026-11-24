@@ -114,20 +114,13 @@ fn string_owning_tuple_arrays_transfer_through_owned_calls() {
 }
 
 #[test]
-fn tuple_array_elements_keep_reference_and_list_gates() {
+fn tuple_array_elements_keep_the_reference_gate() {
     let fixture = Fixture::new();
-    for (name, source, diagnostic) in [
-        (
-            "reference",
-            "fn main() -> i32 { var value := 1; let rows := [(value.borrow(), 2)]; 0 }",
-            "tuple elements cannot contain direct or nested references",
-        ),
-        (
-            "list",
-            "use alloc::List; fn main() -> i32 { let values: List<u8> = []; let rows := [(values, 2)]; 0 }",
-            "arrays cannot contain tuples with List fields",
-        ),
-    ] {
+    for (name, source, diagnostic) in [(
+        "reference",
+        "fn main() -> i32 { var value := 1; let rows := [(value.borrow(), 2)]; 0 }",
+        "tuple elements cannot contain direct or nested references",
+    )] {
         fixture.source(source);
         let output = fixture.run(&["build"]);
         assert_eq!(output.status.code(), Some(1), "{name}: {output:?}");

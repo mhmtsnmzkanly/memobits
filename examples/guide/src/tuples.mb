@@ -139,3 +139,26 @@ test fn tuple_values() {
     assert(nested_enabled);
     assert(labeled_left((left: 40, right: 0)) + reversed_labeled_left((right: 0, left: 2)) == 42);
 }
+
+// A tuple may hold an enum that owns Strings. It can be built from a call
+// result, passed to an owned call, returned, stored in an array and matched in
+// place or by value.
+fn heap_text(base: string) -> string {
+    let text := base.concat("");
+    text
+}
+type Token [ Word(string), Num(i32) ]
+fn token() -> Token { Token::Word(heap_text("abcd")) }
+fn token_pair() -> (Token, i32) { (token(), 7) }
+fn token_total(pair: (Token, i32)) -> i32 {
+    match pair { (Token::Word(w), n) => w.len() as i32 + n, (Token::Num(n), m) => n + m }
+}
+test fn tuples_with_string_owning_enums() {
+    let built := (token(), 1);
+    assert(token_total(built) == 5);
+    assert(token_total(token_pair()) == 11);
+    assert(token_total((Token::Num(3), 4)) == 7);
+    let rows := [(token(), 1), (Token::Num(3), 2)];
+    assert(match rows[0] { (Token::Word(w), n) => w.len() as i32 + n == 5, (Token::Num(_), _) => false });
+    assert(match rows[1] { (Token::Word(_), _) => false, (Token::Num(n), m) => n * m == 6 });
+}

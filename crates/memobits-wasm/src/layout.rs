@@ -165,7 +165,9 @@ pub(super) fn struct_layout_at(
     active.push(index);
     let layout = match &definition.kind {
         TypeDefKind::Struct { fields } => {
-            let has_string_fields = fields.iter().any(|field| field.ty == Type::String);
+            let has_string_fields = fields
+                .iter()
+                .any(|field| matches!(field.ty, Type::String | Type::List(_)));
             let is_tuple = definition.path.module.as_slice() == ["\0tuple"];
             if definition.error_ancestry.is_some()
                 && fields
@@ -212,6 +214,12 @@ pub(super) fn struct_layout_at(
                         string_descriptor::SIZE,
                         string_descriptor::ALIGN,
                         FieldStorage::Aggregate(string_descriptor::SIZE),
+                    ))
+                } else if matches!(field.ty, Type::List(_)) {
+                    Some((
+                        list_descriptor::SIZE,
+                        list_descriptor::ALIGN,
+                        FieldStorage::Aggregate(list_descriptor::SIZE),
                     ))
                 } else {
                     member_layout(
@@ -276,7 +284,7 @@ pub(super) fn struct_layout_at(
                             FieldStorage::Aggregate(string_descriptor::SIZE),
                         ))
                     } else if matches!(ty, Type::List(_)) {
-                        // `List<T>?` from `pop()`: the payload is the List descriptor.
+                        // A List payload is the List descriptor.
                         Some((
                             list_descriptor::SIZE,
                             list_descriptor::ALIGN,

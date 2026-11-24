@@ -8,6 +8,36 @@
 //! decimal literal. Source spans still cover the original spelling.
 
 use crate::{Diagnostic, SourceId, Span};
+use std::{cell::RefCell, collections::HashMap};
+
+thread_local! {
+    /// Original spelling of every numeric literal whose canonical spelling
+    /// differs (radix prefixes, `_` separators), by source span. Compilation
+    /// lexes and checks on one thread, so diagnostics can echo the literal as
+    /// the user wrote it while every check keeps using the canonical value.
+    static SPELLINGS: RefCell<HashMap<Span, (String, String)>> = RefCell::new(HashMap::new());
+}
+
+/// The literal as written at `span`, when it differs from its canonical
+/// spelling `canonical`. The stored canonical text must match, so a span from
+/// an earlier compilation of different text never leaks into a message.
+pub fn literal_spelling(span: Span, canonical: &str) -> Option<String> {
+    SPELLINGS.with(|map| {
+        map.borrow()
+            .get(&span)
+            .filter(|(stored, _)| stored == canonical)
+            .map(|(_, original)| original.clone())
+    })
+}
+
+fn remember(span: Span, text: &str, canonical: &str) {
+    if text != canonical {
+        SPELLINGS.with(|map| {
+            map.borrow_mut()
+                .insert(span, (canonical.to_owned(), text.to_owned()));
+        });
+    }
+}
 
 /// Lex a number that starts with an ASCII digit at `start`. Returns the end
 /// offset and the canonical spelling. Malformed forms push SE001 and yield
@@ -63,7 +93,9 @@ pub(crate) fn lex_number(
         diagnostics.push(crate::diagnostic(1, span, message));
         return (i, "0".into());
     }
-    (i, text[start..i].replace('_', ""))
+    let canonical = text[start..i].replace('_', "");
+    remember(span, &text[start..i], &canonical);
+    (i, canonical)
 }
 
 /// A run of digits and `_` starting at a digit; a trailing `_` is an error.
@@ -123,7 +155,11 @@ fn lex_radix(
     }
     let digits: String = body.chars().filter(|c| *c != '_').collect();
     match u128::from_str_radix(&digits, radix) {
-        Ok(value) => (i, value.to_string()),
+        Ok(value) => {
+            let canonical = value.to_string();
+            remember(span, &text[start..i], &canonical);
+            (i, canonical)
+        }
         Err(_) => {
             diagnostics.push(crate::diagnostic(
                 1,

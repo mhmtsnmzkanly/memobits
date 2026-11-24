@@ -438,8 +438,7 @@ test fn replace_and_swap_list_elements() {
 // the inner List in, `outer[i]` is a List place (`outer[i][j]` reads, and
 // `push`, `pop`, `clear`, `len`, `replace`, `swap` and `outer[i] = v` work on
 // it), and `outer.pop()` moves an inner List out. Every inner List is released
-// exactly once with the outer List. Arrays of Lists and Lists inside structs
-// stay unsupported.
+// exactly once with the outer List.
 test fn nested_lists() {
     var outer: List<List<u32>> = [];
     var first: List<u32> = [];
@@ -468,6 +467,70 @@ test fn nested_lists() {
     row.push("hello");
     words.push(row);
     assert(words[0][0].len() == 5);
+}
+// A List is an ordinary owner, so it composes with the other aggregates: a
+// struct or record field, a tuple element, an array element, and the payload
+// of `Some(..)`, `Ok(..)` or a user enum variant. Field and element places work
+// like a List local: `s.l.push(1)`, `s.l[0] = 5`, `loop x in s.l`, `replace`
+// and `swap`. A call that returns a List can be used in any value position
+// (a tail, `return`, an argument, a field, an element, a receiver). Moving a
+// List out of a field or element is still a partial move (TE022): use
+// `replace`, `swap` or `pop`.
+fn heap_text(base: string) -> string {
+    let text := base.concat("");
+    text
+}
+type Bag { items: List<i32>, label: string }
+fn count_to(n: i32) -> List<i32> {
+    var out: List<i32> = [];
+    var i := 0;
+    loop {
+        if i == n { break; }
+        out.push(i);
+        i += 1;
+    }
+    out
+}
+fn count_tail() -> List<i32> { count_to(3) }
+fn count_either(first: bool) -> List<i32> {
+    if first { return count_to(4); }
+    count_tail()
+}
+fn bag_total(bag: Bag) -> i32 { bag.items.len() as i32 + bag.label.len() as i32 }
+test fn list_call_results() {
+    let a := count_either(true);
+    let b := count_either(false);
+    assert(a.len() == 4);
+    assert(b.len() == 3);
+    assert(count_to(5).len() == 5);
+    var outer: List<List<i32>> = [];
+    outer.push(count_to(2));
+    outer.push(count_tail());
+    assert(outer[1].len() == 3);
+}
+test fn lists_inside_aggregates() {
+    var bag := Bag { items: count_to(3), label: heap_text("abcd") };
+    bag.items.push(10);
+    assert(bag.items.len() == 4);
+    bag.items[0] = 50;
+    assert(bag.items[0] == 50);
+    let old := replace(bag.items, count_to(2));
+    assert(old.len() == 4);
+    assert(bag.items.len() == 2);
+    var total_items := 0;
+    loop x in bag.items { total_items += x; }
+    assert(total_items == 1);
+    assert(bag_total(Bag { items: count_to(4), label: heap_text("abc") }) == 7);
+    var pair := (count_to(2), 9);
+    pair.0.push(1);
+    assert(pair.0.len() == 3);
+    var grid: array<List<i32>, 2> = [count_to(1), count_to(4)];
+    swap(grid[0], grid[1]);
+    grid[0].push(1);
+    assert(grid[0].len() == 5);
+    assert(grid[1].len() == 1);
+    grid[1] = count_to(7);
+    assert(grid[1].len() == 7);
 }
 test fn constant_array_length() {
     // An imported `u32` constant can be an array length or a repeat count.

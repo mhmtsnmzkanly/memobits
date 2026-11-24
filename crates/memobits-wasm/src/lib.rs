@@ -461,6 +461,11 @@ fn field_addr_rooted_at_local(function: &Function, source: Source) -> bool {
                         base,
                         access: memobits_ir::Access::Borrow,
                         ..
+                    }
+                    | InstructionKind::VariantAddr {
+                        base,
+                        access: memobits_ir::Access::Borrow,
+                        ..
                     }) = &instruction.kind
                     else {
                         return false;
@@ -871,13 +876,14 @@ fn construction_aliases(function: &Function, uses: &[u32]) -> BTreeMap<u32, u32>
             let has_staged_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
                 if fields.iter().any(|operand| matches!(operand.source, Source::Local(id)
                     if matches!(function.locals[id.0 as usize].ty,
-                        Type::String | Type::Struct(_) | Type::Array { .. }))));
+                        Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) | Type::Array { .. }))));
             let consumer = if has_staged_string {
                 // Initializer slots end after the constructor has moved from them.
                 after.find(|inst| {
                     !matches!(
                         inst.kind,
                         InstructionKind::EndStringLocal { .. }
+                            | InstructionKind::EndListLocal { .. }
                             | InstructionKind::EndStructLocal { .. }
                     )
                 })

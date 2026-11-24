@@ -444,3 +444,110 @@ test fn guards() {
     assert(guarded_word(short) == 1);
     assert(guarded_word(none) == 0);
 }
+
+// Heap values compose inside `T ! E`, `T?` and user variants. `Ok(Some(x))`,
+// `Ok(list)`, a struct literal inside `Ok(..)` / `Some(..)` / a variant,
+// `Some(list)` and an enum with a List payload all move the value in and
+// release it exactly once, including on early returns.
+fn heap_text(base: string) -> string {
+    let text := base.concat("");
+    text
+}
+type Tag { name: string, n: i32 }
+type Holder [ Many(List<i32>), Named(Tag), Nothing ]
+fn tag() -> Tag { Tag { name: heap_text("abcd"), n: 3 } }
+fn numbers(n: i32) -> List<i32> {
+    var out: List<i32> = [];
+    var i := 0;
+    loop {
+        if i == n { break; }
+        out.push(i);
+        i += 1;
+    }
+    out
+}
+fn maybe_tag() -> Tag? ! Error { Ok(Some(tag())) }
+fn tag_result(ok: bool) -> Tag ! Error {
+    if ok { Ok(Tag { name: heap_text("xy"), n: 1 }) } else { Err(Error { code: 5 }) }
+}
+fn number_result() -> List<i32> ! Error { Ok(numbers(3)) }
+fn some_numbers() -> List<i32>? { Some(numbers(2)) }
+fn holder(kind: i32) -> Holder {
+    if kind == 0 { Holder::Many(numbers(4)) } else if kind == 1 { Holder::Named(tag()) } else { Holder::Nothing }
+}
+test fn heap_payload_composition() {
+    assert(match maybe_tag() { Ok(Some(t)) => t.name.len() == 4, Ok(None) => false, Err(_) => false });
+    assert(match tag_result(true) { Ok(t) => t.n == 1, Err(_) => false });
+    assert(match tag_result(false) { Ok(_) => false, Err(e) => e.code == 5 });
+    assert(match number_result() { Ok(list) => list.len() == 3, Err(_) => false });
+    assert(match some_numbers() { Some(list) => list.len() == 2, None => false });
+    assert(match holder(0) { Holder::Many(list) => list.len() == 4, _ => false });
+    assert(match holder(1) { Holder::Named(t) => t.n == 3, _ => false });
+    assert(match holder(2) { Holder::Nothing => true, _ => false });
+}
+// A `string ! E` (or any heap-success `T ! E` / `T?`) call result is an
+// ordinary owner: bind it, pass it, return it, store it in a field, element or
+// tuple, or `try` it. A literal pattern may test the `Ok` payload in place.
+type Slot { text: string ! Error, n: i32 }
+fn word(ok: bool) -> string ! Error {
+    if ok { Ok(heap_text("abcd")) } else { Err(Error { code: 3 }) }
+}
+fn word_len(r: string ! Error) -> i32 {
+    match r { Ok(s) => s.len() as i32, Err(e) => 100 + e.code as i32 }
+}
+fn word_again(ok: bool) -> string ! Error { word(ok) }
+fn word_bang(ok: bool) -> string ! Error {
+    let s := try word(ok) else e { return Err(e); };
+    let bang := s.concat("!");
+    Ok(bang)
+}
+fn word_kind(ok: bool) -> i32 {
+    match word(ok) { Ok("abcd") => 1, Ok("zz" | "yy") => 2, Ok(_) => 3, Err(_) => 4 }
+}
+test fn string_results_everywhere() {
+    assert(word_len(word(true)) == 4);
+    assert(word_len(word(false)) == 103);
+    assert(word_len(word_again(true)) == 4);
+    assert(word_len(word_bang(true)) == 5);
+    let kept := word(true);
+    assert(word_len(kept) == 4);
+    let slot := Slot { text: word(true), n: 2 };
+    assert(match slot.text { Ok(s) => s.len() as i32 + slot.n == 6, Err(_) => false });
+    let pair := (word(true), 5);
+    assert(match pair { (Ok(s), n) => s.len() as i32 + n == 9, (Err(_), _) => false });
+    var all: List<string ! Error> = [];
+    all.push(word(true));
+    all.push(word(false));
+    assert(match all[1] { Ok(_) => false, Err(e) => e.code == 3 });
+    assert(word_kind(true) == 1);
+    assert(word_kind(false) == 4);
+}
+// A variant that mixes a String with other payloads may leave the String
+// unbound; it is released with the rest of the owner.
+type Mixed [ Two(string, string), One(string, i32), Zero ]
+fn mixed(n: i32) -> Mixed {
+    if n == 0 { Mixed::Zero } else if n == 1 { Mixed::One(heap_text("abcd"), 5) } else { Mixed::Two(heap_text("ab"), heap_text("cde")) }
+}
+test fn unbound_string_payloads() {
+    assert(match mixed(2) { Mixed::Two(_, b) => b.len() == 3, _ => false });
+    assert(match mixed(2) { Mixed::Two(a, _) => a.len() == 2, _ => false });
+    assert(match mixed(1) { Mixed::One(_, n) => n == 5, _ => false });
+    assert(match mixed(2) { Mixed::Two(_, _) => true, _ => false });
+}
+// Guards of an owned `match` and literal patterns reach into a tuple that owns
+// Strings inside an enum payload (the guard only borrows; nothing moves until
+// the arm is taken).
+type Boxed [ Pair((string, i32)), Nope ]
+fn boxed() -> Boxed { Boxed::Pair((heap_text("abcd"), 3)) }
+test fn guards_in_string_tuples() {
+    let picked := match boxed() {
+        Boxed::Pair((s, n)) if s.len() > 9 => n,
+        Boxed::Pair((s, n)) if n > 5 => 7,
+        Boxed::Pair(("abcd", n)) if n == 3 => 11,
+        Boxed::Pair(_) => 0,
+        Boxed::Nope => 9,
+    };
+    assert(picked == 11);
+    assert(match boxed() { Boxed::Pair(pair) if pair.1 > 2 => true, _ => false });
+    assert(match boxed() { Boxed::Pair(("abcd", n)) => n == 3, _ => false });
+}

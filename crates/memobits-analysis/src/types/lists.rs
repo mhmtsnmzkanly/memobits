@@ -7,8 +7,9 @@ impl Checker {
         match &base.kind {
             ExprKind::Path(path) => path.len() == 1,
             ExprKind::Call { callee, .. } => self.direct_callee(callee),
-            // An element of an outer List or array: a place rooted at a local.
-            ExprKind::Index { .. } => {
+            // An element of an outer List or array, or a field: a place rooted
+            // at a local.
+            ExprKind::Index { .. } | ExprKind::Field { .. } => {
                 matches!(super::place_root(base), Some(path) if path.len() == 1)
             }
             _ => false,
@@ -83,7 +84,7 @@ impl Checker {
             }
             // `outer[i].push(x)` writes the element, so the root owner must be
             // a `var` or a `share` parameter.
-            ExprKind::Index { .. } => match super::place_root(base) {
+            ExprKind::Index { .. } | ExprKind::Field { .. } => match super::place_root(base) {
                 Some(path) if path.len() == 1 => self.lookup(&path[0]).is_some_and(|binding| {
                     mutable_receiver
                         && (binding.mutable || binding.access == IrAccess::Share)

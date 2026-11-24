@@ -2,6 +2,7 @@
 //! Parsing does not perform name, type, ownership, or control-flow checks.
 mod items;
 mod literals;
+pub use literals::literal_spelling;
 pub mod numeric;
 mod self_type;
 pub mod templates;
@@ -1936,11 +1937,13 @@ impl Parser {
         if negative {
             self.bump();
         }
+        let mut number_span = None;
         let kind = match self.current().kind.clone() {
             TokenKind::Number(raw) => {
                 if raw.contains(['.', 'e', 'E']) {
                     return self.fail("floating-point literals cannot be used as patterns");
                 }
+                number_span = Some(self.current().span);
                 self.bump();
                 ExprKind::Number(raw)
             }
@@ -1969,7 +1972,7 @@ impl Parser {
         let literal = Node { span, kind };
         Ok(Some(if negative {
             let operand = Node {
-                span,
+                span: number_span.unwrap_or(span),
                 kind: literal.kind,
             };
             Node {

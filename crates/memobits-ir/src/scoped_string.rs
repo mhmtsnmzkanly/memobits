@@ -47,6 +47,13 @@ impl super::Program {
                     pending.push(Slot::Local(index, local));
                 }
             }
+            // A local that holds a List inside an aggregate always owns heap
+            // storage, so it is tracked like a heap String owner.
+            for (position, local) in function.locals.iter().enumerate() {
+                if owns_list_aggregate(self, &local.ty) {
+                    pending.push(Slot::Local(index, LocalId(position as u32)));
+                }
+            }
             let shares = share_borrows(function);
             for block in &function.blocks {
                 let tuple_extractions = tuple_destructure_extractions(self, function, block);
@@ -1022,7 +1029,7 @@ impl OwnerTypeModel for IrOwnerModel<'_> {
     type Ty = Type;
     fn view<'a>(&self, ty: &'a Type) -> OwnerTyView<'a, Type> {
         match ty {
-            Type::String => OwnerTyView::String,
+            Type::String | Type::List(_) => OwnerTyView::String,
             Type::Primitive(_) => OwnerTyView::Primitive,
             Type::Struct(id) => OwnerTyView::Struct(id.0),
             Type::Array { element, len } => OwnerTyView::Array {
@@ -1077,8 +1084,10 @@ fn tuple_owns_string_in(types: &[super::TypeDef], id: u32) -> bool {
             return false;
         }
         let result = fields.iter().any(|field| match &field.ty {
-            Type::String => true,
+            Type::String | Type::List(_) => true,
             Type::Struct(child) => owns(types, child.0, visited),
+            // An enum or array element that owns heap storage.
+            ty @ (Type::Enum(_) | Type::Array { .. }) => owns_string_aggregate_in(types, ty),
             _ => false,
         });
         visited.remove(&id);
@@ -1088,10 +1097,51 @@ fn tuple_owns_string_in(types: &[super::TypeDef], id: u32) -> bool {
 }
 
 pub(super) fn owns_string_aggregate(program: &super::Program, ty: &Type) -> bool {
-    fn owns(program: &super::Program, ty: &Type, visited: &mut HashSet<u32>) -> bool {
+    owns_string_aggregate_in(&program.types, ty)
+}
+
+fn owns_string_aggregate_in(types: &[super::TypeDef], ty: &Type) -> bool {
+    fn owns(types: &[super::TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String => true,
-            Type::Array { element, len } => *len != 0 && owns(program, element, visited),
+            Type::String | Type::List(_) => true,
+            Type::Array { element, len } => *len != 0 && owns(types, element, visited),
+            Type::Struct(id) | Type::Enum(id) => {
+                let Some(definition) = types.get(id.0 as usize) else {
+                    return false;
+                };
+                if !visited.insert(id.0) {
+                    return false;
+                }
+                let result = match &definition.kind {
+                    super::TypeDefKind::Struct { fields } => {
+                        fields.iter().any(|field| owns(types, &field.ty, visited))
+                    }
+                    super::TypeDefKind::Enum { variants } => variants
+                        .iter()
+                        .flat_map(|variant| &variant.payload)
+                        .any(|field| owns(types, field, visited)),
+                };
+                visited.remove(&id.0);
+                result
+            }
+            _ => false,
+        }
+    }
+    matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
+        && owns(types, ty, &mut HashSet::new())
+}
+
+pub(super) fn owns_string_storage(program: &super::Program, ty: &Type) -> bool {
+    matches!(ty, Type::String | Type::List(_)) || owns_string_aggregate(program, ty)
+}
+
+/// An aggregate that holds a List somewhere inside (a List itself is a local
+/// owner of its own and is tracked separately).
+pub(super) fn owns_list_aggregate(program: &super::Program, ty: &Type) -> bool {
+    fn has(program: &super::Program, ty: &Type, visited: &mut HashSet<u32>) -> bool {
+        match ty {
+            Type::List(_) => true,
+            Type::Array { element, len } => *len != 0 && has(program, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 let Some(definition) = program.types.get(id.0 as usize) else {
                     return false;
@@ -1101,12 +1151,12 @@ pub(super) fn owns_string_aggregate(program: &super::Program, ty: &Type) -> bool
                 }
                 let result = match &definition.kind {
                     super::TypeDefKind::Struct { fields } => {
-                        fields.iter().any(|field| owns(program, &field.ty, visited))
+                        fields.iter().any(|field| has(program, &field.ty, visited))
                     }
                     super::TypeDefKind::Enum { variants } => variants
                         .iter()
                         .flat_map(|variant| &variant.payload)
-                        .any(|field| owns(program, field, visited)),
+                        .any(|field| has(program, field, visited)),
                 };
                 visited.remove(&id.0);
                 result
@@ -1115,11 +1165,7 @@ pub(super) fn owns_string_aggregate(program: &super::Program, ty: &Type) -> bool
         }
     }
     matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Enum(_))
-        && owns(program, ty, &mut HashSet::new())
-}
-
-pub(super) fn owns_string_storage(program: &super::Program, ty: &Type) -> bool {
-    *ty == Type::String || owns_string_aggregate(program, ty)
+        && has(program, ty, &mut HashSet::new())
 }
 
 pub(super) fn enum_variant_owns_string_storage(
@@ -1198,12 +1244,6 @@ pub(super) fn owned_aggregate_call_argument(
         return false;
     };
     if !owns_string_aggregate(program, result) {
-        return false;
-    }
-    if matches!(result, Type::Enum(id)
-        if program.types.get(id.0 as usize)
-            .is_some_and(|definition| definition.entry_outcome == Some(EntryOutcome::Result)))
-    {
         return false;
     }
     block.instructions[producer_position + 1..]
@@ -1479,8 +1519,18 @@ pub(super) fn local_move_source(
     let Source::Local(source) = value.source else {
         return None;
     };
-    (value.mode == UseMode::Consume && string_destination(function, target, initialize))
-        .then_some(source)
+    (value.mode == UseMode::Consume
+        && (string_destination(function, target, initialize)
+            || list_destination(function, target, initialize)))
+    .then_some(source)
+}
+
+fn list_destination(function: &Function, target: LocalId, initialize: bool) -> bool {
+    function
+        .locals
+        .get(target.0 as usize)
+        .is_some_and(|local| matches!(local.ty, Type::List(_)) && (initialize || local.mutable))
+        && (!initialize || !function.parameter_locals.contains(&target))
 }
 
 fn string_destination(function: &Function, target: LocalId, initialize: bool) -> bool {

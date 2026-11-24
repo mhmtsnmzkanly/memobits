@@ -1163,7 +1163,9 @@ fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
         Type::Primitive(kind) => *kind != Primitive::Unit,
         Type::String => true,
         Type::Struct(id) | Type::Enum(id) => (id.0 as usize) < type_count,
-        Type::Array { element, .. } => field_type_is_valid(element, type_count),
+        Type::Array { element, .. } | Type::List(element) => {
+            field_type_is_valid(element, type_count)
+        }
         _ => false,
     }
 }
@@ -1311,7 +1313,7 @@ fn validate_type_shape(
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
             Type::String => {}
-            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
             _ => push(
@@ -2660,23 +2662,6 @@ fn validate_instruction(
                         None
                     }
                 });
-            // `string ! E` entry-style results keep requiring a consuming match;
-            // other enums may bind a String payload in place as a read-only
-            // reference (in-place `match` of an element place, E1a).
-            if payload_type == Some(Type::String)
-                && enum_id
-                    .and_then(|type_id| program.types.get(type_id.0 as usize))
-                    .is_some_and(|definition| {
-                        definition.entry_outcome == Some(EntryOutcome::Result)
-                    })
-            {
-                push(
-                    errors,
-                    id,
-                    Some(block),
-                    "String enum payloads require a consuming match",
-                );
-            }
             if let (Some(payload_type), Some(output)) = (payload_type, out) {
                 let expected = Type::Reference {
                     access: *access,
@@ -2885,7 +2870,18 @@ fn validate_instruction(
                     "extracting a borrow Option payload must consume the wrapper",
                 );
             }
-            if payload_type == Some(Type::String) && base.mode != UseMode::Consume {
+            // A String payload may be read out by a non-final extraction when a
+            // later extraction of the same owner local consumes the enum cell.
+            let consumed_later = matches!(base.source, Source::Local(owner)
+                if function.blocks.get(block.0 as usize).is_some_and(|candidate|
+                    candidate.instructions.iter().any(|later| matches!(&later.kind,
+                        InstructionKind::VariantExtract { base: later_base, .. }
+                            if later_base.source == Source::Local(owner)
+                                && later_base.mode == UseMode::Consume))));
+            if payload_type == Some(Type::String)
+                && base.mode != UseMode::Consume
+                && !consumed_later
+            {
                 push(
                     errors,
                     id,
@@ -3508,12 +3504,28 @@ fn validate_operand_escapes(
                     Some(Type::List(_))
                 ) && !list_return.is_some_and(|(returned, _)| returned == position)
                     && !instruction.output.is_some_and(|output| {
-                        // A List moved into an outer List element.
-                        block.instructions[position + 1..].iter().any(|candidate| {
-                            matches!(&candidate.kind, InstructionKind::ListPush { value, .. }
-                                if value.source == Source::Value(output)
-                                    && value.mode == UseMode::Consume)
-                        })
+                        // A List moved into an outer List element, an enum
+                        // payload, a struct field, an array element or an
+                        // owned call argument.
+                        let consumes = |operand: &Operand| {
+                            operand.source == Source::Value(output)
+                                && operand.mode == UseMode::Consume
+                        };
+                        block.instructions[position + 1..]
+                            .iter()
+                            .any(|candidate| match &candidate.kind {
+                                InstructionKind::ListPush { value, .. } => consumes(value),
+                                InstructionKind::EnumNew { payload, .. } => {
+                                    payload.iter().any(consumes)
+                                }
+                                InstructionKind::StructNew { fields, .. } => {
+                                    fields.iter().any(consumes)
+                                }
+                                InstructionKind::ArrayNew {
+                                    init: ArrayInit::Elements(elements),
+                                } => elements.iter().any(consumes),
+                                _ => false,
+                            })
                     })
                 {
                     push(
@@ -3581,13 +3593,6 @@ fn validate_operand_escapes(
                             "String-owning aggregate call result must be assigned directly to a whole local"
                         };
                         push(errors, id, block_id, message);
-                    }
-                    if facts.returns_heap_ok
-                        && scoped_string::immediate_result_match(program, function, block, position)
-                            .is_none()
-                    {
-                        push(errors, id, block_id,
-                            "heap `string ! E` requires an immediate consuming match with explicit Ok(value) and Err arms");
                     }
                     for parameter in &facts.writes_heap {
                         if arguments
@@ -3984,7 +3989,7 @@ fn validate_operand_escapes(
                         let direct_string_move = field.mode == UseMode::Consume
                             && matches!(field.source, Source::Local(local)
                                 if function.locals.get(local.0 as usize)
-                                    .is_some_and(|local| local.ty == Type::String));
+                                    .is_some_and(|local| matches!(local.ty, Type::String | Type::List(_))));
                         let nested_tuple_move = field.mode == UseMode::Consume
                             && struct_fields
                                 .and_then(|fields| fields.get(index))
@@ -4007,16 +4012,25 @@ fn validate_operand_escapes(
                                                 if function.locals.get(local.0 as usize)
                                                     .is_some_and(|local| local.ty == definition.ty)))
                                 });
-                        if !direct_string_move && !nested_tuple_move {
+                        let enum_owner_move = field.mode == UseMode::Consume
+                            && struct_fields
+                                .and_then(|fields| fields.get(index))
+                                .is_some_and(|definition| {
+                                    matches!(definition.ty, Type::Enum(_))
+                                        && scoped_string::owns_string_storage(
+                                            program,
+                                            &definition.ty,
+                                        )
+                                        && matches!(field.source, Source::Local(local)
+                                            if function.locals.get(local.0 as usize)
+                                                .is_some_and(|local| local.ty == definition.ty))
+                                });
+                        if !direct_string_move && !nested_tuple_move && !enum_owner_move {
                             report(block_id, field, true, false);
                         }
                     }
                 }
-                InstructionKind::EnumNew { ty, payload, .. } => {
-                    let is_heap_result_enum =
-                        program.types.get(ty.0 as usize).is_some_and(|definition| {
-                            definition.entry_outcome == Some(EntryOutcome::Result)
-                        });
+                InstructionKind::EnumNew { payload, .. } => {
                     let owned_enum_destination =
                         scoped_string::enum_binding(function, &block.instructions[position..])
                             .is_some()
@@ -4032,8 +4046,7 @@ fn validate_operand_escapes(
                         heap_strings[id.0 as usize].approved_ok.contains(&value)
                     }) {
                         for operand in payload {
-                            let transferred_owned_payload = !is_heap_result_enum
-                                && owned_enum_destination
+                            let transferred_owned_payload = owned_enum_destination
                                 && operand.mode == UseMode::Consume
                                 && matches!(operand.source, Source::Local(local)
                                     if function.locals.get(local.0 as usize).is_some_and(|binding|

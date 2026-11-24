@@ -14,8 +14,8 @@ byte buffers as `array<u8, N>`.
 `bool`, `char`, `string`, owner structs, tuples, enums and fixed arrays.
 Internally it is `Type::List(Box<Type>)` with a private 12-byte descriptor
 (data address, element count, allocation handle); the element stride comes from
-the Wasm layout. Nested `List<List<T>>` is rejected with TE017 for now (it
-needs List moves inside collections), and so are List fields in structs.
+the Wasm layout. Nested `List<List<T>>`, List fields of structs and tuples,
+arrays of Lists and List payloads of enums are supported (G1, F2).
 
 - Literals: with an expected `List<T>`, `[a, b, c]` builds the list. Elements
   evaluate once in written order and move in (owner elements are staged like

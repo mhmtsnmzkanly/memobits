@@ -719,17 +719,15 @@ fn guards_must_be_bool_and_see_only_their_arms_bindings() {
 #[test]
 fn unsupported_shapes_are_reported_not_miscompiled() {
     let f = Fixture::new();
-    // A guard only borrows its bindings; an aggregate that owns Strings
-    // cannot be borrowed into a local yet.
-    f.rejects(
-        "type Msg [ Pair((string, u32)), Nil ]\nfn f(m: Msg) -> u32 { match m { Msg::Pair((s, n)) if n > 2 => n, Msg::Pair((s, _)) => s.len(), Msg::Nil => 3 } }\nfn main() -> i32 { 0 }",
-        "TE017",
-        "a guard in an owned `match` cannot see",
+    // F2 lifted the guard and literal limits for String-owning tuples inside an
+    // enum payload (see f2_payloads.rs): both programs now build and run.
+    assert_eq!(
+        f.result("type Msg [ Pair((string, u32)), Nil ]\nfn text() -> string { let t := \"abc\".concat(\"\"); t }\nfn f(m: Msg) -> u32 { match m { Msg::Pair((s, n)) if n > 2 => n, Msg::Pair((s, _)) => s.len() as u32, Msg::Nil => 3 } }\nfn main() -> i32 { let m := Msg::Pair((text(), 5)); f(m) as i32 }"),
+        "Result: i32(5)"
     );
-    f.rejects(
-        "type Msg [ Pair((string, u32)), Nil ]\nfn f(m: Msg) -> u32 { match m { Msg::Pair((\"a\", n)) => n, Msg::Pair((s, _)) => s.len(), Msg::Nil => 3 } }\nfn main() -> i32 { 0 }",
-        "TE017",
-        "a literal inside a tuple that owns Strings",
+    assert_eq!(
+        f.result("type Msg [ Pair((string, u32)), Nil ]\nfn text() -> string { let t := \"abc\".concat(\"\"); t }\nfn f(m: Msg) -> u32 { match m { Msg::Pair((\"abc\", n)) => n, Msg::Pair((s, _)) => s.len() as u32, Msg::Nil => 3 } }\nfn main() -> i32 { let m := Msg::Pair((text(), 5)); f(m) as i32 }"),
+        "Result: i32(5)"
     );
     // A whole enum or tuple is not taken by a lone binding.
     f.rejects(

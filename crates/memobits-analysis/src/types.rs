@@ -418,8 +418,10 @@ fn render_pattern(pattern: &Pattern) -> String {
 /// A literal pattern's expression as source text.
 fn literal_text(literal: &Expr) -> String {
     match &literal.kind {
-        ExprKind::Number(raw) => raw.clone(),
-        ExprKind::TypedNumber { raw, .. } => raw.clone(),
+        // A radix or separated literal is echoed as written.
+        ExprKind::Number(raw) | ExprKind::TypedNumber { raw, .. } => {
+            memobits_syntax::literal_spelling(literal.span, raw).unwrap_or_else(|| raw.clone())
+        }
         ExprKind::Unary { operand, .. } => format!("-{}", literal_text(operand)),
         ExprKind::Bool(value) => value.to_string(),
         ExprKind::CharLiteral(value) => format!("{value:?}"),
@@ -1541,7 +1543,7 @@ impl Checker {
 
     fn contains_string_owner(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Ty::String => true,
+            Ty::String | Ty::List(_) => true,
             Ty::Array(element, _) => self.contains_string_owner(element, visited),
             Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
                 if !visited.insert(*id) {
@@ -1561,35 +1563,15 @@ impl Checker {
         }
     }
 
-    fn contains_list(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
-        match ty {
-            Ty::List(_) => true,
-            Ty::Array(element, _) => self.contains_list(element, visited),
-            Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
-                if !visited.insert(*id) {
-                    return false;
-                }
-                let info = self.table.info(*id);
-                info.fields
-                    .iter()
-                    .any(|field| self.contains_list(&field.ty, visited))
-                    || info
-                        .variants
-                        .iter()
-                        .flat_map(|variant| &variant.payload)
-                        .any(|payload| self.contains_list(payload, visited))
-            }
-            _ => false,
-        }
-    }
-
     fn tuple_has_unsupported_nested_string_owner(&self, ty: &Ty) -> bool {
         let Ty::Tuple(id, _, _) = ty else {
             return false;
         };
         self.table.info(*id).fields.iter().any(|field| {
-            field.ty != Ty::String
-                && self.contains_string_owner(&field.ty, &mut HashSet::new())
+            !matches!(
+                field.ty,
+                Ty::String | Ty::List(_) | Ty::Enum(..) | Ty::Array(..)
+            ) && self.contains_string_owner(&field.ty, &mut HashSet::new())
                 && !self.supported_nested_string_tuple(&field.ty, &mut HashSet::new())
         })
     }
@@ -1625,8 +1607,10 @@ impl Checker {
             return false;
         }
         let supported = info.fields.iter().all(|field| {
-            field.ty == Ty::String
-                || !self.contains_string_owner(&field.ty, &mut HashSet::new())
+            matches!(
+                field.ty,
+                Ty::String | Ty::List(_) | Ty::Enum(..) | Ty::Array(..)
+            ) || !self.contains_string_owner(&field.ty, &mut HashSet::new())
                 || self.supported_nested_string_tuple(&field.ty, visited)
         });
         visited.remove(id);
@@ -3209,7 +3193,7 @@ impl Checker {
             self.error(
                 17,
                 arg.span,
-                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, primitive and nested owner fields)",
+                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, List, primitive and nested owner fields; a field that is an enum or tuple is not admitted yet)",
             );
         }
         if param.is_some_and(|parameter| {
@@ -4527,13 +4511,6 @@ impl Checker {
             );
             tainted |= arm_tainted;
             if let (Some(column), false) = (&column, arm_tainted) {
-                if self.literal_in_string_tuple(&pattern, column, false) {
-                    self.error(
-                        17,
-                        arm.pattern.span,
-                        "a literal inside a tuple that owns Strings, within an enum payload, is not supported yet; bind the part and compare it in the arm",
-                    );
-                }
                 let row = vec![patterns::Pat::from_fact(&pattern)];
                 let top_level_wildcard = matches!(row[0], patterns::Pat::Wild);
                 if !patterns::is_useful(&signature, &matrix, &row, std::slice::from_ref(column)) {
@@ -4574,12 +4551,7 @@ impl Checker {
                 }
             }
             let guard_alternatives = match &arm.guard {
-                Some(guard) => self.check_guard(
-                    guard,
-                    &pattern,
-                    column.as_ref().unwrap_or(&Ty::Error),
-                    consuming && !arm_tainted,
-                ),
+                Some(guard) => self.check_guard(guard, &pattern, consuming && !arm_tainted),
                 None => Vec::new(),
             };
             facts.push(MatchArmFact {
@@ -4678,20 +4650,10 @@ impl Checker {
         &mut self,
         guard: &Expr,
         pattern: &MatchPattern,
-        column: &Ty,
         twins: bool,
     ) -> Vec<MatchPattern> {
         let mut rewritten = Vec::new();
         if twins {
-            if let Some(binding) = self.unviewable_binding(pattern, column, false) {
-                self.error(
-                    17,
-                    guard.span,
-                    format!(
-                        "a guard in an owned `match` cannot see {binding}: a guard only borrows its bindings, and an aggregate that owns Strings cannot be borrowed into a local yet; move the test into the arm body"
-                    ),
-                );
-            }
             let originals: Vec<(String, Binding)> = self
                 .scopes
                 .last()
@@ -4750,91 +4712,6 @@ impl Checker {
             self.scopes.pop();
         }
         rewritten
-    }
-    /// The first binding of `pattern` that a guard in an owned match cannot
-    /// view through a read-only reference: an aggregate that owns Strings, or
-    /// anything bound out of a String-owning tuple that sits inside an enum
-    /// payload (`inside_variant`).
-    fn unviewable_binding(
-        &self,
-        pattern: &MatchPattern,
-        ty: &Ty,
-        inside_variant: bool,
-    ) -> Option<String> {
-        let owns_strings = |ty: &Ty| self.contains_string_owner(ty, &mut HashSet::new());
-        match pattern {
-            MatchPattern::Bind(_) if !matches!(ty, Ty::String) && owns_strings(ty) => {
-                Some(format!("a binding of type {}", name(ty)))
-            }
-            MatchPattern::Variant { variant, args } => {
-                let Ty::Enum(id, _) = ty else { return None };
-                let payload = &self.table.info(*id).variants[*variant as usize].payload;
-                args.iter()
-                    .zip(payload)
-                    .find_map(|(arg, ty)| self.unviewable_binding(arg, ty, true))
-            }
-            MatchPattern::Tuple(args) => {
-                let Ty::Tuple(id, ..) = ty else { return None };
-                let fields = self.table.info(*id).fields;
-                if inside_variant && owns_strings(ty) {
-                    let mut bound = Vec::new();
-                    pattern.collect_bindings(&mut bound);
-                    if !bound.is_empty() {
-                        return Some(format!("bindings inside a tuple of type {}", name(ty)));
-                    }
-                }
-                args.iter().zip(fields.iter()).find_map(|(arg, field)| {
-                    self.unviewable_binding(arg, &field.ty, inside_variant)
-                })
-            }
-            MatchPattern::Or(alternatives) => alternatives
-                .iter()
-                .find_map(|alternative| self.unviewable_binding(alternative, ty, inside_variant)),
-            _ => None,
-        }
-    }
-    /// A literal tested inside a tuple that owns Strings and sits in an enum
-    /// payload: the test needs a reference to that tuple, which the backend
-    /// cannot hold in a local yet.
-    fn literal_in_string_tuple(
-        &self,
-        pattern: &MatchPattern,
-        ty: &Ty,
-        inside_variant: bool,
-    ) -> bool {
-        fn has_literal(pattern: &MatchPattern) -> bool {
-            match pattern {
-                MatchPattern::Literal(_) => true,
-                MatchPattern::Variant { args, .. } | MatchPattern::Tuple(args) => {
-                    args.iter().any(has_literal)
-                }
-                MatchPattern::Or(alternatives) => alternatives.iter().any(has_literal),
-                _ => false,
-            }
-        }
-        match pattern {
-            MatchPattern::Variant { variant, args } => {
-                let Ty::Enum(id, _) = ty else { return false };
-                let payload = &self.table.info(*id).variants[*variant as usize].payload;
-                args.iter()
-                    .zip(payload)
-                    .any(|(arg, ty)| self.literal_in_string_tuple(arg, ty, true))
-            }
-            MatchPattern::Tuple(args) => {
-                let Ty::Tuple(id, ..) = ty else { return false };
-                let fields = self.table.info(*id).fields;
-                (inside_variant
-                    && self.contains_string_owner(ty, &mut HashSet::new())
-                    && args.iter().any(has_literal))
-                    || args.iter().zip(fields.iter()).any(|(arg, field)| {
-                        self.literal_in_string_tuple(arg, &field.ty, inside_variant)
-                    })
-            }
-            MatchPattern::Or(alternatives) => alternatives
-                .iter()
-                .any(|alternative| self.literal_in_string_tuple(alternative, ty, inside_variant)),
-            _ => false,
-        }
     }
     /// An integer, bool, char or string pattern against the type it matches.
     fn check_literal_pattern(
@@ -5711,7 +5588,20 @@ impl Checker {
                     Ty::Array(element, count) => {
                         if let Some(value) = constant_index(index) {
                             if value < 0 || value >= i128::from(count) {
-                                self.error(8, index.span, format!("constant array index {value} is out of bounds for length {count}"));
+                                let plain_literal = match &index.kind {
+                                    ExprKind::Number(_) => true,
+                                    ExprKind::Unary { operator, operand } => {
+                                        operator == "-"
+                                            && matches!(operand.kind, ExprKind::Number(_))
+                                    }
+                                    _ => false,
+                                };
+                                let written = if plain_literal {
+                                    literal_text(index)
+                                } else {
+                                    value.to_string()
+                                };
+                                self.error(8, index.span, format!("constant array index {written} is out of bounds for length {count}"));
                             }
                         }
                         *element
@@ -8468,7 +8358,7 @@ impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
     fn view<'a>(&self, ty: &'a Ty) -> memobits_ir::OwnerTyView<'a, Ty> {
         use memobits_ir::OwnerTyView as View;
         match ty {
-            Ty::String => View::String,
+            Ty::String | Ty::List(_) => View::String,
             Ty::Primitive(_) => View::Primitive,
             Ty::Struct(id, _) => View::Struct(*id),
             Ty::Array(element, len) => View::Array {

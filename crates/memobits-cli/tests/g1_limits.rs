@@ -666,17 +666,5 @@ fn nested_list_misuse_is_rejected() {
         "TE017",
         "push() requires a mutable List local",
     );
-    // Arrays of Lists and Lists inside Options stay gated.
-    rejects(
-        &f,
-        &wrap("var a: array<List<u32>, 2> = [[1], [2]]; 0"),
-        "TE017",
-        "executable arrays support",
-    );
-    rejects(
-        &f,
-        &wrap("var l: List<u32> = []; let o: List<u32>? = Some(l); 0"),
-        "TE018",
-        "List moves currently require",
-    );
+    // Arrays of Lists and `Some(list)` are accepted since F2 (see f2_payloads).
 }

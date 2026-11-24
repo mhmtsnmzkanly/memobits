@@ -72,8 +72,12 @@ structs, tuples, enums and arrays). Nested lists (`List<List<T>>`) work:
 reads, `outer[i].push(x)`, `.pop()`, `.clear()`, `.len()`, `.get()`,
 `.borrow()` / `.share()`, `replace`, `swap` and `outer[i] = v` all work through
 the element place), `outer.pop()` moves an inner List out, and the outer List
-releases every inner List exactly once. Arrays of Lists, Lists inside structs
-or user enums, and `Some(list)` stay gated.
+releases every inner List exactly once. Lists also compose with the other
+aggregates (F2): `array<List<T>, N>`, List fields of structs, records and tuples,
+and `Some(list)`, `Ok(list)` or a user variant with a List payload; `s.l`, `t.0` and
+`a[i]` are List places for every List method, `replace` and `swap`, and a call that
+returns a List works in every value position (tail, `return`, argument, element,
+field, receiver). Moving a List out of a field or element stays TE022.
 An `if`/`match` expression may produce a `string`, List or String-owning
 aggregate anywhere a value is accepted (binding, argument, assignment, tail
 result): each branch moves its value into one hidden destination before the
@@ -145,10 +149,10 @@ a `bool` (TE002) over its arm's bindings; guarded arms do not count toward exhau
 (TE031 says so) but are still checked for reachability (TE032). In an owned match the
 guard only reads the bindings (primitives copied, strings and other values through
 read-only references) and the payload moves into the arm after the guard holds; when it
-fails nothing was consumed and matching goes on. A guard cannot see an aggregate that
-owns Strings, or anything bound out of a String-owning tuple inside an enum payload, and
-a literal inside such a tuple is not supported yet (TE017); a literal on a `string ! E`
-`Ok` payload stays TE018.
+fails nothing was consumed and matching goes on. Since F2 a guard may also bind an
+aggregate that owns Strings or parts of a String-owning tuple inside an enum payload, a
+literal may test inside such a tuple, and a literal pattern may test the `Ok` payload of
+a `string ! E`.
 Complement and `Self` (G8): `~x` is the bitwise complement of an integer at its own
 width (Rust's `!x`; `~0u8` is 255, `~(-128i8)` is 127), a prefix operator with the
 precedence of unary `-` and `!`. Floats, `bool` and nominal types are TE007 (`~` is
@@ -253,11 +257,9 @@ checked concat followed by replacement.
 Installing heap text through forwarded shares or share aliases, other
 nested heap uses and exported String signatures are gated. An internal
 `String ! E` can return a static String to a consuming match.
-A heap-backed `Ok` can be bound and immediately matched in the same
-function with explicit `Ok(value)` and `Err` arms. A direct internal call
-can also return a heap-backed Result to an immediate consuming match, with
-an optional binding. Ignoring the success owner, forwarding the Result
-without matching it, and general nested String storage are gated.
+A heap-backed `Ok` is an ordinary owner (F2): it can be matched, bound, passed,
+returned, forwarded, stored in a field, element or tuple, and `try`-ed; an unused
+success owner is released with the Result.
 A plain local struct can contain String fields alongside primitive fields.
 A new local struct can initialize a String field with a literal, a named
 heap String move, direct concat, or a direct internal String-returning call.
@@ -395,3 +397,13 @@ test result: FAILED. 2 passed; 1 failed; 0 filtered out
 
 Tests are listed in qualified-name order. A project without tests prints
 `running 0 tests` and `test result: ok. 0 passed; 0 failed; 0 filtered out`.
+Heap payload composition (F2): heap values compose inside `T ! E`, `T?` and user
+variants (`Ok(Some(x))`, `Ok(list)`, a struct literal inside `Ok(..)` / `Some(..)` /
+a variant, `Some(list)`, enum List payloads, heap `Ok(x)` in `if` / `match` branches),
+with exact cleanup including early returns. A `string ! E` (or any heap-success `T ! E`
+/ `T?`) call result is an ordinary owner: bind, pass, return, store in a field, element
+or tuple, or `try` it; the old "immediate consuming match" rule is gone. A variant that
+mixes a String with other payloads may leave the String unbound. A tuple may hold a
+String-owning enum, array or List. A nominal struct with a direct String or List field
+plus a heap-owning enum or tuple field still cannot move by value into a call (TE017).
+Range diagnostics echo a radix or separated literal as written (`0x1FF`, `-0b1000_0001`).

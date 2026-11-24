@@ -304,7 +304,8 @@ test fn heap_text_result() {
         Err(_) => false
     };
     assert(local_ok);
-    // A direct internal return can also hand ownership to an immediate match.
+    // A direct internal return can also hand ownership to a match (or to any other
+    // owner position since F2: a binding, an argument, a field).
     let direct_ok := match owned_label() {
         Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
         Err(_) => false

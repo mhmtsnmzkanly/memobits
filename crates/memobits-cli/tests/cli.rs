@@ -1350,8 +1350,9 @@ fn list_returns_keep_temporary_and_abi_gates() {
         let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
         assert!(diagnostic.contains(message), "{body}: {diagnostic}");
     }
+    // A List call result is an ordinary owner since F2: a tail call forwards it.
     f.write("list.mb", "use alloc::List; fn make() -> List<u8> { let items: List<u8> = []; items } fn forward() -> List<u8> { make() }");
-    err(f.run(&["ownership", "list.mb"]), "TE018");
+    assert!(f.run(&["ownership", "list.mb"]).status.success());
 
     f.write(
         "project.toml",
@@ -2151,10 +2152,6 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
         ),
         ("use alloc::List; fn main() { let items: List<u8> = [true]; }", "TE002"),
         (
-            "use alloc::List; fn main() { let items: List<u8> = []; let array := [items]; }",
-            "TE017",
-        ),
-        (
             "use alloc::List; fn main() { let items: List<u8> = []; items.share(); }",
             "TE017",
         ),
@@ -2378,7 +2375,10 @@ fn returned_heap_string_results_run_from_source_and_wasm() {
 }
 
 #[test]
-fn returned_heap_results_require_an_immediate_consuming_match() {
+fn returned_heap_results_are_ordinary_owners() {
+    // F2: a heap `string ! E` call result needs no immediate consuming match;
+    // every use below passes the ownership check (binding, ignoring the
+    // success owner, an in-place match, passing, forwarding, discarding).
     let f = Fixture::new();
     for body in [
         "make();",
@@ -2409,16 +2409,17 @@ fn returned_heap_results_require_an_immediate_consuming_match() {
         "#
             ),
         );
-        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+        let output = f.run(&["ownership", "text.mb"]);
         assert!(
-            diagnostic.contains("requires an immediate consuming match"),
-            "{body}: {diagnostic}"
+            output.status.success(),
+            "{body}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
 
 #[test]
-fn heap_string_results_reject_escape_and_ignore_paths() {
+fn heap_string_results_are_released_on_every_path() {
     let f = Fixture::new();
     for body in [
         r#"let text := "é".concat("!"); let result: string ! Error = Ok(text); match result { Ok(_) => {}, Err(_) => {} };"#,
@@ -2440,16 +2441,17 @@ fn heap_string_results_reject_escape_and_ignore_paths() {
         "#
             ),
         );
-        let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+        let output = f.run(&["ownership", "text.mb"]);
         assert!(
-            diagnostic.contains("heap String") || diagnostic.contains("heap `string ! E`"),
-            "{body}: {diagnostic}"
+            output.status.success(),
+            "{body}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
 
 #[test]
-fn internal_string_results_require_consuming_payload_matches() {
+fn internal_string_results_match_in_place_through_a_borrow() {
     let f = Fixture::new();
     f.write(
         "text.mb",
@@ -2460,10 +2462,11 @@ fn internal_string_results_require_consuming_payload_matches() {
         }
     "#,
     );
-    let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
+    let output = f.run(&["ownership", "text.mb"]);
     assert!(
-        diagnostic.contains("String enum payloads require a consuming match"),
-        "{diagnostic}"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

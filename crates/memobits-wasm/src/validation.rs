@@ -33,9 +33,11 @@ pub(super) fn validate_string_struct_borrows(
         ));
     }
 
-    // A read-only reference local that is only ever initialized from an element
-    // address (the binding of `loop x in items` over non-copyable List elements)
-    // is a lent element: it behaves like a borrowed parameter.
+    // A read-only reference local that is only ever initialized from an element,
+    // field or variant-payload address (the binding of `loop x in items` over
+    // non-copyable List elements, a decision-tree reference into a matched
+    // owner, a guard's read-only view of a payload) is a lent place: it
+    // behaves like a borrowed parameter.
     let element_producers: HashMap<_, _> = function
         .blocks
         .iter()
@@ -70,6 +72,8 @@ pub(super) fn validate_string_struct_borrows(
                     if element_producers.get(&id).is_some_and(|producer| matches!(
                         producer.kind,
                         InstructionKind::ElementAddr { access: Access::Borrow, .. }
+                            | InstructionKind::FieldAddr { access: Access::Borrow, .. }
+                            | InstructionKind::VariantAddr { access: Access::Borrow, .. }
                     )))
                 })
         })
@@ -158,10 +162,29 @@ pub(super) fn validate_string_struct_borrows(
                 visited.remove(&id.0);
                 owns
             }
+            Type::Enum(id) => {
+                let Some(TypeDef {
+                    kind: TypeDefKind::Enum { variants },
+                    ..
+                }) = program.types.get(id.0 as usize)
+                else {
+                    return false;
+                };
+                if !visited.insert(id.0) {
+                    return false;
+                }
+                let owns = variants
+                    .iter()
+                    .flat_map(|variant| &variant.payload)
+                    .any(|payload| type_owns_string_storage(program, payload, visited));
+                visited.remove(&id.0);
+                owns
+            }
             Type::Array { element, len } => {
                 *len != 0 && type_owns_string_storage(program, element, visited)
             }
-            Type::List(element) => type_owns_string_storage(program, element, visited),
+            // A List is heap storage whatever it holds, like a String.
+            Type::List(_) => true,
             _ => false,
         }
     }
@@ -186,9 +209,13 @@ pub(super) fn validate_string_struct_borrows(
                 let Type::Reference { access, inner } = &binding.ty else {
                     return false;
                 };
-                (lent_elements.contains(&local)
-                    || (function.parameter_locals.contains(&local)
-                        && matches!(access, Access::Borrow | Access::Share)))
+                // A lent place (element, field or payload address held in a
+                // local) roots a chain like a borrowed parameter does.
+                if lent_elements.contains(&local) && owns_string(inner) {
+                    return true;
+                }
+                function.parameter_locals.contains(&local)
+                    && matches!(access, Access::Borrow | Access::Share)
                     && owns_string(inner)
                     && function
                         .parameter_locals
@@ -208,6 +235,11 @@ pub(super) fn validate_string_struct_borrows(
                         ..
                     }
                     | InstructionKind::ElementAddr {
+                        base,
+                        access: Access::Borrow | Access::Share,
+                        ..
+                    }
+                    | InstructionKind::VariantAddr {
                         base,
                         access: Access::Borrow | Access::Share,
                         ..
@@ -552,7 +584,7 @@ pub(super) fn supported_type(ty: &Type) -> bool {
         },
         Type::Array { element, .. } => match element.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
-            nested @ Type::Array { .. } => supported_type(nested),
+            nested @ (Type::Array { .. } | Type::List(_)) => supported_type(nested),
             Type::String | Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },

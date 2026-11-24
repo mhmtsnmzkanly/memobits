@@ -556,11 +556,8 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
             "TE017",
             "bind the struct to a local first",
         ),
-        (
-            "fn main() { make(); }",
-            "TE018",
-            "must be assigned directly",
-        ),
+        // `fn main() { make(); }` is accepted since F2: a discarded owner call
+        // result is staged in a hidden local and released (see f2_payloads.rs).
         (
             "fn main() { var x := make(); x = make(); }",
             "TE018",

@@ -652,7 +652,7 @@ struct Builder<'a> {
 fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
     fn contains_owned_string(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String => true,
+            Type::String | Type::List(_) => true,
             Type::Struct(id) => {
                 let Some(info) = types.get(id.0 as usize) else {
                     return false;
@@ -667,6 +667,7 @@ fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
                 visited.remove(&id.0);
                 owns
             }
+            Type::Enum(_) | Type::Array { .. } => is_string_owner_aggregate_type(types, ty),
             _ => false,
         }
     }
@@ -685,7 +686,7 @@ impl memobits_ir::OwnerTypeModel for FactOwnerModel<'_> {
     fn view<'a>(&self, ty: &'a Type) -> memobits_ir::OwnerTyView<'a, Type> {
         use memobits_ir::OwnerTyView as View;
         match ty {
-            Type::String => View::String,
+            Type::String | Type::List(_) => View::String,
             Type::Primitive(_) => View::Primitive,
             Type::Struct(id) => View::Struct(id.0),
             Type::Array { element, len } => View::Array {
@@ -717,7 +718,7 @@ fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
 fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
     fn owns(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String => true,
+            Type::String | Type::List(_) => true,
             Type::Array { element, len } => *len != 0 && owns(types, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 let Some(info) = types.get(id.0 as usize) else {
@@ -1099,7 +1100,7 @@ impl<'a> Builder<'a> {
     /// has a direct binding and exact cleanup wherever it is consumed
     /// (tail, `return`, element, payload, field, argument).
     fn stage_fresh_call(&mut self, value: Operand, ty: &Type, span: Span) -> Operand {
-        let owner = matches!(ty, Type::String) || self.is_string_owner_struct(ty);
+        let owner = matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty);
         let Source::Value(id) = value.source else {
             return value;
         };
@@ -1375,7 +1376,9 @@ impl<'a> Builder<'a> {
                     return;
                 }
             }
-            if let Some(ty @ (Type::String | Type::List(_))) = self.ty(expr) {
+            if let Some(ty) = self.ty(expr).filter(|ty| {
+                matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty)
+            }) {
                 if let Some(result) = self.lower_expr(expr) {
                     let owner = self.hidden_local("discarded call result", ty, expr.span);
                     self.initialize_local(owner, consume(result), expr.span);
@@ -1446,7 +1449,7 @@ impl<'a> Builder<'a> {
     /// The List a mutating method acts on: a named local, or an element of
     /// an outer List (`outer[i].push(x)`) whose path is evaluated now.
     fn list_place(&mut self, base: &Expr) -> Option<ListPlace> {
-        if let ExprKind::Index { .. } = base.kind {
+        if let ExprKind::Index { .. } | ExprKind::Field { .. } = base.kind {
             let (root, positions) = self.lower_place(base)?;
             return Some(ListPlace::Element(root, positions));
         }
@@ -2713,7 +2716,11 @@ impl<'a> Builder<'a> {
                     let value = self.stage_fresh_call(value, field_ty, element.span);
                     let Some(mut value) = (if *field_ty == Type::String {
                         self.owned_to(value, field_ty)
-                    } else if self.is_string_transport_owner(field_ty) {
+                    } else if self.is_string_transport_owner(field_ty)
+                        || matches!(field_ty, Type::List(_))
+                        || (matches!(field_ty, Type::Enum(_) | Type::Array { .. })
+                            && self.is_string_owner_struct(field_ty))
+                    {
                         let Some(value) = self.owned_to(value, field_ty) else {
                             self.owned_locals.truncate(scope_start);
                             return None;
@@ -3126,7 +3133,9 @@ impl<'a> Builder<'a> {
                         );
                         self.initialize_local(staged, consume(value), init.value.span);
                         consume(op(Source::Local(staged), init.value.span))
-                    } else if self.is_string_tuple(ty)
+                    } else if matches!(ty, Type::List(_))
+                        || (matches!(ty, Type::Enum(_)) && self.is_string_owner_struct(ty))
+                        || self.is_string_tuple(ty)
                         || self.is_string_transport_owner(ty)
                         || (matches!(ty, Type::Array { .. }) && self.is_string_owner_struct(ty))
                     {
@@ -4052,6 +4061,17 @@ impl<'a> Builder<'a> {
                     self.hidden_local("enum String tuple payload", ty.clone(), argument.span);
                 self.initialize_local(staged, owned, argument.span);
                 consume(op(Source::Local(staged), argument.span))
+            } else if *ty != Type::String
+                && self.owns_storage(ty)
+                && !matches!(value.source, Source::Local(_))
+            {
+                // A freshly built owner (struct or record literal, nested
+                // variant, array) is staged in a hidden local first, like an
+                // owner element, so its construction has a direct binding.
+                let owned = self.owned_to(value, ty)?;
+                let staged = self.hidden_local("enum owner payload", ty.clone(), argument.span);
+                self.initialize_local(staged, owned, argument.span);
+                self.owned_captured(consume(op(Source::Local(staged), argument.span)), ty)?
             } else {
                 self.owned_captured(value, ty)?
             };

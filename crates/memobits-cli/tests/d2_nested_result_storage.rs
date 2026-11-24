@@ -1,8 +1,6 @@
 //! D2 nested `Result<String, E>` storage: a Result held in a struct field or a
-//! fixed-array element is accepted only while its payload is a String literal
-//! (zero allocation provenance) or an `Err` payload. Heap-owning Results must
-//! stay rejected by IR ownership validation so no heap block can reach nested
-//! storage that lacks a consuming read path.
+//! fixed-array element, including a heap-owning one (lifted by F2: nested
+//! storage releases a Result's String type-directed like any other enum).
 use std::{
     fs,
     path::PathBuf,
@@ -102,9 +100,12 @@ fn main() -> u32 {
 }
 
 #[test]
-fn heap_owning_results_stay_rejected_in_nested_storage() {
-    for source in [
-        // Struct field initialized from a heap String payload.
+fn heap_owning_results_work_in_nested_storage() {
+    // F2 lifted the old rejection: a heap Result in a struct field, a fixed
+    // array element, an element replacement or a `match` on a field works from
+    // source and from the Wasm artifact (cleanup is covered by the capped
+    // stress tests in `f2_payloads.rs`).
+    assert_source_and_wasm(
         r#"type Box { text: string ! Error, n: u32 }
 fn main() -> u32 {
     let text := "a".concat("b");
@@ -112,43 +113,35 @@ fn main() -> u32 {
     let boxed := Box { text: result, n: 1 };
     boxed.n
 }"#,
-        // Array element from a heap Result returned by a call.
+        1,
+    );
+    assert_source_and_wasm(
         r#"fn make(text: string) -> string ! Error { Ok(text) }
 fn main() -> u32 {
     let result := make("a".concat("b"));
     let items := [result];
-    1
+    match items[0] { Ok(text) => text.len(), Err(error) => error.code }
 }"#,
-        // Replacing a literal element with a heap Result.
+        2,
+    );
+    assert_source_and_wasm(
         r#"fn main() -> u32 {
     let first: string ! Error = Ok("a");
     var items := [first];
-    let text := "a".concat("b");
+    let text := "abc".concat("d");
     let heap: string ! Error = Ok(text);
     items[0] = heap;
-    1
+    match items[0] { Ok(text) => text.len(), Err(error) => error.code }
 }"#,
-        // Reading a heap-capable nested Result without a consuming match.
+        4,
+    );
+    assert_source_and_wasm(
         r#"type Box { text: string ! Error, n: u32 }
 fn main() -> u32 {
     let ok: string ! Error = Ok("a");
     let boxed := Box { text: ok, n: 1 };
     match boxed.text { Ok(value) => value.len(), Err(error) => error.code }
 }"#,
-    ] {
-        let fixture = Fixture::new();
-        fixture.source(source);
-        for args in [&["run"][..], &["build", "--output", "nested.wasm"][..]] {
-            let output = fixture.run(args);
-            assert!(!output.status.success(), "{source}");
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Overwriting an owning element in place is TE022 (E1a); the other
-            // shapes stay TE018.
-            assert!(
-                stderr.contains("TE018") || stderr.contains("TE022"),
-                "{stderr}"
-            );
-        }
-        assert!(!fixture.0.join("nested.wasm").exists());
-    }
+        1,
+    );
 }
