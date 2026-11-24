@@ -8,7 +8,52 @@ element transfers ownership. Keep the existing fixed-array rules, including
 byte buffers as `array<u8, N>`.
 [Fixed arrays](fixed-array-implementation.md)
 
-## Executable checkpoint
+## General List<T> (E1b)
+
+`List<T>` accepts any admitted element type: primitives of every width,
+`bool`, `char`, `string`, owner structs, tuples, enums and fixed arrays.
+Internally it is `Type::List(Box<Type>)` with a private 12-byte descriptor
+(data address, element count, allocation handle); the element stride comes from
+the Wasm layout. Nested `List<List<T>>` is rejected with TE017 for now (it
+needs List moves inside collections), and so are List fields in structs.
+
+- Literals: with an expected `List<T>`, `[a, b, c]` builds the list. Elements
+  evaluate once in written order and move in (owner elements are staged like
+  array elements). `[]` stays the empty list.
+- `push(value)` moves the element in; `pop()` returns `T?` and moves an owner out
+  (the shortened list no longer owns the vacated slot).
+- Growth reserves a new block, moves the existing element bytes bitwise and
+  releases only the old block, never its elements.
+- Cleanup is type-directed: drop, `clear`, whole-list reassignment, scope exit
+  and early returns walk the initialized elements, release each owned element
+  once, then release the block. A moved-from List descriptor is zeroed so a later
+  visit of the slot walks nothing.
+- `items[i]` is a bounds-checked element place (`ElementAddr` over the List
+  descriptor; out of range traps RE007). Primitive elements are copied (and can
+  be written on a `var` list). Non-copyable elements are used in place: as
+  `borrow`/`share` receiver or argument, in an in-place `match`, or through a
+  projection (`items[i].text.len()`). Moving one out and overwriting an owning
+  element are TE022 (`replace`/`swap` arrive with R1; `pop` exists). A live
+  element loan blocks `push`, `pop`, `clear`, moves and reassignment of the
+  list (loan checker, owner granularity, BE005).
+- `get(i) -> T?` is for copyable (primitive) elements; other elements get TE022
+  pointing at `items[i]`. `contains` and `index_of` accept primitive elements of
+  any width; other element types are TE017.
+- `loop x in items` binds copies of primitive elements and read-only loans of
+  non-copyable elements (`x` behaves like a borrowed parameter: projections and
+  in-place use only). The list stays loaned for the whole loop, so mutating it in
+  the body is BE005.
+- Entry/export ABI is unchanged: Lists are not entry results and cannot cross an
+  exported signature.
+- Runnable guide: `examples/guide/src/collections.mb`
+  (`list_element_types`, `list_of_strings`, `list_of_owner_structs`,
+  `list_of_tuples_and_arrays`); stress and negatives in
+  `crates/memobits-cli/tests/e1b_lists.rs`.
+
+## Executable checkpoint (original primitive slice)
+
+The rules below were written for `List<u8>` and `List<u32>` and still hold for
+every element type unless the E1b section above says otherwise.
 
 `List<u8>` and `List<u32>` support contextual empty `[]`, moves into new
 local bindings, non-consuming `.len()`, `.get(index)`, `.contains(value)`,
@@ -58,7 +103,8 @@ and exports remain gated.
 
 ## Source scope
 
-Start with `List<u8>` and `List<u32>`. They exercise one-byte and
+The first slice started with `List<u8>` and `List<u32>` (E1b generalized the
+element type). They exercise one-byte and
 four-byte element storage and fit the current payload alignment. Both
 have existing primitive load/store and `Option` support, and neither
 needs per-element cleanup. Additional primitives can follow a consumer
@@ -124,7 +170,8 @@ from a primitive-returning entry.
 
 ## List iteration
 
-`loop value in items { ... }` supports `List<u8>` and `List<u32>`. The
+`loop value in items { ... }` supports every List element type (non-copyable
+elements are lent, see E1b). The
 receiver can be a whole local binding, a borrow or share binding or parameter,
 or a direct internal List call. Other List-valued expressions are gated.
 

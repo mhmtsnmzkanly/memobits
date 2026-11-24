@@ -29,6 +29,13 @@ impl Checker {
                 "get() requires a whole List local or a direct internal List call",
             );
         }
+        if !matches!(*element, Ty::Primitive(_)) {
+            self.error(
+                22,
+                expr.span,
+                "get() copies its element, and only primitive elements are copyable; use `items[i]` in place (borrow, share, in-place match or projection) or `pop()` to take the last element out",
+            );
+        }
         if arguments.len() != 1 {
             self.error(10, expr.span, "get() expects one index");
             return Ty::Error;
@@ -41,7 +48,7 @@ impl Checker {
         }
         self.table.instantiate_enum(
             super::registry::by_id(super::registry::TemplateId::Option),
-            vec![ResolvedArgument::Type(Ty::Primitive(element))],
+            vec![ResolvedArgument::Type(*element)],
             expr.span,
         )
     }
@@ -85,20 +92,34 @@ impl Checker {
         if pop {
             return self.table.instantiate_enum(
                 super::registry::by_id(super::registry::TemplateId::Option),
-                vec![ResolvedArgument::Type(Ty::Primitive(element))],
+                vec![ResolvedArgument::Type(*element)],
                 expr.span,
             );
         }
         if method == "clear" {
             return UNIT;
         }
-        let element = Ty::Primitive(element);
+        let element = *element;
+        self.allow_array_value(&arguments[0]);
         let value = read_type(self.expr(&arguments[0], Some(&element)));
+        self.reject_extraction(&arguments[0], &value);
         self.ensure(&value, &element, arguments[0].span);
         if value == Ty::Never {
             Ty::Never
         } else {
             UNIT
         }
+    }
+}
+
+impl Checker {
+    /// Elements a List can hold: the types an array can hold, but never a
+    /// reference, `(borrow T)?` or a tuple with a List field.
+    pub(super) fn check_list_element_support(
+        &mut self,
+        element: &Ty,
+        span: memobits_diagnostics::Span,
+    ) {
+        self.check_element_support(element, span);
     }
 }

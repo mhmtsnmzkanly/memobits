@@ -1053,6 +1053,63 @@ impl<'a> Builder<'a> {
     fn is_string_transport_owner(&self, ty: &Type) -> bool {
         is_string_tuple_type(self.types, ty) || is_flat_string_owner_struct_type(self.types, ty)
     }
+    /// Evaluate one element expression that moves into an array or List.
+    fn owned_element(&mut self, element: &Expr, element_ty: &Type) -> Option<Operand> {
+        let value = self.lower_expr(element)?;
+        if self.is_string_transport_owner(element_ty)
+            || (matches!(element_ty, Type::Enum(_))
+                && self.is_string_owner_struct(element_ty)
+                && !matches!(value.source, Source::Local(_)))
+        {
+            // An owner element (literal or call result) is staged in a hidden
+            // local first, as for tuple elements, so its construction has a
+            // direct binding.
+            let value = self.owned_to(value, element_ty)?;
+            let staged = self.hidden_local("owner element", element_ty.clone(), element.span);
+            self.initialize_local(staged, value, element.span);
+            return Some(consume(op(Source::Local(staged), element.span)));
+        }
+        // Capture locals now so every element is read in source order.
+        self.owned_captured(value, element_ty)
+    }
+
+    /// `[a, b, c]` with an expected `List<T>`: a hidden List local that starts
+    /// empty and takes each element in written order.
+    fn lower_list_literal(
+        &mut self,
+        expr: &Expr,
+        elements: &[Expr],
+        list_ty: Type,
+    ) -> Option<Operand> {
+        let Type::List(element_ty) = &list_ty else {
+            unreachable!("checked List literal type")
+        };
+        let element_ty = element_ty.as_ref().clone();
+        let empty = self.emit(expr.span, InstructionKind::EmptyList, Some(list_ty.clone()))?;
+        if elements.is_empty() {
+            return Some(empty);
+        }
+        let list = self.hidden_local("list literal", list_ty, expr.span);
+        self.initialize_local(list, consume(empty), expr.span);
+        for element in elements {
+            let value = if matches!(element_ty, Type::Primitive(_)) {
+                let value = self.lower_expr(element)?;
+                read(self.scalar(value)?)
+            } else {
+                self.owned_element(element, &element_ty)?
+            };
+            self.emit(
+                element.span,
+                InstructionKind::ListPush {
+                    target: list,
+                    value,
+                },
+                None,
+            );
+        }
+        Some(consume(op(Source::Local(list), expr.span)))
+    }
+
     fn is_string_owner_struct(&self, ty: &Type) -> bool {
         is_string_owner_aggregate_type(self.types, ty)
     }
@@ -1618,9 +1675,9 @@ impl<'a> Builder<'a> {
     /// Element type of an array owner or of a reference to an array.
     fn array_element(&self, array: Operand) -> Box<Type> {
         match self.operand_type(array) {
-            Some(Type::Array { element, .. }) => element,
+            Some(Type::Array { element, .. } | Type::List(element)) => element,
             Some(Type::Reference { inner, .. }) => match *inner {
-                Type::Array { element, .. } => element,
+                Type::Array { element, .. } | Type::List(element) => element,
                 _ => unreachable!("checked array index base"),
             },
             _ => unreachable!("checked array index base"),
@@ -2064,14 +2121,21 @@ impl<'a> Builder<'a> {
                 },
                 Some(Type::Primitive(Primitive::Char)),
             )?),
-            Type::List(element) => consume(self.emit(
-                items.span,
-                InstructionKind::ListRead {
-                    source: read(receiver),
-                    index: read(position),
-                },
-                Some(Type::Primitive(element)),
-            )?),
+            Type::List(ref element) if matches!(**element, Type::Primitive(_)) => {
+                consume(self.emit(
+                    items.span,
+                    InstructionKind::ListRead {
+                        source: read(receiver),
+                        index: read(position),
+                    },
+                    Some(element.as_ref().clone()),
+                )?)
+            }
+            Type::List(_) => {
+                // A non-copyable element is lent: the binding is a read-only
+                // reference into the list, which stays loaned for the loop.
+                consume(self.element_addr(receiver, position, Access::Borrow, items.span)?)
+            }
             _ => {
                 let element = self.element_addr(receiver, position, Access::Borrow, items.span)?;
                 let loaded = self.load_element(element, items.span)?;
@@ -2189,8 +2253,8 @@ impl<'a> Builder<'a> {
                 result
             }
             ExprKind::Array(elements) => {
-                if matches!(self.ty(expr), Some(Type::List(_))) {
-                    return self.emit(expr.span, InstructionKind::EmptyList, self.ty(expr));
+                if let Some(list_ty @ Type::List(_)) = self.ty(expr) {
+                    return self.lower_list_literal(expr, elements, list_ty);
                 }
                 let Some(Type::Array {
                     element: element_ty,
@@ -2201,23 +2265,7 @@ impl<'a> Builder<'a> {
                 };
                 let mut operands = Vec::with_capacity(elements.len());
                 for element in elements {
-                    let value = self.lower_expr(element)?;
-                    if self.is_string_transport_owner(&element_ty) {
-                        // An owner element (literal or call result) is staged
-                        // in a hidden local first, as for tuple elements, so
-                        // its construction has a direct binding.
-                        let value = self.owned_to(value, &element_ty)?;
-                        let staged = self.hidden_local(
-                            "array owner element",
-                            (*element_ty).clone(),
-                            element.span,
-                        );
-                        self.initialize_local(staged, value, element.span);
-                        operands.push(consume(op(Source::Local(staged), element.span)));
-                        continue;
-                    }
-                    // Capture locals now so every element is read in source order.
-                    operands.push(self.owned_captured(value, &element_ty)?);
+                    operands.push(self.owned_element(element, &element_ty)?);
                 }
                 self.emit(
                     expr.span,
@@ -2476,8 +2524,20 @@ impl<'a> Builder<'a> {
                         let PathTarget::Local(target) = self.path(base) else {
                             unreachable!("checked List push receiver")
                         };
-                        let value = self.lower_expr(&arguments[0])?;
-                        let value = read(self.scalar(value)?);
+                        let element_ty = match &self.function.locals[target.0 as usize].ty {
+                            Type::List(element) => element.as_ref().clone(),
+                            Type::Reference { inner, .. } => match inner.as_ref() {
+                                Type::List(element) => element.as_ref().clone(),
+                                _ => unreachable!("checked List push receiver"),
+                            },
+                            _ => unreachable!("checked List push receiver"),
+                        };
+                        let value = if matches!(element_ty, Type::Primitive(_)) {
+                            let value = self.lower_expr(&arguments[0])?;
+                            read(self.scalar(value)?)
+                        } else {
+                            self.owned_element(&arguments[0], &element_ty)?
+                        };
                         self.emit(expr.span, InstructionKind::ListPush { target, value }, None);
                         return self.unit(expr.span);
                     }

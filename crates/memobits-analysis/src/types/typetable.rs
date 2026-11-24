@@ -1646,15 +1646,28 @@ impl TypeTable {
                     return Ok(Ty::Array(Box::new(element.clone()), *count));
                 }
                 TemplateId::List => {
-                    let [ResolvedArgument::Type(Ty::Primitive(element @ ("u8" | "u32")))] =
-                        arguments.as_slice()
-                    else {
-                        return Err(failure(
-                            17,
-                            "this List slice supports u8 and u32 elements".into(),
-                        ));
+                    let [ResolvedArgument::Type(element)] = arguments.as_slice() else {
+                        unreachable!("template argument contract checked above");
                     };
-                    return Ok(Ty::List(element));
+                    match element {
+                        Ty::Reference { .. } => {
+                            return Err(failure(
+                                17,
+                                "List elements cannot be references".into(),
+                            ))
+                        }
+                        Ty::Primitive("Unit") => {
+                            return Err(failure(17, "List elements cannot be Unit".into()))
+                        }
+                        Ty::List(_) => {
+                            return Err(failure(
+                                17,
+                                "nested List<List<T>> is not supported yet; use a struct that wraps a List only after struct List fields land, or flatten the storage".into(),
+                            ))
+                        }
+                        _ => {}
+                    }
+                    return Ok(Ty::List(Box::new(element.clone())));
                 }
             }
         }

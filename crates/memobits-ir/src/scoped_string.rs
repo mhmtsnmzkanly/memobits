@@ -119,6 +119,32 @@ impl super::Program {
                                 }
                             }
                         }
+                        InstructionKind::ListPop { .. } => {
+                            // A popped owner moves into the binding that takes the Option.
+                            if let (Some(output), Some(next)) = (
+                                instruction.output,
+                                block.instructions[position + 1..]
+                                    .iter()
+                                    .find(|inst| !is_cleanup(inst)),
+                            ) {
+                                if let InstructionKind::Assign {
+                                    target,
+                                    value,
+                                    initialize: true,
+                                } = &next.kind
+                                {
+                                    if value.source == Source::Value(output)
+                                        && value.mode == UseMode::Consume
+                                        && function
+                                            .values
+                                            .get(output.0 as usize)
+                                            .is_some_and(|ty| owns_string_aggregate(self, ty))
+                                    {
+                                        pending.push(Slot::Local(index, *target));
+                                    }
+                                }
+                            }
+                        }
                         InstructionKind::Extract { .. } => {
                             if let Some((source, target, _)) = tuple_extractions.get(&position) {
                                 let field_type = instruction

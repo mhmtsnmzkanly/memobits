@@ -2145,8 +2145,11 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
             "use alloc::List; fn main() { let items: List<u8> = []; let moved := items; items.len(); }",
             "BE001",
         ),
-        ("use alloc::List; fn main() { let items: List<i32> = []; }", "TE017"),
-        ("use alloc::List; fn main() { let items: List<u8> = [1]; }", "TE017"),
+        (
+            "use alloc::List; fn main() { let items: List<List<u8>> = []; }",
+            "TE017",
+        ),
+        ("use alloc::List; fn main() { let items: List<u8> = [true]; }", "TE002"),
         (
             "use alloc::List; fn main() { let items: List<u8> = []; let array := [items]; }",
             "TE017",

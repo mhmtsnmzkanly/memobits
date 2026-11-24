@@ -65,8 +65,20 @@ The ownership commands check owned `String` transfers and internal loans.
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
 application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
-primitive/aggregate references. `List<u8>` and `List<u32>` (after `use alloc::List;`) support
-contextual empty `[]`, local moves, and non-consuming `.len()`.
+primitive/aggregate references. `List<T>` (after `use alloc::List;`) holds any
+admitted element type (primitives of every width, `bool`, `char`, `string`,
+structs, tuples, enums and arrays). `List<List<T>>` is rejected with TE017.
+Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
+run once in written order and move in). `items[i]` is a bounds-checked element
+place: primitives are copied, other elements are used in place (borrow/share
+receiver or argument, in-place `match`, projections); moving one out and
+overwriting an owning element are TE022, and a live element loan blocks `push`,
+`pop`, `clear`, moves and reassignment (BE005). `.get(i)` is primitive-only
+(TE022 points to `items[i]` otherwise), `.contains`/`.index_of` need primitive
+elements (TE017 otherwise), `.pop()` moves an owner out, and `loop x in items`
+binds copies of primitive elements and read-only loans of other elements. The
+List releases every owned element exactly once on `clear`, reassignment, drop
+and scope exit. A List supports local moves, and non-consuming `.len()`.
 `.push(value)` appends through a whole mutable local. Empty construction
 allocates no heap block. `.get(index)` copies an element into `T?`
 and returns `None` when the `u32` index is outside the List. Direct internal

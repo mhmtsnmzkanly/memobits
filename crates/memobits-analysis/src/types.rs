@@ -44,7 +44,7 @@ pub(crate) enum CheckMode {
 enum Ty {
     Primitive(&'static str),
     String,
-    List(&'static str),
+    List(Box<Ty>),
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
@@ -369,7 +369,7 @@ fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
         Ty::String => "string".into(),
-        Ty::List(element) => format!("List<{element}>"),
+        Ty::List(element) => format!("List<{}>", name(element)),
         Ty::Array(element, count) => format!("array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
@@ -808,9 +808,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             access: *access,
             inner: Box::new(ir_type(inner)?),
         },
-        Ty::List("u8") => IrType::List(Primitive::U8),
-        Ty::List("u32") => IrType::List(Primitive::U32),
-        Ty::List(_) => return None,
+        Ty::List(element) => IrType::List(Box::new(ir_type(element)?)),
         Ty::Array(element, len) => IrType::Array {
             element: Box::new(ir_type(element)?),
             len: *len,
@@ -1469,11 +1467,14 @@ impl Checker {
         let writable = binding.mutable || binding.access == IrAccess::Share;
         let aggregate = |ty: &Ty| match ty {
             Ty::Array(..) => Some("an element of immutable array"),
+            Ty::List(_) => Some("an element of immutable List"),
             Ty::Struct(..) | Ty::Tuple(..) => Some("a field of immutable struct"),
             _ => None,
         };
         match &binding.ty {
-            ty @ (Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)) if !writable => {
+            ty @ (Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..))
+                if !writable =>
+            {
                 let what = aggregate(ty).expect("aggregate root");
                 self.error(
                     4,
@@ -1487,7 +1488,7 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
             ) =>
             {
                 self.error(
@@ -1502,7 +1503,7 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
             ) && !writable =>
             {
                 self.error(
@@ -2180,7 +2181,7 @@ impl Checker {
                                 self.error(
                                     22,
                                     target.span,
-                                    "an element that owns String storage cannot be overwritten in place; take the old element out with `replace` or `swap` (not available yet), or rebuild the array",
+                                    "an element that owns String storage cannot be overwritten in place; take the old element out with `replace`, `swap` or `pop` (`pop` is available on a List; `replace` and `swap` are not available yet), or rebuild the collection",
                                 );
                             }
                             match place_root(target) {
@@ -2513,7 +2514,25 @@ impl Checker {
                     let ty = match read_type(self.expr(items, None)) {
                         Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
                         Ty::List(element) if self.list_read_receiver(items) => {
-                            Ty::Primitive(element)
+                            if matches!(*element, Ty::Primitive(_)) {
+                                *element
+                            } else {
+                                // Non-copyable elements are lent read-only for the
+                                // iteration; the list is loaned for the whole loop.
+                                let origin = match place_root(items) {
+                                    Some(path) if path.len() == 1 => self
+                                        .lookup(&path[0])
+                                        .map_or(ReferenceOrigin::Temporary, |binding| {
+                                            ReferenceOrigin::Binding(binding.origin)
+                                        }),
+                                    _ => ReferenceOrigin::Temporary,
+                                };
+                                Ty::Reference {
+                                    access: IrAccess::Borrow,
+                                    inner: element,
+                                    origin,
+                                }
+                            }
                         }
                         Ty::String if matches!(&items.kind, ExprKind::Path(path) if path.len() == 1) => {
                             Ty::Primitive("char")
@@ -2633,7 +2652,7 @@ impl Checker {
         if ty == Ty::Error {
             return Ty::Error;
         }
-        if !matches!(ty, Ty::String | Ty::List("u8" | "u32"))
+        if !matches!(ty, Ty::String | Ty::List(_))
             || !matches!(&value.kind, ExprKind::Path(path) if path.len() == 1
                 && self.lookup(&path[0]).is_some_and(|binding| binding.access == IrAccess::Owned))
         {
@@ -2845,15 +2864,26 @@ impl Checker {
         let mut diverges = receiver == Ty::Never;
         let element = match receiver {
             Ty::Array(element, _) if numeric(&element) || *element == BOOL => Some(*element),
-            Ty::List(element @ ("u8" | "u32")) if self.list_read_receiver(base) => {
-                Some(Ty::Primitive(element))
+            Ty::List(element)
+                if matches!(*element, Ty::Primitive(kind) if kind != "Unit")
+                    && self.list_read_receiver(base) =>
+            {
+                Some(*element)
+            }
+            Ty::List(_) => {
+                self.error(
+                    17,
+                    base.span,
+                    format!("{method}() on a List needs primitive elements and a local binding or direct internal call result; compare other element types in a `loop`"),
+                );
+                None
             }
             Ty::Error | Ty::Never => None,
             _ => {
                 self.error(
                     17,
                     base.span,
-                    format!("{method}() requires an array with numeric or Bool elements, or a List<u8> or List<u32> local, reference binding, or direct internal call result"),
+                    format!("{method}() requires an array with numeric or Bool elements, or a List of primitives (local, reference binding, or direct internal call result)"),
                 );
                 None
             }
@@ -4243,12 +4273,19 @@ impl Checker {
                         "array literals must be used as an owned value (binding initializer, assignment, argument, element, result or branch value)",
                     );
                 }
-                if let Some(list @ Ty::List(_)) = expected {
-                    if elements.is_empty() {
-                        return list.clone();
+                if let Some(list @ Ty::List(element)) = expected {
+                    // Elements evaluate once, in written order, and move in.
+                    for item in elements {
+                        self.allow_array_value(item);
+                        let actual = self.expr(item, Some(element));
+                        self.reject_extraction(item, &actual);
+                        if matches!(actual, Ty::Reference { .. }) {
+                            self.error(17, item.span, "List elements cannot be references");
+                        }
+                        self.ensure(&actual, element, item.span);
                     }
-                    self.error(17, expr.span, "only empty List literals are supported");
-                    return Ty::Error;
+                    self.check_list_element_support(element, expr.span);
+                    return list.clone();
                 }
                 let mut element_ty = match expected {
                     Some(Ty::Array(element, _)) => Some(element.as_ref().clone()),
@@ -4497,12 +4534,15 @@ impl Checker {
                 // An array reference (`borrow`/`share` parameter or binding)
                 // indexes like its owner.
                 let base_ty = match base_ty {
-                    Ty::Reference { inner, .. } if matches!(inner.as_ref(), Ty::Array(..)) => {
+                    Ty::Reference { inner, .. }
+                        if matches!(inner.as_ref(), Ty::Array(..) | Ty::List(_)) =>
+                    {
                         *inner
                     }
                     other => other,
                 };
                 let result = match base_ty {
+                    Ty::List(element) => *element,
                     Ty::Array(element, count) => {
                         if let Some(value) = constant_index(index) {
                             if value < 0 || value >= i128::from(count) {
@@ -4516,7 +4556,10 @@ impl Checker {
                         self.error(
                             7,
                             base.span,
-                            format!("indexing requires an Array value, found {}", name(&other)),
+                            format!(
+                                "indexing requires an Array or List value, found {}",
+                                name(&other)
+                            ),
                         );
                         Ty::Error
                     }

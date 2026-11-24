@@ -161,7 +161,7 @@ pub enum Type {
     /// Owned UTF-8 text. Its storage representation is private to the backend.
     String,
     /// Owned homogeneous list with private descriptor storage.
-    List(Primitive),
+    List(Box<Type>),
     Function(Signature),
     Reference {
         access: Access,
@@ -1165,8 +1165,14 @@ fn validate_type_shape(
     context: &str,
 ) {
     match ty {
-        Type::List(Primitive::U8 | Primitive::U32) => {}
-        Type::List(_) => push(errors, id, None, "unsupported List element type"),
+        Type::List(element) => match element.as_ref() {
+            Type::Primitive(kind) if *kind != Primitive::Unit => {}
+            Type::String => {}
+            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+                validate_type_shape(type_count, element, errors, id, context)
+            }
+            _ => push(errors, id, None, "unsupported List element type"),
+        },
         Type::Primitive(_) | Type::String => {}
         Type::Struct(type_id) | Type::Enum(type_id) => {
             if type_id.0 as usize >= type_count {
@@ -1249,24 +1255,24 @@ fn validate_type_shape(
 }
 
 /// A List read accepts an owner or a read-only reference to its descriptor.
-fn list_read_element(ty: &Type) -> Option<Primitive> {
+fn list_read_element(ty: &Type) -> Option<Type> {
     match ty {
-        Type::List(element) => Some(*element),
+        Type::List(element) => Some(element.as_ref().clone()),
         Type::Reference {
             access: Access::Borrow | Access::Share,
             inner,
         } => match inner.as_ref() {
-            Type::List(element) => Some(*element),
+            Type::List(element) => Some(element.as_ref().clone()),
             _ => None,
         },
         _ => None,
     }
 }
 
-fn mutable_list_element(function: &Function, target: LocalId) -> Option<Primitive> {
+fn mutable_list_element(function: &Function, target: LocalId) -> Option<Type> {
     let local = function.locals.get(target.0 as usize)?;
     match &local.ty {
-        Type::List(element) if local.mutable => Some(*element),
+        Type::List(element) if local.mutable => Some(element.as_ref().clone()),
         Type::Reference {
             access: Access::Share,
             inner,
@@ -1277,23 +1283,21 @@ fn mutable_list_element(function: &Function, target: LocalId) -> Option<Primitiv
     }
 }
 
-fn scalar_option_matches(
-    program: &Program,
-    element: Option<Primitive>,
-    output: Option<&Type>,
-) -> bool {
+/// `output` is the `T?` enum whose `Some` payload is exactly `element`.
+fn option_matches(program: &Program, element: Option<&Type>, output: Option<&Type>) -> bool {
     match (element, output) {
-        (Some(element @ (Primitive::U8 | Primitive::U32)), Some(Type::Enum(option))) => {
-            let name = if element == Primitive::U8 {
-                "u8?"
-            } else {
-                "u32?"
-            };
-            program
-                .types
-                .get(option.0 as usize)
-                .is_some_and(|definition| definition.is_scalar_option(name, element))
-        }
+        (Some(element), Some(Type::Enum(option))) => program
+            .types
+            .get(option.0 as usize)
+            .is_some_and(|definition| {
+                definition.path.name.ends_with('?')
+                    && definition.error_ancestry.is_none()
+                    && definition.entry_outcome.is_none()
+                    && matches!(&definition.kind, TypeDefKind::Enum { variants }
+                        if matches!(&variants[..], [some, none]
+                            if some.name == "Some" && some.payload == [element.clone()]
+                                && none.name == "None" && none.payload.is_empty()))
+            }),
         _ => false,
     }
 }
@@ -1451,11 +1455,7 @@ fn validate_instruction(
             }
         }
         InstructionKind::ListClear { target } => {
-            if !matches!(
-                mutable_list_element(function, *target),
-                Some(Primitive::U8 | Primitive::U32)
-            ) || instruction.output.is_some()
-            {
+            if mutable_list_element(function, *target).is_none() || instruction.output.is_some() {
                 push(
                     errors,
                     id,
@@ -1465,7 +1465,11 @@ fn validate_instruction(
             }
         }
         InstructionKind::ListPop { target } => {
-            if !scalar_option_matches(program, mutable_list_element(function, *target), out) {
+            if !option_matches(
+                program,
+                mutable_list_element(function, *target).as_ref(),
+                out,
+            ) {
                 push(
                     errors,
                     id,
@@ -1477,10 +1481,18 @@ fn validate_instruction(
         InstructionKind::ListPush { target, value } => {
             let actual = operand_type(program, function, value, errors, id, block);
             let receiver = mutable_list_element(function, *target);
-            if receiver.map(Type::Primitive) != actual
+            let owned_element = receiver
+                .as_ref()
+                .is_some_and(|element| !matches!(element, Type::Primitive(_)));
+            let expected_mode = if owned_element {
+                UseMode::Consume
+            } else {
+                UseMode::Read
+            };
+            if receiver != actual
                 || receiver.is_none()
                 || instruction.output.is_some()
-                || value.mode != UseMode::Read
+                || value.mode != expected_mode
             {
                 push(
                     errors,
@@ -1493,8 +1505,9 @@ fn validate_instruction(
         InstructionKind::ListGet { source, index } => {
             let input = operand_type(program, function, source, errors, id, block);
             let index_type = operand_type(program, function, index, errors, id, block);
-            let valid_output =
-                scalar_option_matches(program, input.as_ref().and_then(list_read_element), out);
+            let element = input.as_ref().and_then(list_read_element);
+            let valid_output = matches!(element, Some(Type::Primitive(_)))
+                && option_matches(program, element.as_ref(), out);
             if !matches!(source.source, Source::Local(_))
                 || source.mode != UseMode::Read
                 || index.mode != UseMode::Read
@@ -1522,8 +1535,8 @@ fn validate_instruction(
             if source.mode != UseMode::Read
                 || index.mode != UseMode::Read
                 || index_type != Some(Type::Primitive(Primitive::U32))
-                || element.is_none()
-                || element.map(Type::Primitive).as_ref() != out
+                || !matches!(element, Some(Type::Primitive(_)))
+                || element.as_ref() != out
             {
                 push(
                     errors,
@@ -1549,13 +1562,16 @@ fn validate_instruction(
                         Type::Primitive(kind) if kind != Primitive::Unit => Some(kind),
                         _ => None,
                     },
-                    Type::List(kind @ (Primitive::U8 | Primitive::U32)) => Some(kind),
+                    Type::List(element) => match *element {
+                        Type::Primitive(kind) if kind != Primitive::Unit => Some(kind),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 _ => None,
             };
             let valid_output = if *return_index {
-                scalar_option_matches(program, Some(Primitive::U32), out)
+                option_matches(program, Some(&Type::Primitive(Primitive::U32)), out)
             } else {
                 out == Some(&Type::Primitive(Primitive::Bool))
             };
@@ -1673,10 +1689,7 @@ fn validate_instruction(
             if instruction.output.is_some()
                 || value.mode != UseMode::Consume
                 || !matches!(value.source, Source::Local(_))
-                || !matches!(
-                    ty,
-                    Some(Type::String | Type::List(Primitive::U8 | Primitive::U32))
-                )
+                || !matches!(ty, Some(Type::String | Type::List(_)))
             {
                 push(
                     errors,
@@ -2074,7 +2087,9 @@ fn validate_instruction(
                 );
             }
             let element = actual.and_then(|actual| match actual {
-                Type::Array { element, .. } if *access != Access::Owned => Some(*element),
+                Type::Array { element, .. } | Type::List(element) if *access != Access::Owned => {
+                    Some(*element)
+                }
                 Type::Reference {
                     access: owner_access,
                     inner,
@@ -2095,7 +2110,7 @@ fn validate_instruction(
                         );
                     }
                     match *inner {
-                        Type::Array { element, .. } => Some(*element),
+                        Type::Array { element, .. } | Type::List(element) => Some(*element),
                         _ => {
                             push(
                                 errors,
@@ -3542,9 +3557,35 @@ fn validate_operand_escapes(
                             },
                         )
                     });
+                    let feeds_owned_list_push = instruction.output.is_some_and(|output| {
+                        let Source::Local(source) = value.source else {
+                            return false;
+                        };
+                        let Some(source_ty) = function
+                            .locals
+                            .get(source.0 as usize)
+                            .map(|local| &local.ty)
+                        else {
+                            return false;
+                        };
+                        scoped_string::owns_string_storage(program, source_ty)
+                            && block.instructions[position + 1..].iter().any(|candidate| {
+                                matches!(&candidate.kind, InstructionKind::ListPush { target, value: pushed }
+                                    if pushed.source == Source::Value(output)
+                                        && pushed.mode == UseMode::Consume
+                                        && function.locals.get(target.0 as usize).is_some_and(|list| {
+                                            let list = match &list.ty {
+                                                Type::Reference { inner, .. } => inner.as_ref(),
+                                                other => other,
+                                            };
+                                            matches!(list, Type::List(element) if **element == *source_ty)
+                                        }))
+                            })
+                    });
                     if !feeds_owned_enum_payload
                         && !feeds_owned_call_argument
                         && !feeds_owned_array_element
+                        && !feeds_owned_list_push
                         && (!return_capture.is_some_and(|(returned, source)| {
                             returned == position && heap_locals.contains(&source)
                         }) || (*function.signature.result != Type::String
@@ -3869,7 +3910,24 @@ fn validate_operand_escapes(
                     report(block_id, offset, false, false);
                 }
                 InstructionKind::ListClear { .. } | InstructionKind::ListPop { .. } => {}
-                InstructionKind::ListPush { value, .. } => report(block_id, value, false, false),
+                InstructionKind::ListPush { target, value } => {
+                    // An owner element moves into the list: a consumed local of
+                    // the element type (or a captured one, checked above).
+                    let moved_owner = value.mode == UseMode::Consume
+                        && matches!(value.source, Source::Local(local)
+                        if function.locals.get(local.0 as usize).is_some_and(|binding|
+                            scoped_string::owns_string_storage(program, &binding.ty)
+                                && function.locals.get(target.0 as usize).is_some_and(|list| {
+                                    let list = match &list.ty {
+                                        Type::Reference { inner, .. } => inner.as_ref(),
+                                        other => other,
+                                    };
+                                    matches!(list, Type::List(element) if **element == binding.ty)
+                                })));
+                    if !moved_owner {
+                        report(block_id, value, false, false)
+                    }
+                }
                 InstructionKind::ListLen { source }
                 | InstructionKind::Copy { source }
                 | InstructionKind::StringLen { source } => {

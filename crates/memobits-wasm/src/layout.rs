@@ -60,7 +60,7 @@ pub(super) const STRUCT_LAYOUT_OVERFLOW: &str = "struct layout overflows the 32-
 pub(super) fn type_has_string_storage(types: &[TypeDef], ty: &Type) -> bool {
     pub(super) fn has(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String => true,
+            Type::String | Type::List(_) => true,
             Type::Array { element, len } => *len != 0 && has(types, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 if !visited.insert(id.0) {

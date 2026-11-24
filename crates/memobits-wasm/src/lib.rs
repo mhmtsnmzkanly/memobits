@@ -1495,7 +1495,7 @@ fn encode_frames_traced(
             functions.function(first + offset);
         }
         if has_list_push {
-            types.ty().function([ValType::I32; 3], [ValType::I32]);
+            types.ty().function([ValType::I32; 2], [ValType::I32]);
             functions.function(first + 3);
         }
         selected.len() as u32 + adapter_count
@@ -1575,7 +1575,7 @@ fn encode_frames_traced(
         code.function(&string_heap::releaser());
         code.function(&string_heap::reserve());
         if has_list_push {
-            code.function(&list_descriptor::push(copy + 2, copy + 1));
+            code.function(&list_descriptor::append(copy + 2, copy + 1));
         }
     }
     if utf8.is_some() {
@@ -1776,7 +1776,7 @@ fn compile_function(
             });
             if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
                 body.instructions().local_get(index as u32);
-                list_descriptor::clear_allocation(body);
+                list_descriptor::clear(body);
             } else if heap_locals.contains(local)
                 && type_has_string_storage(&program.types, &function.locals[local.0 as usize].ty)
             {
@@ -2076,18 +2076,28 @@ fn release_string_at(
     Ok(())
 }
 
+/// Release a List owner's elements (type-directed) and then its block.
 fn release_list_cell(
     body: &mut WasmFunction,
+    types: &[TypeDef],
+    structs: &[StructLayout],
+    ty: &Type,
     cell: ArrayCell,
     frame: Option<FrameState>,
+    cleanup_base: u32,
     heap_copy_index: Option<u32>,
 ) -> Result<(), String> {
-    if let Some(copy) = heap_copy_index {
-        emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
-        list_descriptor::load_allocation(body);
-        body.instructions().call(copy + 1);
-    }
-    Ok(())
+    emit_local_string_storage_cleanup(
+        body,
+        types,
+        structs,
+        ty,
+        frame.ok_or("List requires a frame")?,
+        cell.offset,
+        cleanup_base,
+        heap_copy_index,
+        true,
+    )
 }
 
 fn max_string_array_depth(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> usize {
@@ -2095,6 +2105,7 @@ fn max_string_array_depth(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u3
         Type::Array { element, len } if *len != 0 => {
             1 + max_string_array_depth(types, element, visited)
         }
+        Type::List(element) => 1 + max_string_array_depth(types, element, visited),
         Type::Struct(id) | Type::Enum(id) if visited.insert(id.0) => {
             let depth = match types.get(id.0 as usize).map(|definition| &definition.kind) {
                 Some(TypeDefKind::Struct { fields }) => fields
@@ -2125,6 +2136,64 @@ fn emit_relative_address(body: &mut WasmFunction, base: u32, offset: u32) {
     }
 }
 
+/// Release every initialized element of the List whose descriptor sits at
+/// `base_local + offset`. The block itself is released by the caller.
+#[allow(clippy::too_many_arguments)]
+fn emit_list_elements_cleanup(
+    body: &mut WasmFunction,
+    types: &[TypeDef],
+    structs: &[StructLayout],
+    element: &Type,
+    base_local: u32,
+    offset: u32,
+    scratch_base: u32,
+    array_depth: usize,
+    heap_copy_index: Option<u32>,
+) -> Result<(), String> {
+    if !type_has_string_storage(types, element) {
+        return Ok(());
+    }
+    let (stride, _) = aggregate_layout(structs, element)?;
+    let index_local = scratch_base + 1 + (array_depth as u32) * 2;
+    let child_base = index_local + 1;
+    body.instruction(&WasmInstruction::I32Const(0));
+    body.instruction(&WasmInstruction::LocalSet(index_local));
+    body.instruction(&WasmInstruction::Block(BlockType::Empty));
+    body.instruction(&WasmInstruction::Loop(BlockType::Empty));
+    body.instruction(&WasmInstruction::LocalGet(index_local));
+    emit_relative_address(body, base_local, offset);
+    list_descriptor::load_length(body);
+    body.instruction(&WasmInstruction::I32GeU);
+    body.instruction(&WasmInstruction::BrIf(1));
+    emit_relative_address(body, base_local, offset);
+    list_descriptor::load_address(body);
+    body.instruction(&WasmInstruction::LocalGet(index_local));
+    body.instruction(&WasmInstruction::I32Const(stride as i32));
+    body.instruction(&WasmInstruction::I32Mul);
+    body.instruction(&WasmInstruction::I32Add);
+    body.instruction(&WasmInstruction::LocalSet(child_base));
+    emit_string_storage_cleanup(
+        body,
+        types,
+        structs,
+        element,
+        child_base,
+        0,
+        scratch_base,
+        array_depth + 1,
+        heap_copy_index,
+        true,
+    )?;
+    body.instruction(&WasmInstruction::LocalGet(index_local));
+    body.instruction(&WasmInstruction::I32Const(1));
+    body.instruction(&WasmInstruction::I32Add);
+    body.instruction(&WasmInstruction::LocalSet(index_local));
+    body.instruction(&WasmInstruction::Br(0));
+    body.instruction(&WasmInstruction::End);
+    body.instruction(&WasmInstruction::End);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_string_storage_cleanup(
     body: &mut WasmFunction,
@@ -2142,6 +2211,32 @@ fn emit_string_storage_cleanup(
         return Ok(());
     }
     match ty {
+        Type::List(element) => {
+            if release {
+                emit_list_elements_cleanup(
+                    body,
+                    types,
+                    structs,
+                    element,
+                    base_local,
+                    offset,
+                    scratch_base,
+                    array_depth,
+                    heap_copy_index,
+                )?;
+                if let Some(releaser) = heap_copy_index {
+                    emit_relative_address(body, base_local, offset);
+                    list_descriptor::load_allocation(body);
+                    body.instruction(&WasmInstruction::Call(releaser + 1));
+                }
+            }
+            if !release {
+                // A moved-from descriptor must look empty to a later visit. A
+                // released one is dead: its owner ends or is overwritten next.
+                emit_relative_address(body, base_local, offset);
+                list_descriptor::clear(body);
+            }
+        }
         Type::String => {
             if release {
                 if let Some(releaser) = heap_copy_index {
@@ -2344,7 +2439,7 @@ fn clear_moved_heap_source(
     if let Some((source, owner_operand)) = owner {
         if matches!(function.locals[source.0 as usize].ty, Type::List(_)) {
             emit_operand(body, function, param_count, &owner_operand, layout, frame)?;
-            list_descriptor::clear_allocation(body);
+            list_descriptor::clear(body);
         } else if heap_locals.contains(&source) {
             if type_has_string_storage(types, &function.locals[source.0 as usize].ty) {
                 let cell = array_cell_of(layout, Slot::Local(source.0))?;
@@ -3038,7 +3133,16 @@ fn compile_instruction(
             };
             if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
-                release_list_cell(body, cell, frame, heap_copy_index)?;
+                release_list_cell(
+                    body,
+                    type_definitions,
+                    &layout.structs,
+                    &function.locals[local.0 as usize].ty,
+                    cell,
+                    frame,
+                    cleanup_base,
+                    heap_copy_index,
+                )?;
             } else if heap_locals.contains(&local) {
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
                 emit_local_string_storage_cleanup(
@@ -3216,33 +3320,68 @@ fn compile_instruction(
         }
         InstructionKind::EndListLocal { local } => {
             let cell = array_cell_of(layout, Slot::Local(local.0))?;
-            release_list_cell(body, cell, frame, heap_copy_index)?;
+            release_list_cell(
+                body,
+                type_definitions,
+                &layout.structs,
+                &function.locals[local.0 as usize].ty,
+                cell,
+                frame,
+                cleanup_base,
+                heap_copy_index,
+            )?;
         }
         InstructionKind::ListPush { target, value } => {
             let list = match &function.locals[target.0 as usize].ty {
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
-            let Type::List(element) = *list else {
+            let Type::List(element) = list else {
                 return Err("List push target is not a List".into());
             };
-            let (width, _) = storage_layout(element)?;
+            let (width, _) = aggregate_layout(&layout.structs, element)?;
             let receiver = Operand {
                 source: Source::Local(*target),
                 mode: memobits_ir::UseMode::Read,
                 span: instruction.span,
             };
             emit_operand(body, function, param_count, &receiver, layout, frame)?;
-            emit_operand(body, function, param_count, value, layout, frame)?;
             body.instructions()
                 .i32_const(width as i32)
                 .call(heap_copy_index.ok_or("missing List allocation helper")? + 3)
+                .local_tee(cleanup_base)
                 .i32_eqz();
             trap_if(
                 body,
                 traps.site(instruction.span),
                 TrapReason::HeapAllocation,
             );
+            // Bitwise move into the freshly reserved slot.
+            body.instructions().local_get(cleanup_base);
+            emit_operand(body, function, param_count, value, layout, frame)?;
+            match element.as_ref() {
+                Type::Primitive(kind) => emit_store(body, *kind),
+                _ => {
+                    body.instruction(&WasmInstruction::I32Const(width as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                    if type_has_string_storage(type_definitions, element) {
+                        clear_moved_heap_source(
+                            body,
+                            function,
+                            param_count,
+                            value,
+                            layout,
+                            frame,
+                            type_definitions,
+                            cleanup_base,
+                            heap_locals,
+                        )?;
+                    }
+                }
+            }
         }
         InstructionKind::EmptyList => {
             let value = instruction.output.ok_or("empty List lacks a value")?;
@@ -3256,6 +3395,28 @@ fn compile_instruction(
                 mode: memobits_ir::UseMode::Read,
                 span: instruction.span,
             };
+            let list = match &function.locals[target.0 as usize].ty {
+                Type::Reference { inner, .. } => inner.as_ref(),
+                owner => owner,
+            };
+            let Type::List(element) = list else {
+                return Err("List clear target is not a List".into());
+            };
+            if type_has_string_storage(type_definitions, element) {
+                emit_operand(body, function, param_count, &receiver, layout, frame)?;
+                body.instruction(&WasmInstruction::LocalSet(cleanup_base));
+                emit_list_elements_cleanup(
+                    body,
+                    type_definitions,
+                    &layout.structs,
+                    element,
+                    cleanup_base,
+                    0,
+                    cleanup_base,
+                    0,
+                    heap_copy_index,
+                )?;
+            }
             emit_operand(body, function, param_count, &receiver, layout, frame)?;
             body.instructions().i32_const(0);
             list_descriptor::store_length(body);
@@ -3275,10 +3436,10 @@ fn compile_instruction(
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
-            let Type::List(element) = *list else {
+            let Type::List(element) = list else {
                 return Err("List pop target is not a List".into());
             };
-            let (width, _) = storage_layout(element)?;
+            let (width, _) = aggregate_layout(&layout.structs, element)?;
             emit_address(body, frame, tag);
             emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
             list_descriptor::load_length(body);
@@ -3299,8 +3460,21 @@ fn compile_instruction(
                 .i32_const(width as i32)
                 .i32_mul()
                 .i32_add();
-            emit_load(body, element);
-            emit_store(body, element);
+            match element.as_ref() {
+                Type::Primitive(kind) => {
+                    emit_load(body, *kind);
+                    emit_store(body, *kind);
+                }
+                _ => {
+                    // The element moves bitwise into the Option payload; the
+                    // shortened list no longer owns the vacated slot.
+                    body.instruction(&WasmInstruction::I32Const(width as i32));
+                    body.instruction(&WasmInstruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+            }
             emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
             body.instructions().local_get(scratch);
             list_descriptor::store_length(body);
@@ -3323,8 +3497,11 @@ fn compile_instruction(
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
-            let Type::List(element) = *owner_type else {
+            let Type::List(element) = owner_type else {
                 return Err("List element read source is not a List".into());
+            };
+            let Type::Primitive(element) = **element else {
+                return Err("List get and read require a primitive element".into());
             };
             let (width, _) = storage_layout(element)?;
             emit_operand(body, function, param_count, index, layout, frame)?;
@@ -3378,7 +3555,12 @@ fn compile_instruction(
                     };
                     (element, Some(len))
                 }
-                Type::List(element) => (element, None),
+                Type::List(element) => {
+                    let Type::Primitive(element) = *element else {
+                        return Err("collection search requires primitive List elements".into());
+                    };
+                    (element, None)
+                }
                 _ => return Err("collection search requires an Array or List".into()),
             };
             let (width, _) = storage_layout(element)?;
@@ -3976,16 +4158,20 @@ fn compile_instruction(
         InstructionKind::ElementAddr { base, index, .. } => {
             let output = output.ok_or("element address lacks an output")?;
             // The base is an array owner (its operand is the cell address) or a
-            // reference to an array (its operand is the owner's address).
-            let (len, element) = match value_type(function, base)? {
-                Type::Array { element, len } => (len, element),
-                Type::Reference { inner, .. } => match *inner {
-                    Type::Array { element, len } => (len, element),
-                    _ => return Err("element address base is not an array".into()),
-                },
-                _ => return Err("element address base is not an array".into()),
+            // reference to an array (its operand is the owner's address). A List
+            // owner or reference yields its descriptor address; the length and
+            // the element block are read from the descriptor.
+            let base_type = value_type(function, base)?;
+            let collection = match &base_type {
+                Type::Reference { inner, .. } => inner.as_ref(),
+                owner => owner,
             };
-            let (size, _) = aggregate_layout(&layout.structs, &element)?;
+            let (len, element) = match collection {
+                Type::Array { element, len } => (Some(*len), element.as_ref()),
+                Type::List(element) => (None, element.as_ref()),
+                _ => return Err("element address base is not an array or List".into()),
+            };
+            let (size, _) = aggregate_layout(&layout.structs, element)?;
             let wide = matches!(
                 value_type(function, index)?,
                 Type::Primitive(Primitive::I64 | Primitive::U64)
@@ -3994,15 +4180,31 @@ fn compile_instruction(
             // The unsigned comparison also rejects negative indices. The index
             // operand is read-only, so it is re-read for the address computation.
             emit_operand(body, function, param_count, index, layout, frame)?;
-            if wide {
-                body.instruction(&WasmInstruction::I64Const(i64::from(len)));
-                body.instruction(&WasmInstruction::I64GeU);
-            } else {
-                body.instruction(&WasmInstruction::I32Const(len as i32));
-                body.instruction(&WasmInstruction::I32GeU);
+            match len {
+                Some(len) if wide => {
+                    body.instruction(&WasmInstruction::I64Const(i64::from(len)));
+                    body.instruction(&WasmInstruction::I64GeU);
+                }
+                Some(len) => {
+                    body.instruction(&WasmInstruction::I32Const(len as i32));
+                    body.instruction(&WasmInstruction::I32GeU);
+                }
+                None => {
+                    emit_operand(body, function, param_count, base, layout, frame)?;
+                    list_descriptor::load_length(body);
+                    if wide {
+                        body.instruction(&WasmInstruction::I64ExtendI32U);
+                        body.instruction(&WasmInstruction::I64GeU);
+                    } else {
+                        body.instruction(&WasmInstruction::I32GeU);
+                    }
+                }
             }
             trap_if(body, site, TrapReason::IndexOutOfBounds);
             emit_operand(body, function, param_count, base, layout, frame)?;
+            if len.is_none() {
+                list_descriptor::load_address(body);
+            }
             emit_operand(body, function, param_count, index, layout, frame)?;
             if wide {
                 body.instruction(&WasmInstruction::I32WrapI64);
@@ -4182,7 +4384,16 @@ fn compile_instruction(
                         return Ok(());
                     }
                     if list {
-                        release_list_cell(body, cell, frame, heap_copy_index)?;
+                        release_list_cell(
+                            body,
+                            type_definitions,
+                            &layout.structs,
+                            &function.locals[target.0 as usize].ty,
+                            cell,
+                            frame,
+                            cleanup_base,
+                            heap_copy_index,
+                        )?;
                     } else {
                         emit_local_string_storage_cleanup(
                             body,

@@ -268,8 +268,9 @@ test fn primitive_lists() {
 // An element is a place. Use it in place as a borrow or share receiver or
 // argument, in an in-place match, or through a projection such as
 // items[i].text.len(). Moving an element out (let t := items[0];) is rejected
-// with TE022 (`replace`, `swap` and `pop` are planned), and so is repeating an
-// owner ([name; 2]) or overwriting an owning element in place.
+// with TE022 (`replace` and `swap` are planned; `pop` takes the last element
+// of a List), and so is repeating an owner ([name; 2]) or overwriting an
+// owning element in place.
 type Entry {
     label: string,
     weight: u32,
@@ -299,4 +300,111 @@ test fn owned_array_elements() {
     let row := [entries];
     // Nested element places: grid[i][j].
     assert(entry_weight(row[0][1].borrow()) == 7);
+}
+
+// General List<T>. A List holds any admitted element type: primitives of every
+// width, bool, char, string, structs, tuples, enums and arrays. A non-empty
+// literal with an expected List<T> builds the list: elements run once, in
+// written order, and owners move in. Growth moves the elements bitwise; the
+// list releases every element exactly once when it is dropped, cleared,
+// reassigned or goes out of scope (also on early returns). A nested
+// List<List<T>> is not supported yet and is rejected with TE017.
+fn word_total(words: borrow List<string>) -> u32 {
+    var total: u32 = 0;
+    loop word in words {
+        total += word.len();
+    }
+    total
+}
+fn add_word(words: share List<string>, word: string) {
+    words.push(word);
+}
+fn take_words(words: List<string>) -> u32 {
+    words.len() + words[0].len()
+}
+fn two_words() -> List<string> {
+    let first := "one".concat("");
+    let words: List<string> = [first, "two"];
+    words
+}
+test fn list_element_types() {
+    // Every width, bool and char; indexing copies a primitive element.
+    var wide: List<u64> = [5_000_000_000];
+    wide.push(7);
+    var signed: List<i16> = [-3, 4];
+    var flags: List<bool> = [true, false];
+    var marks: List<char> = ['a'];
+    marks.push('z');
+    signed[1] = 40;
+    assert(wide[0] == 5_000_000_000);
+    assert(wide.len() == 2);
+    assert(signed[0] + signed[1] == 37);
+    assert(flags[0] && !flags[1]);
+    assert(marks[1] == 'z');
+    // contains and index_of work for primitive elements of any width.
+    assert(wide.contains(7));
+    let found: u32 = match wide_index(wide.borrow(), 7) {
+        Some(position) => position,
+        None => 99,
+    };
+    assert(found == 1);
+}
+fn wide_index(items: borrow List<u64>, value: u64) -> u32? {
+    items.index_of(value)
+}
+test fn list_of_strings() {
+    var words: List<string> = two_words();
+    let more := "three".concat("");
+    add_word(words.share(), more);
+    let at: u32 = 2;
+    // items[i] is a bounds-checked place used in place; get stays primitive-only.
+    assert(words[0].len() == 3);
+    assert(size_of(words[at].borrow()) == 5);
+    assert(word_total(words.borrow()) == 11);
+    // pop moves the last element out; the shortened list no longer owns it.
+    let last := words.pop();
+    let last_length: u32 = match last {
+        Some(word) => word.len(),
+        None => 0,
+    };
+    assert(last_length == 5);
+    assert(words.len() == 2);
+    assert(take_words(words) == 5);
+    var scratch: List<string> = two_words();
+    scratch.clear();
+    assert(scratch.len() == 0);
+    scratch.push("again");
+    assert(scratch[0].len() == 5);
+    // Reassignment releases the old elements.
+    scratch = two_words();
+    assert(scratch.len() == 2);
+}
+test fn list_of_owner_structs() {
+    let head := Entry { label: "head".concat(""), weight: 1 };
+    var entries: List<Entry> = [head];
+    let tail := Entry { label: "tail!".concat(""), weight: 2 };
+    entries.push(tail);
+    // Projections, borrows and loop lending reach through the element.
+    assert(entries[1].label.len() == 5);
+    assert(entry_weight(entries[0].borrow()) == 5);
+    var weights: u32 = 0;
+    loop entry in entries {
+        weights += entry.weight + entry.label.len();
+    }
+    assert(weights == 12);
+    let taken := entries.pop();
+    let taken_weight: u32 = match taken {
+        Some(entry) => entry.weight,
+        None => 0,
+    };
+    assert(taken_weight == 2);
+    assert(entries.len() == 1);
+}
+test fn list_of_tuples_and_arrays() {
+    let name := "pair".concat("");
+    var pairs: List<(string, u32)> = [];
+    pairs.push((name, 5));
+    assert(pairs[0].1 + pairs[0].0.len() == 9);
+    let rows: List<array<u32, 2>> = [[1, 2], [3, 4]];
+    assert(rows[1][0] + rows[0][1] == 5);
 }

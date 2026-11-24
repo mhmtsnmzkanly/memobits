@@ -33,10 +33,11 @@ pub(super) fn load_allocation(body: &mut Function) {
     body.instruction(&Instruction::I32Load(field(ALLOCATION_OFFSET)));
 }
 
-pub(super) fn clear_allocation(body: &mut Function) {
-    body.instructions()
-        .i32_const(0)
-        .i32_store(field(ALLOCATION_OFFSET));
+/// Zero the whole descriptor at the address on the stack. Used after a move or
+/// a release so a later visit of the slot sees an empty List and never walks
+/// elements that now belong to another owner or were already released.
+pub(super) fn clear(body: &mut Function) {
+    initialize_empty(body);
 }
 
 fn field(offset: u64) -> MemArg {
@@ -46,18 +47,20 @@ fn field(offset: u64) -> MemArg {
     }
 }
 
-/// Append a single primitive. A failed reserve leaves the old owner intact.
-pub(super) fn push(reserve: u32, release: u32) -> Function {
+/// Grow the list by one uninitialized element slot and return its address, or
+/// zero when the reservation fails (the old owner is left intact). Growth moves
+/// the existing elements bitwise into the new block and releases only the old
+/// block, never the elements it held. The caller initializes the slot.
+pub(super) fn append(reserve: u32, release: u32) -> Function {
     const OWNER: u32 = 0;
-    const VALUE: u32 = 1;
-    const WIDTH: u32 = 2;
-    const LENGTH: u32 = 3;
-    const OLD: u32 = 4;
-    const BLOCK: u32 = 5;
-    const DATA: u32 = 6;
-    const USED: u32 = 7;
-    const REQUIRED: u32 = 8;
-    const WIDE: u32 = 9;
+    const WIDTH: u32 = 1;
+    const LENGTH: u32 = 2;
+    const OLD: u32 = 3;
+    const BLOCK: u32 = 4;
+    const DATA: u32 = 5;
+    const USED: u32 = 6;
+    const REQUIRED: u32 = 7;
+    const WIDE: u32 = 8;
     const MAX_BYTES: i64 =
         (memory::MAX_PAGES * memory::PAGE_BYTES) as i64 - string_heap::HEADER_BYTES as i64;
 
@@ -145,19 +148,6 @@ pub(super) fn push(reserve: u32, release: u32) -> Function {
         .i32_const(string_heap::HEADER_BYTES)
         .i32_add()
         .local_set(DATA);
-    for (width, element) in [(1, Primitive::U8), (4, Primitive::U32)] {
-        body.instructions()
-            .local_get(WIDTH)
-            .i32_const(width)
-            .i32_eq()
-            .if_(BlockType::Empty)
-            .local_get(DATA)
-            .local_get(USED)
-            .i32_add()
-            .local_get(VALUE);
-        super::emit_store(&mut body, element);
-        body.instructions().end();
-    }
     body.instructions()
         .local_get(OWNER)
         .local_get(DATA)
@@ -177,7 +167,9 @@ pub(super) fn push(reserve: u32, release: u32) -> Function {
         .local_get(OLD)
         .call(release)
         .end()
-        .i32_const(1)
+        .local_get(DATA)
+        .local_get(USED)
+        .i32_add()
         .end();
     body
 }

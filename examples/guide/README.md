@@ -40,7 +40,7 @@ The report lists every test as `test <module>::<name> ... ok` and ends with the
 summary line below (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
 ```text
-test result: ok. 78 passed; 0 failed; 0 filtered out
+test result: ok. 82 passed; 0 failed; 0 filtered out
 ```
 
 `mb test` runs each test in a fresh instance and exits 1 if any fails. Add a

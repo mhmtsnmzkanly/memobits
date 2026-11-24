@@ -33,8 +33,51 @@ pub(super) fn validate_string_struct_borrows(
         ));
     }
 
+    // A read-only reference local that is only ever initialized from an element
+    // address (the binding of `loop x in items` over non-copyable List elements)
+    // is a lent element: it behaves like a borrowed parameter.
+    let element_producers: HashMap<_, _> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.output.map(|output| (output, instruction)))
+        .collect();
+    let lent_elements: HashSet<LocalId> = function
+        .locals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| LocalId(index as u32))
+        .filter(|local| {
+            let assignments: Vec<_> = function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match &instruction.kind {
+                    InstructionKind::Assign { target, value, .. } if target == local => Some(value),
+                    _ => None,
+                })
+                .collect();
+            matches!(
+                function.locals[local.0 as usize].ty,
+                Type::Reference {
+                    access: Access::Borrow,
+                    ..
+                }
+            ) && !function.parameter_locals.contains(local)
+                && !assignments.is_empty()
+                && assignments.iter().all(|value| {
+                    matches!(value.source, Source::Value(id)
+                    if element_producers.get(&id).is_some_and(|producer| matches!(
+                        producer.kind,
+                        InstructionKind::ElementAddr { access: Access::Borrow, .. }
+                    )))
+                })
+        })
+        .collect();
+
     if function.locals.iter().enumerate().any(|(index, local)| {
         is_string_struct_ref(&local.ty)
+            && !lent_elements.contains(&LocalId(index as u32))
             && !(function.parameter_locals.contains(&LocalId(index as u32))
                 && matches!(
                     local.ty,
@@ -118,6 +161,7 @@ pub(super) fn validate_string_struct_borrows(
             Type::Array { element, len } => {
                 *len != 0 && type_owns_string_storage(program, element, visited)
             }
+            Type::List(element) => type_owns_string_storage(program, element, visited),
             _ => false,
         }
     }
@@ -125,6 +169,7 @@ pub(super) fn validate_string_struct_borrows(
         program: &Program,
         function: &Function,
         structs: &[StructLayout],
+        lent_elements: &HashSet<LocalId>,
         source: Source,
         producers: &HashMap<memobits_ir::ValueId, &Instruction>,
         visited: &mut HashSet<memobits_ir::ValueId>,
@@ -141,8 +186,9 @@ pub(super) fn validate_string_struct_borrows(
                 let Type::Reference { access, inner } = &binding.ty else {
                     return false;
                 };
-                function.parameter_locals.contains(&local)
-                    && matches!(access, Access::Borrow | Access::Share)
+                (lent_elements.contains(&local)
+                    || (function.parameter_locals.contains(&local)
+                        && matches!(access, Access::Borrow | Access::Share)))
                     && owns_string(inner)
                     && function
                         .parameter_locals
@@ -173,7 +219,15 @@ pub(super) fn validate_string_struct_borrows(
                     } => base.source,
                     _ => return false,
                 };
-                rooted_at_named_owner(program, function, structs, base, producers, visited)
+                rooted_at_named_owner(
+                    program,
+                    function,
+                    structs,
+                    lent_elements,
+                    base,
+                    producers,
+                    visited,
+                )
             }
             _ => false,
         }
@@ -264,6 +318,7 @@ pub(super) fn validate_string_struct_borrows(
                     program,
                     function,
                     structs,
+                    &lent_elements,
                     Source::Value(value),
                     &producers,
                     &mut HashSet::new(),
@@ -310,6 +365,22 @@ pub(super) fn validate_string_struct_borrows(
         }
     };
     let mut allowed = HashSet::new();
+    for instruction in instructions() {
+        if let InstructionKind::Assign {
+            target,
+            value:
+                Operand {
+                    source: Source::Value(value),
+                    ..
+                },
+            ..
+        } = &instruction.kind
+        {
+            if lent_elements.contains(target) {
+                allowed.insert(*value);
+            }
+        }
+    }
     let mut forwarded_parameter = false;
     for instruction in instructions() {
         let InstructionKind::Call {
@@ -454,11 +525,12 @@ pub(super) fn supported_type(ty: &Type) -> bool {
     match ty {
         Type::Primitive(_) => true,
         // A struct or enum is an inline frame-cell value, passed internally by address.
-        Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) => true,
+        Type::String | Type::Struct(_) | Type::Enum(_) => true,
+        Type::List(element) => supported_type(element),
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
-        } if matches!(inner.as_ref(), Type::List(_)) => true,
+        } if matches!(inner.as_ref(), Type::List(_)) => supported_type(inner),
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
