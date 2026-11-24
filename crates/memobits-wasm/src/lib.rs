@@ -21,6 +21,7 @@ use wasm_encoder::{
 };
 
 mod arrays;
+mod interpolation;
 mod layout;
 mod list_descriptor;
 mod memory;
@@ -802,6 +803,13 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 InstructionKind::InitConcatString { strings, .. } => {
                     strings.iter().for_each(&mut count)
                 }
+                InstructionKind::InitInterpolatedString { parts, .. } => {
+                    for part in parts {
+                        if let memobits_ir::InterpolationPart::Value(operand) = part {
+                            count(operand);
+                        }
+                    }
+                }
                 InstructionKind::Store { reference, value } => {
                     count(reference);
                     count(value);
@@ -1348,23 +1356,33 @@ impl<'a> StringData<'a> {
         };
         for function in functions {
             for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
-                let InstructionKind::Constant(Constant::String(text)) = &instruction.kind else {
-                    continue;
+                let texts: Vec<&'a String> = match &instruction.kind {
+                    InstructionKind::Constant(Constant::String(text)) => vec![text],
+                    InstructionKind::InitInterpolatedString { parts, .. } => parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            memobits_ir::InterpolationPart::Text(text) => Some(text),
+                            memobits_ir::InterpolationPart::Value(_) => None,
+                        })
+                        .collect(),
+                    _ => continue,
                 };
-                if data.offsets.contains_key(text.as_str()) {
-                    continue;
+                for text in texts {
+                    if data.offsets.contains_key(text.as_str()) {
+                        continue;
+                    }
+                    let layout_error = "String literals exceed the supported Wasm memory size";
+                    let len = u32::try_from(text.len()).map_err(|_| layout_error)?;
+                    let size = string_descriptor::SIZE
+                        .checked_add(len)
+                        .ok_or(layout_error)?;
+                    let descriptor = layout.reserve(size).map_err(|_| layout_error)?;
+                    let address = descriptor + string_descriptor::SIZE;
+                    data.start.get_or_insert(descriptor);
+                    data.offsets.insert(text.as_str(), descriptor);
+                    data.bytes.extend(string_descriptor::encode(address, len));
+                    data.bytes.extend(text.as_bytes());
                 }
-                let layout_error = "String literals exceed the supported Wasm memory size";
-                let len = u32::try_from(text.len()).map_err(|_| layout_error)?;
-                let size = string_descriptor::SIZE
-                    .checked_add(len)
-                    .ok_or(layout_error)?;
-                let descriptor = layout.reserve(size).map_err(|_| layout_error)?;
-                let address = descriptor + string_descriptor::SIZE;
-                data.start.get_or_insert(descriptor);
-                data.offsets.insert(text, descriptor);
-                data.bytes.extend(string_descriptor::encode(address, len));
-                data.bytes.extend(text.as_bytes());
             }
         }
         Ok(data)
@@ -1508,7 +1526,15 @@ fn encode_frames_traced(
             .flat_map(|block| &block.instructions)
             .any(|inst| matches!(inst.kind, InstructionKind::ListPush { .. }))
     });
+    let has_interpolation = reachable.iter().any(|id| {
+        program.functions[*id as usize]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|inst| matches!(inst.kind, InstructionKind::InitInterpolatedString { .. }))
+    });
     let use_heap = has_list_push
+        || has_interpolation
         || reachable.iter().any(|id| {
             let facts = &heap_strings[*id as usize];
             !facts.locals.is_empty() || facts.returns_heap_ok
@@ -1548,6 +1574,28 @@ fn encode_frames_traced(
             functions.function(signatures.len() as u32 + prior);
             (selected.len() as u32 + prior, program)
         });
+    let fmt = has_interpolation.then(|| {
+        let prior = u32::from(entry.is_some())
+            + if use_heap {
+                3 + u32::from(has_list_push)
+            } else {
+                0
+            }
+            + u32::from(utf8.is_some());
+        types
+            .ty()
+            .function([ValType::I64, ValType::I32], [ValType::I32]); // int_len
+        types
+            .ty()
+            .function([ValType::I32, ValType::I64, ValType::I32], [ValType::I32]); // int_write
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32], [ValType::I32]); // char_write
+        for offset in 0..interpolation::HELPER_COUNT {
+            functions.function(signatures.len() as u32 + prior + offset);
+        }
+        selected.len() as u32 + prior
+    });
     let has_frames = reachable.iter().any(|id| {
         host_import(&program.functions[*id as usize]).is_none() && sizes[*id as usize] != 0
     });
@@ -1584,6 +1632,7 @@ fn encode_frames_traced(
             &heap_strings[*id as usize].locals,
             heap_copy_index,
             utf8,
+            fmt,
             &mut traps,
         )?);
     }
@@ -1608,6 +1657,11 @@ fn encode_frames_traced(
     }
     if utf8.is_some() {
         code.function(&utf8::validator());
+    }
+    if fmt.is_some() {
+        code.function(&interpolation::int_len());
+        code.function(&interpolation::int_write());
+        code.function(&interpolation::char_write());
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
@@ -1716,6 +1770,7 @@ fn compile_function(
     heap_locals: &HashSet<LocalId>,
     heap_copy_index: Option<u32>,
     utf8: Option<(u32, &Program)>,
+    fmt: Option<u32>,
     traps: &mut Traps,
 ) -> Result<WasmFunction, String> {
     let layout = FrameLayout::for_function_in(structs, function, stack_size)
@@ -1853,6 +1908,7 @@ fn compile_function(
                 &program.types,
                 heap_copy_index,
                 utf8,
+                fmt,
                 traps,
             )?;
         }
@@ -3146,6 +3202,7 @@ fn compile_instruction(
     type_definitions: &[TypeDef],
     heap_copy_index: Option<u32>,
     utf8: Option<(u32, &Program)>,
+    fmt: Option<u32>,
     traps: &mut Traps,
 ) -> Result<(), String> {
     let output = instruction
@@ -3229,6 +3286,24 @@ fn compile_instruction(
             if heap_locals.contains(local) {
                 release_string_local(body, *local, layout, frame, heap_copy_index)?;
             }
+        }
+        InstructionKind::InitInterpolatedString { target, parts } => {
+            interpolation::emit(
+                body,
+                instruction,
+                function,
+                param_count,
+                scratch64,
+                cleanup_base,
+                layout,
+                frame,
+                strings,
+                heap_copy_index,
+                fmt,
+                traps,
+                *target,
+                parts,
+            )?;
         }
         InstructionKind::InitConcatString { target, strings } => {
             for source in strings {

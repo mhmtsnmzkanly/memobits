@@ -278,7 +278,7 @@ fn grouped_symbol_imports_expand_to_individual_bindings() {
 
 #[test]
 fn string_literals_preserve_utf8_and_quoted_byte_spans() {
-    let source = "fn f() { let empty := \"\"; \"café 😀 // /* }\" }";
+    let source = "fn f() { let empty := \"\"; \"café 😀 // /* }}\" }";
     let result = parse(SourceId(0), source);
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     let ItemKind::Function { body, .. } = &result.module.items[0].kind else {
@@ -287,14 +287,19 @@ fn string_literals_preserve_utf8_and_quoted_byte_spans() {
     let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
         panic!()
     };
-    for (expr, expected) in [
-        (value, ""),
-        (body.tail.as_deref().unwrap(), "café 😀 // /* }"),
+    // `}}` is an escaped brace, so the text holds a single `}`.
+    for (expr, expected, written) in [
+        (value, "", ""),
+        (
+            body.tail.as_deref().unwrap(),
+            "café 😀 // /* }",
+            "café 😀 // /* }}",
+        ),
     ] {
         assert_eq!(expr.kind, ExprKind::StringLiteral(expected.into()));
         assert_eq!(
             &source[expr.span.start..expr.span.end],
-            format!("\"{expected}\"")
+            format!("\"{written}\"")
         );
     }
 }

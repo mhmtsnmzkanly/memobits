@@ -746,6 +746,67 @@ Facts about the shipped behavior; no new decisions.
   incrementing, so the increment never runs at the type's maximum and no wrap
   or trap occurs.
 
+### Shipped G4 details (2026-11-24)
+
+- Grammar: a string literal body is split at lex time. `{{` and `}}` are
+  literal braces; `{name}` is a placeholder where `name` is one identifier
+  (a letter or `_`, then letters, digits or `_`; Unicode letters allowed). A
+  lone `}`, an unterminated `{`, an empty `{}` and anything else inside the
+  braces (spaces, expressions, field access, calls, `:` format specifiers,
+  nested braces, string literals) is a lexical error SE001 whose span covers
+  the offending braces. Backslash escapes remain unsupported. A literal
+  without placeholders is exactly the old static literal (`{{`/`}}` become
+  single braces), so programs without interpolation lower and encode
+  byte-identically (checked on all 14 example artifacts and 112 command
+  outputs with `.local-design/g4/equivalence.sh`). The AST node is
+  `ExprKind::Interpolation(Vec<InterpolationPart>)` with `Text` and
+  `Value(Path)` parts.
+- Typing: the identifier is read like any value read (NE001 unknown name, BE001
+  after a move, BE005 while it is exclusively shared). Supported value types
+  are all integer widths, `bool`, `char` and `string` (also through
+  `borrow`/`share` parameters). Floats are rejected with TE017 "formatting
+  floating-point values in string interpolation is not supported yet": a
+  shortest round-trip (Rust `Display`) float formatter needs Ryu-style
+  tables or big-number arithmetic that the hand-assembled guest backend does
+  not have, which is disproportionate for this step; the diagnostic keeps the
+  decision visible and floats can be added later without a source change.
+  Every other type (structs, enums, tuples, arrays, `List`, optionals,
+  functions) is TE017 "cannot interpolate a value of type 'T'". The result
+  type is `string`. Under `[build] alloc = false` an interpolating literal is
+  TE033 naming the setting.
+- Formatting: integers are decimal with `-` for negatives (signed values from
+  `i8` to `i64` and unsigned values to `u64` are exact, including the
+  minimum and maximum); `bool` is `true` / `false`; `char` is its UTF-8
+  bytes; `string` copies its bytes.
+- Lowering: each distinct interpolation shape (text pieces plus the types of
+  the interpolated values) becomes one synthesized internal function
+  `$interpolate$N` appended after the source functions (existing function IDs
+  do not move). Its parameters are the values (`borrow string` for strings,
+  by value for primitives) and its body is the new IR instruction
+  `InitInterpolatedString`, followed by the usual capture, scope end and
+  return. A literal lowers to an ordinary call: identifiers are read left to
+  right, once each (a String is borrowed for the call, a primitive is copied);
+  the call result is staged in a named owner local so every consumer sees a
+  plain String move, with exact cleanup on every path (early return,
+  `break`, `continue`, a later argument that exits, discarded statements).
+  This accepts interpolation wherever a String value is accepted: bindings,
+  arguments (owned and `.borrow()` temporaries), returns and tails, struct
+  field initializers, tuple/array/List elements, `Some(...)`, branch and
+  match values and replacement of a `var`.
+- Wasm: `InitInterpolatedString` computes the exact byte length of every part
+  in a 64-bit sum (text and string lengths, `int_len` for integers, constants
+  for `bool`, a comparison chain for `char`), traps with the heap-allocation
+  reason only when the sum exceeds the memory limit or the single block
+  reservation fails, then writes the parts in order into the one block with
+  `memory.copy`, `int_write` and `char_write`. No allocation, and so no trap,
+  happens after the block is reserved, and there is no quadratic concat.
+  The three formatting helpers are added to the module only when an
+  interpolation is reachable. Text pieces use the same static data table as
+  string literals.
+- Limits: floats (above); width, padding, precision and other format
+  specifiers; interpolating expressions or fields (bind a local first);
+  interpolation in `const` initializers (a later step); raw literals.
+
 ### Shipped G2 details (2026-11-24)
 
 - Divergence: an `if`/`else` or `match` arm that cannot fall through

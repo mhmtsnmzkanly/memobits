@@ -63,7 +63,8 @@ impl super::Program {
                 }
                 for (position, instruction) in block.instructions.iter().enumerate() {
                     match &instruction.kind {
-                        InstructionKind::InitConcatString { target, .. } => {
+                        InstructionKind::InitConcatString { target, .. }
+                        | InstructionKind::InitInterpolatedString { target, .. } => {
                             pending.push(Slot::Local(index, *target));
                         }
                         InstructionKind::StructNew { fields, .. } => {
@@ -1540,7 +1541,8 @@ pub(super) fn validate(
         let tuple_extractions = tuple_destructure_extractions(program, function, block);
         for (position, instruction) in block.instructions.iter().enumerate() {
             let initialized = match &instruction.kind {
-                InstructionKind::InitConcatString { target, .. } => Some(*target),
+                InstructionKind::InitConcatString { target, .. }
+                | InstructionKind::InitInterpolatedString { target, .. } => Some(*target),
                 InstructionKind::Extract { base, .. }
                     if tuple_extractions.contains_key(&position)
                         && base.mode == UseMode::Consume =>

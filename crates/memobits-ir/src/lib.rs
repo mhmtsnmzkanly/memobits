@@ -292,6 +292,16 @@ fn projection_base(base: &Operand, access: Access) -> Operand {
     base
 }
 
+/// One piece of an `InitInterpolatedString`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InterpolationPart {
+    /// Static UTF-8 text.
+    Text(String),
+    /// A read-only String borrow, or an integer, `Bool` or `Char` value that
+    /// is formatted as decimal digits, `true`/`false` or its UTF-8 bytes.
+    Value(Operand),
+}
+
 /// Initialisation of a freshly created array. Elements are never observably
 /// uninitialised.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,6 +319,14 @@ pub enum InstructionKind {
     InitConcatString {
         target: LocalId,
         strings: [Operand; 2],
+    },
+    /// Initialize an immutable lexical String owner from text and formatted
+    /// values: the total length is computed first, the block is allocated
+    /// once and every part is written in order. Value operands are read-only
+    /// String borrows or integer, `Bool` and `Char` values.
+    InitInterpolatedString {
+        target: LocalId,
+        parts: Vec<InterpolationPart>,
     },
     /// End lexical storage for a struct with String fields, even after a move.
     EndStructLocal {
@@ -1668,6 +1686,45 @@ fn validate_instruction(
                     Some(block),
                     "invalid result type for UTF-8 operation",
                 );
+            }
+        }
+        InstructionKind::InitInterpolatedString { target, parts } => {
+            let valid_local = function
+                .locals
+                .get(target.0 as usize)
+                .is_some_and(|local| local.ty == Type::String)
+                && !function.parameter_locals.contains(target);
+            if !valid_local || instruction.output.is_some() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "string interpolation requires a new String local and no output",
+                );
+            }
+            for part in parts {
+                let InterpolationPart::Value(source) = part else {
+                    continue;
+                };
+                let input = operand_type(program, function, source, errors, id, block);
+                let formattable = match &input {
+                    Some(Type::Reference {
+                        access: Access::Borrow,
+                        inner,
+                    }) => **inner == Type::String,
+                    Some(Type::Primitive(kind)) => {
+                        !matches!(kind, Primitive::Unit | Primitive::F32 | Primitive::F64)
+                    }
+                    _ => false,
+                };
+                if !formattable || source.mode != UseMode::Read {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "string interpolation requires read-only String borrows or integer, bool and char values",
+                    );
+                }
             }
         }
         InstructionKind::InitConcatString { target, strings } => {
@@ -4037,6 +4094,13 @@ fn validate_operand_escapes(
                 InstructionKind::InitConcatString { strings, .. } => {
                     for source in strings {
                         report(block_id, source, false, false);
+                    }
+                }
+                InstructionKind::InitInterpolatedString { parts, .. } => {
+                    for part in parts {
+                        if let InterpolationPart::Value(source) = part {
+                            report(block_id, source, false, false);
+                        }
                     }
                 }
                 InstructionKind::Call { callee, arguments } => {

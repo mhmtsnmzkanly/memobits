@@ -200,6 +200,14 @@ fn transfer_instruction(
             }
             state[target.0 as usize] = Availability::Available;
         }
+        InstructionKind::InitInterpolatedString { target, parts } => {
+            for part in parts {
+                if let memobits_ir::InterpolationPart::Value(source) = part {
+                    transfer_operand(source, state, diagnostics.as_deref_mut(), function);
+                }
+            }
+            state[target.0 as usize] = Availability::Available;
+        }
         InstructionKind::EndStructLocal { local }
         | InstructionKind::EndStringLocal { local }
         | InstructionKind::EndListLocal { local } => {

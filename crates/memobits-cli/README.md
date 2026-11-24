@@ -92,6 +92,19 @@ bound's type, otherwise `i32`; a mismatch is TE002, a non-integer bound TE017),
 are evaluated once, left to right, before the first iteration, and `i` is
 immutable. An empty range runs zero times; `..=` ending at the type's maximum
 terminates without overflow. A range outside a `loop ... in` header is SE002.
+A string literal may interpolate identifiers: `"x = {x}"` reads the in-scope
+local or parameter `x` without moving it (a `string` is borrowed, a number,
+`bool` or `char` is copied, and the usual loan rules apply: BE005 while it is
+exclusively shared, BE001 after a move). `{{` and `}}` write literal braces;
+a lone `}`, an unterminated or empty `{` and anything but one identifier inside
+the braces (expressions, field access, calls, format specifiers) is SE001.
+Integers of every width format in decimal (`-` for negatives, exact at the
+64-bit extremes), `bool` as `true`/`false`, `char` as its UTF-8 bytes and
+`string` as its bytes; floats are TE017 "not supported yet" and every other
+type TE017 "cannot interpolate a value of type". An interpolating literal is an
+owned heap `string` built with one length pass and one allocation, valid in
+any position that accepts a String value; under `[build] alloc = false` it is
+TE033. A literal without placeholders stays a static literal.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share
@@ -252,7 +265,7 @@ path `alloc::List<T>`); without the import `List` is an unknown type (NE003) and
 a note names the import. Renaming it (`use alloc::List as X;`) is not supported.
 With `alloc = false` the build is core-only: any `alloc` import is ME012 and
 every heap-producing string operation (`concat`, `push_str`, `to_utf8_string`)
-is TE033, both naming `[build] alloc`; string literals and read-only string
+and every interpolating string literal is TE033, both naming `[build] alloc`; string literals and read-only string
 operations (`len`, `byte_at`, `scalar_at`, `is_char_boundary`, `validate_utf8`)
 keep working, and the emitted module contains no allocator function, no
 `memory.grow` and a memory whose maximum equals its minimum. The setting

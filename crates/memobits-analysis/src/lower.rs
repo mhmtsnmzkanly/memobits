@@ -17,6 +17,8 @@ use memobits_syntax::{
 
 mod arrays;
 mod calls;
+mod interpolation;
+use interpolation::TakeFunctions;
 mod operations;
 use operations::{binary_op, primitive_type, unary_op};
 
@@ -126,6 +128,8 @@ pub fn lower_module(
         diagnostics.push(error(span, "package and module path must be nonempty"));
         return Err(diagnostics);
     }
+    let interpolations = interpolation::Interpolations::new(facts.functions.len());
+    interpolations.borrow_mut().enter(package, module_path);
     let mut functions = Vec::new();
     for (item, fact) in module
         .items
@@ -178,10 +182,11 @@ pub fn lower_module(
             }],
             entry: BlockId(0),
         };
-        let mut builder = Builder::new(function, fact, &facts.types);
+        let mut builder = Builder::new(function, fact, &facts.types, interpolations.clone());
         builder.lower_body(body);
         functions.push(builder.function);
     }
+    functions.extend(interpolations.take_functions());
     let program = Program {
         functions,
         types: program_types(&facts.types, package, |_| module_path.to_vec()),
@@ -283,6 +288,7 @@ pub fn lower_resolved(
     if !constant_errors.is_empty() {
         return Err(constant_errors);
     }
+    let interpolations = interpolation::Interpolations::new(typed.functions.len());
     let mut functions = Vec::with_capacity(typed.functions.len());
     for fact in &typed.functions {
         let Some(source) = resolution.modules.get(&fact.source_module) else {
@@ -460,7 +466,10 @@ pub fn lower_resolved(
             }],
             entry: BlockId(0),
         };
-        let mut builder = Builder::new(function, fact, &typed.types);
+        interpolations
+            .borrow_mut()
+            .enter(&project.manifest.package.name, &function.path.module);
+        let mut builder = Builder::new(function, fact, &typed.types, interpolations.clone());
         if !external {
             builder.lower_body(body);
         } else {
@@ -468,6 +477,7 @@ pub fn lower_resolved(
         }
         functions.push(builder.function);
     }
+    functions.extend(interpolations.take_functions());
     let program = Program {
         functions,
         types: program_types(&typed.types, &project.manifest.package.name, |module| {
@@ -596,6 +606,7 @@ struct LoopTargets {
     iterable_loan: Option<Operand>,
 }
 struct Builder<'a> {
+    interpolations: interpolation::SharedInterpolations,
     function: Function,
     facts: &'a FunctionFacts,
     types: &'a [TypeFact],
@@ -723,7 +734,12 @@ fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
 }
 
 impl<'a> Builder<'a> {
-    fn new(function: Function, facts: &'a FunctionFacts, types: &'a [TypeFact]) -> Self {
+    fn new(
+        function: Function,
+        facts: &'a FunctionFacts,
+        types: &'a [TypeFact],
+        interpolations: interpolation::SharedInterpolations,
+    ) -> Self {
         let expression_ids = facts
             .expressions
             .iter()
@@ -788,6 +804,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         Self {
+            interpolations,
             function,
             facts,
             types,
@@ -1292,6 +1309,11 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_expression_statement(&mut self, expr: &Expr) {
+        if matches!(expr.kind, ExprKind::Interpolation(_)) {
+            // The staged owner is released with the enclosing scope.
+            self.lower_expr(expr);
+            return;
+        }
         if let ExprKind::Call {
             callee, arguments, ..
         } = &expr.kind
@@ -1320,6 +1342,9 @@ impl<'a> Builder<'a> {
     }
 
     fn is_direct_string_call(&self, expr: &Expr) -> bool {
+        if matches!(expr.kind, ExprKind::Interpolation(_)) {
+            return true;
+        }
         let ExprKind::Call { callee, .. } = &expr.kind else {
             return false;
         };
@@ -1334,6 +1359,12 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_with_temporary_owner(&mut self, base: &Expr) -> Option<Operand> {
+        if matches!(base.kind, ExprKind::Interpolation(_)) {
+            // Already staged in a named owner by `lower_interpolation`.
+            let mut owner = self.lower_expr(base)?;
+            owner.mode = UseMode::Read;
+            return Some(owner);
+        }
         if let ExprKind::Call {
             callee, arguments, ..
         } = &base.kind
@@ -1557,6 +1588,7 @@ impl<'a> Builder<'a> {
     /// hidden local first so its construction has a direct binding.
     fn owned_result(&mut self, value: Operand, result: &Type) -> Option<Operand> {
         let value = self.owned_to(value, result)?;
+
         if matches!(result, Type::Struct(_))
             && self.is_string_owner_struct(result)
             && self.is_struct_literal_value(value)
@@ -2719,6 +2751,7 @@ impl<'a> Builder<'a> {
                 Constant::Integer((*value as u32).to_string()),
                 Type::Primitive(Primitive::Char),
             ),
+            ExprKind::Interpolation(parts) => self.lower_interpolation(expr, parts),
             ExprKind::StringLiteral(text) => {
                 self.constant(expr.span, Constant::String(text.clone()), Type::String)
             }

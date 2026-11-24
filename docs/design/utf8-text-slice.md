@@ -31,7 +31,10 @@ already exercises that distinction.
 
 Single-line double-quoted literals carry direct UTF-8 text, including the
 empty literal. The frontend rejects escapes, line breaks (LF and CR), and
-unterminated literals. Raw literals and interpolation remain pending.
+unterminated literals. Raw literals remain pending. A literal with `{name}`
+placeholders is an interpolation (see "Shipped G4 details" in
+[the decisions](decisions.md)): `{{` and `}}` are literal braces, and a
+literal without placeholders is unchanged static text.
 
 String literals retain their UTF-8 payload in typed IR. Ownership checks and
 execution use the same IR. Owned bindings and internal calls transfer the

@@ -16,8 +16,8 @@ use memobits_project::Project;
 use memobits_resolve::Resolution;
 use memobits_syntax::{
     Access, Block, Expr, ExprKind, FieldInit, FieldPattern, GenericParameter, GenericParameterKind,
-    ItemKind, MatchArm, Module, Parameter, Pattern, PatternKind, Statement, StatementKind,
-    TupleBinding, Type, WhereBound,
+    InterpolationPart, ItemKind, MatchArm, Module, Parameter, Pattern, PatternKind, Statement,
+    StatementKind, TupleBinding, Type, WhereBound,
 };
 
 mod arrays;
@@ -480,7 +480,8 @@ fn flow_expr(expr: &Expr) -> Flow {
         | ExprKind::StringLiteral(_)
         | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
-        | ExprKind::Path(_) => Flow::NEXT,
+        | ExprKind::Path(_)
+        | ExprKind::Interpolation(_) => Flow::NEXT,
         ExprKind::Array(elements) => elements
             .iter()
             .fold(Flow::NEXT, |flow, element| flow.then(flow_expr(element))),
@@ -3241,7 +3242,9 @@ impl Checker {
         }
 
         let temporary_inner = match (expected, &base.kind) {
-            (Some(inner @ Ty::String), ExprKind::Call { .. }) => Some(inner),
+            (Some(inner @ Ty::String), ExprKind::Call { .. } | ExprKind::Interpolation(_)) => {
+                Some(inner)
+            }
             (Some(inner @ Ty::List(_)), ExprKind::Call { callee, .. })
                 if self.direct_callee(callee) =>
             {
@@ -4961,6 +4964,34 @@ impl Checker {
                 chosen
             }
             ExprKind::StringLiteral(_) => Ty::String,
+            ExprKind::Interpolation(parts) => {
+                self.require_alloc(expr.span, "string interpolation");
+                for part in parts {
+                    let InterpolationPart::Value(value) = part else {
+                        continue;
+                    };
+                    self.allow_array_value(value);
+                    let ty = read_type(self.expr(value, None));
+                    match &ty {
+                        Ty::String | Ty::Error | Ty::Never => {}
+                        Ty::Primitive(kind) if integer(&ty) || matches!(*kind, "bool" | "char") => {}
+                        Ty::Primitive("f32" | "f64") => self.error(
+                            17,
+                            value.span,
+                            "formatting floating-point values in string interpolation is not supported yet",
+                        ),
+                        _ => self.error(
+                            17,
+                            value.span,
+                            format!(
+                                "cannot interpolate a value of type '{}'; string interpolation supports integers, bool, char and string",
+                                name(&ty)
+                            ),
+                        ),
+                    }
+                }
+                Ty::String
+            }
             ExprKind::CharLiteral(_) => Ty::Primitive("char"),
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {

@@ -33,7 +33,7 @@ impl Builder<'_> {
                             && !direct_result_enum
                             && self.is_string_owner_struct(&parameter.ty));
                 let temporary_receiver = match &argument.kind {
-                    ExprKind::Call { .. }
+                    ExprKind::Call { .. } | ExprKind::Interpolation(_)
                         if (direct_string || direct_list) && parameter.access == Access::Owned =>
                     {
                         Some(argument)
@@ -44,7 +44,10 @@ impl Builder<'_> {
                         match &conversion.kind {
                             ExprKind::Field { base, name }
                                 if name == "borrow"
-                                    && matches!(base.kind, ExprKind::Call { .. }) =>
+                                    && matches!(
+                                        base.kind,
+                                        ExprKind::Call { .. } | ExprKind::Interpolation(_)
+                                    ) =>
                             {
                                 Some(base.as_ref())
                             }

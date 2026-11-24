@@ -233,6 +233,10 @@ pub enum ExprKind {
     StringLiteral(String),
     CharLiteral(char),
     Bool(bool),
+    /// A string literal with at least one `{name}` placeholder. Parts keep
+    /// source order; adjacent text is merged and `{{` / `}}` are already
+    /// unescaped. Each value part is a single-identifier `Path` expression.
+    Interpolation(Vec<InterpolationPart>),
     Path(Vec<String>),
     Unary {
         operator: String,
@@ -274,6 +278,13 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum InterpolationPart {
+    /// Literal text, never empty.
+    Text(String),
+    /// An identifier read (a `Path` expression with one segment).
+    Value(Expr),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchArm {
@@ -578,6 +589,91 @@ fn lex_char(
     (cursor, TokenKind::CharLiteral('\u{fffd}'))
 }
 
+/// One piece of a string literal body after brace handling.
+#[derive(Debug, PartialEq)]
+enum RawPart {
+    Text(String),
+    /// An identifier with its byte range inside the literal body.
+    Name(String, usize, usize),
+}
+
+struct InterpolationError {
+    start: usize,
+    end: usize,
+    message: &'static str,
+}
+
+/// Split a literal body into text and `{identifier}` placeholders. `{{` and
+/// `}}` are literal braces. Anything else between braces, a lone `}` and an
+/// unterminated `{` are errors.
+fn split_interpolation(body: &str) -> Result<Vec<RawPart>, InterpolationError> {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    let mut chars = body.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        match c {
+            '{' if matches!(chars.peek(), Some((_, '{'))) => {
+                chars.next();
+                text.push('{');
+            }
+            '}' if matches!(chars.peek(), Some((_, '}'))) => {
+                chars.next();
+                text.push('}');
+            }
+            '}' => {
+                return Err(InterpolationError {
+                    start: offset,
+                    end: offset + 1,
+                    message: "unmatched `}` in string literal; write `}}` for a literal brace",
+                });
+            }
+            '{' => {
+                let start = offset + 1;
+                let Some(close) = body[start..].find('}').map(|index| start + index) else {
+                    return Err(InterpolationError {
+                        start: offset,
+                        end: body.len().min(offset + 1),
+                        message:
+                            "unterminated `{` in string literal; write `{{` for a literal brace",
+                    });
+                };
+                let name = &body[start..close];
+                let mut name_chars = name.chars();
+                let valid = name_chars
+                    .next()
+                    .is_some_and(|first| first == '_' || first.is_alphabetic())
+                    && name_chars.all(|c| c == '_' || c.is_alphanumeric());
+                if name.is_empty() {
+                    return Err(InterpolationError {
+                        start: offset,
+                        end: close + 1,
+                        message: "empty `{}` in string literal; name a value inside the braces or write `{{` for a literal brace",
+                    });
+                }
+                if !valid {
+                    return Err(InterpolationError {
+                        start: offset,
+                        end: close + 1,
+                        message: "only a plain identifier is allowed inside `{}` in a string literal (no expressions, field access, calls or format specifiers); write `{{` for a literal brace",
+                    });
+                }
+                if !text.is_empty() {
+                    parts.push(RawPart::Text(std::mem::take(&mut text)));
+                }
+                parts.push(RawPart::Name(name.into(), start, close));
+                while chars.peek().is_some_and(|(next, _)| *next <= close) {
+                    chars.next();
+                }
+            }
+            _ => text.push(c),
+        }
+    }
+    if !text.is_empty() {
+        parts.push(RawPart::Text(text));
+    }
+    Ok(parts)
+}
+
 fn lex_string(
     source: SourceId,
     text: &str,
@@ -601,6 +697,17 @@ fn lex_string(
             // Skip an escaped quote for recovery only. The literal is invalid.
             escaped = false;
         } else if c == '"' {
+            if let Err(error) = split_interpolation(&text[body..end]) {
+                diagnostics.push(diagnostic(
+                    1,
+                    Span {
+                        source,
+                        start: body + error.start,
+                        end: body + error.end,
+                    },
+                    error.message,
+                ));
+            }
             return (end + 1, TokenKind::StringLiteral(text[body..end].into()));
         } else if c == '\\' {
             if !reported_escape {
@@ -625,6 +732,37 @@ fn lex_string(
         "unterminated string literal",
     ));
     (end, TokenKind::StringLiteral(text[body..end].into()))
+}
+
+/// Build the expression for a string literal token. A literal without
+/// placeholders stays a plain literal (with `{{`/`}}` unescaped); an invalid
+/// body was already reported by the lexer and keeps its raw text.
+fn string_expression(literal: Span, text: String) -> ExprKind {
+    let Ok(parts) = split_interpolation(&text) else {
+        return ExprKind::StringLiteral(text);
+    };
+    if !parts.iter().any(|part| matches!(part, RawPart::Name(..))) {
+        return ExprKind::StringLiteral(match parts.into_iter().next() {
+            Some(RawPart::Text(text)) => text,
+            _ => String::new(),
+        });
+    }
+    ExprKind::Interpolation(
+        parts
+            .into_iter()
+            .map(|part| match part {
+                RawPart::Text(text) => InterpolationPart::Text(text),
+                RawPart::Name(name, start, end) => InterpolationPart::Value(Expr {
+                    span: Span {
+                        source: literal.source,
+                        start: literal.start + 1 + start,
+                        end: literal.start + 1 + end,
+                    },
+                    kind: ExprKind::Path(vec![name]),
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// Parse declarations, recovering at declaration and statement boundaries.
@@ -1991,8 +2129,9 @@ impl Parser {
                     ExprKind::Number(n)
                 }
                 TokenKind::StringLiteral(text) => {
+                    let literal = self.current().span;
                     self.bump();
-                    ExprKind::StringLiteral(text)
+                    string_expression(literal, text)
                 }
                 TokenKind::CharLiteral(value) => {
                     self.bump();

@@ -328,3 +328,67 @@ test fn text_length_and_concat() {
     assert(text().len() == 10);
     assert(character_roundtrip('😀'));
 }
+
+// String interpolation. In a string literal, `{name}` inserts the value of an
+// identifier that is in scope: a local, a parameter, or a `borrow`/`share`
+// parameter. Supported values are every integer width (decimal, `-` for a
+// negative number), `bool` (`true` / `false`), `char` (its UTF-8 bytes) and
+// `string` (its bytes). Floats, structs, enums, lists and other types are
+// rejected with a diagnostic; only a plain identifier may appear between the
+// braces (no expressions, field access or calls). A literal with a
+// placeholder builds an owned heap `string` in one allocation (the alloc
+// layer: `[build] alloc = false` rejects it with TE033). The identifiers are
+// read, not moved: a String stays usable and a number is copied. A literal
+// without placeholders is still a static literal.
+fn byte_at_is(value: borrow string, offset: u32, expected: u8) -> bool {
+    byte_is(value.byte_at(offset), expected)
+}
+fn interpolate_parts(count: u32, label: borrow string, ok: bool) -> string {
+    "{label}: {count} ({ok})"
+}
+test fn string_interpolation() {
+    let count: u32 = 42;
+    let label := "answer";
+    let line := "{label} = {count}";
+    // "answer = 42" is eleven bytes; text, a String and an integer are joined.
+    assert(line.len() == 11);
+    assert(byte_at_is(line.borrow(), 0, 97));
+    assert(byte_at_is(line.borrow(), 9, 52));
+    assert(byte_at_is(line.borrow(), 10, 50));
+    // The values are only read: `label` is still available, and a number
+    // keeps its value.
+    assert(label.len() == 6);
+    assert(count == 42);
+    let negative: i64 = -9_223_372_036_854_775_808;
+    assert("{negative}".len() == 20);
+    let flag := true;
+    let ch: char = '😀';
+    // `true` is 4 bytes, the emoji is 4 UTF-8 bytes.
+    assert("{flag}{ch}".len() == 8);
+    assert(interpolate_parts(7, label.borrow(), false).len() == 17);
+}
+// `{{` and `}}` write literal braces. A literal that only escapes braces has
+// no placeholder and stays a static literal.
+test fn interpolation_braces() {
+    let n: u8 = 5;
+    let braced := "{{{n}}}";
+    assert(braced.len() == 3);
+    assert(byte_at_is(braced.borrow(), 0, 123));
+    assert(byte_at_is(braced.borrow(), 1, 53));
+    assert(byte_at_is(braced.borrow(), 2, 125));
+    assert("{{}}".len() == 2);
+    // Empty strings are valid parts, even when every part is empty.
+    let empty := "";
+    assert("{empty}{empty}".len() == 0);
+}
+// Reading an identifier for interpolation follows the loan rules of any read:
+// while an exclusive `share` of the value is alive the read is rejected
+// (BE005), and a moved String cannot be read (BE001).
+test fn interpolation_follows_loans() {
+    var title := "ab".concat("cd");
+    let view := title.share();
+    let size := view.len(); // the last use of the share
+    let copy := "{title}!"; // allowed after the share ended
+    assert(size == 4);
+    assert(copy.len() == 5);
+}

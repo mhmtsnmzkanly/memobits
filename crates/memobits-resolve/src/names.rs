@@ -1,7 +1,7 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_syntax::{
-    templates, Block, Expr, ExprKind, ItemKind, Module, PatternKind, StatementKind, TupleBinding,
-    Type, TypeArgument, TypeDefinition,
+    templates, Block, Expr, ExprKind, InterpolationPart, ItemKind, Module, PatternKind,
+    StatementKind, TupleBinding, Type, TypeArgument, TypeDefinition,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -694,6 +694,13 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Path(path) => self.qualified_path(path, expr.span),
+            ExprKind::Interpolation(parts) => {
+                for part in parts {
+                    if let InterpolationPart::Value(value) = part {
+                        self.expr(value);
+                    }
+                }
+            }
             ExprKind::Array(elements) => {
                 for element in elements {
                     self.expr(element);

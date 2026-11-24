@@ -78,7 +78,8 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
         | ExprKind::StringLiteral(_)
         | ExprKind::CharLiteral(_)
         | ExprKind::Bool(_)
-        | ExprKind::Path(_) => {}
+        | ExprKind::Path(_)
+        | ExprKind::Interpolation(_) => {}
         ExprKind::Array(elements) => {
             for element in elements {
                 check_expr(element, in_loop, diagnostics);

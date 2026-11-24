@@ -684,6 +684,13 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::StringScalarAt { source, offset }
         | InstructionKind::StringScalarRead { source, offset, .. } => vec![source, offset],
         InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
+        InstructionKind::InitInterpolatedString { parts, .. } => parts
+            .iter()
+            .filter_map(|part| match part {
+                memobits_ir::InterpolationPart::Value(operand) => Some(operand),
+                memobits_ir::InterpolationPart::Text(_) => None,
+            })
+            .collect(),
         InstructionKind::Store { reference, value } => vec![reference, value],
         InstructionKind::SwapPlaces { left, right } => vec![left, right],
         InstructionKind::ReplaceStringField { value, .. } => vec![value],
@@ -1622,6 +1629,25 @@ fn check_instruction(
                     infos,
                     diagnostics,
                 );
+            }
+        }
+        InstructionKind::InitInterpolatedString { parts, .. } => {
+            for part in parts {
+                let memobits_ir::InterpolationPart::Value(reference) = part else {
+                    continue;
+                };
+                if type_at(function, reference.source).is_some_and(is_reference) {
+                    check_reference_read(
+                        program,
+                        function,
+                        state,
+                        reference,
+                        instruction.span,
+                        active_before,
+                        infos,
+                        diagnostics,
+                    );
+                }
             }
         }
         InstructionKind::ReplaceStringField { target, field, .. } => {
