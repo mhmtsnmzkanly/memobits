@@ -461,6 +461,7 @@ fn flow_block(block: &Block) -> Flow {
                 breaks: false,
             },
             StatementKind::ForEach { items, .. } => flow_expr(items),
+            StatementKind::RangeLoop { start, end, .. } => flow_expr(start).then(flow_expr(end)),
             StatementKind::Break => Flow {
                 falls: false,
                 breaks: true,
@@ -1687,6 +1688,46 @@ impl Checker {
             }
         }
     }
+    /// Type of a range loop's bounds: both bounds share one integer type; an
+    /// untyped literal bound takes the other bound's type.
+    fn range_bounds_type(&mut self, start: &Expr, end: &Expr) -> Ty {
+        fn untyped_literal(expr: &Expr) -> bool {
+            match &expr.kind {
+                ExprKind::Number(raw) => !raw.contains(['.', 'e', 'E']),
+                ExprKind::Unary { operator, operand } => {
+                    (operator == "-" || operator == "+") && untyped_literal(operand)
+                }
+                _ => false,
+            }
+        }
+        let (start_ty, end_ty) = if untyped_literal(start) && !untyped_literal(end) {
+            let end_ty = read_type(self.expr(end, None));
+            let start_ty = read_type(self.expr(start, Some(&end_ty)));
+            (start_ty, end_ty)
+        } else {
+            let start_ty = read_type(self.expr(start, None));
+            let end_ty = read_type(self.expr(end, Some(&start_ty)));
+            (start_ty, end_ty)
+        };
+        if matches!(start_ty, Ty::Error | Ty::Never) || matches!(end_ty, Ty::Error | Ty::Never) {
+            return Ty::Error;
+        }
+        for (ty, bound) in [(&start_ty, start), (&end_ty, end)] {
+            if !integer(ty) {
+                self.error(
+                    17,
+                    bound.span,
+                    format!("range bounds must be integers, found {}", name(ty)),
+                );
+                return Ty::Error;
+            }
+        }
+        if start_ty != end_ty {
+            self.ensure(&end_ty, &start_ty, end.span);
+            return Ty::Error;
+        }
+        start_ty
+    }
     fn ensure(&mut self, actual: &Ty, expected: &Ty, span: Span) {
         // A primitive read through a reference is copied implicitly.
         if let (Ty::Reference { inner, .. }, Ty::Primitive(_)) = (actual, expected) {
@@ -2552,6 +2593,36 @@ impl Checker {
                             Ty::Error
                         }
                     };
+                    let origin = statement as *const Statement as usize;
+                    let id = self.register_local(
+                        binding,
+                        &ty,
+                        false,
+                        IrAccess::Owned,
+                        statement.span,
+                        origin,
+                    );
+                    self.scopes.push(HashMap::from([(
+                        binding.clone(),
+                        Binding {
+                            ty,
+                            mutable: false,
+                            access: IrAccess::Owned,
+                            id,
+                            origin,
+                        },
+                    )]));
+                    self.block(body, None);
+                    self.scopes.pop();
+                }
+                StatementKind::RangeLoop {
+                    binding,
+                    start,
+                    end,
+                    body,
+                    ..
+                } => {
+                    let ty = self.range_bounds_type(start, end);
                     let origin = statement as *const Statement as usize;
                     let id = self.register_local(
                         binding,

@@ -86,6 +86,12 @@ binds as an owned `name`. `target = try expr;` leaves the target unchanged on a
 failure and `try expr;` discards one; `try` without `else` anywhere else is
 SE002, a non-fallible operand is TE029, a name on a `T?` is TE030, and a
 handler of the wrong type is TE013.
+`loop i in a..b` (half-open) and `loop i in a..=b` (inclusive) iterate an integer
+range: the bounds share one integer type (an untyped literal takes the other
+bound's type, otherwise `i32`; a mismatch is TE002, a non-integer bound TE017),
+are evaluated once, left to right, before the first iteration, and `i` is
+immutable. An empty range runs zero times; `..=` ending at the type's maximum
+terminates without overflow. A range outside a `loop ... in` header is SE002.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

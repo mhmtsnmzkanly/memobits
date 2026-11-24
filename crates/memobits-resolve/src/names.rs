@@ -613,6 +613,19 @@ impl Checker<'_> {
                     self.block(body);
                     self.scopes.pop();
                 }
+                StatementKind::RangeLoop {
+                    binding,
+                    start,
+                    end,
+                    body,
+                    ..
+                } => {
+                    self.expr(start);
+                    self.expr(end);
+                    self.scopes.push(BTreeSet::from([binding.clone()]));
+                    self.block(body);
+                    self.scopes.pop();
+                }
                 _ => {}
             }
         }

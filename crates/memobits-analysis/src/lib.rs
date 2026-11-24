@@ -51,6 +51,13 @@ fn check_block(block: &Block, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) 
                 check_expr(items, in_loop, diagnostics);
                 check_block(body, true, diagnostics);
             }
+            StatementKind::RangeLoop {
+                start, end, body, ..
+            } => {
+                check_expr(start, in_loop, diagnostics);
+                check_expr(end, in_loop, diagnostics);
+                check_block(body, true, diagnostics);
+            }
             StatementKind::Break if !in_loop => {
                 diagnostics.push(invalid_control(20, "break", statement.span));
             }

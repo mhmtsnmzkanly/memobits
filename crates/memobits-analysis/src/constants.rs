@@ -376,6 +376,13 @@ fn check_block(
                 check_expr(items, types, diagnostics);
                 check_block(body, types, diagnostics);
             }
+            StatementKind::RangeLoop {
+                start, end, body, ..
+            } => {
+                check_expr(start, types, diagnostics);
+                check_expr(end, types, diagnostics);
+                check_block(body, types, diagnostics);
+            }
         }
     }
     if let Some(tail) = &block.tail {

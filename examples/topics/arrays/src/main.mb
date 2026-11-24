@@ -4,27 +4,17 @@
 
 // Read-only access through a `borrow` parameter.
 fn sum(a: borrow array<i32, 3>) -> i32 {
-    var i := 0;
     var total := 0;
-    loop {
-        if i >= 3 {
-            break;
-        }
+    loop i in 0..3 {
         total += a[i];
-        i += 1;
     }
     total
 }
 
 // Mutation through a `share` parameter is visible to the caller.
 fn scale(a: share array<i32, 3>, k: i32) {
-    var i := 0;
-    loop {
-        if i >= 3 {
-            break;
-        }
+    loop i in 0..3 {
         a[i] *= k;
-        i += 1;
     }
 }
 
@@ -35,24 +25,14 @@ fn make(base: i32) -> array<i32, 3> {
 
 fn main() -> i32 ! Error {
     var squares: array<i32, 8> = [0; 8];
-    var i := 0;
-    loop {
-        if i >= 8 {
-            break;
-        }
+    loop i in 0..8 {
         squares[i] = i * i;
-        i += 1;
     }
     squares[3] += 100;
 
     var total := 0;
-    var j := 0;
-    loop {
-        if j >= 8 {
-            break;
-        }
+    loop j in 0..8 {
         total = total + squares[j];
-        j += 1;
     }
 
     // A primitive element is copied implicitly into a binding; `squares` stays intact.

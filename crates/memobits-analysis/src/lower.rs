@@ -1718,6 +1718,15 @@ impl<'a> Builder<'a> {
                 StatementKind::ForEach { items, body, .. } => {
                     self.lower_for_each(statement, items, body);
                 }
+                StatementKind::RangeLoop {
+                    start,
+                    end,
+                    inclusive,
+                    body,
+                    ..
+                } => {
+                    self.lower_range_loop(statement, start, end, *inclusive, body);
+                }
                 StatementKind::Break => {
                     let loop_targets = self.loops.last_mut().expect("checked break");
                     loop_targets.had_break = true;
@@ -2295,6 +2304,166 @@ impl<'a> Builder<'a> {
         self.lower_block(body);
         self.goto(header, Vec::new(), body.span);
         self.loops.pop().unwrap().had_break
+    }
+
+    /// `loop i in a..b` / `loop i in a..=b`. The bounds are evaluated once,
+    /// left to right, into hidden locals. A hidden cursor holds the next value;
+    /// it is copied into `i` and advanced before the body runs, so `continue`
+    /// reuses the header like a bare loop. Half-open: the header tests
+    /// `cursor < end`, so advancing cannot pass `end`. Inclusive: a hidden flag
+    /// says whether a value remains; the cursor is advanced only when it is not
+    /// yet `end`, so the increment never executes at the type's maximum.
+    fn lower_range_loop(
+        &mut self,
+        statement: &Statement,
+        start: &Expr,
+        end: &Expr,
+        inclusive: bool,
+        body: &Block,
+    ) -> Option<()> {
+        let span = statement.span;
+        let ty = self.function.locals[self.local(statement).0 as usize]
+            .ty
+            .clone();
+        let bool_ty = Type::Primitive(Primitive::Bool);
+        let first = self.lower_expr(start)?;
+        let first = self.scalar(first)?;
+        let first = self.owned(first)?;
+        let cursor = self.hidden_local("range cursor", ty.clone(), span);
+        self.initialize_local(cursor, first, span);
+        let last = self.lower_expr(end)?;
+        let last = self.scalar(last)?;
+        let last = self.owned(last)?;
+        let limit = self.hidden_local("range end", ty.clone(), span);
+        self.initialize_local(limit, last, span);
+        let remaining = if inclusive {
+            let flag = self.hidden_local("range remaining", bool_ty.clone(), span);
+            let from = self.capture(op(Source::Local(cursor), span))?;
+            let to = self.capture(op(Source::Local(limit), span))?;
+            let ordered = self.emit(
+                span,
+                InstructionKind::Binary {
+                    op: BinaryOp::LessEqual,
+                    left: read(from),
+                    right: read(to),
+                },
+                Some(bool_ty.clone()),
+            )?;
+            self.initialize_local(flag, consume(ordered), span);
+            Some(flag)
+        } else {
+            None
+        };
+
+        let header = self.new_block();
+        let entry = self.new_block();
+        let exit = self.new_block();
+        self.goto(header, Vec::new(), span);
+        self.current = Some(header);
+        let more = match remaining {
+            Some(flag) => self.capture(op(Source::Local(flag), span))?,
+            None => {
+                let position = self.capture(op(Source::Local(cursor), span))?;
+                let bound = self.capture(op(Source::Local(limit), span))?;
+                self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: BinaryOp::Less,
+                        left: read(position),
+                        right: read(bound),
+                    },
+                    Some(bool_ty.clone()),
+                )?
+            }
+        };
+        self.finish(
+            header,
+            TerminatorKind::Branch {
+                condition: read(more),
+                then_edge: Edge {
+                    target: entry,
+                    arguments: Vec::new(),
+                },
+                else_edge: Edge {
+                    target: exit,
+                    arguments: Vec::new(),
+                },
+            },
+            Some(span),
+        );
+        self.current = Some(entry);
+        let position = self.capture(op(Source::Local(cursor), span))?;
+        let value = self.owned(position)?;
+        self.initialize_local(self.local(statement), value, span);
+        let one = self.constant(span, Constant::Integer("1".into()), ty.clone())?;
+        match remaining {
+            None => {
+                let position = self.capture(op(Source::Local(cursor), span))?;
+                let next = self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: BinaryOp::Add,
+                        left: read(position),
+                        right: read(one),
+                    },
+                    Some(ty),
+                )?;
+                self.replace_local(cursor, consume(next), span, span);
+            }
+            Some(flag) => {
+                let position = self.capture(op(Source::Local(cursor), span))?;
+                let bound = self.capture(op(Source::Local(limit), span))?;
+                let at_end = self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: read(position),
+                        right: read(bound),
+                    },
+                    Some(bool_ty.clone()),
+                )?;
+                let last_value = self.new_block();
+                let advance = self.new_block();
+                let join = self.new_block();
+                let current = self.current?;
+                self.finish(
+                    current,
+                    TerminatorKind::Branch {
+                        condition: read(at_end),
+                        then_edge: Edge {
+                            target: last_value,
+                            arguments: Vec::new(),
+                        },
+                        else_edge: Edge {
+                            target: advance,
+                            arguments: Vec::new(),
+                        },
+                    },
+                    Some(span),
+                );
+                self.current = Some(last_value);
+                let no = self.constant(span, Constant::Bool(false), bool_ty)?;
+                self.replace_local(flag, consume(no), span, span);
+                self.goto(join, Vec::new(), span);
+                self.current = Some(advance);
+                let position = self.capture(op(Source::Local(cursor), span))?;
+                let next = self.emit(
+                    span,
+                    InstructionKind::Binary {
+                        op: BinaryOp::Add,
+                        left: read(position),
+                        right: read(one),
+                    },
+                    Some(ty),
+                )?;
+                self.replace_local(cursor, consume(next), span, span);
+                self.goto(join, Vec::new(), span);
+                self.current = Some(join);
+            }
+        }
+        self.lower_loop_body(body, header, exit, None);
+        self.current = Some(exit);
+        Some(())
     }
 
     fn lower_for_each(&mut self, statement: &Statement, items: &Expr, body: &Block) -> Option<()> {

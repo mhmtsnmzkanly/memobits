@@ -1,21 +1,16 @@
 fn factorial(count: i32) -> i32 {
     var result: i32 = 1;
-    var step: i32 = 1;
-    loop {
-        if step > count { break; }
+    // `1..=count` is inclusive; `1..count` would stop before `count`.
+    loop step in 1..=count {
         result = result * step;
-        step = step + 1;
     }
     result
 }
 
 fn sum_to(count: i32) -> i32 {
     var total: i32 = 0;
-    var step: i32 = 1;
-    loop {
-        if step > count { break; }
+    loop step in 1..=count {
         total = total + step;
-        step = step + 1;
     }
     total
 }

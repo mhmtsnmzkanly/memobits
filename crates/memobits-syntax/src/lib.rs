@@ -204,6 +204,16 @@ pub enum StatementKind {
         items: Expr,
         body: Block,
     },
+    /// `loop name in start..end { ... }` (half-open) or
+    /// `loop name in start..=end { ... }` (inclusive). Ranges are not values;
+    /// they exist only in this header.
+    RangeLoop {
+        binding: String,
+        start: Expr,
+        end: Expr,
+        inclusive: bool,
+        body: Block,
+    },
     Break,
     Continue,
 }
@@ -454,8 +464,8 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
             }
             TokenKind::Number(text[start..i].into())
         } else if let Some(op) = [
-            "::", ":=", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
-            "%=", "&=", "|=", "^=", "<<=", ">>=",
+            "..=", "..", "::", ":=", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=",
+            "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
         ]
         .into_iter()
         .find(|op| text[i..].starts_with(op))
@@ -625,6 +635,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
         tokens: lexed.tokens,
         pos: 0,
         no_struct: false,
+        range_bound: None,
         diagnostics: lexed.diagnostics,
         warnings: Vec::new(),
         pending: Vec::new(),
@@ -683,6 +694,9 @@ struct Parser {
     pos: usize,
     /// A following brace starts a control-flow block. Struct literals need parentheses.
     no_struct: bool,
+    /// Set while a `loop ... in` header's first bound is parsed (outside any
+    /// brackets): the only place a `..` may follow an expression.
+    range_bound: Option<usize>,
     diagnostics: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
     pending: Vec<Item>,
@@ -1191,7 +1205,7 @@ impl Parser {
         let mut fields = Vec::new();
         while !self.at("}") && !self.eof() {
             let start = self.current().span.start;
-            if self.at(".") {
+            if self.at("..") {
                 return self
                     .fail("`..` in a destructuring pattern is not supported; name every field");
             }
@@ -1339,11 +1353,32 @@ impl Parser {
             } else {
                 let binding = self.name()?;
                 self.expect("in")?;
-                let items = self.before_block()?;
-                StatementKind::ForEach {
-                    binding,
-                    items,
-                    body: self.block()?,
+                let saved = std::mem::replace(&mut self.no_struct, true);
+                self.range_bound = Some(self.pos);
+                let items = self.expr(0);
+                self.range_bound = None;
+                match items {
+                    Ok(start) if self.at("..") || self.at("..=") => {
+                        let inclusive = self.at("..=");
+                        self.bump();
+                        let end = self.expr(0);
+                        self.no_struct = saved;
+                        StatementKind::RangeLoop {
+                            binding,
+                            start,
+                            end: end?,
+                            inclusive,
+                            body: self.block()?,
+                        }
+                    }
+                    other => {
+                        self.no_struct = saved;
+                        StatementKind::ForEach {
+                            binding,
+                            items: other?,
+                            body: self.block()?,
+                        }
+                    }
                 }
             }
         } else if self.eat("break") {
@@ -1762,7 +1797,9 @@ impl Parser {
     /// Parse inside delimiters, where a brace can start a struct literal.
     fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         let saved = std::mem::replace(&mut self.no_struct, false);
+        let saved_range = self.range_bound.take();
         let result = parse(self);
+        self.range_bound = saved_range;
         self.no_struct = saved;
         result
     }
@@ -1844,8 +1881,16 @@ impl Parser {
         self.expect("}")?;
         Ok(fields)
     }
+    fn range_outside_header<T>(&mut self) -> PResult<T> {
+        self.fail(
+            "a range `a..b` or `a..=b` is not a value; it is only allowed as the iterable of `loop name in a..b { ... }`",
+        )
+    }
     fn expr(&mut self, minimum: u8) -> PResult<Expr> {
         let start = self.current().span.start;
+        if self.at("..") || self.at("..=") {
+            return self.range_outside_header();
+        }
         let mut left = if self.at("-") || self.at("!") || self.at("+") {
             let operator = match self.bump().kind {
                 TokenKind::Symbol(s) => s,
@@ -2088,6 +2133,12 @@ impl Parser {
                         "<<" | ">>" => 8,
                         "+" | "-" => 9,
                         "*" | "/" | "%" => 11,
+                        ".." | "..=" => {
+                            if self.range_bound.is_some() {
+                                break;
+                            }
+                            return self.range_outside_header();
+                        }
                         _ => break,
                     };
                     (operator.to_owned(), power)
@@ -2126,6 +2177,7 @@ mod warning_channel_tests {
             tokens: lexed.tokens,
             pos: 0,
             no_struct: false,
+            range_bound: None,
             diagnostics: lexed.diagnostics,
             warnings: Vec::new(),
             pending: Vec::new(),

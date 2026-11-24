@@ -720,6 +720,32 @@ Facts about the shipped behavior; no new decisions.
 - `~` bitwise complement for integers; `Self` names the extended type inside
   `extend` blocks.
 
+### Shipped G3 details (2026-11-24)
+
+- Syntax: `loop name in a..b` and `loop name in a..=b` are statements
+  (`StatementKind::RangeLoop`); `..` and `..=` are lexer tokens. Each bound is a
+  full expression (so `a + 1..b * 2` is `(a + 1)..(b * 2)`); a range is parsed
+  only directly in the header. Anywhere else (`let r := 0..5`, `..5`, an
+  argument, parentheses, a chain `0..3..5`) it is SE002 "a range ... is not a
+  value". There is no `step` and no reverse range; `5..0` is empty.
+- Typing: both bounds must have one integer type. An untyped integer literal
+  bound takes the other bound's type (with two literals the type is `i32`);
+  mismatched types are TE002, float, bool or other bounds are TE017 "range
+  bounds must be integers". The loop variable is immutable (TE004 on
+  assignment) and scoped to the body.
+- Semantics: `a` then `b` are evaluated once, left to right, before the first
+  iteration, even when the range is empty. A body that changes a variable used
+  as a bound does not change the iteration. `a..b` runs while `cursor < b`;
+  `a..=b` runs while `cursor <= b`; `break`, `continue`, early `return` and
+  cleanup of body owners are those of other loops.
+- Lowering: bounds and a cursor live in hidden locals. The cursor is copied into
+  the loop variable and advanced before the body, so `continue` re-enters the
+  header like a bare loop. Half-open advances with a checked `+ 1`, which
+  cannot overflow because `cursor < b`. Inclusive uses a hidden `remaining`
+  flag (initially `a <= b`): when `cursor == b` the flag is cleared instead of
+  incrementing, so the increment never runs at the type's maximum and no wrap
+  or trap occurs.
+
 ### Shipped G2 details (2026-11-24)
 
 - Divergence: an `if`/`else` or `match` arm that cannot fall through

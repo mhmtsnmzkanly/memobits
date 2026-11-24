@@ -89,6 +89,45 @@ test fn bit_operations() {
     assert(1 << 31 == high);
     assert(high >> 31 == 1);
 }
+// `loop i in a..b` counts from `a` up to but not including `b`; `a..=b`
+// includes `b`. Both bounds are evaluated once, left to right, before the
+// first iteration, and must have one integer type (an untyped literal takes
+// the other bound's type, otherwise i32). The variable `i` is immutable. An
+// empty range (`a >= b`, or `a > b` for `..=`) runs zero times and there are no
+// reverse ranges or steps. `..=` ending at the type's maximum terminates
+// without overflow. Ranges are not values: they only appear in this header.
+test fn range_loops() {
+    var sum := 0;
+    loop i in 0..5 { sum += i; }
+    assert(sum == 10);
+    loop i in 0..=5 { sum += i; }
+    assert(sum == 25);
+    var negative := 0;
+    loop i in -3..=-1 { negative += i; }
+    assert(negative == -6);
+    var runs := 0;
+    loop i in 5..0 { runs += 1; }
+    loop i in 3..=2 { runs += 1; }
+    assert(runs == 0);
+    // Bounds are evaluated once: changing `limit` in the body does not extend
+    // the loop. Other loop forms (`break`, `continue`) work as usual.
+    var limit: u8 = 3;
+    var seen := 0;
+    loop i in 0..limit {
+        limit = 200;
+        if i == 1 { continue; }
+        seen += 1;
+    }
+    assert(seen == 2);
+    // An inclusive range up to the maximum of its type visits every value.
+    let top: u8 = 255;
+    var count: u32 = 0;
+    loop i in 0..=top { count += 1; }
+    assert(count == 256);
+    var last: u8 = 0;
+    loop i in 250..=top { last = i; }
+    assert(last == 255);
+}
 // Integer arithmetic and array indexing are checked. Proven invalid cases
 // can fail compilation. Dynamic overflow, zero divisors and invalid indices
 // trap at runtime. Floats use IEEE arithmetic.
