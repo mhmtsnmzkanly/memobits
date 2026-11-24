@@ -127,9 +127,28 @@ uses are checked like a typed literal, so `let x: u32 = SMALL_U8` is TE002 and
 is a static literal). Constants are private unless `pub`, imported with
 `use m::NAME;` or named `m::NAME` (ME007 private, ME006 missing, ME008 when used as a
 type, ME009 as an entry or export), and share the value namespace with functions
-and types (ME005). A local name shadows a constant; assigning to one is TE004; a
-`match` arm named like a constant is TE017 (constant patterns are not supported
-yet).
+and types (ME005). A local name shadows a constant in expressions; assigning to one is TE004. In a
+`match` arm a bare name or `m::NAME` that is a visible constant is a constant
+pattern (see below); a repeat count may be any constant name (`[0; width]`).
+Patterns (G7): `match` accepts integer, bool, char and string literals (negative
+integers too) at any depth, constants as patterns, `p | q` alternatives and
+`pattern if condition => body` guards. A scrutinee may also be an integer, float, bool,
+char or string value (compared in place, never moved; floats take only `_`/a binding),
+where a lone binding arm (`n => ...`, a read-only reference for strings) is allowed. A
+literal must have the scrutinee's type (TE030: mismatch, out of range such as `300` for
+`u8` or `-1` for unsigned, float literal SE002). Literal domains are infinite except
+bool, so `1 => ..., 2 => ...` needs a `_` or binding arm (TE031 "add a `_` arm"); `true`
+and `false` cover bool, and the message names a missing `false`. Constants of `f32`/`f64`
+are TE017 as patterns; a variant of the matched enum wins over a constant of the same
+name. Every `|` alternative binds the same names with the same types (TE030). A guard is
+a `bool` (TE002) over its arm's bindings; guarded arms do not count toward exhaustiveness
+(TE031 says so) but are still checked for reachability (TE032). In an owned match the
+guard only reads the bindings (primitives copied, strings and other values through
+read-only references) and the payload moves into the arm after the guard holds; when it
+fails nothing was consumed and matching goes on. A guard cannot see an aggregate that
+owns Strings, or anything bound out of a String-owning tuple inside an enum payload, and
+a literal inside such a tuple is not supported yet (TE017); a literal on a `string ! E`
+`Ok` payload stays TE018.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

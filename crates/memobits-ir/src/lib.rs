@@ -339,6 +339,11 @@ pub enum InstructionKind {
         target: LocalId,
         strings: [Operand; 2],
     },
+    /// Compare two Strings byte for byte, producing a `bool`. Both operands
+    /// are read-only String borrows; nothing is moved or allocated.
+    StringEquals {
+        strings: [Operand; 2],
+    },
     /// Initialize an immutable lexical String owner from text and formatted
     /// values: the total length is computed first, the block is allocated
     /// once and every part is written in order. Value operands are read-only
@@ -1770,6 +1775,33 @@ fn validate_instruction(
                         id,
                         Some(block),
                         "concat requires read-only String borrows",
+                    );
+                }
+            }
+        }
+        InstructionKind::StringEquals { strings } => {
+            if instruction
+                .output
+                .map(|output| &function.values[output.0 as usize])
+                != Some(&Type::Primitive(Primitive::Bool))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "string equality requires a bool output",
+                );
+            }
+            for source in strings {
+                let input = operand_type(program, function, source, errors, id, block);
+                if !matches!(input, Some(Type::Reference { access: Access::Borrow, inner }) if *inner == Type::String)
+                    || source.mode != UseMode::Read
+                {
+                    push(
+                        errors,
+                        id,
+                        Some(block),
+                        "string equality requires read-only String borrows",
                     );
                 }
             }
@@ -4127,7 +4159,8 @@ fn validate_operand_escapes(
                         report(block_id, value, true, false);
                     }
                 }
-                InstructionKind::InitConcatString { strings, .. } => {
+                InstructionKind::InitConcatString { strings, .. }
+                | InstructionKind::StringEquals { strings } => {
                     for source in strings {
                         report(block_id, source, false, false);
                     }

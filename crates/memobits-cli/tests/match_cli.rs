@@ -338,9 +338,9 @@ fn borrowed_and_place_scrutinees_match_in_place() {
 fn unsupported_pattern_forms_are_syntax_errors_with_hints() {
     let f = Fixture::new();
     for (pattern, hint) in [
-        ("1 => 0,", "literal patterns"),
-        ("Shape::Circle(1.0) => 0,", "literal patterns"),
-        ("Shape::Circle(r) if r > 1.0 => 0,", "guards"),
+        ("1.5 => 0,", "floating-point literals"),
+        ("Shape::Circle(1.0) => 0,", "floating-point literals"),
+        ("Shape::Circle { r } => 0,", "struct patterns"),
     ] {
         let text = f.error(
             &format!("{SHAPE}fn main() -> i32 {{ match Shape::Empty {{ {pattern} _ => 1 }} }}"),

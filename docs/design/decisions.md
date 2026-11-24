@@ -476,8 +476,8 @@ This section supersedes earlier spelling statements in this file, including
   owned parts exactly once; an in-place (borrowed) match copies primitive
   payloads and lends aggregate payloads read-only. No partial moves out of a
   live owner are introduced.
-- Literal patterns, or-patterns, guards and pattern bindings with `@` remain
-  open (not part of this decision).
+- Literal patterns, or-patterns and guards followed in G7 (see "Shipped G7
+  details"); pattern bindings with `@` remain open.
 
 ## Platform layers and memory model (2026-11-24, user decision)
 
@@ -823,8 +823,8 @@ Facts about the shipped behavior; no new decisions.
   `const` is now a reserved word (generic `<const N: u32>` is unchanged). The
   annotation is mandatory (SE002 otherwise). Allowed types: `i8`..`i64`,
   `u8`..`u64`, `f32`, `f64`, `bool`, `char`, `string`; anything else (aliases,
-  arrays, `String`, optionals) is TE017. A repeat count `[v; NAME]` accepts an
-  identifier that starts with an uppercase letter.
+  arrays, `String`, optionals) is TE017. A repeat count `[v; NAME]` accepted only an
+  identifier that starts with an uppercase letter (any name since G7).
 - Evaluation (`memobits-resolve/src/consts.rs`, after names, imports and
   visibility are validated, over every loaded module, used or not): a typed
   evaluator that follows the checker's literal rules (an untyped literal takes
@@ -861,15 +861,13 @@ Facts about the shipped behavior; no new decisions.
   (ME007), `pub` for other modules; a const cannot be an application entry or
   a library export (ME009) and is not a type (ME008). Locals, parameters,
   loop variables and tuple/destructure bindings shadow a constant; assigning
-  to one is TE004. A bare identifier in a `match` arm that names a visible
-  constant is TE017 (a literal-pattern decision belongs to G7: until then the
-  identifier would silently bind a new variable).
+  to one is TE004. A bare identifier in a `match` arm that named a visible
+  constant was TE017 until G7 (now a constant pattern, see G7).
 - Standalone commands `mb analyze` / `mb ownership` on one file fold that
   file's constants too (`fold_standalone_constants`); `mb syntax` only parses.
 - Limits: no `static`/global storage, no mutation, no calls (including
   `wrapping_*`/`checked_*` methods), no `if`/`match`/blocks in initializers, no
-  aggregates, no interpolation in initializers, no constant patterns, no
-  non-`u32` array lengths, no type aliases as the const type.
+  aggregates, no interpolation in initializers, no non-`u32` array lengths, no type aliases as the const type.
 
 ### Shipped G2 details (2026-11-24)
 
@@ -905,3 +903,79 @@ Facts about the shipped behavior; no new decisions.
   success payloads (bound, moved, discarded or overwritten) and handler locals.
   `Ok(Some(heap))`, `Ok(list)` constructors and a struct literal inside `Ok(...)`
   remain existing gates.
+
+### Shipped G7 details (2026-11-24)
+
+- Grammar: `PatternKind::{Literal, Constant, Or}` and `MatchArm.guard`. A
+  pattern is `alt (| alt)*`; an alternative is `_`, a literal (integer with an
+  optional `-`, `true`/`false`, char, string without placeholders), a name, a
+  variant path with sub-patterns, or a tuple/group; `(p | q)` groups. `|`
+  alternatives and sub-patterns nest at any depth. A guard is `if expr`
+  between the pattern and `=>` (any `bool` expression). Float literals,
+  struct patterns and `@` stay SE002. `[v; name]` repeat counts take any
+  identifier (an identifier after `;` cannot be anything else); an unknown or
+  non-`u32` name is reported by the const pass (NE001 / TE017).
+- Scrutinee types: besides enums and tuples, any integer, float, bool, char or
+  string value (or a reference to one). Such a scrutinee is always matched in
+  place and never moved (a string temporary is released after the match); a
+  lone binding arm is allowed for these types (an integer copy, a read-only
+  reference for strings) and stays TE030 for an enum or tuple scrutinee.
+  Floats accept only `_`/a binding (no float literal or constant pattern).
+- Literal semantics: equality in the scrutinee's type. Integers must fit the
+  type (TE030 "does not fit u8", also `-1` for unsigned); bool/char/string
+  literals need a bool/char/string position; strings compare length then bytes
+  in place (new IR instruction `StringEquals`: two read-only borrows, `bool`
+  output, no allocation, no move; static and heap strings alike).
+- Constants (`consts.rs` rewriter): a bare identifier that names a visible
+  `const` (including an `as` alias), or `m::NAME`, becomes
+  `PatternKind::Constant { path, value }` before analysis (a local of the same
+  name does not shadow it in a pattern). The checker lets a lone name that is a
+  variant of the matched enum stay that variant; otherwise it is the constant's
+  literal with the same type rules (a `u8` constant against an `i32` scrutinee
+  is TE030). `f32`/`f64` constants are TE017 as patterns. Any other bare
+  identifier is a binding. The `try ... else name` handler name is never a
+  constant.
+- Exhaustiveness (`types/patterns.rs`): the pattern matrix gained `Lit`
+  (integer/char/string: an infinite domain, so a literal never completes a
+  signature), bool as a two-constructor type (`false`/`true`) and `Or`
+  (expanded into rows when it heads a column; a head alternative is useful when
+  any alternative is). A guarded arm is checked for reachability but never
+  joins the matrix. TE031 names missing values (`false`, `Some(_)`, `(true, _)`)
+  and, when only `_` is missing, says to add a `_` or binding arm; with guards
+  present it notes that guarded arms do not count. TE032 is unchanged.
+- Or-patterns: each alternative is checked in its own scope; all must bind the
+  same names with the same types (TE030 for a missing name or a different
+  type); later alternatives reuse the first alternative's locals, so the arm body
+  exists once. The checker stores the or-free `alternatives` of each arm and
+  lowering emits one decision-tree leaf per alternative that binds and jumps to
+  the arm's single body block (no body duplication).
+- Lowering: the decision tree gained a literal column: test the first row's
+  literal (`==` after a `Load`, or `StringEquals`), rows with that literal or
+  an irrefutable pattern continue without the column, the rest continue on the
+  failing edge (after a failed bool test the other bool literal is certain).
+  All occurrences are references, so nested literals reach through
+  `VariantAddr`/`FieldAddr` like other sub-patterns.
+- Guard ownership rule: a guard never moves anything. For an in-place match
+  (references, element/field places, scalars, strings) the arm's bindings are
+  already read-only views; they are bound at the leaf, the guard runs and a
+  true guard jumps to the body. For an owned (consuming) match the checker
+  gives every binding a guard twin (a copy for primitives, a read-only
+  reference otherwise); the leaf binds the twins by address into the owner,
+  evaluates the guard, and only on `true` moves the real payloads out (so unbound
+  owned parts are released exactly once as before). On `false` the owner is
+  untouched and matching resumes with the rows after this one in the same
+  decision-tree state (later alternatives of the same arm are tried too). Each
+  leaf re-evaluates the guard expression (lowering duplicates guard code, never
+  arm bodies); guard temporaries are released inside the guard. Guards may use
+  `&&`/`||`, calls and `return`.
+- Limits: a guard of an owned match cannot see a binding of an aggregate that
+  owns Strings, or a binding inside a String-owning tuple that sits in an enum
+  payload (TE017; the backend cannot hold such a borrow in a local); a literal
+  inside such a tuple is TE017 too; a literal on the `Ok` payload of
+  `string ! E` stays TE018 (consuming-match rule); a variant mixing a String
+  payload with other payloads that leaves the String unbound still fails
+  validation (LE900/TE018) as before. `@` bindings, struct patterns, ranges and
+  float patterns remain open.
+- Tests: `crates/memobits-cli/tests/g7_patterns.rs` (20), parser/analysis tests
+  updated for the removed gates; guide `enums_outcomes.mb` (`literal_patterns`,
+  `constant_patterns`, `or_patterns`, `guards`: 109 tests).

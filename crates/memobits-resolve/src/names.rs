@@ -710,11 +710,12 @@ impl Checker<'_> {
                     self.pattern(slot);
                 }
             }
-            PatternKind::Tuple(elements) => {
+            PatternKind::Tuple(elements) | PatternKind::Or(elements) => {
                 for element in elements {
                     self.pattern(element);
                 }
             }
+            PatternKind::Literal(_) | PatternKind::Constant { .. } => {}
         }
     }
     fn expr(&mut self, expr: &Expr) {
@@ -820,6 +821,9 @@ impl Checker<'_> {
                 for arm in arms {
                     self.scopes.push(BTreeSet::new());
                     self.pattern(&arm.pattern);
+                    if let Some(guard) = &arm.guard {
+                        self.expr(guard);
+                    }
                     self.expr(&arm.body);
                     self.scopes.pop();
                 }

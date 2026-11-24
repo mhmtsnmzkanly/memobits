@@ -303,8 +303,9 @@ test-only `__test_memory` export, not by any language-level tag access.
 
 ### Still gated
 
-Nothing of B2's reference and place gating remains (see B3). Gated: nested
-patterns, literal patterns, guards, or-patterns, bare binding patterns (`x =>`),
+Nothing of B2's reference and place gating remains (see B3). Gated (as of B2;
+nested patterns shipped in N-PAT, literal, constant, or-patterns, guards and
+top-level bindings on scalar and string scrutinees in G7): `@` bindings,
 `..` in patterns, enum equality, and enums in `main` / `[export]` signatures.
 Everything in B3 and B4 above.
 
@@ -389,8 +390,8 @@ names); `memobits-wasm` (`VariantAddr` offset, no new layout).
 
 ### Gated, still
 
-Literal patterns, guards, or-patterns, `@` bindings, a top-level bare binding
-pattern, mutable matching (writes through payload bindings: TE004; matching a `share`
+`@` bindings, a top-level bare binding on an enum or tuple (literal, or-patterns,
+guards and constants shipped in G7), mutable matching (writes through payload bindings: TE004; matching a `share`
 does not make bindings writable), `==`/`!=` on enums (TE007), a match scrutinee
 projecting through a call result (`f().field`, TE017), enums in `main` /
 `[export]` signatures (LE900), reference-valued arm results and returning or

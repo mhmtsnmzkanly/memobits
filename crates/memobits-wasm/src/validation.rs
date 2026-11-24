@@ -459,6 +459,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         | InstructionKind::EndListLocal { .. }
         | InstructionKind::EmptyList
         | InstructionKind::InitConcatString { .. }
+        | InstructionKind::StringEquals { .. }
         | InstructionKind::InitInterpolatedString { .. }
         | InstructionKind::StringIsCharBoundary { .. }
         | InstructionKind::StringByteAt { .. }

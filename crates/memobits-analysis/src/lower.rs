@@ -37,7 +37,7 @@ fn struct_field_index(definition: &TypeFact, name: &str) -> Option<usize> {
 
 use crate::types::{
     check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
-    MatchPattern, PathTarget, SelectedCall, TypeFact, VariantUse,
+    MatchPattern, PathTarget, PatternLiteral, SelectedCall, TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -556,8 +556,15 @@ fn irrefutable_pattern(pattern: &MatchPattern) -> bool {
         MatchPattern::Wildcard | MatchPattern::Bind(_) => true,
         // A tuple has one constructor: it tests nothing by itself.
         MatchPattern::Tuple(args) => args.iter().all(irrefutable_pattern),
-        MatchPattern::Variant { .. } => false,
+        MatchPattern::Variant { .. } | MatchPattern::Literal(_) => false,
+        // Alternatives are expanded before lowering; kept for completeness.
+        MatchPattern::Or(alternatives) => alternatives.iter().any(irrefutable_pattern),
     }
+}
+/// A pattern that binds nothing and takes no part of the value: `_` or a
+/// literal (whose test has already passed at a leaf).
+fn ignores_value(pattern: &MatchPattern) -> bool {
+    matches!(pattern, MatchPattern::Wildcard | MatchPattern::Literal(_))
 }
 static MATCH_WILDCARD: MatchPattern = MatchPattern::Wildcard;
 /// One row of the match pattern matrix: the arm and its remaining patterns,
@@ -566,6 +573,12 @@ static MATCH_WILDCARD: MatchPattern = MatchPattern::Wildcard;
 struct MatchRow<'p> {
     arm: usize,
     patterns: Vec<&'p MatchPattern>,
+    /// The whole or-free alternative this row stands for; its bindings are
+    /// bound at the leaf.
+    full: &'p MatchPattern,
+    /// The same alternative over guard-phase locals (a guarded arm of a
+    /// consuming match).
+    guard_full: Option<&'p MatchPattern>,
 }
 impl<'p> MatchRow<'p> {
     /// The row with its pattern at `column` replaced by `replacement`.
@@ -573,14 +586,13 @@ impl<'p> MatchRow<'p> {
         let mut patterns = self.patterns.clone();
         patterns.splice(column..=column, replacement);
         Self {
-            arm: self.arm,
             patterns,
+            ..self.clone()
         }
     }
 }
 /// What the leaves of one match's decision tree need.
-struct MatchPlan<'p> {
-    arms: &'p [crate::types::MatchArmFact],
+struct MatchPlan {
     /// The block of each arm's body, entered from its leaves.
     bodies: Vec<BlockId>,
     /// The hidden owner of a consuming match.
@@ -3144,14 +3156,42 @@ impl<'a> Builder<'a> {
         // local the decision phase reads (the owner, or the reference to the
         // matched place of an in-place match).
         let (owner, root, root_ty) = if fact.borrowed {
+            let scrutinee_ty = self.ty(scrutinee);
             let reference = if matches!(
                 scrutinee.kind,
                 ExprKind::Index { .. } | ExprKind::Field { .. }
             ) {
                 let (root, projections) = self.lower_place(scrutinee)?;
                 self.address_chain(root, &projections, Access::Borrow, span)?
+            } else if matches!(scrutinee_ty, Some(Type::String)) {
+                // Matched in place: the string is read, never moved.
+                self.lower_read_receiver(scrutinee)?
+            } else if let Some(ty @ Type::Primitive(_)) = scrutinee_ty {
+                // A scalar is copied into a hidden cell the tests read.
+                let value = self.lower_expr(scrutinee)?;
+                let value = self.scalar(value)?;
+                // A copy: matching never consumes the variable it reads.
+                let value = self.owned(value)?;
+                let cell = self.hidden_local("match scrutinee", ty, span);
+                self.emit(
+                    span,
+                    InstructionKind::Assign {
+                        target: cell,
+                        value,
+                        initialize: true,
+                    },
+                    None,
+                );
+                self.borrow(op(Source::Local(cell), span), Access::Borrow)?
             } else {
-                self.lower_expr(scrutinee)?
+                let value = self.lower_expr(scrutinee)?;
+                match self.operand_type(value) {
+                    // A reference to a string is re-borrowed read-only.
+                    Some(Type::Reference { inner, .. }) if *inner == Type::String => {
+                        self.borrow(value, Access::Borrow)?
+                    }
+                    _ => value,
+                }
             };
             let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
                 unreachable!("checked borrowing match scrutinee")
@@ -3203,19 +3243,26 @@ impl<'a> Builder<'a> {
             id
         });
         let plan = MatchPlan {
-            arms: &fact.arms,
             bodies: arms.iter().map(|_| self.new_block()).collect(),
             owner,
             root,
             root_ty: root_ty.clone(),
         };
+        // One row per alternative of every `|`, all sharing the arm's body.
         let rows = fact
             .arms
             .iter()
             .enumerate()
-            .map(|(arm, fact)| MatchRow {
-                arm,
-                patterns: vec![&fact.pattern],
+            .flat_map(|(arm, fact)| {
+                fact.alternatives
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, alternative)| MatchRow {
+                        arm,
+                        patterns: vec![alternative],
+                        full: alternative,
+                        guard_full: fact.guard_alternatives.get(index),
+                    })
             })
             .collect();
         self.decide_match(
@@ -3273,7 +3320,7 @@ impl<'a> Builder<'a> {
     #[allow(clippy::too_many_arguments)]
     fn decide_match(
         &mut self,
-        plan: &MatchPlan<'a>,
+        plan: &MatchPlan,
         rows: Vec<MatchRow<'a>>,
         occurrences: Vec<MatchOccurrence>,
         owner_in_scope: bool,
@@ -3293,17 +3340,57 @@ impl<'a> Builder<'a> {
         else {
             let arm = first.arm;
             let pattern_span = arms[arm].pattern.span;
-            let pattern = &plan.arms[arm].pattern;
-            if plan.owner.is_none() {
-                let mut reference = op(Source::Local(plan.root), pattern_span);
-                reference.mode = UseMode::Borrow;
-                self.bind_in_place(pattern, reference, &plan.root_ty, pattern_span)?;
-            } else {
-                let cell = plan.owner.expect("consuming match owner");
-                self.move_out_of(pattern, cell, &plan.root_ty, owner_in_scope, pattern_span)?;
+            let pattern = first.full;
+            let Some(guard) = arms[arm].guard.as_ref() else {
+                self.bind_arm(plan, pattern, owner_in_scope, pattern_span)?;
+                self.goto(plan.bodies[arm], Vec::new(), pattern_span);
+                return Some(());
+            };
+            // A guarded arm: bind read-only views for the guard (nothing is
+            // moved yet), test it, and only on success take the arm for real.
+            // On failure matching resumes with the rows after this one.
+            let view = match plan.owner {
+                None => pattern,
+                Some(_) => first.guard_full.expect("guard-phase pattern"),
+            };
+            let mut reference = op(Source::Local(plan.root), pattern_span);
+            reference.mode = UseMode::Borrow;
+            self.bind_in_place(view, reference, &plan.root_ty, pattern_span)?;
+            let scope_start = self.owned_locals.len();
+            let held = self.lower_expr(guard);
+            let Some(held) = held else {
+                // The guard itself never completes.
+                self.owned_locals.truncate(scope_start);
+                return Some(());
+            };
+            let held = self.scalar(held)?;
+            let held = self.capture(held)?;
+            self.end_owned_locals(scope_start, guard.span);
+            self.owned_locals.truncate(scope_start);
+            let taken = self.new_block();
+            let failed = self.new_block();
+            let current = self.current.expect("guard block");
+            let edge = |target| Edge {
+                target,
+                arguments: Vec::new(),
+            };
+            self.finish(
+                current,
+                TerminatorKind::Branch {
+                    condition: read(held),
+                    then_edge: edge(taken),
+                    else_edge: edge(failed),
+                },
+                Some(guard.span),
+            );
+            self.current = Some(taken);
+            if plan.owner.is_some() {
+                self.bind_arm(plan, pattern, owner_in_scope, pattern_span)?;
             }
             self.goto(plan.bodies[arm], Vec::new(), pattern_span);
-            return Some(());
+            self.current = Some(failed);
+            let rest: Vec<MatchRow<'a>> = rows[1..].to_vec();
+            return self.decide_match(plan, rest, occurrences, owner_in_scope, arms, span);
         };
         let occurrence = occurrences[column].clone();
         let types = self.types;
@@ -3480,9 +3567,123 @@ impl<'a> Builder<'a> {
                 next.splice(column..column, children);
                 self.decide_match(plan, specialized, next, owner_in_scope, arms, span)?;
             }
+            Type::Primitive(_) | Type::String => {
+                let MatchPattern::Literal(literal) = first.patterns[column] else {
+                    unreachable!("a refutable scalar or string pattern is a literal")
+                };
+                // Test the first row's literal. Rows with that literal (or no
+                // test) continue without this column; the others continue on
+                // the failing edge, where the value is known to differ.
+                let matches = self.literal_test(&occurrence, literal, span)?;
+                let then_block = self.new_block();
+                let else_block = self.new_block();
+                let edge = |target| Edge {
+                    target,
+                    arguments: Vec::new(),
+                };
+                self.finish(
+                    current,
+                    TerminatorKind::Branch {
+                        condition: read(matches),
+                        then_edge: edge(then_block),
+                        else_edge: edge(else_block),
+                    },
+                    Some(span),
+                );
+                let passing = rows
+                    .iter()
+                    .filter(|row| match row.patterns[column] {
+                        MatchPattern::Literal(found) => found == literal,
+                        pattern => irrefutable_pattern(pattern),
+                    })
+                    .map(|row| row.replacing(column, Vec::new()))
+                    .collect();
+                let mut all_occurrences = rest_occurrences.clone();
+                all_occurrences.insert(column, occurrence.clone());
+                self.current = Some(then_block);
+                self.decide_match(plan, passing, rest_occurrences, owner_in_scope, arms, span)?;
+                let failing = rows
+                    .iter()
+                    .filter(|row| {
+                        !matches!(row.patterns[column], MatchPattern::Literal(found) if found == literal)
+                    })
+                    .map(|row| match (row.patterns[column], literal) {
+                        // `false` after a failed `true` test is certain.
+                        (MatchPattern::Literal(PatternLiteral::Bool(_)), _) => {
+                            row.replacing(column, vec![&MATCH_WILDCARD])
+                        }
+                        _ => row.clone(),
+                    })
+                    .collect();
+                self.current = Some(else_block);
+                self.decide_match(plan, failing, all_occurrences, owner_in_scope, arms, span)?;
+            }
             _ => unreachable!("checked match column type"),
         }
         Some(())
+    }
+    /// A `bool` operand: does the value `occurrence` refers to equal `literal`?
+    fn literal_test(
+        &mut self,
+        occurrence: &MatchOccurrence,
+        literal: &PatternLiteral,
+        span: Span,
+    ) -> Option<Operand> {
+        let bool_ty = Type::Primitive(Primitive::Bool);
+        let mut reference = op(Source::Local(occurrence.reference), span);
+        reference.mode = UseMode::Borrow;
+        if let PatternLiteral::String(text) = literal {
+            let expected = self.constant(span, Constant::String(text.clone()), Type::String)?;
+            let expected = self.borrow(expected, Access::Borrow)?;
+            reference.mode = UseMode::Read;
+            return self.emit(
+                span,
+                InstructionKind::StringEquals {
+                    strings: [reference, read(expected)],
+                },
+                Some(bool_ty),
+            );
+        }
+        let (constant, ty) = match literal {
+            PatternLiteral::Integer(value) => {
+                (Constant::Integer(value.clone()), occurrence.ty.clone())
+            }
+            PatternLiteral::Bool(value) => (Constant::Bool(*value), bool_ty.clone()),
+            PatternLiteral::Char(value) => (
+                Constant::Integer((*value as u32).to_string()),
+                Type::Primitive(Primitive::Char),
+            ),
+            PatternLiteral::String(_) => unreachable!("handled above"),
+        };
+        let found = self.load_element(reference, span)?;
+        let expected = self.constant(span, constant, ty)?;
+        self.emit(
+            span,
+            InstructionKind::Binary {
+                op: BinaryOp::Equal,
+                left: read(found),
+                right: read(expected),
+            },
+            Some(bool_ty),
+        )
+    }
+    /// Bind the arm's names at a leaf: copy or lend them out of the matched
+    /// place, or move them out of the consuming match's owner.
+    fn bind_arm(
+        &mut self,
+        plan: &MatchPlan,
+        pattern: &MatchPattern,
+        owner_in_scope: bool,
+        span: Span,
+    ) -> Option<()> {
+        match plan.owner {
+            None => {
+                let mut reference = op(Source::Local(plan.root), span);
+                reference.mode = UseMode::Borrow;
+                self.bind_in_place(pattern, reference, &plan.root_ty, span)
+            }
+            Some(cell) => self.move_out_of(pattern, cell, &plan.root_ty, owner_in_scope, span),
+        }
     }
     /// A reference local to payload `field` of `variant`, derived from the
     /// reference `base` (valid on the edge where `variant` is the tag).
@@ -3551,12 +3752,18 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<()> {
         match pattern {
-            MatchPattern::Wildcard => {}
+            MatchPattern::Wildcard | MatchPattern::Literal(_) => {}
+            MatchPattern::Or(_) => unreachable!("alternatives are expanded before lowering"),
             MatchPattern::Bind(local) => {
                 let local = local.expect("lowered match binding");
                 let value = if matches!(ty, Type::Primitive(_)) {
                     let loaded = self.load_element(reference, span)?;
                     self.owned(loaded)?
+                } else if matches!(reference.source, Source::Local(_)) {
+                    // The matched place itself (a whole-value binding): lend
+                    // it again so later arms can still test it.
+                    let lent = self.borrow(reference, Access::Borrow)?;
+                    consume(lent)
                 } else {
                     consume(reference)
                 };
@@ -3576,7 +3783,7 @@ impl<'a> Builder<'a> {
                 };
                 let payload = &self.types[id.0 as usize].variants[*variant as usize].payload;
                 for (field, arg) in args.iter().enumerate() {
-                    if matches!(arg, MatchPattern::Wildcard) {
+                    if ignores_value(arg) {
                         continue;
                     }
                     let child = self.variant_reference_operand(
@@ -3595,7 +3802,7 @@ impl<'a> Builder<'a> {
                 };
                 let fields = &self.types[id.0 as usize].fields;
                 for (field, arg) in args.iter().enumerate() {
-                    if matches!(arg, MatchPattern::Wildcard) {
+                    if ignores_value(arg) {
                         continue;
                     }
                     let field_ty = fields[field].ty.clone();
@@ -3621,7 +3828,8 @@ impl<'a> Builder<'a> {
     ) -> Option<()> {
         let types = self.types;
         match pattern {
-            MatchPattern::Wildcard => {
+            MatchPattern::Or(_) => unreachable!("alternatives are expanded before lowering"),
+            MatchPattern::Wildcard | MatchPattern::Literal(_) => {
                 if in_scope {
                     self.release_owned(cell, ty, span);
                 }
@@ -3640,8 +3848,7 @@ impl<'a> Builder<'a> {
                 // through its own local.
                 let needed: Vec<usize> = (0..args.len())
                     .filter(|field| {
-                        !matches!(args[*field], MatchPattern::Wildcard)
-                            || self.owns_storage(&payload[*field])
+                        !ignores_value(&args[*field]) || self.owns_storage(&payload[*field])
                     })
                     .collect();
                 let mut children = Vec::new();
@@ -3685,7 +3892,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|field| field.ty.clone())
                     .collect();
-                if args.iter().all(|arg| matches!(arg, MatchPattern::Wildcard)) {
+                if args.iter().all(ignores_value) {
                     if in_scope {
                         self.release_owned(cell, ty, span);
                     }
@@ -3750,7 +3957,7 @@ impl<'a> Builder<'a> {
                 // The ownership validator recognizes the discard kind: an
                 // ignored heap `Ok` payload of a `string ! E` is not an
                 // accepted immediate consuming match.
-                let (name, kind) = if matches!(pattern, MatchPattern::Wildcard) {
+                let (name, kind) = if ignores_value(pattern) {
                     ("discarded match payload", LocalKind::DiscardedMatchPayload)
                 } else {
                     ("match payload", LocalKind::Ordinary)

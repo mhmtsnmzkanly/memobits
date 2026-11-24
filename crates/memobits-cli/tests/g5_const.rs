@@ -770,13 +770,13 @@ fn constants_follow_the_value_namespace_and_are_read_only() {
         "TE011",
         "expression is not callable",
     );
-    // A pattern identifier would silently bind, so it is rejected until
-    // literal patterns arrive.
+    // A pattern identifier that names a constant is a constant pattern (G7);
+    // its type must be the matched type.
     rejects(
         &f,
         "const ZERO: u32 = 0;\nfn main() -> i32 { match 1 { ZERO => 1, _ => 2 } }\n",
-        "TE017",
-        "constant patterns are not supported yet",
+        "TE030",
+        "type 'i32'",
     );
 }
 

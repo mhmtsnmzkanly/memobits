@@ -294,7 +294,10 @@ fn module_names_repeat_count(module: &Module) -> bool {
                 else_branch,
             } => expr(condition) || block(then_branch) || else_branch.as_deref().is_some_and(expr),
             ExprKind::Match { scrutinee, arms } => {
-                expr(scrutinee) || arms.iter().any(|a| expr(&a.body))
+                expr(scrutinee)
+                    || arms
+                        .iter()
+                        .any(|a| a.guard.as_ref().is_some_and(expr) || expr(&a.body))
             }
             _ => false,
         }
@@ -1253,37 +1256,92 @@ impl Rewriter<'_, '_> {
         self.expr(target);
     }
 
-    fn pattern(&mut self, pattern: &Pattern) {
-        match &pattern.kind {
-            PatternKind::Wildcard => {}
-            PatternKind::Binding(name) => {
-                if self
-                    .folder
-                    .bindings
-                    .get(self.module)
-                    .is_some_and(|b| b.contains_key(name))
-                {
+    /// Binds the names of a match pattern and turns a name that is a visible
+    /// constant into a constant pattern (a local never shadows a constant in
+    /// a pattern; a variant of the matched enum is told apart by the checker).
+    fn pattern(&mut self, pattern: &mut Pattern) {
+        let name_path = match &pattern.kind {
+            PatternKind::Binding(name) => Some(vec![name.clone()]),
+            PatternKind::Variant { path, slots } if path.len() > 1 && slots.is_empty() => {
+                Some(path.clone())
+            }
+            _ => None,
+        };
+        if let Some(path) = name_path {
+            let found = match path.as_slice() {
+                [name] => self.pattern_lookup(name),
+                _ => self.lookup_path(&path),
+            };
+            if let Lookup::Value(constant) = found {
+                let span = pattern.span;
+                if matches!(constant.1, CVal::Float(_)) {
                     self.error(
                         Category::Type,
                         17,
-                        pattern.span,
+                        span,
                         format!(
-                            "constant patterns are not supported yet: `{name}` would bind a new variable here; compare with `==` in an `if` or rename the binding"
+                            "constant `{}` is a floating-point value; floating-point values cannot be used as patterns",
+                            path.join("::")
                         ),
                     );
+                } else {
+                    let mut value = Expr {
+                        span,
+                        kind: ExprKind::Bool(false),
+                    };
+                    self.inline(&mut value, constant);
+                    pattern.kind = PatternKind::Constant {
+                        path,
+                        value: Box::new(value),
+                    };
+                    return;
                 }
+            }
+        }
+        match &mut pattern.kind {
+            PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Constant { .. } => {}
+            PatternKind::Binding(name) => {
                 self.scopes.last_mut().unwrap().insert(name.clone());
             }
-            PatternKind::Variant { slots, .. } => {
+            PatternKind::Variant { path, slots } => {
+                // The names a `try ... else name` handler binds are never
+                // constants.
+                if path
+                    .first()
+                    .is_some_and(|marker| marker.starts_with("$try"))
+                {
+                    for slot in slots.iter() {
+                        if let PatternKind::Binding(name) = &slot.kind {
+                            self.scopes.last_mut().unwrap().insert(name.clone());
+                        }
+                    }
+                    return;
+                }
                 for slot in slots {
                     self.pattern(slot);
                 }
             }
-            PatternKind::Tuple(elements) => {
+            PatternKind::Tuple(elements) | PatternKind::Or(elements) => {
                 for element in elements {
                     self.pattern(element);
                 }
             }
+        }
+    }
+
+    /// A single name in a pattern: the module's constant of that name, if any.
+    fn pattern_lookup(&self, name: &str) -> Lookup {
+        match self
+            .folder
+            .bindings
+            .get(self.module)
+            .and_then(|b| b.get(name))
+        {
+            None => Lookup::NotConst,
+            Some(key) => match self.folder.values.get(key) {
+                Some(Some(value)) => Lookup::Value(value.clone()),
+                _ => Lookup::Failed,
+            },
         }
     }
 
@@ -1467,7 +1525,10 @@ impl Rewriter<'_, '_> {
                 self.expr(scrutinee);
                 for arm in arms {
                     self.scopes.push(HashSet::new());
-                    self.pattern(&arm.pattern);
+                    self.pattern(&mut arm.pattern);
+                    if let Some(guard) = &mut arm.guard {
+                        self.expr(guard);
+                    }
                     self.expr(&mut arm.body);
                     self.scopes.pop();
                 }

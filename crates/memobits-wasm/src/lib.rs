@@ -801,9 +801,8 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 | InstructionKind::VariantExtract { base, .. } => count(base),
                 InstructionKind::StructNew { fields, .. } => fields.iter().for_each(&mut count),
                 InstructionKind::EnumNew { payload, .. } => payload.iter().for_each(&mut count),
-                InstructionKind::InitConcatString { strings, .. } => {
-                    strings.iter().for_each(&mut count)
-                }
+                InstructionKind::InitConcatString { strings, .. }
+                | InstructionKind::StringEquals { strings } => strings.iter().for_each(&mut count),
                 InstructionKind::InitInterpolatedString { parts, .. } => {
                     for part in parts {
                         if let memobits_ir::InterpolationPart::Value(operand) = part {
@@ -3264,6 +3263,57 @@ fn compile_instruction(
                 *target,
                 parts,
             )?;
+        }
+        InstructionKind::StringEquals { strings } => {
+            // Equal lengths, then every byte in turn. The output local doubles
+            // as the byte index; the block yields the final `bool`.
+            let output = output.ok_or("string equality lacks an output")?;
+            let [left, right] = strings;
+            let load_length = |body: &mut WasmFunction, source: &Operand| {
+                emit_operand(body, function, param_count, source, layout, frame)?;
+                string_descriptor::load_length(body);
+                Ok::<(), String>(())
+            };
+            let byte = |body: &mut WasmFunction, source: &Operand| {
+                emit_operand(body, function, param_count, source, layout, frame)?;
+                string_descriptor::load_address(body);
+                body.instruction(&WasmInstruction::LocalGet(output));
+                body.instruction(&WasmInstruction::I32Add);
+                emit_load(body, Primitive::U8);
+                Ok::<(), String>(())
+            };
+            body.instruction(&WasmInstruction::Block(BlockType::Result(ValType::I32)));
+            body.instruction(&WasmInstruction::I32Const(0));
+            load_length(body, left)?;
+            load_length(body, right)?;
+            body.instruction(&WasmInstruction::I32Ne);
+            body.instruction(&WasmInstruction::BrIf(0));
+            body.instruction(&WasmInstruction::Drop);
+            body.instruction(&WasmInstruction::I32Const(0));
+            body.instruction(&WasmInstruction::LocalSet(output));
+            body.instruction(&WasmInstruction::Block(BlockType::Empty));
+            body.instruction(&WasmInstruction::Loop(BlockType::Empty));
+            body.instruction(&WasmInstruction::LocalGet(output));
+            load_length(body, left)?;
+            body.instruction(&WasmInstruction::I32GeU);
+            body.instruction(&WasmInstruction::BrIf(1));
+            byte(body, left)?;
+            byte(body, right)?;
+            body.instruction(&WasmInstruction::I32Ne);
+            body.instruction(&WasmInstruction::If(BlockType::Empty));
+            body.instruction(&WasmInstruction::I32Const(0));
+            body.instruction(&WasmInstruction::Br(3));
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::LocalGet(output));
+            body.instruction(&WasmInstruction::I32Const(1));
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::LocalSet(output));
+            body.instruction(&WasmInstruction::Br(0));
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::I32Const(1));
+            body.instruction(&WasmInstruction::End);
+            body.instruction(&WasmInstruction::LocalSet(output));
         }
         InstructionKind::InitConcatString { target, strings } => {
             for source in strings {

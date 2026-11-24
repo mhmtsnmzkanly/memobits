@@ -372,7 +372,7 @@ fn malformed_nested_patterns_keep_their_codes() {
         "TE030",
     );
     f.error(
-        "fn f(x: u32? ! Error) -> u32 { match x { Ok(Some(1)) => 1, _ => 0 } }\nfn main() -> i32 { 0 }",
+        "fn f(x: u32? ! Error) -> u32 { match x { Ok(Some(1.5)) => 1, _ => 0 } }\nfn main() -> i32 { 0 }",
         "SE002",
     );
 }

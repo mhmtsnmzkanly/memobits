@@ -26,7 +26,8 @@ It demonstrates:
 Patterns nest to any depth (`Ok(Some(v))`, `Shape::Pair(Point::Origin, other)`, tuples
 in payloads); see the guide's `nested_patterns` check.
 
-Still gated: literal patterns, guards, `==` on enums (use `match`), and
+Literal, constant and or-patterns and `if` guards are covered by the language guide
+(`enums_outcomes.mb`). Still gated: `@` bindings, `==` on enums (use `match`), and
 user-defined enums in Wasm entry or library export signatures. The separate
 [application outcome adapter](../../../docs/design/outcome-implementation.md)
 supports compiler-known `T ! E` and `T ?! E` entries with primitive success

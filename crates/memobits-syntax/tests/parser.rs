@@ -673,14 +673,7 @@ fn indexing_chains_with_calls_fields_and_unary_precedence() {
 
 #[test]
 fn malformed_arrays_recover_to_following_statements_and_items() {
-    for malformed in [
-        "[1,,2]",
-        "[1; -1]",
-        "[1; 1.5]",
-        "a[]",
-        "[1; n]",
-        "[1; 2 + 3]",
-    ] {
+    for malformed in ["[1,,2]", "[1; -1]", "[1; 1.5]", "a[]", "[1; 2 + 3]"] {
         let parsed = parse(
             SourceId(0),
             &format!("fn f() {{ {malformed}; let good := 3; }} fn g() {{}}"),
@@ -1094,21 +1087,27 @@ fn match_scrutinee_rejects_struct_literals_but_allows_parentheses() {
 }
 
 #[test]
-fn unsupported_patterns_are_gated_with_messages() {
-    syntax_error("fn f(s: S) { match s { 1 => {} } }", "literal patterns");
-    syntax_error("fn f(s: S) { match s { true => {} } }", "literal patterns");
-    syntax_error(
-        "fn f(s: S) { match s { A::B(1) => {} } }",
-        "literal patterns",
+fn literal_or_and_guarded_patterns_parse_and_the_rest_stays_gated() {
+    use memobits_syntax::PatternKind;
+    let body = first_body(
+        "fn f(s: S) -> i32 { match s { 1 | -2 => 1, true => 2, 'a' => 3, \"x\" => 4, A::B(1 | 2, _) if s > 1 => 5, _ => 6 } }",
     );
+    let ExprKind::Match { arms, .. } = &body.tail.as_ref().unwrap().kind else {
+        panic!()
+    };
+    assert_eq!(arms.len(), 6);
+    let PatternKind::Or(alternatives) = &arms[0].pattern.kind else {
+        panic!("expected an or-pattern")
+    };
+    assert!(matches!(alternatives[0].kind, PatternKind::Literal(_)));
+    assert!(matches!(alternatives[1].kind, PatternKind::Literal(_)));
+    assert!(arms[0].guard.is_none());
+    assert!(arms[4].guard.is_some());
     syntax_error(
-        "fn f(s: S) { match s { A::B(C::D(1)) => {} } }",
-        "literal patterns",
+        "fn f(s: S) { match s { 1.5 => {} } }",
+        "floating-point literals cannot be used as patterns",
     );
-    syntax_error(
-        "fn f(s: S) { match s { A::B(x) if x > 1 => {} _ => {} } }",
-        "guards",
-    );
+    syntax_error("fn f(s: S) { match s { \"{x}\" => {} } }", "placeholders");
     syntax_error(
         "fn f(s: S) { match s { A { x } => {} } }",
         "struct patterns",
@@ -1297,7 +1296,10 @@ fn nested_variant_tuple_wildcard_and_binding_patterns_parse_at_any_depth() {
 
 #[test]
 fn malformed_nested_patterns_are_syntax_errors() {
-    syntax_error("fn f(s: S) { match s { A::B(C::D(1)) => {} } }", "literal");
+    syntax_error(
+        "fn f(s: S) { match s { A::B(C::D(1.5)) => {} } }",
+        "floating-point",
+    );
     syntax_error("fn f(s: S) { match s { A::B(()) => {} } }", "empty tuple");
     syntax_error(
         "fn f(s: S) { match s { A::B(C { x }) => {} } }",

@@ -318,3 +318,129 @@ test fn try_without_else() {
 // Ancestor reference conversion works at direct internal calls. Owned
 // conversion to an ancestor is unavailable. `T ! E` and `T ?! E` require Error
 // or a nominal descendant as their error argument.
+// Literal patterns match integers (negative ones too), bool, char and string
+// values by equality, at any depth. Their domains are infinite (except bool),
+// so a `_` or a binding arm is required; `true` and `false` cover bool. A
+// string scrutinee is compared byte by byte in place and is not moved.
+fn literal_kind(n: i32, flag: bool, letter: char, word: string) -> i32 {
+    let a := match n { 0 => 1, -1 => 2, 7 => 3, _ => 4 };
+    let b := match flag { true => 10, false => 20 };
+    let c := match letter { 'a' => 100, '😀' => 200, _ => 300 };
+    let d := match word { "hi" => 1000, "" => 2000, other => 3000 + other.len() as i32 };
+    a + b + c + d
+}
+fn literal_in_payload(r: i32? ! Error, t: (i32, bool)) -> i32 {
+    let first := match r { Ok(Some(7)) => 1, Ok(Some(_)) => 2, Ok(None) => 3, Err(_) => 4 };
+    let second := match t { (0, true) => 10, (0, _) => 20, (_, flag) => if flag { 30 } else { 40 } };
+    first + second
+}
+test fn literal_patterns() {
+    assert(literal_kind(0, true, 'a', "hi") == 1111);
+    assert(literal_kind(-1, false, '😀', "") == 2222);
+    assert(literal_kind(5, true, 'z', "abcd") == 3318);
+    let ok: i32? ! Error = Ok(Some(7));
+    let other: i32? ! Error = Ok(Some(8));
+    let nothing: i32? ! Error = Ok(None);
+    assert(literal_in_payload(ok, (0, true)) == 11);
+    assert(literal_in_payload(other, (0, false)) == 22);
+    assert(literal_in_payload(nothing, (5, false)) == 43);
+    let heap := "hel".concat("lo");
+    let tag := match heap { "hello" => 1, _ => 2 };
+    assert(tag == 1);
+    // The match only read `heap`.
+    assert(heap.len() == 5);
+}
+// A bare name that is a visible `const` (or `module::NAME`) is a constant
+// pattern: it matches the constant's value. A variant of the matched enum
+// wins over a constant of the same name; any other bare name is a binding.
+// Repeat counts accept any u32 constant name too: `[0; width]`.
+const LIMIT: i32 = 10;
+const ANSWER: string = "42";
+const width: u32 = 3;
+fn limit_state(n: i32) -> i32 {
+    match n { LIMIT => 1, 0 => 0, other => other }
+}
+test fn constant_patterns() {
+    assert(limit_state(10) == 1);
+    assert(limit_state(0) == 0);
+    assert(limit_state(5) == 5);
+    let reply := match "42" { ANSWER => true, _ => false };
+    assert(reply);
+    let cells := [7; width];
+    assert(cells[2] == 7);
+}
+// `p | q` matches when either alternative does, at any depth. Every
+// alternative must bind the same names with the same types; the arm body
+// exists once.
+type Shape [ Circle(i32), Square(i32), Rect(i32, i32), Dot ]
+fn shape_size(shape: Shape) -> i32 {
+    match shape {
+        Shape::Circle(n) | Shape::Square(n) => n,
+        Shape::Rect(w, 1) | Shape::Rect(1, w) => w,
+        Shape::Rect(w, h) => w * h,
+        Shape::Dot => 0,
+    }
+}
+fn small(o: i32?) -> bool {
+    match o { Some(1 | 2 | 3) => true, _ => false }
+}
+test fn or_patterns() {
+    assert(shape_size(Shape::Circle(4)) == 4);
+    assert(shape_size(Shape::Square(5)) == 5);
+    assert(shape_size(Shape::Rect(6, 1)) == 6);
+    assert(shape_size(Shape::Rect(1, 7)) == 7);
+    assert(shape_size(Shape::Rect(2, 3)) == 6);
+    assert(shape_size(Shape::Dot) == 0);
+    assert(small(Some(2)));
+    assert(!small(Some(9)));
+    assert(!small(None));
+}
+// `pattern if condition => body`: the guard is a bool that sees the pattern's
+// bindings. When it fails, matching continues with the next arms (their
+// patterns are tested as usual). A guarded arm never counts toward
+// exhaustiveness, so an unguarded arm must still cover its values. In an owned
+// match the guard only reads its bindings (primitives by copy, everything
+// else through a read-only reference); the payload moves into the arm only
+// once the guard has held, so a failed guard consumes nothing. A guard cannot
+// see a binding of an aggregate that owns Strings (TE017).
+fn ranked(n: i32, m: i32) -> i32 {
+    match (n, m) {
+        (a, b) if a > b => 1,
+        (a, _) if a < 0 => 2,
+        (0, _) => 3,
+        (a, b) if 10 / a == b => 4,
+        _ => 5,
+    }
+}
+fn guarded_text(shape: Shape, limit: i32) -> i32 {
+    match shape {
+        Shape::Circle(r) if r > limit => r,
+        Shape::Circle(_) => -1,
+        _ => 0,
+    }
+}
+fn guarded_word(word: string?) -> u32 {
+    match word {
+        Some(w) if w.len() > 3 => w.len(),
+        Some(_) => 1,
+        None => 0,
+    }
+}
+test fn guards() {
+    assert(ranked(5, 3) == 1);
+    assert(ranked(-1, 3) == 2);
+    assert(ranked(0, 3) == 3);
+    assert(ranked(2, 5) == 4);
+    assert(ranked(3, 9) == 5);
+    assert(guarded_text(Shape::Circle(9), 5) == 9);
+    assert(guarded_text(Shape::Circle(2), 5) == -1);
+    assert(guarded_text(Shape::Dot, 5) == 0);
+    let long_text := "abcdef".concat("");
+    let short_text := "ab".concat("");
+    let long: string? = Some(long_text);
+    let short: string? = Some(short_text);
+    let none: string? = None;
+    assert(guarded_word(long) == 6);
+    assert(guarded_word(short) == 1);
+    assert(guarded_word(none) == 0);
+}

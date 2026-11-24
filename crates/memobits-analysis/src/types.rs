@@ -405,7 +405,51 @@ fn render_pattern(pattern: &Pattern) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        PatternKind::Literal(literal) => literal_text(literal),
+        PatternKind::Constant { path, .. } => path.join("::"),
+        PatternKind::Or(alternatives) => alternatives
+            .iter()
+            .map(render_pattern)
+            .collect::<Vec<_>>()
+            .join(" | "),
     }
+}
+
+/// A literal pattern's expression as source text.
+fn literal_text(literal: &Expr) -> String {
+    match &literal.kind {
+        ExprKind::Number(raw) => raw.clone(),
+        ExprKind::TypedNumber { raw, .. } => raw.clone(),
+        ExprKind::Unary { operand, .. } => format!("-{}", literal_text(operand)),
+        ExprKind::Bool(value) => value.to_string(),
+        ExprKind::CharLiteral(value) => format!("{value:?}"),
+        ExprKind::StringLiteral(text) => format!("{text:?}"),
+        _ => "_".into(),
+    }
+}
+
+/// Two binding types are the same for an or-pattern when they agree apart
+/// from the identity of the pattern they borrow from.
+fn same_binding_type(left: &Ty, right: &Ty) -> bool {
+    match (left, right) {
+        (
+            Ty::Reference {
+                access: left_access,
+                inner: left_inner,
+                ..
+            },
+            Ty::Reference {
+                access: right_access,
+                inner: right_inner,
+                ..
+            },
+        ) => left_access == right_access && left_inner == right_inner,
+        _ => left == right,
+    }
+}
+
+fn name_of(ty: &Ty) -> String {
+    name(ty)
 }
 
 fn name(ty: &Ty) -> String {
@@ -584,6 +628,9 @@ fn flow_expr(expr: &Expr) -> Flow {
                 let arm_flow = flow_expr(&arm.body);
                 falls |= arm_flow.falls;
                 breaks |= arm_flow.breaks;
+                if let Some(guard) = &arm.guard {
+                    breaks |= flow_expr(guard).breaks;
+                }
             }
             scrutinee.then(Flow { falls, breaks })
         }
@@ -673,14 +720,100 @@ impl MatchPattern {
                     arg.collect_bindings(into);
                 }
             }
+            MatchPattern::Literal(_) => {}
+            // Every alternative binds the same locals.
+            MatchPattern::Or(alternatives) => {
+                if let Some(first) = alternatives.first() {
+                    first.collect_bindings(into);
+                }
+            }
         }
     }
+
+    /// The or-free patterns this pattern stands for: one per way of choosing
+    /// an alternative at every `|`.
+    pub fn alternatives(&self) -> Vec<MatchPattern> {
+        match self {
+            MatchPattern::Or(alternatives) => alternatives
+                .iter()
+                .flat_map(MatchPattern::alternatives)
+                .collect(),
+            MatchPattern::Variant { variant, args } => product(args)
+                .into_iter()
+                .map(|args| MatchPattern::Variant {
+                    variant: *variant,
+                    args,
+                })
+                .collect(),
+            MatchPattern::Tuple(args) => {
+                product(args).into_iter().map(MatchPattern::Tuple).collect()
+            }
+            other => vec![other.clone()],
+        }
+    }
+
+    /// The same pattern with every binding local replaced through `map`
+    /// (keyed by the binding's name).
+    fn rebind(&mut self, locals: &[LocalFact], map: &HashMap<String, Option<LocalId>>) {
+        match self {
+            MatchPattern::Bind(Some(local)) => {
+                if let Some(target) = locals
+                    .get(local.0 as usize)
+                    .and_then(|fact| map.get(&fact.name))
+                {
+                    *self = MatchPattern::Bind(*target);
+                }
+            }
+            MatchPattern::Variant { args, .. } | MatchPattern::Tuple(args) => {
+                for arg in args {
+                    arg.rebind(locals, map);
+                }
+            }
+            MatchPattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    alternative.rebind(locals, map);
+                }
+            }
+            MatchPattern::Wildcard | MatchPattern::Bind(None) | MatchPattern::Literal(_) => {}
+        }
+    }
+}
+
+/// Every combination of one alternative per argument.
+fn product(args: &[MatchPattern]) -> Vec<Vec<MatchPattern>> {
+    let mut combinations: Vec<Vec<MatchPattern>> = vec![Vec::new()];
+    for arg in args {
+        let options = arg.alternatives();
+        combinations = combinations
+            .iter()
+            .flat_map(|prefix| {
+                options.iter().map(move |option| {
+                    let mut next = prefix.clone();
+                    next.push(option.clone());
+                    next
+                })
+            })
+            .collect();
+    }
+    combinations
 }
 
 /// One arm: its checked pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchArmFact {
     pub pattern: MatchPattern,
+    /// `pattern` with every `|` resolved: one entry per alternative, all
+    /// binding the same locals. The decision tree has one leaf per entry.
+    pub alternatives: Vec<MatchPattern>,
+    /// The arm has an `if` guard. A guarded arm is only taken when the guard
+    /// holds; it never counts toward exhaustiveness.
+    pub guarded: bool,
+    /// For a guarded arm of a consuming match: `alternatives` with the
+    /// bindings replaced by guard-phase locals (copies of primitives and
+    /// read-only references to everything else). The guard reads those; the
+    /// real bindings are moved in only once the guard has held. Empty
+    /// otherwise.
+    pub guard_alternatives: Vec<MatchPattern>,
 }
 
 /// A checked pattern at any depth. The type each node matches is implied by
@@ -699,6 +832,22 @@ pub enum MatchPattern {
     },
     /// A tuple, with one sub-pattern per element.
     Tuple(Vec<MatchPattern>),
+    /// A literal (or constant) value of an integer, bool, char or string
+    /// position, compared by equality.
+    Literal(PatternLiteral),
+    /// `p | q`: kept in the arm's pattern for coverage; the decision tree
+    /// uses the or-free `alternatives`.
+    Or(Vec<MatchPattern>),
+}
+
+/// The value of a literal pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternLiteral {
+    /// A decimal integer, possibly negative, within its type's range.
+    Integer(String),
+    Bool(bool),
+    Char(char),
+    String(String),
 }
 
 /// Local-to-this-expression tuple alias resolutions used by lowering.
@@ -4184,8 +4333,22 @@ impl Checker {
                 );
                 column = Some(scrutinee_ty.clone());
             }
+            // Integers, floats, bool, char and strings are matched in place:
+            // nothing is moved, and a binding copies the value (a string
+            // binding is a read-only reference).
+            Ty::Primitive(kind) if *kind != "Unit" && !is_try_match(arms) => {
+                borrowed = true;
+                column = Some(scrutinee_ty.clone());
+            }
+            Ty::String if !is_try_match(arms) => {
+                borrowed = true;
+                column = Some(Ty::String);
+            }
             Ty::Reference { inner, .. }
-                if matches!(inner.as_ref(), Ty::Enum(..) | Ty::Tuple(..)) =>
+                if matches!(inner.as_ref(), Ty::Enum(..) | Ty::Tuple(..))
+                    || (!is_try_match(arms)
+                        && (matches!(inner.as_ref(), Ty::String)
+                            || matches!(inner.as_ref(), Ty::Primitive(kind) if *kind != "Unit"))) =>
             {
                 borrowed = true;
                 column = Some((**inner).clone());
@@ -4202,7 +4365,10 @@ impl Checker {
             other => self.error(
                 29,
                 scrutinee.span,
-                format!("`match` requires an enum value, found {}", name(other)),
+                format!(
+                    "`match` requires an enum, tuple, integer, bool, char or string value, found {}",
+                    name(other)
+                ),
             ),
         }
         let signature = {
@@ -4223,6 +4389,8 @@ impl Checker {
                         .iter()
                         .map(|field| field.ty.clone())
                         .collect()]),
+                    // `false` and `true`.
+                    Ty::Primitive("bool") => Some(vec![Vec::new(), Vec::new()]),
                     _ => None,
                 }
             }
@@ -4233,6 +4401,7 @@ impl Checker {
         let mut result: Option<Ty> = None;
         let mut facts = Vec::new();
         let is_try = is_try_match(arms);
+        let consuming = !borrowed && column.is_some();
         for arm in arms {
             self.scopes.push(HashMap::new());
             let mut arm_tainted = false;
@@ -4246,6 +4415,13 @@ impl Checker {
             );
             tainted |= arm_tainted;
             if let (Some(column), false) = (&column, arm_tainted) {
+                if self.literal_in_string_tuple(&pattern, column, false) {
+                    self.error(
+                        17,
+                        arm.pattern.span,
+                        "a literal inside a tuple that owns Strings, within an enum payload, is not supported yet; bind the part and compare it in the arm",
+                    );
+                }
                 let row = vec![patterns::Pat::from_fact(&pattern)];
                 let top_level_wildcard = matches!(row[0], patterns::Pat::Wild);
                 if !patterns::is_useful(&signature, &matrix, &row, std::slice::from_ref(column)) {
@@ -4279,10 +4455,27 @@ impl Checker {
                     };
                     self.error(32, arm.pattern.span, message);
                 }
-                irrefutable_seen |= top_level_wildcard;
-                matrix.push(row);
+                // A guarded arm may fail its guard, so it covers nothing.
+                if arm.guard.is_none() {
+                    irrefutable_seen |= top_level_wildcard;
+                    matrix.push(row);
+                }
             }
-            facts.push(MatchArmFact { pattern });
+            let guard_alternatives = match &arm.guard {
+                Some(guard) => self.check_guard(
+                    guard,
+                    &pattern,
+                    column.as_ref().unwrap_or(&Ty::Error),
+                    consuming && !arm_tainted,
+                ),
+                None => Vec::new(),
+            };
+            facts.push(MatchArmFact {
+                alternatives: pattern.alternatives(),
+                pattern,
+                guarded: arm.guard.is_some(),
+                guard_alternatives,
+            });
             let arm_expected = expected.or(result.as_ref().filter(|ty| **ty != Ty::Never));
             let ty = self.expr(&arm.body, arm_expected);
             self.reject_extraction(&arm.body, &ty);
@@ -4334,14 +4527,21 @@ impl Checker {
                     .iter()
                     .map(|witness| format!("`{}`", patterns::render(&witness[0], &names)))
                     .collect();
-                self.error(
-                    31,
-                    expr.span,
+                let message = if examples == ["`_`"] {
+                    "non-exhaustive match: literal patterns do not cover every value; add a `_` arm or a binding arm"
+                        .to_string()
+                } else {
+                    let guards = if arms.iter().any(|arm| arm.guard.is_some()) {
+                        " (arms with an `if` guard do not count)"
+                    } else {
+                        ""
+                    };
                     format!(
-                        "non-exhaustive match: missing {}; add arms for them or a `_` arm",
+                        "non-exhaustive match: missing {}{guards}; add arms for them or a `_` arm",
                         examples.join(", ")
-                    ),
-                );
+                    )
+                };
+                self.error(31, expr.span, message);
             }
         }
         if let Some((facts_out, expression)) = self.facts.as_mut().zip(id) {
@@ -4355,6 +4555,273 @@ impl Checker {
             return Ty::Never;
         }
         result.unwrap_or(Ty::Error)
+    }
+    /// Check an arm's `if` guard in the arm scope. In a consuming match the
+    /// guard must not move bound payloads (the arm may still fail), so it
+    /// sees guard-phase twins of the bindings: primitives are copied and
+    /// everything else is a read-only reference. Returns the arm's
+    /// alternatives rewritten onto those twins (empty when no twins are
+    /// needed).
+    fn check_guard(
+        &mut self,
+        guard: &Expr,
+        pattern: &MatchPattern,
+        column: &Ty,
+        twins: bool,
+    ) -> Vec<MatchPattern> {
+        let mut rewritten = Vec::new();
+        if twins {
+            if let Some(binding) = self.unviewable_binding(pattern, column, false) {
+                self.error(
+                    17,
+                    guard.span,
+                    format!(
+                        "a guard in an owned `match` cannot see {binding}: a guard only borrows its bindings, and an aggregate that owns Strings cannot be borrowed into a local yet; move the test into the arm body"
+                    ),
+                );
+            }
+            let originals: Vec<(String, Binding)> = self
+                .scopes
+                .last()
+                .map(|scope| {
+                    scope
+                        .iter()
+                        .map(|(name, binding)| (name.clone(), binding.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut scope = HashMap::new();
+            let mut map: HashMap<String, Option<LocalId>> = HashMap::new();
+            for (name, binding) in originals {
+                let addr = binding.origin + 1;
+                let ty = if matches!(binding.ty, Ty::Primitive(_)) {
+                    binding.ty.clone()
+                } else {
+                    Ty::Reference {
+                        access: IrAccess::Borrow,
+                        inner: Box::new(binding.ty.clone()),
+                        origin: ReferenceOrigin::Binding(addr),
+                    }
+                };
+                let local =
+                    self.register_local(&name, &ty, false, IrAccess::Owned, guard.span, addr);
+                map.insert(name.clone(), local);
+                scope.insert(
+                    name,
+                    Binding {
+                        ty,
+                        mutable: false,
+                        access: IrAccess::Owned,
+                        id: local,
+                        origin: addr,
+                    },
+                );
+            }
+            let locals: Vec<LocalFact> = self
+                .facts
+                .as_ref()
+                .map(|facts| facts.locals.clone())
+                .unwrap_or_default();
+            rewritten = pattern
+                .alternatives()
+                .into_iter()
+                .map(|mut alternative| {
+                    alternative.rebind(&locals, &map);
+                    alternative
+                })
+                .collect();
+            self.scopes.push(scope);
+        }
+        let condition = read_type(self.expr(guard, Some(&BOOL)));
+        self.ensure(&condition, &BOOL, guard.span);
+        if twins {
+            self.scopes.pop();
+        }
+        rewritten
+    }
+    /// The first binding of `pattern` that a guard in an owned match cannot
+    /// view through a read-only reference: an aggregate that owns Strings, or
+    /// anything bound out of a String-owning tuple that sits inside an enum
+    /// payload (`inside_variant`).
+    fn unviewable_binding(
+        &self,
+        pattern: &MatchPattern,
+        ty: &Ty,
+        inside_variant: bool,
+    ) -> Option<String> {
+        let owns_strings = |ty: &Ty| self.contains_string_owner(ty, &mut HashSet::new());
+        match pattern {
+            MatchPattern::Bind(_) if !matches!(ty, Ty::String) && owns_strings(ty) => {
+                Some(format!("a binding of type {}", name(ty)))
+            }
+            MatchPattern::Variant { variant, args } => {
+                let Ty::Enum(id, _) = ty else { return None };
+                let payload = &self.table.info(*id).variants[*variant as usize].payload;
+                args.iter()
+                    .zip(payload)
+                    .find_map(|(arg, ty)| self.unviewable_binding(arg, ty, true))
+            }
+            MatchPattern::Tuple(args) => {
+                let Ty::Tuple(id, ..) = ty else { return None };
+                let fields = self.table.info(*id).fields;
+                if inside_variant && owns_strings(ty) {
+                    let mut bound = Vec::new();
+                    pattern.collect_bindings(&mut bound);
+                    if !bound.is_empty() {
+                        return Some(format!("bindings inside a tuple of type {}", name(ty)));
+                    }
+                }
+                args.iter().zip(fields.iter()).find_map(|(arg, field)| {
+                    self.unviewable_binding(arg, &field.ty, inside_variant)
+                })
+            }
+            MatchPattern::Or(alternatives) => alternatives
+                .iter()
+                .find_map(|alternative| self.unviewable_binding(alternative, ty, inside_variant)),
+            _ => None,
+        }
+    }
+    /// A literal tested inside a tuple that owns Strings and sits in an enum
+    /// payload: the test needs a reference to that tuple, which the backend
+    /// cannot hold in a local yet.
+    fn literal_in_string_tuple(
+        &self,
+        pattern: &MatchPattern,
+        ty: &Ty,
+        inside_variant: bool,
+    ) -> bool {
+        fn has_literal(pattern: &MatchPattern) -> bool {
+            match pattern {
+                MatchPattern::Literal(_) => true,
+                MatchPattern::Variant { args, .. } | MatchPattern::Tuple(args) => {
+                    args.iter().any(has_literal)
+                }
+                MatchPattern::Or(alternatives) => alternatives.iter().any(has_literal),
+                _ => false,
+            }
+        }
+        match pattern {
+            MatchPattern::Variant { variant, args } => {
+                let Ty::Enum(id, _) = ty else { return false };
+                let payload = &self.table.info(*id).variants[*variant as usize].payload;
+                args.iter()
+                    .zip(payload)
+                    .any(|(arg, ty)| self.literal_in_string_tuple(arg, ty, true))
+            }
+            MatchPattern::Tuple(args) => {
+                let Ty::Tuple(id, ..) = ty else { return false };
+                let fields = self.table.info(*id).fields;
+                (inside_variant
+                    && self.contains_string_owner(ty, &mut HashSet::new())
+                    && args.iter().any(has_literal))
+                    || args.iter().zip(fields.iter()).any(|(arg, field)| {
+                        self.literal_in_string_tuple(arg, &field.ty, inside_variant)
+                    })
+            }
+            MatchPattern::Or(alternatives) => alternatives
+                .iter()
+                .any(|alternative| self.literal_in_string_tuple(alternative, ty, inside_variant)),
+            _ => false,
+        }
+    }
+    /// An integer, bool, char or string pattern against the type it matches.
+    fn check_literal_pattern(
+        &mut self,
+        literal: &Expr,
+        expected: &Ty,
+        span: Span,
+        tainted: &mut bool,
+    ) -> MatchPattern {
+        let mut fail = |this: &mut Self, message: String| {
+            this.error(30, span, message);
+            *tainted = true;
+            MatchPattern::Wildcard
+        };
+        if matches!(expected, Ty::Error | Ty::Never) {
+            *tainted = true;
+            return MatchPattern::Wildcard;
+        }
+        let (negative, core) = match &literal.kind {
+            ExprKind::Unary { operator, operand } if operator == "-" => (true, operand.as_ref()),
+            _ => (false, literal),
+        };
+        let text = literal_text(literal);
+        match &core.kind {
+            ExprKind::Number(_) | ExprKind::TypedNumber { .. } => {
+                let (raw, fixed) = match &core.kind {
+                    ExprKind::Number(raw) => (raw.replace('_', ""), None),
+                    ExprKind::TypedNumber { raw, ty } => (raw.clone(), ty.path.first().cloned()),
+                    _ => unreachable!(),
+                };
+                let Ty::Primitive(kind) = expected else {
+                    return fail(
+                        self,
+                        format!(
+                            "integer pattern `{text}` cannot match a value of type '{}'",
+                            name(expected)
+                        ),
+                    );
+                };
+                if !integer(expected) || fixed.as_deref().is_some_and(|fixed| fixed != *kind) {
+                    let found = fixed.unwrap_or_else(|| "an integer".into());
+                    return fail(
+                        self,
+                        format!(
+                            "pattern `{text}` is {found}, but the value being matched has type '{kind}'"
+                        ),
+                    );
+                }
+                let Ok(magnitude) = raw.trim_start_matches('-').parse::<u128>() else {
+                    return fail(
+                        self,
+                        format!("integer pattern `{text}` does not fit {kind}"),
+                    );
+                };
+                let negative = negative ^ raw.starts_with('-');
+                let unsigned = kind.starts_with('u');
+                let limit = int_limit(kind).unwrap_or(0);
+                let fits = if negative {
+                    !unsigned && magnitude <= limit + 1
+                } else {
+                    magnitude <= limit
+                };
+                if !fits {
+                    return fail(
+                        self,
+                        format!("integer pattern `{text}` does not fit {kind}"),
+                    );
+                }
+                let value = if negative && magnitude != 0 {
+                    format!("-{magnitude}")
+                } else {
+                    magnitude.to_string()
+                };
+                MatchPattern::Literal(PatternLiteral::Integer(value))
+            }
+            ExprKind::Bool(value) if *expected == BOOL => {
+                MatchPattern::Literal(PatternLiteral::Bool(*value))
+            }
+            ExprKind::CharLiteral(value) if *expected == Ty::Primitive("char") => {
+                MatchPattern::Literal(PatternLiteral::Char(*value))
+            }
+            ExprKind::StringLiteral(value) if *expected == Ty::String => {
+                MatchPattern::Literal(PatternLiteral::String(value.clone()))
+            }
+            _ => {
+                let kind = match &core.kind {
+                    ExprKind::Bool(_) => "bool",
+                    ExprKind::CharLiteral(_) => "char",
+                    _ => "string",
+                };
+                fail(
+                    self,
+                    format!(
+                        "pattern `{text}` is a {kind} literal, but the value being matched has type '{}'",
+                        name(expected)
+                    ),
+                )
+            }
+        }
     }
     /// Check one pattern against the type it matches and register its
     /// bindings in the current arm scope. Errors set `tainted` and yield `_`.
@@ -4387,12 +4854,14 @@ impl Checker {
                         tainted,
                     );
                 }
-                if top_level {
+                // A whole enum or tuple is matched by its variants or parts;
+                // a lone binding there would take the scrutinee itself.
+                if top_level && matches!(expected, Ty::Enum(..) | Ty::Tuple(..)) {
                     self.error(
                         30,
                         pattern.span,
                         format!(
-                            "'{binding}' is not an enum variant pattern; binding patterns are not supported, write `_` to match anything"
+                            "'{binding}' is not an enum variant pattern; a binding cannot take a whole enum or tuple here, write `_` to match anything"
                         ),
                     );
                     *tainted = true;
@@ -4453,6 +4922,35 @@ impl Checker {
                 }
                 self.check_variant_pattern(pattern, path, slots, expected, borrowed, names, tainted)
             }
+            PatternKind::Literal(literal) => {
+                self.check_literal_pattern(literal, expected, pattern.span, tainted)
+            }
+            PatternKind::Constant { path, value } => {
+                // A lone name that is a variant of the matched enum is that
+                // variant; otherwise it is the constant's value.
+                if path.len() == 1 {
+                    let enum_context = matches!(expected, Ty::Enum(..)).then_some(expected);
+                    if self
+                        .contextual_variant(path, pattern.span, enum_context)
+                        .is_some()
+                        || self.prelude_variant(path).is_some()
+                    {
+                        return self.check_variant_pattern(
+                            pattern,
+                            path,
+                            &[],
+                            expected,
+                            borrowed,
+                            names,
+                            tainted,
+                        );
+                    }
+                }
+                self.check_literal_pattern(value, expected, pattern.span, tainted)
+            }
+            PatternKind::Or(alternatives) => {
+                self.check_or_pattern(alternatives, expected, borrowed, top_level, names, tainted)
+            }
             PatternKind::Tuple(elements) => {
                 let mut field_types: Option<Vec<Ty>> = None;
                 match expected {
@@ -4504,6 +5002,98 @@ impl Checker {
                 }
             }
         }
+    }
+    /// `p | q`: every alternative must bind the same names with the same
+    /// types. Later alternatives are rewritten onto the first one's locals,
+    /// so the arm body sees one binding per name.
+    #[allow(clippy::too_many_arguments)]
+    fn check_or_pattern(
+        &mut self,
+        alternatives: &[Pattern],
+        expected: &Ty,
+        borrowed: bool,
+        top_level: bool,
+        names: &mut Vec<String>,
+        tainted: &mut bool,
+    ) -> MatchPattern {
+        let base_names = names.clone();
+        let mut checked = Vec::new();
+        let mut first: Option<HashMap<String, Binding>> = None;
+        let mut map: HashMap<String, Option<LocalId>> = HashMap::new();
+        for alternative in alternatives {
+            let locals_before = self.facts.as_ref().map_or(0, |facts| facts.locals.len());
+            self.scopes.push(HashMap::new());
+            let mut alternative_names = base_names.clone();
+            let mut checked_one = self.check_pattern(
+                alternative,
+                expected,
+                borrowed,
+                top_level,
+                &mut alternative_names,
+                tainted,
+            );
+            let scope = self.scopes.pop().expect("alternative scope");
+            match &first {
+                None => {
+                    *names = alternative_names;
+                    map = scope
+                        .iter()
+                        .map(|(name, binding)| (name.clone(), binding.id))
+                        .collect();
+                    self.scopes
+                        .last_mut()
+                        .expect("arm scope")
+                        .extend(scope.clone());
+                    first = Some(scope);
+                }
+                Some(expected_scope) => {
+                    let mut missing: Vec<&String> = expected_scope
+                        .keys()
+                        .filter(|name| !scope.contains_key(*name))
+                        .collect();
+                    let mut extra: Vec<&String> = scope
+                        .keys()
+                        .filter(|name| !expected_scope.contains_key(*name))
+                        .collect();
+                    missing.sort();
+                    extra.sort();
+                    if let Some(name) = missing.first().or(extra.first()) {
+                        self.error(
+                            30,
+                            alternative.span,
+                            format!(
+                                "or-pattern alternatives must bind the same names: '{name}' is not bound by every alternative"
+                            ),
+                        );
+                        *tainted = true;
+                    }
+                    for (name, binding) in &scope {
+                        if let Some(first_binding) = expected_scope.get(name) {
+                            if !same_binding_type(&binding.ty, &first_binding.ty) {
+                                self.error(
+                                    30,
+                                    alternative.span,
+                                    format!(
+                                        "or-pattern alternatives must bind '{name}' with the same type: {} and {}",
+                                        name_of(&first_binding.ty),
+                                        name_of(&binding.ty)
+                                    ),
+                                );
+                                *tainted = true;
+                            }
+                        }
+                    }
+                    // Reuse the first alternative's locals and drop this
+                    // alternative's own.
+                    if let Some(facts) = self.facts.as_mut() {
+                        checked_one.rebind(&facts.locals, &map);
+                        facts.locals.truncate(locals_before);
+                    }
+                }
+            }
+            checked.push(checked_one);
+        }
+        MatchPattern::Or(checked)
     }
     /// A `try` marker pattern: `$try_ok` is `Ok`/`Some` and `$try_err` is
     /// `Err`/`None`, chosen by the built-in enum of the scrutinee.

@@ -131,6 +131,9 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
         ExprKind::Match { scrutinee, arms } => {
             check_expr(scrutinee, in_loop, diagnostics);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    check_expr(guard, in_loop, diagnostics);
+                }
                 check_expr(&arm.body, in_loop, diagnostics);
             }
         }

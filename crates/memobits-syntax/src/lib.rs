@@ -308,6 +308,9 @@ pub enum InterpolationPart {
 pub struct MatchArm {
     pub span: Span,
     pub pattern: Pattern,
+    /// `pattern if guard =>`: a `bool` expression that sees the pattern's
+    /// bindings.
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -332,6 +335,19 @@ pub enum PatternKind {
     },
     /// `(p, q)`: matches a tuple element by element.
     Tuple(Vec<Pattern>),
+    /// A literal: an integer (`7`, `-7`), `true`/`false`, a character or a
+    /// string. The expression is a `Number`, a `-` applied to a `Number`, a
+    /// `TypedNumber` (an inlined constant), `Bool`, `CharLiteral` or
+    /// `StringLiteral`.
+    Literal(Box<Expr>),
+    /// A module `const` named in a pattern, replaced by the resolver. A lone
+    /// name that is a variant of the matched enum is still that variant, so
+    /// the checker decides between the two; `value` is the constant's value
+    /// as a literal expression.
+    Constant { path: Vec<String>, value: Box<Expr> },
+    /// `p | q`: matches when any alternative matches. Every alternative binds
+    /// the same names.
+    Or(Vec<Pattern>),
 }
 /// One `field` or `field: alias` entry of a destructuring pattern.
 #[derive(Clone, Debug, PartialEq)]
@@ -881,6 +897,18 @@ impl Parser {
             _ => false,
         }
     }
+    /// Whether a word is a plain identifier, not a reserved word.
+    fn is_identifier(&self, word: &str) -> bool {
+        ![
+            "pub", "fn", "use", "as", "type", "let", "var", "borrow", "share", "return", "loop",
+            "break", "continue", "if", "else", "true", "false", "while", "struct", "enum",
+            "import", "export", "match", "try", "const",
+        ]
+        .contains(&word)
+    }
+    fn next_kind(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.pos + 1).map(|token| &token.kind)
+    }
     fn next_at(&self, value: &str) -> bool {
         self.tokens
             .get(self.pos + 1)
@@ -925,14 +953,7 @@ impl Parser {
     }
     fn name(&mut self) -> PResult<String> {
         match &self.current().kind {
-            TokenKind::Word(s)
-                if ![
-                    "pub", "fn", "use", "as", "type", "let", "var", "borrow", "share", "return",
-                    "loop", "break", "continue", "if", "else", "true", "false", "while", "struct",
-                    "enum", "import", "export", "match", "try", "const",
-                ]
-                .contains(&s.as_str()) =>
-            {
+            TokenKind::Word(s) if self.is_identifier(s) => {
                 let s = s.clone();
                 self.bump();
                 Ok(s)
@@ -1686,9 +1707,7 @@ impl Parser {
             while !p.at("}") && !p.eof() {
                 let arm_start = p.current().span.start;
                 let pattern = p.pattern()?;
-                if p.at("if") {
-                    return p.fail("match guards are not supported yet");
-                }
+                let guard = if p.eat("if") { Some(p.expr(0)?) } else { None };
                 p.expect("=>")?;
                 let block_start = p.at("{") || p.at("if") || p.at("match");
                 let body = if block_start {
@@ -1701,6 +1720,7 @@ impl Parser {
                 arms.push(MatchArm {
                     span: p.span(arm_start),
                     pattern,
+                    guard,
                     body,
                 });
                 if !p.eat(",") && !block_start && !p.at("}") {
@@ -1776,11 +1796,13 @@ impl Parser {
                 MatchArm {
                     span,
                     pattern: marker("$try_ok", vec![binding(VALUE)]),
+                    guard: None,
                     body: value_path(),
                 },
                 MatchArm {
                     span: handler.span,
                     pattern: marker("$try_err", name.iter().map(|n| binding(n)).collect()),
+                    guard: None,
                     body: Node {
                         span: handler.span,
                         kind: ExprKind::Block(handler),
@@ -1793,11 +1815,13 @@ impl Parser {
                     // Bound (not `_`) so an owned success value is moved into
                     // the arm and released there.
                     pattern: marker("$try_ok", vec![binding(VALUE)]),
+                    guard: None,
                     body: empty_block(),
                 },
                 MatchArm {
                     span,
                     pattern: marker("$try_err", Vec::new()),
+                    guard: None,
                     body: empty_block(),
                 },
             ),
@@ -1814,6 +1838,7 @@ impl Parser {
                     MatchArm {
                         span,
                         pattern: marker("$try_ok", vec![binding(VALUE)]),
+                        guard: None,
                         body: Node {
                             span,
                             kind: ExprKind::Block(Block {
@@ -1826,6 +1851,7 @@ impl Parser {
                     MatchArm {
                         span,
                         pattern: marker("$try_err", Vec::new()),
+                        guard: None,
                         body: empty_block(),
                     },
                 )
@@ -1866,16 +1892,31 @@ impl Parser {
             }),
         })
     }
-    /// One pattern at any nesting depth: `_`, a binding name, a variant path
-    /// with optional parenthesized sub-patterns, or a tuple pattern.
+    /// One pattern at any nesting depth, with `|` alternatives.
     fn pattern(&mut self) -> PResult<Pattern> {
         let start = self.current().span.start;
-        if matches!(self.current().kind, TokenKind::Number(_))
-            || self.at("true")
-            || self.at("false")
-            || self.at("-")
-        {
-            return self.fail("literal patterns are not supported yet; match on enum variants");
+        let first = self.pattern_alternative()?;
+        if !self.at("|") {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first];
+        while self.eat("|") {
+            alternatives.push(self.pattern_alternative()?);
+        }
+        Ok(Pattern {
+            span: self.span(start),
+            kind: PatternKind::Or(alternatives),
+        })
+    }
+    /// One alternative: `_`, a literal, a binding name, a variant path with
+    /// optional parenthesized sub-patterns, or a tuple pattern.
+    fn pattern_alternative(&mut self) -> PResult<Pattern> {
+        let start = self.current().span.start;
+        if let Some(literal) = self.literal_pattern()? {
+            return Ok(Pattern {
+                span: self.span(start),
+                kind: PatternKind::Literal(Box::new(literal)),
+            });
         }
         if self.at("(") {
             return self.tuple_pattern();
@@ -1917,6 +1958,61 @@ impl Parser {
             span: self.span(start),
             kind: PatternKind::Variant { path, slots },
         })
+    }
+    /// An integer (optionally negative), boolean, character or string literal
+    /// used as a pattern.
+    fn literal_pattern(&mut self) -> PResult<Option<Expr>> {
+        let start = self.current().span.start;
+        let negative = self.at("-") && matches!(self.next_kind(), Some(TokenKind::Number(_)));
+        if negative {
+            self.bump();
+        }
+        let kind = match self.current().kind.clone() {
+            TokenKind::Number(raw) => {
+                if raw.contains(['.', 'e', 'E']) {
+                    return self.fail("floating-point literals cannot be used as patterns");
+                }
+                self.bump();
+                ExprKind::Number(raw)
+            }
+            _ if negative => unreachable!("a `-` is consumed only before a number"),
+            TokenKind::CharLiteral(value) => {
+                self.bump();
+                ExprKind::CharLiteral(value)
+            }
+            TokenKind::StringLiteral(text) => {
+                let literal = self.current().span;
+                self.bump();
+                match string_expression(literal, text) {
+                    ExprKind::Interpolation(_) => {
+                        return self.fail("a string pattern cannot contain `{name}` placeholders; write `{{` and `}}` for literal braces");
+                    }
+                    kind => kind,
+                }
+            }
+            TokenKind::Word(word) if word == "true" || word == "false" => {
+                self.bump();
+                ExprKind::Bool(word == "true")
+            }
+            _ => return Ok(None),
+        };
+        let span = self.span(start);
+        let literal = Node { span, kind };
+        Ok(Some(if negative {
+            let operand = Node {
+                span,
+                kind: literal.kind,
+            };
+            Node {
+                span,
+                kind: ExprKind::Unary {
+                    operator: "-".into(),
+                    operand: Box::new(operand),
+                },
+            }
+        } else {
+            literal
+        }))
     }
     /// `(p)` groups one pattern; `(p, q)` and `(p,)` are tuple patterns.
     fn tuple_pattern(&mut self) -> PResult<Pattern> {
@@ -1998,10 +2094,10 @@ impl Parser {
         if self.eat(";") {
             // A module `const` name is kept in `raw` and replaced by the
             // resolver; an unresolved name is reported there.
+            // After `;` only an integer literal or a name can follow, so any
+            // identifier is a constant name.
             let count = match self.current().kind.clone() {
-                TokenKind::Word(name)
-                    if name.as_bytes().first().is_some_and(u8::is_ascii_uppercase) =>
-                {
+                TokenKind::Word(name) if self.is_identifier(&name) => {
                     let span = self.bump().span;
                     IntegerLiteral { span, raw: name }
                 }

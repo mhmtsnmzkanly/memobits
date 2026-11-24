@@ -1,6 +1,6 @@
 //! Pattern-matrix usefulness for `match`: unreachable arms and uncovered
 //! example patterns (Maranget's algorithm over enum and tuple constructors).
-use super::{name, MatchPattern, Ty};
+use super::{name, MatchPattern, PatternLiteral, Ty};
 use std::collections::BTreeSet;
 
 /// A pattern reduced to what coverage cares about: a constructor with
@@ -8,8 +8,14 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub(super) enum Pat {
     Wild,
-    /// An enum variant index, or `0` for the single constructor of a tuple.
+    /// An enum variant index, `0` for the single constructor of a tuple, and
+    /// `0`/`1` for `false`/`true`.
     Ctor(u32, Vec<Pat>),
+    /// An integer, character or string literal: one value of an infinite
+    /// domain, so literals alone never cover a type.
+    Lit(PatternLiteral),
+    /// `p | q`: expanded into separate rows as soon as it heads a column.
+    Or(Vec<Pat>),
 }
 
 impl Pat {
@@ -20,6 +26,13 @@ impl Pat {
                 Pat::Ctor(*variant, args.iter().map(Pat::from_fact).collect())
             }
             MatchPattern::Tuple(args) => Pat::Ctor(0, args.iter().map(Pat::from_fact).collect()),
+            MatchPattern::Literal(PatternLiteral::Bool(value)) => {
+                Pat::Ctor(*value as u32, Vec::new())
+            }
+            MatchPattern::Literal(literal) => Pat::Lit(literal.clone()),
+            MatchPattern::Or(alternatives) => {
+                Pat::Or(alternatives.iter().map(Pat::from_fact).collect())
+            }
         }
     }
 }
@@ -46,9 +59,38 @@ fn specialize(rows: &[Vec<Pat>], ctor: u32, arity: usize) -> Vec<Vec<Pat>> {
             Pat::Ctor(found, args) if *found == ctor => {
                 Some([args.clone(), row[1..].to_vec()].concat())
             }
-            Pat::Ctor(..) => None,
+            Pat::Ctor(..) | Pat::Lit(_) | Pat::Or(_) => None,
         })
         .collect()
+}
+
+/// Rows that match the literal `literal` in the first column (or any value).
+fn specialize_literal(rows: &[Vec<Pat>], literal: &PatternLiteral) -> Vec<Vec<Pat>> {
+    rows.iter()
+        .filter_map(|row| match &row[0] {
+            Pat::Wild => Some(row[1..].to_vec()),
+            Pat::Lit(found) if found == literal => Some(row[1..].to_vec()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Replace every row whose first column is an or-pattern by one row per
+/// alternative.
+fn expand_rows(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+    let mut expanded = Vec::new();
+    for row in rows {
+        if let Some(Pat::Or(alternatives)) = row.first() {
+            for alternative in alternatives {
+                let mut next = vec![alternative.clone()];
+                next.extend_from_slice(&row[1..]);
+                expanded.extend(expand_rows(&[next]));
+            }
+        } else {
+            expanded.push(row.clone());
+        }
+    }
+    expanded
 }
 
 fn default_rows(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
@@ -62,7 +104,7 @@ fn used_constructors(rows: &[Vec<Pat>]) -> BTreeSet<u32> {
     rows.iter()
         .filter_map(|row| match &row[0] {
             Pat::Ctor(ctor, _) => Some(*ctor),
-            Pat::Wild => None,
+            Pat::Wild | Pat::Lit(_) | Pat::Or(_) => None,
         })
         .collect()
 }
@@ -81,6 +123,25 @@ pub(super) fn is_useful(
     let Some((head, rest)) = pattern.split_first() else {
         return rows.is_empty();
     };
+    let rows = &expand_rows(rows);
+    if let Pat::Or(alternatives) = head {
+        return alternatives.iter().any(|alternative| {
+            is_useful(
+                signature,
+                rows,
+                &[vec![alternative.clone()], rest.to_vec()].concat(),
+                types,
+            )
+        });
+    }
+    if let Pat::Lit(literal) = head {
+        return is_useful(
+            signature,
+            &specialize_literal(rows, literal),
+            rest,
+            &types[1..],
+        );
+    }
     let constructors = signature(&types[0]);
     match (head, constructors) {
         (Pat::Ctor(ctor, args), Some(constructors)) => {
@@ -119,6 +180,7 @@ pub(super) fn missing(
     if limit == 0 {
         return Vec::new();
     }
+    let rows = &expand_rows(rows);
     let Some((ty, rest_types)) = types.split_first() else {
         return if rows.is_empty() {
             vec![Vec::new()]
@@ -187,6 +249,7 @@ pub(super) trait ConstructorNames {
 pub(super) fn render(witness: &Witness, names: &dyn ConstructorNames) -> String {
     match witness {
         Witness::Wild => "_".into(),
+        Witness::Ctor(Ty::Primitive("bool"), value, _) => (*value == 1).to_string(),
         Witness::Ctor(ty @ Ty::Enum(..), variant, arguments) => {
             let name = names.variant_name(ty, *variant);
             if arguments.is_empty() {

@@ -42,9 +42,11 @@ itself a pattern, so patterns nest to any depth. Arms are
 separated by commas, which may be omitted after a block-like body (`{`, `if`, `match`);
 `return`, `break` and `continue` are accepted directly as an arm body (parsed as a
 one-statement block); `=>` is a token. The scrutinee is parsed like an `if` condition, so a
-struct literal there is SE002 (parenthesise it). Literal and struct patterns, guards
-(`if` after a pattern), and a missing separator are SE002 with a message naming the gated
-form. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
+struct literal there is SE002 (parenthesise it). A pattern is `_`, a literal (integer, optionally negative, bool, char or string), a name,
+a variant path with sub-patterns, a tuple or `p | q` alternatives; an `if` guard may
+follow it. Float literals, struct patterns and a missing separator are SE002 with a
+message naming the gated form. A name that is a `const` is resolved to a constant
+pattern before analysis; an array repeat count `[v; name]` accepts any identifier. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
 is left to analysis.
 
 Ordinary single-line UTF-8 string literals parse. String escapes, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's

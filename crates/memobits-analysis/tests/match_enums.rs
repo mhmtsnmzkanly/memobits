@@ -130,7 +130,7 @@ fn wrong_enum_arity_and_unsupported_patterns_are_reported() {
     rejected(
         "match make(1) { other => 1 }",
         "TE030",
-        "binding patterns are not supported",
+        "a binding cannot take a whole enum or tuple",
     );
     rejected(
         "match make(1) { Shape::Cube => 1, _ => 2 }",
@@ -187,9 +187,9 @@ fn duplicate_and_unreachable_arms_are_errors() {
 #[test]
 fn scrutinee_must_be_an_enum() {
     rejected(
-        "match 1 { _ => 1 }",
+        "match [1, 2] { _ => 1 }",
         "TE029",
-        "requires an enum value, found i32",
+        "requires an enum, tuple, integer, bool, char or string value, found array",
     );
     rejected(
         "let p := P { x: 1, y: 2 }; match p { _ => 1 }",

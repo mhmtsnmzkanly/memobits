@@ -66,6 +66,7 @@ fn a_repeat_count_may_name_a_constant() {
         "fn main() { let a := [0; SIZE]; let b := [0; 4]; }",
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    // Any identifier names a constant (G7).
     let parsed = parse(SourceId(0), "fn main() { let a := [0; size]; }");
-    assert!(!parsed.diagnostics.is_empty());
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 }

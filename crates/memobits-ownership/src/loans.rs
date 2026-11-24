@@ -683,7 +683,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         | InstructionKind::StringByteAt { source, offset }
         | InstructionKind::StringScalarAt { source, offset }
         | InstructionKind::StringScalarRead { source, offset, .. } => vec![source, offset],
-        InstructionKind::InitConcatString { strings, .. } => strings.iter().collect(),
+        InstructionKind::InitConcatString { strings, .. }
+        | InstructionKind::StringEquals { strings } => strings.iter().collect(),
         InstructionKind::InitInterpolatedString { parts, .. } => parts
             .iter()
             .filter_map(|part| match part {
@@ -1617,7 +1618,8 @@ fn check_instruction(
                 diagnostics,
             );
         }
-        InstructionKind::InitConcatString { strings, .. } => {
+        InstructionKind::InitConcatString { strings, .. }
+        | InstructionKind::StringEquals { strings } => {
             for reference in strings {
                 check_reference_read(
                     program,

@@ -359,6 +359,9 @@ fn check_expr(
         ExprKind::Match { scrutinee, arms } => {
             check_expr(scrutinee, types, diagnostics);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    check_expr(guard, types, diagnostics);
+                }
                 check_expr(&arm.body, types, diagnostics);
             }
         }

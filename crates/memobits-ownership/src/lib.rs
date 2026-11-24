@@ -200,6 +200,11 @@ fn transfer_instruction(
             }
             state[target.0 as usize] = Availability::Available;
         }
+        InstructionKind::StringEquals { strings } => {
+            for source in strings {
+                transfer_operand(source, state, diagnostics.as_deref_mut(), function);
+            }
+        }
         InstructionKind::InitInterpolatedString { target, parts } => {
             for part in parts {
                 if let memobits_ir::InterpolationPart::Value(source) = part {
