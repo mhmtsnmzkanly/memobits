@@ -1,6 +1,6 @@
-//! D3 acceptance tests: the non-failing MW warning channel (proven with MW003)
-//! and silent `Option<T>` acceptance, plus the `T?` clauses that needed
-//! dedicated evidence (contextual None, matching, type errors).
+//! D3 acceptance tests: removed spellings fail with TE001 replacement guidance,
+//! plus the `T?` clauses that needed dedicated evidence (contextual None,
+//! matching, type errors).
 
 use std::{
     fs,
@@ -61,89 +61,38 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-const LEGACY: &str = "fn pick(value: Option<i32>) -> i32 {\n    match value { Some(n) => n, None => 2 }\n}\nfn main() -> i32 { pick(Some(40)) + pick(None) }\n";
-
 #[test]
-fn option_spelling_is_silent_on_check_build_and_run() {
+fn removed_spellings_fail_with_te001_replacement_guidance() {
     let f = Fixture::new();
-    f.project(LEGACY);
-    for args in [
-        &["check"][..],
-        &["build", "--output", "out.wasm"][..],
-        &["run"][..],
+    for (source, guidance) in [
+        ("fn f(a: Option<i32>) {} fn main() {}", "write 'T?' instead"),
+        (
+            "fn f(a: Result<i32, Error>) {} fn main() {}",
+            "write 'T ! E' instead",
+        ),
+        (
+            "fn f(a: Attempt<i32, Error>) {} fn main() {}",
+            "write 'T ?! E' instead",
+        ),
+        ("fn f(a: Bool) {} fn main() {}", "write 'bool' instead"),
+        ("fn f(a: Char) {} fn main() {}", "write 'char' instead"),
+        (
+            "fn f(a: Array<u8, 2>) {} fn main() {}",
+            "write 'array<T, N>' instead",
+        ),
     ] {
-        let output = f.run(args);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{args:?}: {}",
-            stderr(&output)
-        );
-        assert!(output.stderr.is_empty(), "{args:?}: {}", stderr(&output));
-    }
-    let run = f.run(&["run"]);
-    assert_eq!(stdout(&run), "Result: i32(42)\n");
-    let artifact = f.run(&["run", "out.wasm"]);
-    assert_eq!(artifact.status.code(), Some(0));
-    assert_eq!(stdout(&artifact), "Result: i32(42)\n");
-    assert!(artifact.stderr.is_empty(), "{}", stderr(&artifact));
-}
-
-#[test]
-fn option_spelling_is_silent_on_standalone_source_commands() {
-    let f = Fixture::new();
-    f.write("legacy.mb", LEGACY);
-    for command in ["analyze", "ownership"] {
-        let output = f.run(&[command, "legacy.mb"]);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{command}: {}",
-            stderr(&output)
-        );
-        assert!(!stderr(&output).contains("warning"), "{command}");
-    }
-}
-
-#[test]
-fn bytes_warning_proves_the_channel_is_non_failing_and_prints_before_run_output() {
-    let f = Fixture::new();
-    f.project("fn main() -> i32 { let b: Bytes<2> = [1, 2]; 42 }\n");
-    for args in [&["check"][..], &["run"][..]] {
-        let output = f.run(args);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{args:?}: {}",
-            stderr(&output)
-        );
-        let text = stderr(&output);
-        assert!(text.starts_with("warning[MW003]"), "{args:?}: {text}");
-    }
-    assert_eq!(stdout(&f.run(&["run"])), "Result: i32(42)\n");
-}
-
-#[test]
-fn errors_still_fail_when_warnings_are_present() {
-    let f = Fixture::new();
-    f.project(
-        "fn pick(value: Bytes<2>) -> i32 { 1 }\nfn main() -> i32 { let flag: Bool = 3; 1 }\n",
-    );
-    for args in [&["check"][..], &["build"][..], &["run"][..]] {
-        let output = f.run(args);
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
-        assert!(output.stdout.is_empty(), "{args:?}");
-        let text = stderr(&output);
-        let warning = text
-            .find("warning[MW003]")
-            .unwrap_or_else(|| panic!("{args:?}: {text}"));
-        let error = text
-            .find("error[TE002]")
-            .unwrap_or_else(|| panic!("{args:?}: {text}"));
-        assert!(
-            warning < error,
-            "warning is printed before the error: {text}"
-        );
+        f.project(source);
+        for args in [&["check"][..], &["build"][..], &["run"][..]] {
+            let output = f.run(args);
+            assert_eq!(output.status.code(), Some(1), "{source} {args:?}");
+            assert!(output.stdout.is_empty(), "{source} {args:?}");
+            let text = stderr(&output);
+            assert!(
+                text.contains("error[TE001]") && text.contains(guidance),
+                "{source} {args:?}: {text}"
+            );
+            assert!(!text.contains("warning"), "{source} {args:?}: {text}");
+        }
     }
 }
 
@@ -182,11 +131,11 @@ fn option_spelling_with_borrow_payloads_and_nesting_is_silent() {
     f.project(
         r#"
         fn read(value: borrow i32) -> i32 { value.copy() }
-        type Box { slot: Option<i32> }
+        type Box { slot: i32? }
         fn main() -> i32 {
             var owner := 40;
-            let wrapped: Option<borrow i32> = Some(owner.borrow());
-            let inner: Option<Option<i32>> = None;
+            let wrapped: (borrow i32)? = Some(owner.borrow());
+            let inner: i32?? = None;
             let seen := match wrapped { Some(view) => read(view), None => 0 };
             seen + 2
         }
@@ -207,7 +156,7 @@ fn option_spelling_in_an_imported_module_is_silent() {
     );
     f.write(
         "src/model.mb",
-        "pub type Maybe = Option<u32>;\npub fn none() -> Maybe { None }\n",
+        "pub type Maybe = u32?;\npub fn none() -> Maybe { None }\n",
     );
     f.write(
         "src/main.mb",
@@ -224,7 +173,7 @@ fn contextual_none_and_matching_work_through_calls_and_returns_in_source_and_was
     let f = Fixture::new();
     f.project(
         r#"
-        fn choose(flag: Bool) -> i32? { if flag { Some(40) } else { None } }
+        fn choose(flag: bool) -> i32? { if flag { Some(40) } else { None } }
         fn value_or(item: i32?, fallback: i32) -> i32 {
             match item { Some(n) => n, None => fallback }
         }
@@ -248,12 +197,12 @@ fn postfix_optional_type_errors_are_reported() {
     let f = Fixture::new();
     for (source, message) in [
         (
-            "fn main() { let flag: Bool? = Some(1); }",
-            "expected Bool, found",
+            "fn main() { let flag: bool? = Some(1); }",
+            "expected bool, found",
         ),
         (
             "fn main() { let value := None; }",
-            "cannot determine None's outcome type; provide an Option<T> annotation",
+            "cannot determine None's outcome type; provide a 'T?' annotation",
         ),
         ("fn take(value: i32?) {} fn main() { take(true); }", "TE002"),
     ] {
@@ -269,10 +218,10 @@ fn postfix_optional_type_errors_are_reported() {
 }
 
 #[test]
-fn postfix_and_option_spellings_are_the_same_type() {
+fn optional_and_fallible_operators_compose_in_source_and_wasm() {
     let f = Fixture::new();
     f.project(
-        "fn legacy(value: Option<i32>) -> i32? { value }\nfn main() -> i32 { let a: i32? = Some(42); let b: Option<i32> = a; match legacy(b) { Some(n) => n, None => 0 } }\n",
+        "fn lookup(value: u32?) -> u32 ?! Error { match value { Some(n) => if n > 100 { Err(Error { code: n }) } else { Ok(Some(n)) }, None => Ok(None) } }\nfn main() -> i32 { let a: u32? = Some(42); match lookup(a) { Ok(Some(n)) => n as i32, Ok(None) => 0, Err(e) => 0 - e.code as i32 } }\n",
     );
     let output = f.run(&["run"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));

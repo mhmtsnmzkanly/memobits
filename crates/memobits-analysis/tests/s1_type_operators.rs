@@ -1,4 +1,4 @@
-//! New built-in spellings lower to exactly the same program as the old ones.
+//! `T ?! E` is the same type as `T? ! E` and type names use the new spellings.
 use memobits_analysis::lower_module;
 use memobits_diagnostics::SourceId;
 use memobits_syntax::parse;
@@ -17,26 +17,28 @@ fn lower(source: &str) -> String {
 }
 
 #[test]
-fn new_spellings_lower_like_old_spellings() {
-    let new = lower(
-        "fn pick(flag: bool) -> u32? ! Error { if flag { Ok(Some(1)) } else { Ok(None) } }
-         fn grid() -> array<array<i32, 2>, 2> { [[1, 2], [3, 4]] }
-         fn letter() -> char { 'a' }
-         fn wrap(v: i32) -> (i32 ! Error)? { Some(Ok(v)) }
-         fn main() -> i32 ! Error {
-             let x: array<i32 ! Error, 1> = [Ok(5)];
-             match pick(true) { Ok(o) => match o { Some(n) => Ok(n as i32), None => Ok(0) }, Err(e) => Err(e) }
-         }",
-    );
-    let old = lower(
-        "fn pick(flag: Bool) -> Result<Option<u32>, Error> { if flag { Ok(Some(1)) } else { Ok(None) } }
-         fn grid() -> Array<Array<i32, 2>, 2> { [[1, 2], [3, 4]] }
-         fn letter() -> Char { 'a' }
-         fn wrap(v: i32) -> Option<Result<i32, Error>> { Some(Ok(v)) }
-         fn main() -> Result<i32, Error> {
-             let x: Array<Result<i32, Error>, 1> = [Ok(5)];
-             match pick(true) { Ok(o) => match o { Some(n) => Ok(n as i32), None => Ok(0) }, Err(e) => Err(e) }
-         }",
-    );
-    assert_eq!(new, old);
+fn question_bang_is_the_same_type_as_question_then_bang() {
+    let source = |spelling: &str| {
+        format!(
+            "fn pick(flag: bool) -> {spelling} {{ if flag {{ Ok(Some(1)) }} else {{ Ok(None) }} }}
+             fn grid() -> array<array<i32, 2>, 2> {{ [[1, 2], [3, 4]] }}
+             fn letter() -> char {{ 'a' }}
+             fn wrap(v: i32) -> (i32 ! Error)? {{ Some(Ok(v)) }}
+             fn main() -> i32 ! Error {{
+                 let x: array<i32 ! Error, 1> = [Ok(5)];
+                 match pick(true) {{
+                     Ok(Some(n)) => Ok(n as i32),
+                     Ok(None) => Ok(0),
+                     Err(e) => Err(e),
+                 }}
+             }}"
+        )
+    };
+    let reference = lower(&source("u32? ! Error"));
+    for spelling in ["u32?! Error", "u32 ?! Error", "(u32?) ! Error"] {
+        assert_eq!(lower(&source(spelling)), reference, "{spelling}");
+    }
+    // Type names render with the new spellings.
+    assert!(reference.contains("u32 ?! Error"), "{reference}");
+    assert!(reference.contains("(i32 ! Error)?"), "{reference}");
 }

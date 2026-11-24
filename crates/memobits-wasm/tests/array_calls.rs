@@ -172,7 +172,7 @@ fn every_element_type_crosses_calls() {
         ),
         ("f32", "[1.5, 2.5, 3.5]", "a[1] == 2.5"),
         ("f64", "[1.5, 2.5, 3.5]", "a[1] == 2.5"),
-        ("Bool", "[true, false, true]", "!(a[1]) && a[0]"),
+        ("bool", "[true, false, true]", "!(a[1]) && a[0]"),
     ] {
         let source = format!(
             "fn by_borrow(a: borrow array<{ty}, 3>) -> bool {{ {check} }} \

@@ -34,13 +34,15 @@ the scrutinee's place until its last use, with a variant payload step in the
 loan path (like a field path). Mutable matching stays deferred: matching
 through a `share` binds read-only too.
 
-**B4 — compiler-known `Option`, `Result`, `Attempt` and the `Error` hierarchy.**
+**B4 — compiler-known `T?`, `T ! E`, `T ?! E` and the `Error` hierarchy.**
 Implementation sequence and acceptance gates: `outcome-implementation.md`.
 The shared compiler registry supplies the templates. Analysis interns each
 concrete instance, so IR and Wasm use the ordinary enum pipeline.
 Type arguments such as `i32?` instantiate compiler-known types;
 user-defined generic declarations remain deferred, as required by `decisions.md`.
-Prelude variants are `Some`/`None`, `Ok`/`Err`, and `Done`/`Skipped`/`Failed`.
+Prelude variants are `Some`/`None` and `Ok`/`Err`. `T ?! E` is exactly
+`T? ! E`: there is no separate three-state type, and `Done`, `Skipped` and
+`Failed` no longer exist (use `Ok(Some(v))`, `Ok(None)` and `Err(e)`).
 Explicitly typed local `(borrow T)?` bindings support construction,
 consuming local moves and consuming matches. The wrapper carries the loan on
 the referent until the wrapper or extracted reference reaches its last use.

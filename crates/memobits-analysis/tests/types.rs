@@ -390,7 +390,12 @@ fn fixed_bytes_use_array_length_and_element_rules() {
             "{source}: {diagnostics:?}"
         );
     }
-    for ty in ["Bytes<-1>", "Bytes<n>", "Bytes<1.0>", "Bytes<u8, 1>"] {
+    for ty in [
+        "array<u8, -1>",
+        "array<u8, n>",
+        "array<u8, 1.0>",
+        "array<1>",
+    ] {
         let parsed = parse(SourceId(9), &format!("fn f(b: {ty}) {{}}"));
         assert!(!parsed.diagnostics.is_empty(), "{ty}");
     }

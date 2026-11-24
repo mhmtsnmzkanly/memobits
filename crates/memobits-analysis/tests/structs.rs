@@ -213,7 +213,7 @@ fn literal_shape_errors_have_dedicated_diagnostics() {
     rejected(
         &format!("{P} fn main() {{ let p := P {{ x: 1, y: true }}; }}"),
         "TE002",
-        "expected i32, found Bool",
+        "expected i32, found bool",
     );
     rejected(
         "type N = i32; fn main() { let p := N { x: 1 }; }",
@@ -423,7 +423,7 @@ fn aliases_resolve_wherever_a_type_is_named() {
     rejected(
         "type Num = i32; fn main() { let x: Num = true; }",
         "TE002",
-        "expected i32, found Bool",
+        "expected i32, found bool",
     );
 }
 

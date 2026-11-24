@@ -206,7 +206,7 @@ fn field_write_type_and_privacy_errors() {
     rejected(
         &format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; p.x = true; }}"),
         "TE002",
-        "expected i32, found Bool",
+        "expected i32, found bool",
     );
     rejected(
         &format!("{P} fn main() {{ var p := P {{ x: 1, y: 2 }}; p.z = 1; }}"),

@@ -920,7 +920,7 @@ fn primitive_reference_widths_and_owner_cells_execute() {
         ("u64", "1", "18000000000000000001"),
         ("f32", "1.0", "-12.5"),
         ("f64", "1.0", "-12345.25"),
-        ("Bool", "false", "true"),
+        ("bool", "false", "true"),
     ] {
         let program = lower(&format!(
             "fn write(x: share {ty}) {{ x = {replacement}; }} fn relay(x: share {ty}) {{ write(x); }} fn run(var x: {ty}) -> bool {{ var r := x.share(); relay(r); x == {replacement} }} fn main() -> bool {{ run({initial}) }}"

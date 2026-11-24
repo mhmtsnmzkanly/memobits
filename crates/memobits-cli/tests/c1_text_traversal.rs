@@ -1,6 +1,5 @@
 //! C1 acceptance tests: `loop ch in text` scalar traversal over `string`
-//! receivers (source and standalone Wasm), loan and binding negatives, and the
-//! MW003 spelling migration warnings.
+//! receivers (source and standalone Wasm), loan and binding negatives,.
 use std::{
     fs,
     path::PathBuf,
@@ -341,7 +340,7 @@ fn traversal_loan_and_binding_negatives() {
         ),
         (
             "let s := \"ab\"; loop ch in s { let n: u32 = ch; }",
-            "expected u32, found Char",
+            "expected u32, found char",
         ),
         (
             "let s := \"ab\"; loop ch in s { if ch < 'b' { } }",
@@ -353,35 +352,15 @@ fn traversal_loan_and_binding_negatives() {
 }
 
 #[test]
-fn legacy_bytes_spelling_warns_without_failing() {
+fn bytes_is_an_ordinary_unknown_type() {
     let f = Fixture::new();
-    f.project(
-        "fn length(text: borrow string) -> u32 { text.len() }\n\
-         fn main() -> u32 { let bytes: Bytes<2> = [1, 2]; let text := \"ab\"; if bytes[1] == 2 { length(text.borrow()) + 2 } else { 0 } }\n",
-    );
-    for args in [
-        &["check"][..],
-        &["build", "--output", "w.wasm"][..],
-        &["run"][..],
-    ] {
-        let output = f.run(args);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{args:?}: {}",
-            text(&output.stderr)
-        );
-        let stderr = text(&output.stderr);
-        assert!(!stderr.contains("MW002"), "{args:?}: {stderr}");
-        assert!(
-            stderr.contains(
-                "warning[MW003]: legacy `Bytes<N>` type spelling; write `Array<u8, N>` instead"
-            ),
-            "{args:?}: {stderr}"
-        );
-        assert!(stderr.contains("src/main.mb:2:"), "{args:?}: {stderr}");
-    }
-    assert_eq!(text(&f.run(&["run"]).stdout), "Result: u32(4)\n");
+    f.project("fn main() -> u32 { let bytes: Bytes<2> = [1, 2]; 0 }\n");
+    let output = f.run(&["check"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("unknown type 'Bytes'"), "{stderr}");
+    assert!(!stderr.contains("array<u8"), "{stderr}");
+    assert!(!stderr.contains("MW0"), "{stderr}");
 }
 
 #[test]
@@ -396,17 +375,6 @@ fn current_spellings_produce_no_warnings() {
         assert_eq!(output.status.code(), Some(0), "{args:?}");
         assert_eq!(text(&output.stderr), "", "{args:?}");
     }
-}
-
-#[test]
-fn legacy_spelling_warnings_do_not_hide_errors() {
-    let f = Fixture::new();
-    f.project("fn main() -> u32 { let bytes: Bytes<1> = [1]; let n: u32 = true; n }\n");
-    let output = f.run(&["check"]);
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = text(&output.stderr);
-    assert!(stderr.starts_with("warning[MW003]"), "{stderr}");
-    assert!(stderr.contains("error[TE"), "{stderr}");
 }
 
 #[test]

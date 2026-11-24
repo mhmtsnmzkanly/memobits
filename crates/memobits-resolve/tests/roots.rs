@@ -748,7 +748,7 @@ fn imported_outcome_alias_variants_check_names_and_visibility() {
         "use inner::Read as Inner;
          pub type Maybe = i32?;
          pub type Read = Inner;
-         type Hidden = Attempt<i32, Error>;",
+         type Hidden = i32 ?! Error;",
     );
     fs::write(f.0.join("src/inner.mb"), "pub type Read = i32 ! Error;").unwrap();
     for (source, expected) in [
@@ -756,8 +756,8 @@ fn imported_outcome_alias_variants_check_names_and_visibility() {
             "use math::Maybe; use math::Read as R; fn main() { Maybe::Some(7); R::Ok(7); }",
             None,
         ),
-        ("fn main() { math::Read::Done(7); }", Some("ME006")),
-        ("fn main() { math::Hidden::Skipped; }", Some("ME007")),
+        ("fn main() { math::Read::Missing(7); }", Some("ME006")),
+        ("fn main() { math::Hidden::Ok; }", Some("ME007")),
     ] {
         fs::write(f.0.join("src/main.mb"), source).unwrap();
         let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);
@@ -774,7 +774,7 @@ fn imported_outcome_alias_variants_check_names_and_visibility() {
 fn public_outcome_signatures_cannot_expose_private_nested_types() {
     let f = Fixture::new(
         "type Hidden { pub value: i32 }
-         pub fn make() -> Attempt<array<Hidden, 2>, Error>? { None }",
+         pub fn make() -> (array<Hidden, 2> ?! Error)? { None }",
     );
     fs::write(f.0.join("src/main.mb"), "use math::make; fn main() {}").unwrap();
     let result = resolve(&Project::load(&f.0, None).unwrap(), Target::Application);

@@ -308,7 +308,7 @@ fn anonymous_payload_enum_identity_and_payload_types_are_checked() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("TE002"), "{stderr}");
-    assert!(stderr.contains("expected i32, found Bool"), "{stderr}");
+    assert!(stderr.contains("expected i32, found bool"), "{stderr}");
 
     for (source, code, message) in [
         (

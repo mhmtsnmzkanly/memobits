@@ -5,14 +5,19 @@ pub const ENTRY_EXPORT: &str = "main";
 pub const MEMORY_EXPORT: &str = "__mb_entry_memory_v1";
 pub const RESULT_ALIGNMENT: u32 = 16;
 pub const ERROR_ID_BYTES: u32 = 4;
-const VERSION: u8 = 1;
-const HEADER_BYTES: usize = 12;
+/// Version 2 replaced the three-state Attempt family with a `T ?! E` family and
+/// added the optional payload offset.
+const VERSION: u8 = 2;
+const HEADER_BYTES: usize = 13;
 const MAX_NAME_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
+    /// `T ! E`: tag 0 is `Ok(T)`, tag 1 is `Err(E)`.
     Result,
-    Attempt,
+    /// `T ?! E` (`Result<Option<T>, E>`): the `Ok` payload is an optional cell
+    /// whose tag (0 = `Some`, 1 = `None`) sits at `payload_offset`.
+    OptionalResult,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +69,8 @@ pub struct Metadata<'a> {
     pub family: Family,
     pub success: Scalar,
     pub payload_offset: u8,
+    /// Offset of the scalar from `payload_offset` for `OptionalResult`; zero for `Result`.
+    pub inner_offset: u8,
     pub size: u32,
     pub error_id: u32,
     pub error_name: &'a str,
@@ -76,9 +83,15 @@ impl<'a> Metadata<'a> {
         }
         let family = match self.family {
             Family::Result => 1,
-            Family::Attempt => 2,
+            Family::OptionalResult => 2,
         };
-        let mut bytes = vec![VERSION, family, self.success as u8, self.payload_offset];
+        let mut bytes = vec![
+            VERSION,
+            family,
+            self.success as u8,
+            self.payload_offset,
+            self.inner_offset,
+        ];
         bytes.extend(self.size.to_le_bytes());
         bytes.extend(self.error_id.to_le_bytes());
         bytes.extend(self.error_name.as_bytes());
@@ -89,19 +102,20 @@ impl<'a> Metadata<'a> {
         if !(HEADER_BYTES + 1..=HEADER_BYTES + MAX_NAME_BYTES).contains(&bytes.len()) {
             return None;
         }
-        let [VERSION, family, scalar, payload_offset] = bytes[..4] else {
+        let [VERSION, family, scalar, payload_offset, inner_offset] = bytes[..5] else {
             return None;
         };
         let metadata = Self {
             family: match family {
                 1 => Family::Result,
-                2 => Family::Attempt,
+                2 => Family::OptionalResult,
                 _ => return None,
             },
             success: Scalar::from_tag(scalar)?,
             payload_offset,
-            size: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
-            error_id: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            inner_offset,
+            size: u32::from_le_bytes(bytes[5..9].try_into().ok()?),
+            error_id: u32::from_le_bytes(bytes[9..13].try_into().ok()?),
             error_name: std::str::from_utf8(&bytes[HEADER_BYTES..]).ok()?,
         };
         metadata.valid().then_some(metadata)
@@ -111,6 +125,13 @@ impl<'a> Metadata<'a> {
         let offset = u32::from(self.payload_offset);
         matches!(offset, 4 | 8)
             && offset >= self.success.width()
+            && match self.family {
+                Family::Result => self.inner_offset == 0,
+                Family::OptionalResult => {
+                    u32::from(self.inner_offset) == self.success.width()
+                        && self.size >= offset + u32::from(self.inner_offset) + self.success.width()
+                }
+            }
             && self.size >= offset + ERROR_ID_BYTES + 4
             && self.size.is_multiple_of(offset)
             && self.error_id != 0

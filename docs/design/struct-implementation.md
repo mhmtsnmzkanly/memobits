@@ -283,7 +283,7 @@ No new IR instruction and no new ownership rule were needed.
 - Arrays of structs `array<P, 3>`: literals, repetition
   `[P { x: 0, y: 0 }; 8]`, `a[i].x` reads and writes, `a[i] = P { .. }`, and
   arbitrary nesting (arrays of structs holding arrays of structs).
-- Sub-aggregates lent to `borrow P` / `share P` / `borrow Array<..>` parameters
+- Sub-aggregates lent to `borrow P` / `share P` / `borrow array<..>` parameters
   with `l.a.borrow()`, `a[i].share()`, `p.pts.borrow()`, and bound to local
   reference handles (`let r := l.a.borrow();`, `var s := a[i].share();`).
 - Aggregates with sub-aggregates pass by value (moves) as parameters, results,

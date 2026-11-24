@@ -10,7 +10,7 @@ Application output exposes the selected package entry as `main`. Library output
 uses the external aliases from the manifest export table and starts resolution
 from those exports. It must not introduce the application entry automatically.
 Library function exports use scalar signatures. A zero-argument application
-entry returning `Result` or `Attempt` with a primitive success payload uses
+entry returning `T ! E` or `T ?! E` with a primitive success payload uses
 the private [outcome entry adapter](outcome-implementation.md). Other aggregate
 application signatures and aggregate library exports are rejected with LE900.
 

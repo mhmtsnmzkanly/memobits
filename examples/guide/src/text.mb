@@ -130,9 +130,8 @@ pub fn walk_text(value: borrow string) -> bool {
 // immutable `char`. It works on a named `string` local or a borrowed
 // parameter, evaluates the text once, and borrows it for the whole loop, so the
 // body cannot mutate or move it. `.len()` still counts bytes: this text has
-// four scalars in ten bytes. Compatibility: the legacy `array<u8, N>` type
-// spelling still compiles with the same meaning but prints warning MW003 on
-// stderr; this guide uses `string` and `array<u8, N>`. `String` is rejected.
+// four scalars in ten bytes. The removed spellings `String`, `Char` and
+// `Bytes<N>` are rejected; this guide uses `string`, `char` and `array<u8, N>`.
 fn count_wide(value: borrow string) -> u32 {
     var wide: u32 = 0;
     loop ch in value {

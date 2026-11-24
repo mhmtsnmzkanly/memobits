@@ -32,19 +32,19 @@ Errors use the shared diagnostics renderer with these stable project codes:
 | PE006 | Unsupported build target or export |
 | PE007 | Invalid `[build]` setting, such as a `stack_size` out of range or not a multiple of 16 |
 
-Warnings use the `MW` prefix (migration warnings) and render as
-`warning[MW003]: message` with the same code, file, line, column and caret
-layout as errors. They are non-failing: `check`, `build`, `run`, `resolve`,
-`analyze-project`, `ownership-project`, `syntax`, `analyze` and `ownership`
-print them to stderr as soon as the source is parsed (before any error), and a
-warning never changes the exit status or suppresses an error. Running a
-prebuilt `.wasm` artifact has no source and prints no warnings.
-
-| Code | Meaning |
-| --- | --- |
-| MW001 | Unused and reserved. `Option<T>` is accepted silently with the same meaning as `T?` (user decision 2026-11-23). |
-| MW002 | Unused and reserved. Bare `String` is not a warning: it is rejected with TE001 (`use lowercase 'string'`). |
-| MW003 | Legacy `Bytes<N>` type spelling; write `Array<u8, N>` instead. `Bytes<N>` is an alias outside the target core with identical meaning. |
+The `MW` prefix is reserved for non-failing warnings, which render as
+`warning[MWnnn]: message` with the same file, line, column and caret layout as
+errors. The channel is wired through the parser, resolver and every source
+command (warnings print to stderr as soon as the source is parsed, before any
+error, and never change the exit status or suppress an error), but no warning
+is currently emitted: MW001 to MW003 and the old type spellings they covered
+were removed, and a removed spelling is now an error. Removed spellings fail
+with TE001 and name the replacement: `Option<T>` becomes `T?`, `Result<T, E>`
+becomes `T ! E`, `Attempt<T, E>` becomes `T ?! E`, `Bool` becomes `bool`,
+`Char` becomes `char` and `Array<T, N>` becomes `array<T, N>`. `Bytes` no longer
+exists and is an ordinary unknown type; use `array<u8, N>`. A unit test in
+`memobits-syntax` keeps the channel itself covered. Running a prebuilt `.wasm`
+artifact has no source and prints no warnings.
 
 Successful commands exit 0 and write stdout; failures exit 1 and write stderr.
 Tests launch the real `mb` executable with isolated temporary directories and
@@ -141,8 +141,8 @@ direct concat, or a direct internal String-returning call. See the
 and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 
 Application builds export the manifest entry as
-`main`. A zero-argument application entry can return `T ! E` or
-`Attempt<T, E>` with `bool`, an integer, or a float as its success payload.
+`main`. A zero-argument application entry can return `T ! E` or `T ?! E`
+(that is, `T? ! E`) with `bool`, an integer, or a float as `T`.
 The private adapter applies to `main` and uses the `memobits.entry` custom
 section. Library builds preserve export aliases and support scalar function
 signatures.
@@ -177,9 +177,9 @@ their Memobits type. Standalone scalar artifacts display the Wasm scalar type.
 Unit functions print `Result: Unit`.
 
 Outcome entries display the same result in both modes, such as
-`Result: Ok(u32(7))`, `Result: Done(Bool(true))`, `Result: Skipped`, or
-`Result: Failed(pkg::parser::ParseError, code=5)`. Both `Err` and `Failed`
-return the concrete error type and its `u32` code. The builtin root is printed
+`Result: Ok(u32(7))` for `T ! E`, and `Result: Ok(Some(bool(true)))`,
+`Result: Ok(None)` or `Result: Err(pkg::parser::ParseError, code=5)` for
+`T ?! E`. `Err` returns the concrete error type and its `u32` code. The builtin root is printed
 as `Error`. Guest traps and other runtime failures use RE diagnostics and exit
 nonzero. Without a project profile, the runtime accepts zero-argument exports
 from modules without host imports.

@@ -29,7 +29,7 @@ impl Checker {
                 "arrays cannot contain tuples with List fields in this slice",
             );
         } else if self.table.is_borrow_option(element) {
-            self.error(17, span, "Option<borrow T> cannot be stored in an array");
+            self.error(17, span, "(borrow T)? cannot be stored in an array");
         } else if self.lowering
             && !matches!(
                 element,

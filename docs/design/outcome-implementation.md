@@ -1,8 +1,10 @@
 # Compiler-known outcomes (B4)
 
-Owned `T?`, `T ! E`, and `Attempt<T, E>` execute inside Memobits
-functions. Zero-argument application entries support `Result` and `Attempt`
-with primitive success payloads. The full B4 contract is in
+Owned `T?`, `T ! E`, and `T ?! E` execute inside Memobits
+functions. `T ?! E` is exactly `T? ! E` (that is, `T? ! E`); there is no
+separate three-state type, and values are built and matched as `Ok(Some(v))`,
+`Ok(None)` and `Err(e)` with nested patterns. Zero-argument application entries
+support `T ! E` and `T ?! E` with primitive success payloads. The full B4 contract is in
 [decisions.md](decisions.md).
 
 ## Implemented gates
@@ -21,12 +23,12 @@ with primitive success payloads. The full B4 contract is in
   payloads produce TE017 at the payload expression. Integer slots still
   require literals. Contextual owned primitive payloads can still load
   a value through a standalone reference.
-- `Some`, `None`, `Ok`, `Err`, `Done`, `Skipped`, and `Failed` use the
+- `Some`, `None`, `Ok` and `Err` use the
   concrete expected instance when one is available. An alias-qualified
-  constructor such as `Work::Done(value)` supplies its own instance. Local
+  constructor such as `Work::Ok(value)` supplies its own instance. Local
   bindings, functions, and imports shadow the short names. Payload evidence
   alone can determine all arguments for `Some(value)`, including nested
-  `Some` calls. Bare `None` and well-formed short Result or Attempt constructors
+  `Some` calls. Bare `None` and well-formed short `Ok`/`Err` constructors
   without a concrete instance in context produce TE002. The Error bound never
   supplies an omitted argument by default.
 - Constructor and pattern arity, payload types, variant membership, and match
@@ -118,25 +120,30 @@ fn main() -> i32 {
 
 - The supported success payloads are `bool`, integers through 64 bits, and
   `f32` and `f64`. The application adapter accepts zero-argument
-  `T ! E` and `Attempt<T, E>` entries, including aliases. `Option`
+  `T ! E` and `T ?! E` entries, including aliases. `T?`
   entries, outcomes with aggregate success payloads, other aggregate
   application signatures, and aggregate library exports get LE900.
-- The internal version 1 adapter exports `main` with two Wasm `i32` results
+- The internal version 2 adapter exports `main` with two Wasm `i32` results
   (address and size) and its backing memory as `__mb_entry_memory_v1`. The
   caller-owned return cell follows the configured guest stack. The guest call
   retains the full configured stack budget.
 - The `memobits.entry` custom section carries a version byte, outcome family,
-  success primitive tag, payload offset, and the little-endian result size
-  and declared Error ID. A bounded UTF-8 name follows the header. Version 1
-  records only the declared `E`. Owning a concrete error through an ancestor
+  success primitive tag, payload offset, optional inner offset (zero for
+  `T ! E`; for `T ?! E` the offset of the scalar inside the `Option` cell, whose
+  tag byte at the payload offset is 0 for `Some` and 1 for `None`), and the
+  little-endian result size
+  and declared Error ID. A bounded UTF-8 name follows the header. Version 2
+  (it replaced the three-state family of version 1 with `T ?! E`) records only the declared `E`. Owning a concrete error through an ancestor
   type requires a separate conversion feature. The host checks the stored tag
   against the declared ID before displaying the qualified concrete name and
   `code`.
 - The runner checks metadata size and values, rejects duplicate sections and
   control characters in names, and checks the adapter signature, memory,
   returned size, address alignment, bounds, and active variant before
-  rendering. Source and standalone artifact runs share the decoder. All five
-  variants are normal returns printed on stdout. Guest traps use runtime
+  rendering. Source and standalone artifact runs share the decoder. `Ok(v)`,
+  `Ok(Some(v))`, `Ok(None)` and `Err` are normal returns printed on stdout
+  (`Result: Ok(i32(42))`, `Result: Ok(Some(bool(true)))`, `Result: Ok(None)`,
+  `Result: Err(Error, code=5)`). Guest traps use runtime
   diagnostics. This adapter is private to the current backend and runner.
 
 ## Remaining gates
@@ -172,9 +179,9 @@ coercion, field privacy, and source and standalone artifact
 execution with a primitive entry result. A counter checks once-only
 evaluation of success and failure payloads.
 
-CLI tests also cover all five outcome variants, standalone artifact parity,
+CLI tests also cover every outcome variant, standalone artifact parity,
 and checked and stack traps during outcome execution. A cross-module regression
 returns a leaf error after whole stores through both its immediate ancestor
 and root shares. It checks the concrete identity, the updated code, and the
 preserved leaf fields. Runtime tests exercise malformed metadata, invalid
-addresses and sizes, invalid tags and Bool payloads, and mismatched identities.
+addresses and sizes, invalid tags and bool payloads, and mismatched identities.

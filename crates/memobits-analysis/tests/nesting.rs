@@ -377,7 +377,7 @@ fn type_errors_in_nested_places() {
     rejected(
         &main_body("var p := Poly { n: 1, pts: [1, 2, 3], c: P { x: 5, y: 6 } };"),
         "TE002",
-        "Array<i32, 4>",
+        "array<i32, 4>",
     );
     rejected(
         &main_body("var p := Poly { n: 1, pts: [1, 2, 3, 4], c: P { x: 5, y: 6 } }; p.pts[4] = 1;"),

@@ -144,7 +144,7 @@ struct SpecializationRegistry {
     method_by_key: HashMap<String, FunctionId>,
 }
 const UNIT: Ty = Ty::Primitive("Unit");
-const BOOL: Ty = Ty::Primitive("Bool");
+const BOOL: Ty = Ty::Primitive("bool");
 const I32: Ty = Ty::Primitive("i32");
 const F64: Ty = Ty::Primitive("f64");
 const U8: Ty = Ty::Primitive("u8");
@@ -234,7 +234,7 @@ fn supported_generic_function(template: &GenericFunctionTemplate) -> bool {
 }
 
 fn is_array_generic_pattern(ty: &Type, type_name: &str, const_name: &str) -> bool {
-    ty.path.as_slice() == ["Array"]
+    ty.path.as_slice() == ["array"]
         && matches!(ty.arguments.as_slice(), [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Const(length)]
             if is_plain_type_parameter(element, type_name) && length == const_name)
 }
@@ -368,9 +368,9 @@ fn render_pattern(pattern: &Pattern) -> String {
 fn name(ty: &Ty) -> String {
     match ty {
         Ty::Primitive(s) => s.to_string(),
-        Ty::String => "String".into(),
+        Ty::String => "string".into(),
         Ty::List(element) => format!("List<{element}>"),
-        Ty::Array(element, count) => format!("Array<{}, {count}>", name(element)),
+        Ty::Array(element, count) => format!("array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(..) => "function".into(),
         Ty::Reference { access, inner, .. } => {
@@ -747,7 +747,6 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
             error_ancestry: table.error_ancestry(id as u32),
             entry_outcome: match table.enum_template(id as u32).map(|template| template.id) {
                 Some(registry::TemplateId::Result) => Some(memobits_ir::EntryOutcome::Result),
-                Some(registry::TemplateId::Attempt) => Some(memobits_ir::EntryOutcome::Attempt),
                 _ => None,
             },
             fields: info
@@ -778,8 +777,8 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
     Some(match ty {
         Ty::Primitive(name) => IrType::Primitive(match *name {
             "Unit" => Primitive::Unit,
-            "Bool" => Primitive::Bool,
-            "Char" => Primitive::Char,
+            "bool" => Primitive::Bool,
+            "char" => Primitive::Char,
             "i8" => Primitive::I8,
             "i16" => Primitive::I16,
             "i32" => Primitive::I32,
@@ -1547,7 +1546,7 @@ impl Checker {
                 return concrete.clone();
             }
         }
-        if ty.path.as_slice() == ["Array"] {
+        if ty.path.as_slice() == ["array"] {
             if let [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Const(length)] =
                 ty.arguments.as_slice()
             {
@@ -2057,7 +2056,7 @@ impl Checker {
                         self.error(
                             17,
                             statement.span,
-                            "Option<borrow T> requires an immutable local binding",
+                            "(borrow T)? requires an immutable local binding",
                         );
                     }
                     let id = self.register_local(
@@ -2503,7 +2502,7 @@ impl Checker {
                             Ty::Primitive(element)
                         }
                         Ty::String if matches!(&items.kind, ExprKind::Path(path) if path.len() == 1) => {
-                            Ty::Primitive("Char")
+                            Ty::Primitive("char")
                         }
                         Ty::String => {
                             self.error(
@@ -2519,7 +2518,7 @@ impl Checker {
                         }
                         Ty::Never | Ty::Error => Ty::Error,
                         _ => {
-                            self.error(17, items.span, "loop iteration requires a fixed Array or Bytes with numeric or Bool elements, or a List<u8> or List<u32>, or a named string");
+                            self.error(17, items.span, "loop iteration requires a fixed array with numeric or bool elements, or a List<u8> or List<u32>, or a named string");
                             Ty::Error
                         }
                     };
@@ -2947,7 +2946,7 @@ impl Checker {
             self.error(
                 17,
                 base.span,
-                "cannot borrow or share the storage of Option<borrow T>",
+                "cannot borrow or share the storage of (borrow T)?",
             );
             return Ty::Error;
         }
@@ -3502,7 +3501,7 @@ impl Checker {
                 2,
                 expr.span,
                 format!(
-                    "cannot determine {}'s outcome type; provide an {} annotation",
+                    "cannot determine {}'s outcome type; provide a '{}' annotation",
                     declared.name,
                     template.annotation()
                 ),
@@ -3669,7 +3668,7 @@ impl Checker {
                     self.error(
                         17,
                         argument.span,
-                        "Some requires a borrow reference for Option<borrow T>",
+                        "Some requires a borrow reference for (borrow T)?",
                     );
                 } else {
                     self.ensure(&actual, want, argument.span);
@@ -4493,7 +4492,7 @@ impl Checker {
                 chosen
             }
             ExprKind::StringLiteral(_) => Ty::String,
-            ExprKind::CharLiteral(_) => Ty::Primitive("Char"),
+            ExprKind::CharLiteral(_) => Ty::Primitive("char"),
             ExprKind::Bool(_) => BOOL,
             ExprKind::Path(path) => {
                 if let Some((function, signature)) = self
@@ -5241,7 +5240,7 @@ impl Checker {
                             );
                         } else if !numeric(&left_ty)
                             && left_ty != BOOL
-                            && left_ty != Ty::Primitive("Char")
+                            && left_ty != Ty::Primitive("char")
                             && left_ty != Ty::Error
                         {
                             self.error(7, left.span, "equality requires numeric or Bool operands");

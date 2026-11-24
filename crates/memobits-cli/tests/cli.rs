@@ -43,7 +43,7 @@ fn concat_accepts_aliased_inputs_and_keeps_outer_owners_across_nested_calls() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "concat.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "concat.wasm"]);
@@ -145,7 +145,7 @@ fn string_push_str_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "append.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "append.wasm"]);
@@ -221,7 +221,7 @@ fn share_string_replacement_preserves_caller_owned_storage() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "share.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "share.wasm"]);
@@ -313,7 +313,7 @@ fn heap_string_replacement_preserves_rhs_reads_and_handles_mixed_moves() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "replacement.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "replacement.wasm"]);
@@ -400,7 +400,7 @@ fn heap_returns_chain_through_immutable_locals_and_preserve_static_paths() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "returns.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "returns.wasm"]);
@@ -440,7 +440,7 @@ fn discarded_heap_results_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "discard.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "discard.wasm"]);
@@ -522,7 +522,7 @@ fn immediate_heap_string_reads_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "read.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "read.wasm"]);
@@ -565,7 +565,7 @@ fn temporary_string_borrows_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "borrow.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "borrow.wasm"]);
@@ -642,7 +642,7 @@ fn temporary_owned_string_arguments_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "owned-argument.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "owned-argument.wasm"]);
@@ -748,7 +748,7 @@ fn concat_moves_across_nested_scopes_release_once_on_either_branch() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "moves.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "moves.wasm"]);
@@ -852,7 +852,7 @@ fn list_replacement_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "replace.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "replace.wasm"]);
@@ -924,7 +924,7 @@ fn owned_list_returns_run_from_source_and_wasm() {
     "#);
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "return-list.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "return-list.wasm"]);
@@ -978,7 +978,7 @@ fn discarded_list_returns_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "discard-list.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "discard-list.wasm"]);
@@ -1043,7 +1043,7 @@ fn collection_contains_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "contains.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "contains.wasm"]);
@@ -1117,7 +1117,7 @@ fn collection_index_of_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "index-of.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "index-of.wasm"]);
@@ -1199,7 +1199,7 @@ fn temporary_list_reads_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "list-read.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "list-read.wasm"]);
@@ -1252,7 +1252,7 @@ fn temporary_list_borrows_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "list-borrow.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "list-borrow.wasm"]);
@@ -1427,7 +1427,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "owned.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "owned.wasm"]);
@@ -1511,7 +1511,7 @@ fn shared_list_push_updates_caller_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "shared.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "shared.wasm"]);
@@ -1562,7 +1562,7 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "replace-share.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "replace-share.wasm"]);
@@ -1605,7 +1605,7 @@ fn list_clear_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "clear.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "clear.wasm"]);
@@ -1674,7 +1674,7 @@ fn list_pop_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "pop.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "pop.wasm"]);
@@ -1762,7 +1762,7 @@ fn stored_list_share_updates_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "stored-share.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "stored-share.wasm"]);
@@ -1890,7 +1890,7 @@ fn borrowed_list_reads_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "borrow.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "borrow.wasm"]);
@@ -2015,7 +2015,7 @@ fn list_get_reads_copied_values_after_growth_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "get.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "get.wasm"]);
@@ -2069,7 +2069,7 @@ fn list_push_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "lists.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "lists.wasm"]);
@@ -2118,7 +2118,7 @@ fn empty_lists_and_local_moves_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "lists.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "lists.wasm"]);
@@ -2284,7 +2284,7 @@ fn internal_static_string_results_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "result.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "result.wasm"]);
@@ -2322,7 +2322,7 @@ fn immediately_matched_heap_string_results_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "owned-result.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "owned-result.wasm"]);
@@ -2366,7 +2366,7 @@ fn returned_heap_string_results_run_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "returned-result.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "returned-result.wasm"]);
@@ -2439,7 +2439,7 @@ fn heap_string_results_reject_escape_and_ignore_paths() {
         );
         let diagnostic = err(f.run(&["ownership", "text.mb"]), "TE018");
         assert!(
-            diagnostic.contains("heap String") || diagnostic.contains("heap Result<String, E>"),
+            diagnostic.contains("heap String") || diagnostic.contains("heap `string ! E`"),
             "{body}: {diagnostic}"
         );
     }
@@ -2680,7 +2680,7 @@ fn string_struct_share_reads_keep_caller_ownership_and_artifact_parity() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "share.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "share.wasm"]);
@@ -2739,7 +2739,7 @@ fn string_struct_share_replaces_fields_with_caller_cleanup_and_parity() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "share-write.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "share-write.wasm"]);
@@ -3123,7 +3123,7 @@ fn strict_utf8_construction_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "utf8.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "utf8.wasm"]);
@@ -3223,7 +3223,7 @@ fn scalar_traversal_counts_scalars_separately_from_utf8_bytes_in_source_and_wasm
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "scalar-traversal.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "scalar-traversal.wasm"]);
@@ -5472,7 +5472,7 @@ fn char_and_u32_are_distinct_scalar_types() {
     let f = Fixture::new();
     f.write("char-mismatch.mb", "fn main() -> bool { 'A' == 65 }");
     let message = err(f.run(&["analyze", "char-mismatch.mb"]), "TE002");
-    assert!(message.contains("expected Char"), "{message}");
+    assert!(message.contains("expected char"), "{message}");
 }
 
 #[test]
@@ -5546,7 +5546,7 @@ fn tuple_nested_option_reference_is_gated_before_owner_can_escape() {
     f.write("option-reference.mb", "fn main() -> i32 { var value := 1; let maybe: (borrow i32)? = None; let tuple := (maybe, 0); value = 2; tuple.1 }");
     let message = err(f.run(&["analyze", "option-reference.mb"]), "TE017");
     assert!(
-        message.contains("Option reference type arguments require embedded-loan tracking")
+        message.contains("reference type arguments require embedded-loan tracking")
             || message.contains("tuple elements cannot contain direct or nested references")
             || message.contains("tuple types cannot contain direct or nested references"),
         "{message}"
@@ -6040,7 +6040,7 @@ fn generic_nominal_enum_constructors_reject_invalid_origins_and_payloads() {
         (
             "type Packet<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<2> = Packet::Data([1]); }",
             "TE002",
-            "expected Array<u8, 2>, found Array<u8, 1>",
+            "expected array<u8, 2>, found array<u8, 1>",
         ),
         (
             "type Packet<const N: u32> [Data(array<u8, N>)] fn main() { let packet: Packet<1> = Packet::Data(); }",
@@ -6357,7 +6357,7 @@ fn generic_array_function_rejects_conflicting_const_arguments() {
     );
     let diagnostic = err(f.run(&["run"]), "TE002");
     assert!(
-        diagnostic.contains("expected Array<i32, 1>, found Array<i32, 2>"),
+        diagnostic.contains("expected array<i32, 1>, found array<i32, 2>"),
         "{diagnostic}"
     );
 
@@ -6387,7 +6387,7 @@ fn generic_functions_reject_conflicting_types_and_preserve_owned_moves() {
     );
     let diagnostic = err(f.run(&["run"]), "TE002");
     assert!(
-        diagnostic.contains("expected i32, found Bool"),
+        diagnostic.contains("expected i32, found bool"),
         "{diagnostic}"
     );
 
@@ -6710,12 +6710,12 @@ fn postfix_optional_type_rejects_mismatched_and_uninferred_values() {
         (
             "fn main() { let value: i32? = Some(true); }",
             "TE002",
-            "expected i32, found Bool",
+            "expected i32, found bool",
         ),
         (
             "fn main() { let value := None; }",
             "TE002",
-            "cannot determine None's outcome type; provide an Option<T> annotation",
+            "cannot determine None's outcome type; provide a 'T?' annotation",
         ),
     ] {
         f.write("src/main.mb", source);
@@ -6776,7 +6776,7 @@ fn postfix_optional_reference_grouping_keeps_current_transport_gate() {
     );
     let diagnostic = err(f.run(&["run"]), "TE017");
     assert!(
-        diagnostic.contains("Option reference type arguments require embedded-loan tracking"),
+        diagnostic.contains("reference type arguments require embedded-loan tracking"),
         "{diagnostic}"
     );
 }
@@ -6795,7 +6795,7 @@ fn option_some_value_roundtrips_through_match() {
 }
 
 #[test]
-fn applied_bytes_coexists_with_a_bare_bytes_import_and_moves_like_an_array() {
+fn a_user_type_named_bytes_is_an_ordinary_type_and_arrays_move() {
     let f = Fixture::new();
     f.write(
         "project.toml",
@@ -6819,14 +6819,6 @@ fn applied_bytes_coexists_with_a_bare_bytes_import_and_moves_like_an_array() {
         &source.replace("consume(data)", "consume(data); data[0]"),
     );
     err(f.run(&["run"]), "BE001");
-
-    f.write(
-        "src/main.mb",
-        "type Bytes [ Tag ]
-         type Buffer = Bytes<1>;
-         fn main() -> u8 { Buffer::Tag; 0 }",
-    );
-    err(f.run(&["resolve"]), "NE004");
 }
 
 fn assert_example_runs_in_both_modes(project: &str, expected: &[u8]) {
@@ -6914,7 +6906,7 @@ fn unresolved_none_preserves_previous_artifact() {
     f.write("src/main.mb", "fn main() { let value := None; }");
     f.write("option.wasm", "existing artifact");
     let message = err(f.run(&["build", "--output", "option.wasm"]), "TE002");
-    assert!(message.contains("Option<T> annotation"), "{message}");
+    assert!(message.contains("'T?' annotation"), "{message}");
     assert_eq!(
         fs::read(f.0.join("option.wasm")).unwrap(),
         b"existing artifact"
@@ -6933,7 +6925,7 @@ fn owned_outcomes_execute_once_through_imported_aliases_in_source_and_artifact()
         "pub type Maybe = u32?;
          pub type Failure = Error;
          pub type Read = u32 ! Failure;
-         pub type Work = Attempt<Read, Failure>;
+         pub type Work = Read ?! Failure;
          pub fn bump(n: share u32) -> u32 { n += 1; n }
          pub fn fail(n: share u32) -> Failure { Error { code: bump(n) } }
          pub fn zero() -> u32 { 0 }",
@@ -6945,19 +6937,19 @@ fn owned_outcomes_execute_once_through_imported_aliases_in_source_and_artifact()
          use model::Work;
          use model::bump;
          use model::fail;
-         use model::zero as Skipped;
+         use model::zero as nothing;
          fn read(value: Work) -> u32 {
              match value {
-                 Work::Done(r) => match r { Ok(n) => n, R::Err(e) => e.code },
-                 Work::Skipped => Skipped(),
-                 Failed(e) => e.code
+                 Work::Ok(Some(r)) => match r { Ok(n) => n, R::Err(e) => e.code },
+                 Work::Ok(None) => nothing(),
+                 Err(e) => e.code
              }
          }
          fn main() -> i32 {
              var count: u32 = 0;
-             let value := Work::Done(Ok(bump(count.share())));
-             let failure: Work = Failed(fail(count.share()));
-             let miss := model::Work::Skipped;
+             let value := Work::Ok(Some(Ok(bump(count.share()))));
+             let failure: Work = Err(fail(count.share()));
+             let miss := model::Work::Ok(None);
              let optional := match Maybe::Some(7) { Maybe::Some(n) => n, Maybe::None => 0 };
              if optional + read(value) + read(failure) + read(miss) + count * 10 == 30 { 30 } else { 0 }
          }",
@@ -6985,12 +6977,9 @@ fn project_outcomes_reject_invalid_error_argument_and_missing_context() {
         "[package]\nname='outcomes'\nentry='main::main'\n",
     );
     for (source, diagnostic) in [
+        ("fn main() { let value := Ok(7); }", "'T ! E' annotation"),
         (
-            "fn main() { let value := Ok(7); }",
-            "Result<T, E> annotation",
-        ),
-        (
-            "fn main() { let value: Attempt<i32, u32> = Done(7); }",
+            "fn main() { let value: i32 ?! u32 = Ok(Some(7)); }",
             "requires Error",
         ),
     ] {
@@ -7019,8 +7008,8 @@ fn derived_errors_execute_across_modules_in_source_and_artifact() {
         "use origin::Parent as Ancestor;
          pub type ParseError: Ancestor { pub line: u32 }
          pub type Read = u32 ! ParseError;
-         pub type Work = Attempt<Read, ParseError>;
-         pub fn wrap(e: ParseError) -> Work { Done(Err(e)) }",
+         pub type Work = Read ?! ParseError;
+         pub fn wrap(e: ParseError) -> Work { Ok(Some(Err(e))) }",
     );
     f.write(
         "src/main.mb",
@@ -7029,16 +7018,16 @@ fn derived_errors_execute_across_modules_in_source_and_artifact() {
          use model::wrap;
          fn inspect(work: Work) -> u32 {
              match work {
-                 Done(read) => match read { Err(e) => e.code + 10 * e.stage + 100 * e.line, Ok(n) => n },
-                 Failed(e) => e.code,
-                 Skipped => 0
+                 Ok(Some(read)) => match read { Err(e) => e.code + 10 * e.stage + 100 * e.line, Ok(n) => n },
+                 Err(e) => e.code,
+                 Ok(None) => 0
              }
          }
          fn main() -> i32 {
              var err := ParseError { line: 3, code: 1, stage: 2 };
              origin::bump(err.share());
              let n := origin::code(err.borrow());
-             let failed: Work = Failed(ParseError { stage: 9, code: 7, line: 8 });
+             let failed: Work = Err(ParseError { stage: 9, code: 7, line: 8 });
              if n == 5 && inspect(wrap(err)) + inspect(failed) == 332 { 332 } else { 0 }
          }",
     );
@@ -7175,17 +7164,26 @@ fn outcome_entries_report_every_variant_from_source_and_standalone_artifacts() {
             "Err(Error, code=4294967295)",
         ),
         (
-            "fn main() -> Attempt<bool, Error> { Done(true) }",
-            "Done(Bool(true))",
+            "fn main() -> bool ?! Error { Ok(Some(true)) }",
+            "Ok(Some(bool(true)))",
         ),
         (
-            "fn main() -> Attempt<f64, Error> { Done(2.5) }",
-            "Done(f64(2.5))",
+            "fn main() -> f64 ?! Error { Ok(Some(2.5)) }",
+            "Ok(Some(f64(2.5)))",
         ),
-        ("fn main() -> Attempt<i32, Error> { Skipped }", "Skipped"),
         (
-            "type ParseError: Error {} fn main() -> Attempt<i32, ParseError> { Failed(ParseError { code: 5 }) }",
-            "Failed(outcomes::main::ParseError, code=5)",
+            "fn main() -> u64?! Error { Ok(Some(18446744073709551615)) }",
+            "Ok(Some(u64(18446744073709551615)))",
+        ),
+        ("fn main() -> i32 ?! Error { Ok(None) }", "Ok(None)"),
+        ("fn main() -> i8 ?! Error { Ok(None) }", "Ok(None)"),
+        (
+            "type ParseError: Error {} fn main() -> i32 ?! ParseError { Err(ParseError { code: 5 }) }",
+            "Err(outcomes::main::ParseError, code=5)",
+        ),
+        (
+            "fn main() -> u8 ?! Error { Err(Error { code: 9 }) }",
+            "Err(Error, code=9)",
         ),
     ] {
         f.write("src/main.mb", source);
@@ -7310,7 +7308,7 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
             "primitive success payload",
         ),
         (
-            "fn main(n: i32) -> Attempt<i32, Error> { Done(n) }",
+            "fn main(n: i32) -> i32 ?! Error { Ok(Some(n)) }",
             "must take no parameters",
         ),
         (
@@ -8471,7 +8469,7 @@ fn numeric_cast_matrix_and_rust_boundaries_match_source_and_wasm() {
     f.write("src/main.mb", &source);
     let run = f.run(&["run"]);
     assert!(run.status.success(), "{run:?}");
-    assert_eq!(run.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(run.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "casts.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "casts.wasm"]);
@@ -9337,7 +9335,7 @@ fn struct_diagnostics_are_rendered_with_stable_codes() {
         (
             "let p := P { x: 1, y: true }; 0",
             "TE002",
-            "expected i32, found Bool",
+            "expected i32, found bool",
         ),
         ("let p := Q { x: 1 }; 0", "NE003", "unknown type 'Q'"),
         ("let n := 1; n.x + 1", "TE024", "requires a struct value"),
@@ -9709,7 +9707,7 @@ fn list_iteration_runs_from_source_and_wasm() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "list-iteration.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let wasm = f.run(&["run", "list-iteration.wasm"]);
@@ -9760,7 +9758,7 @@ fn explicit_drop_releases_owners_and_allows_reinitialization() {
     );
     let source = f.run(&["run"]);
     assert!(source.status.success(), "{source:?}");
-    assert_eq!(source.stdout, b"Result: Ok(Bool(true))\n");
+    assert_eq!(source.stdout, b"Result: Ok(bool(true))\n");
     let build = f.run(&["build", "--output", "drop.wasm"]);
     assert!(build.status.success(), "{build:?}");
     let artifact = f.run(&["run", "drop.wasm"]);

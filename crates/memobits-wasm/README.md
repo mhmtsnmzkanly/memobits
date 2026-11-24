@@ -7,7 +7,7 @@ application entry export or library export aliases; the backend does not infer
 project visibility or roots.
 
 `compile_application_traced` exports the selected entry as `main`. A zero-argument
-entry returning `Result` or `Attempt` with a primitive success payload uses
+entry returning `T ! E` or `T ?! E` with a primitive success payload uses
 the private [outcome entry adapter](../../docs/design/outcome-implementation.md).
 It exports an address/size wrapper and its backing memory, and records decoding
 metadata in `memobits.entry`. Library exports use scalar signatures.
@@ -17,10 +17,10 @@ assignments, direct calls, returns, branches, and arbitrary basic-block edges.
 It uses a dispatcher loop for control flow and stages edge arguments before
 copying block parameters. Integer arithmetic checks overflow, division by zero,
 and signed minimum divided by negative one. Floating operations use Wasm IEEE
-behavior. Invalid Bool, Unit, and narrow integer parameters trap at function
+behavior. Invalid bool, Unit, and narrow integer parameters trap at function
 entry. Indirect calls and non-primitive types are reported with LE900.
 
-The current ABI is experimental: Bool and 8/16/32-bit integers use Wasm i32;
+The current ABI is experimental: bool and 8/16/32-bit integers use Wasm i32;
 64-bit integers use i64; f32/f64 map directly; Unit has no external result.
 Internal Unit values use a zero-valued i32 slot. No ABI stability or source
 mapping guarantee is implied.

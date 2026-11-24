@@ -338,7 +338,7 @@ pub struct LexResult {
 pub struct ParseResult {
     pub module: Module,
     pub diagnostics: Vec<Diagnostic>,
-    /// Non-failing migration warnings (`MW` codes); they never make a parse fail.
+    /// Non-failing warnings; they never make a parse fail. Currently unused.
     pub warnings: Vec<Diagnostic>,
 }
 fn diagnostic(number: u16, span: Span, message: impl Into<String>) -> Diagnostic {
@@ -805,12 +805,36 @@ impl Parser {
         if !self.eat("!") {
             return Ok(value);
         }
-        let error = self.ty_postfix()?;
+        let error = self.error_operand()?;
         Ok(Type {
             span: self.span(start),
-            path: vec!["Result".into()],
-            arguments: vec![TypeArgument::Type(value), TypeArgument::Type(error)],
+            path: vec!["!".into()],
+            arguments: vec![TypeArgument::Type(value), error],
         })
+    }
+    /// The error side of `T ! E`: a postfix type, or a parenthesized reference
+    /// such as `(borrow E)`. Grouping is syntax only; transport gates still apply.
+    fn error_operand(&mut self) -> PResult<TypeArgument> {
+        if self.at("(") && (self.next_at("borrow") || self.next_at("share")) {
+            let saved = (self.pos, self.diagnostics.len());
+            self.bump();
+            let start = self.current().span.start;
+            let access = self.access();
+            let referent = self.ty()?;
+            let span = self.span(start);
+            self.expect(")")?;
+            if !self.at("?") {
+                return Ok(TypeArgument::Reference {
+                    span,
+                    access,
+                    referent,
+                });
+            }
+            // `(borrow E)?` is an optional reference: parse it as a postfix type.
+            self.pos = saved.0;
+            self.diagnostics.truncate(saved.1);
+        }
+        Ok(TypeArgument::Type(self.ty_postfix()?))
     }
     /// A type without the `!` operator: optional suffixes bind here.
     fn ty_postfix(&mut self) -> PResult<Type> {
@@ -939,7 +963,7 @@ impl Parser {
                 }
                 return Ok(Type {
                     span: self.span(start),
-                    path: vec!["Option".into()],
+                    path: vec!["?".into()],
                     arguments: vec![TypeArgument::Reference {
                         span: reference_span,
                         access,
@@ -951,22 +975,13 @@ impl Parser {
             while self.eat("?") {
                 ty = Type {
                     span: self.span(start),
-                    path: vec!["Option".into()],
+                    path: vec!["?".into()],
                     arguments: vec![TypeArgument::Type(ty)],
                 };
             }
             return Ok(ty);
         }
-        let mut path = self.path()?;
-        if path.len() == 1 {
-            // Lowercase built-in spellings map onto the existing built-in types.
-            match path[0].as_str() {
-                "bool" => path[0] = "Bool".into(),
-                "char" => path[0] = "Char".into(),
-                "array" => path[0] = "Array".into(),
-                _ => {}
-            }
-        }
+        let path = self.path()?;
         let mut arguments = Vec::new();
         if self.eat("<") {
             let template = templates::lookup_applied(&path);
@@ -1030,22 +1045,15 @@ impl Parser {
                         | "u64"
                         | "f32"
                         | "f64"
-                        | "Bool"
-                        | "String"
-                        | "Char"
+                        | "bool"
+                        | "string"
+                        | "char"
                 )
             {
                 return self.fail("primitive types do not accept generic arguments");
             }
-        } else if path == ["Array"] {
-            return self.fail("expected Array<element type, length>");
-        }
-        if path == ["Bytes"] && !arguments.is_empty() {
-            self.warn_migration(
-                3,
-                start,
-                "legacy `Bytes<N>` type spelling; write `Array<u8, N>` instead".into(),
-            );
+        } else if path == ["array"] {
+            return self.fail("expected array<element type, length>");
         }
         let mut ty = Type {
             span: self.span(start),
@@ -1055,19 +1063,18 @@ impl Parser {
         while self.eat("?") {
             ty = Type {
                 span: self.span(start),
-                path: vec!["Option".into()],
+                path: vec!["?".into()],
                 arguments: vec![TypeArgument::Type(ty)],
             };
         }
         Ok(ty)
     }
-    /// MW003: the legacy `Bytes<N>` spelling. Meaning is unchanged. MW001 and MW002 are unused.
-    fn warn_migration(&mut self, number: u16, start: usize, message: String) {
-        let mut warning = Diagnostic::new(
-            DiagnosticCode::new(Category::Migration, number).unwrap(),
-            Severity::Warning,
-            message,
-        );
+    /// Report a non-failing warning. The channel (`ParseResult::warnings`, then
+    /// `Resolution::warnings`, then the CLI) currently has no producer: the
+    /// migration warnings MW001 to MW003 were removed with the old type spellings.
+    #[allow(dead_code)]
+    fn warn(&mut self, code: DiagnosticCode, start: usize, message: String) {
+        let mut warning = Diagnostic::new(code, Severity::Warning, message);
         warning.span = Some(self.span(start));
         self.warnings.push(warning);
     }
@@ -1915,5 +1922,31 @@ impl Parser {
             };
         }
         Ok(left)
+    }
+}
+
+#[cfg(test)]
+mod warning_channel_tests {
+    use super::*;
+
+    #[test]
+    fn warning_channel_reaches_the_parse_result_without_failing() {
+        let lexed = lex(SourceId(0), "fn main() {}");
+        let mut parser = Parser {
+            tokens: lexed.tokens,
+            pos: 0,
+            no_struct: false,
+            diagnostics: lexed.diagnostics,
+            warnings: Vec::new(),
+            pending: Vec::new(),
+        };
+        parser.warn(
+            DiagnosticCode::new(Category::Migration, 1).unwrap(),
+            0,
+            "test warning".into(),
+        );
+        assert_eq!(parser.warnings.len(), 1);
+        assert_eq!(parser.warnings[0].severity, Severity::Warning);
+        assert!(parser.diagnostics.is_empty());
     }
 }

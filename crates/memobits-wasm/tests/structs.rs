@@ -106,7 +106,7 @@ fn extreme_values_survive_layout_padding() {
         ("c", "i8", -128),
         ("e", "u16", 65535),
         ("f", "i32", -2147483648),
-        ("g", "Bool", 0),
+        ("g", "bool", 0),
     ] {
         let source = format!("{program} fn main() -> {ty} {{ {build} w.{field}.copy() }}");
         assert_eq!(

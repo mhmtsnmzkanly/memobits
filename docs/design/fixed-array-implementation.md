@@ -238,7 +238,7 @@ WP3 lets arrays of primitive elements cross internal function calls.
   TE004 through a `borrow` or an immutable share binding. A constant
   out-of-range index through a reference is TE008, the D1 extraction rule
   TE022 applies unchanged, and a length or element mismatch between argument and
-  parameter is TE002 (`expected borrow Array<i32, 3>, found borrow Array<i32,
+  parameter is TE002 (`expected borrow array<i32, 3>, found borrow array<i32,
   2>`). An owned array argument may be a literal, a repetition or a named array
   (a move). A whole array may be assigned through a share reference
   (`a = [1, 2];` stores with a memory copy).

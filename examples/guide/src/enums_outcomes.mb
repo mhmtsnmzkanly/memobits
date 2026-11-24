@@ -148,7 +148,8 @@ type RangeError: ReadingError {
     observed: i32,
 }
 type Checked = Row ! RangeError;
-type Poll = Attempt<i32?, RangeError>;
+// `T ?! E` is exactly `T? ! E`: Ok(Some(v)), Ok(None) or Err(e).
+type Poll = i32? ?! RangeError;
 fn replace_context(context: share ReadingError) {
     // A whole write through an ancestor share updates its visible fields.
     // The descendant keeps its concrete type and its observed field.
@@ -166,34 +167,36 @@ fn check(value: i32) -> Checked {
     }
 }
 fn poll(enabled: bool, value: i32) -> Poll {
-    if !enabled { return Poll::Skipped; }
+    // Ok(None) means the operation was skipped.
+    if !enabled { return Ok(None); }
     match check(value) {
         Ok(row) => {
             // Some can infer an owned Option from its payload. Bare None
-            // needs an expected type, here supplied by Poll::Done.
+            // needs an expected type, here supplied by the Poll return type.
             if row[0] == 0 {
-                Poll::Done(None)
+                Ok(Some(None))
             } else {
                 let reading := Some(total(row.borrow()));
-                Done(reading)
+                Ok(Some(reading))
             }
         },
-        Err(error) => Failed(error),
+        Err(error) => Err(error),
     }
 }
 pub fn outcomes() -> bool {
+    // Nested patterns match through all three layers.
     let done := match poll(true, 2) {
-        Done(reading) => match reading { Some(value) => value == 9, None => false },
+        Ok(Some(Some(value))) => value == 9,
         _ => false,
     };
-    // Done(None) means the operation ran and found no reading.
+    // Ok(Some(None)) means the operation ran and found no reading.
     let empty := match poll(true, 0) {
-        Done(reading) => match reading { None => true, Some(_) => false },
+        Ok(Some(None)) => true,
         _ => false,
     };
-    let skipped := match poll(false, 2) { Skipped => true, _ => false };
+    let skipped := match poll(false, 2) { Ok(None) => true, _ => false };
     let failed := match poll(true, -4) {
-        Failed(error) => {
+        Err(error) => {
             var error := error;
             replace_context(error.share()); // RangeError to ReadingError.
             error_code(error.borrow()) == 12 // RangeError to its root Error.
@@ -204,5 +207,5 @@ pub fn outcomes() -> bool {
     done && empty && skipped && failed
 }
 // Ancestor reference conversion works at direct internal calls. Owned
-// conversion to an ancestor is unavailable. Result and Attempt require Error
+// conversion to an ancestor is unavailable. `T ! E` and `T ?! E` require Error
 // or a nominal descendant as their error argument.

@@ -263,20 +263,20 @@ fn in_place_matches_copy_primitives_and_lend_nested_aggregates() {
 }
 
 #[test]
-fn nested_patterns_work_inside_attempt_and_option_containers() {
+fn nested_patterns_work_inside_optional_fallible_containers() {
     let f = Fixture::new();
     assert_eq!(
         f.result(
-            "fn att(a: Attempt<u32, Error>?) -> u32 {
+            "fn att(a: (u32 ?! Error)?) -> u32 {
                  match a {
-                     Some(Done(v)) => v,
-                     Some(Skipped) => 1000,
-                     Some(Failed(e)) => e.code + 2000,
+                     Some(Ok(Some(v))) => v,
+                     Some(Ok(None)) => 1000,
+                     Some(Err(e)) => e.code + 2000,
                      None => 3000,
                  }
              }
              fn main() -> i32 {
-                 (att(Some(Done(5))) + att(Some(Skipped)) + att(None)) as i32
+                 (att(Some(Ok(Some(5)))) + att(Some(Ok(None))) + att(None)) as i32
              }"
         ),
         "Result: i32(4005)"

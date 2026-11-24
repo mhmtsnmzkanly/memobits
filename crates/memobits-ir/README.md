@@ -66,7 +66,7 @@ access, the output `Reference` type and loan-id uniqueness. `EnumTag` also accep
 mode on any enum reference.
 
 Compiler-known outcomes use the same enum operations. `TypeDef::entry_outcome`
-identifies Result and Attempt instances for application entry validation and
+identifies `T ! E` and `T ?! E` (that is, `T? ! E`) instances for application entry validation and
 emission. Nominal Error ancestry is tracked on struct definitions.
 
 Run tests with `cargo test --offline -p memobits-ir`.

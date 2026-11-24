@@ -29,7 +29,7 @@ in payloads); see the guide's `nested_patterns` check.
 Still gated: literal patterns, guards, `==` on enums (use `match`), and
 user-defined enums in Wasm entry or library export signatures. The separate
 [application outcome adapter](../../../docs/design/outcome-implementation.md)
-supports compiler-known Result and Attempt entries with primitive success
+supports compiler-known `T ! E` and `T ?! E` entries with primitive success
 payloads. See the [enum checkpoints](../../../docs/design/enum-implementation.md).
 
 ```sh

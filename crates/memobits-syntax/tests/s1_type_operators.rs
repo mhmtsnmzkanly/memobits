@@ -1,5 +1,5 @@
 //! Built-in type spelling: `bool`, `char`, `array<T, N>` and the `T ! E` /
-//! `T?` type operators parse onto the existing built-in type shapes.
+//! `T?` / `T ?! E` type operators.
 use memobits_diagnostics::SourceId;
 use memobits_syntax::{parse, ItemKind, Type, TypeArgument};
 
@@ -37,39 +37,68 @@ fn result_type(source: &str) -> String {
     render(result.as_ref().expect("result type"))
 }
 
-fn same(new: &str, old: &str) {
-    let a = result_type(&format!("fn f() -> {new} {{ x }}"));
-    let b = result_type(&format!("fn f() -> {old} {{ x }}"));
-    assert_eq!(a, b, "{new} vs {old}");
+fn same(left: &str, right: &str) {
+    let a = result_type(&format!("fn f() -> {left} {{ x }}"));
+    let b = result_type(&format!("fn f() -> {right} {{ x }}"));
+    assert_eq!(a, b, "{left} vs {right}");
+}
+
+fn shape(source: &str, expected: &str) {
+    assert_eq!(
+        result_type(&format!("fn f() -> {source} {{ x }}")),
+        expected
+    );
 }
 
 #[test]
-fn lowercase_builtins_match_existing_types() {
-    same("bool", "Bool");
-    same("char", "Char");
-    same("array<u8, 4>", "Array<u8, 4>");
-    same("array<array<i32, 2>, 3>", "Array<Array<i32, 2>, 3>");
+fn builtin_spellings_are_lowercase() {
+    shape("bool", "bool");
+    shape("char", "char");
+    shape("array<u8, 4>", "array<u8, 4>");
+    shape("array<array<i32, 2>, 3>", "array<array<i32, 2>, 3>");
 }
 
 #[test]
-fn bang_is_result_and_question_binds_tighter() {
-    same("i32 ! Error", "Result<i32, Error>");
-    same("u32? ! Error", "Result<Option<u32>, Error>");
-    same("(u32 ! Error)?", "Option<Result<u32, Error>>");
-    same("(borrow Text)?", "Option<borrow Text>");
-    same("bool ! Error", "Result<Bool, Error>");
+fn operators_parse_onto_the_template_shapes() {
+    shape("i32 ! Error", "!<i32, Error>");
+    shape("u32?", "?<u32>");
+    shape("u32? ! Error", "!<?<u32>, Error>");
+    shape("(u32 ! Error)?", "?<!<u32, Error>>");
+    shape("(borrow Text)?", "?<Borrow Text>");
+    shape("i32 ! (borrow Error)", "!<i32, Borrow Error>");
+}
+
+#[test]
+fn old_spellings_parse_as_ordinary_names_and_fail_later() {
+    shape("Option<u32>", "Option<u32>");
+    shape("Result<u32, Error>", "Result<u32, Error>");
+    shape("Attempt<u32, Error>", "Attempt<u32, Error>");
+    shape("bool", "bool");
+}
+
+#[test]
+fn question_bang_is_question_then_bang() {
+    for spelling in [
+        "u32?! Error",
+        "u32 ?! Error",
+        "u32? ! Error",
+        "u32 ? ! Error",
+    ] {
+        shape(spelling, "!<?<u32>, Error>");
+    }
+    same("u32 ?! Error", "(u32?) ! Error");
+    shape("(u32 ! Error) ?! Error", "!<?<!<u32, Error>>, Error>");
+    shape("u32?? ?! Error", "!<?<?<?<u32>>>, Error>");
+    shape("(borrow Text) ?! Error", "!<?<Borrow Text>, Error>");
+    shape("array<u32 ?! Error, 2>", "array<!<?<u32>, Error>, 2>");
+    shape("(u32 ?! Error, bool)", "\0tuple<!<?<u32>, Error>, bool>");
 }
 
 #[test]
 fn bang_nests_in_type_arguments_and_elements() {
-    same("Option<i32 ! Error>", "Option<Result<i32, Error>>");
-    same(
-        "Result<(i32 ! Error)?, Error>",
-        "Result<Option<Result<i32, Error>>, Error>",
-    );
-    same("array<i32 ! Error, 2>", "Array<Result<i32, Error>, 2>");
-    same("(i32 ! Error, bool)", "(Result<i32, Error>, Bool)");
-    same("List<u8? ! Error>", "List<Result<Option<u8>, Error>>");
+    shape("array<i32 ! Error, 2>", "array<!<i32, Error>, 2>");
+    shape("(i32 ! Error, bool)", "\0tuple<!<i32, Error>, bool>");
+    shape("List<u8? ! Error>", "List<!<?<u8>, Error>>");
 }
 
 #[test]

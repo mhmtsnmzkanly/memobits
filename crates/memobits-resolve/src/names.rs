@@ -35,8 +35,8 @@ pub(crate) fn check(
         }
     }
     let mut types: BTreeSet<String> = [
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "Bool", "String",
-        "string", "Char",
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "String",
+        "string", "char",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -433,6 +433,7 @@ impl Checker<'_> {
         } else if let Some(path) = self.imports.get(&ty.path[0]) {
             self.qualified.push((path.clone(), ty.span, true));
         } else if !self.types.contains(&ty.path[0])
+            && !templates::is_removed_spelling(&ty.path[0])
             && !self
                 .generic_types
                 .iter()
@@ -449,12 +450,9 @@ impl Checker<'_> {
         while head.len() == 1 && seen.insert(head[0].clone()) {
             match self.aliases.get(&head[0]) {
                 Some(target) => {
-                    if templates::lookup_type(target).is_some_and(|template| {
-                        matches!(
-                            template.id,
-                            templates::TemplateId::Bytes | templates::TemplateId::List
-                        )
-                    }) {
+                    if templates::lookup_type(target)
+                        .is_some_and(|template| template.id == templates::TemplateId::List)
+                    {
                         self.error(4, span, format!("unknown variant '{}'", path.join("::")));
                         return;
                     }

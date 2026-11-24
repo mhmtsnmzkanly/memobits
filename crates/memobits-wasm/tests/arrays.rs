@@ -90,7 +90,7 @@ fn every_element_type_reads_back_with_sign_and_zero_extension() {
         ),
         ("f32", "[1.5, -2.25, 3.0]", "a[1] == -2.25"),
         ("f64", "[1.5, -2.25, 3.0]", "a[1] == -2.25"),
-        ("Bool", "[false, true, false]", "a[1] == true"),
+        ("bool", "[false, true, false]", "a[1] == true"),
     ] {
         let source = format!(
             "fn main() -> bool {{ let a: array<{ty}, 3> = {elements}; {check} && a[2] == a[2] }}"
@@ -267,7 +267,7 @@ fn repetition_of_every_element_type_and_large_counts() {
         ("u64", "5000000000", "a[63] == 5000000000"),
         ("f32", "1.5", "a[63] == 1.5"),
         ("f64", "-2.25", "a[63] == -2.25"),
-        ("Bool", "true", "a[63] == true && a[1] == true"),
+        ("bool", "true", "a[63] == true && a[1] == true"),
     ] {
         let source = format!(
             "fn main() -> bool {{ let a: array<{ty}, 64> = [{value}; 64]; {check} && a[2] == a[2] }}"

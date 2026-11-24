@@ -132,7 +132,7 @@ fn anonymous_enum_payloads_are_typed_and_extracted_by_variant_patterns() {
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.to_string() == "TE002"
-                && diagnostic.message.contains("expected i32, found Bool")
+                && diagnostic.message.contains("expected i32, found bool")
         }),
         "{diagnostics:?}"
     );

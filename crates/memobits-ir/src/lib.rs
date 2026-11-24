@@ -79,14 +79,12 @@ pub enum ErrorAncestry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryOutcome {
     Result,
-    Attempt,
 }
 
 impl EntryOutcome {
     pub fn variants(self) -> &'static [&'static str] {
         match self {
             Self::Result => &["Ok", "Err"],
-            Self::Attempt => &["Done", "Skipped", "Failed"],
         }
     }
 }
@@ -112,7 +110,7 @@ impl TypeDef {
     }
 
     fn borrow_option_referent(&self) -> Option<&Type> {
-        if !self.path.name.starts_with("Option<borrow ")
+        if !(self.path.name.starts_with("(borrow ") && self.path.name.ends_with(")?"))
             || self.error_ancestry.is_some()
             || self.entry_outcome.is_some()
         {
@@ -829,7 +827,7 @@ impl Program {
             && self
                 .types
                 .get(option.0 as usize)?
-                .is_scalar_option("Option<i32>", Primitive::I32))
+                .is_scalar_option("i32?", Primitive::I32))
         .then_some(*error)
     }
 
@@ -957,7 +955,6 @@ impl Program {
                                 .zip(names)
                                 .all(|(variant, name)| variant.name == *name)
                             && variants[0].payload.len() == 1
-                            && (outcome != EntryOutcome::Attempt || variants[1].payload.is_empty())
                             && matches!(
                                 variants[names.len() - 1].payload.as_slice(),
                                 [Type::Struct(id)] if self.types.get(id.0 as usize)
@@ -1274,9 +1271,9 @@ fn scalar_option_matches(
     match (element, output) {
         (Some(element @ (Primitive::U8 | Primitive::U32)), Some(Type::Enum(option))) => {
             let name = if element == Primitive::U8 {
-                "Option<u8>"
+                "u8?"
             } else {
-                "Option<u32>"
+                "u32?"
             };
             program
                 .types
@@ -1558,7 +1555,7 @@ fn validate_instruction(
                     errors,
                     id,
                     Some(block),
-                    "collection search requires a borrowed primitive collection, matching scalar value, and the corresponding Bool or Option<u32> output",
+                    "collection search requires a borrowed primitive collection, matching scalar value, and the corresponding bool or u32? output",
                 );
             }
         }
@@ -1802,9 +1799,9 @@ fn validate_instruction(
                 kind @ (InstructionKind::StringByteAt { .. }
                 | InstructionKind::StringScalarAt { .. }) => {
                     let (name, payload) = if matches!(kind, InstructionKind::StringByteAt { .. }) {
-                        ("Option<u8>", Primitive::U8)
+                        ("u8?", Primitive::U8)
                     } else {
-                        ("Option<u32>", Primitive::U32)
+                        ("u32?", Primitive::U32)
                     };
                     matches!(out, Some(Type::Enum(id))
                         if program.types.get(id.0 as usize).is_some_and(|ty| ty.is_scalar_option(name, payload)))
@@ -3336,7 +3333,7 @@ fn validate_operand_escapes(
                             .is_none()
                     {
                         push(errors, id, block_id,
-                            "heap Result<String, E> requires an immediate consuming match with explicit Ok(value) and Err arms");
+                            "heap `string ! E` requires an immediate consuming match with explicit Ok(value) and Err arms");
                     }
                     for parameter in &facts.writes_heap {
                         if arguments

@@ -8,9 +8,9 @@
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
 use memobits_entry_abi as entry_abi;
 use memobits_ir::{
-    ArrayInit, BinaryOp, BlockId, Constant, EntryOutcome, ErrorAncestry, Function, FunctionId,
-    Instruction, InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind,
-    Type, TypeDef, TypeDefKind, UnaryOp, UseMode, ValueId,
+    ArrayInit, BinaryOp, BlockId, Constant, ErrorAncestry, Function, FunctionId, Instruction,
+    InstructionKind, LocalId, Operand, Primitive, Program, Source, TerminatorKind, Type, TypeDef,
+    TypeDefKind, UnaryOp, UseMode, ValueId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_encoder::{
@@ -1139,32 +1139,66 @@ fn outcome_entry(
         return Ok(None);
     };
     if !function.signature.parameters.is_empty() {
-        return Err("Result and Attempt application entries must take no parameters".into());
+        return Err("`T ! E` and `T ?! E` application entries must take no parameters".into());
     }
 
     let TypeDefKind::Enum { variants } = &definition.kind else {
         unreachable!("validated outcome definition");
     };
-    let success = match variants[0].payload.as_slice() {
-        [Type::Primitive(kind)] => match kind {
-            Primitive::Bool => Some(entry_abi::Scalar::Bool),
-            Primitive::I8 => Some(entry_abi::Scalar::I8),
-            Primitive::I16 => Some(entry_abi::Scalar::I16),
-            Primitive::I32 => Some(entry_abi::Scalar::I32),
-            Primitive::I64 => Some(entry_abi::Scalar::I64),
-            Primitive::U8 => Some(entry_abi::Scalar::U8),
-            Primitive::U16 => Some(entry_abi::Scalar::U16),
-            Primitive::U32 => Some(entry_abi::Scalar::U32),
-            Primitive::U64 => Some(entry_abi::Scalar::U64),
-            Primitive::F32 => Some(entry_abi::Scalar::F32),
-            Primitive::F64 => Some(entry_abi::Scalar::F64),
-            Primitive::Unit => None,
-            Primitive::Char => None,
-        },
-        _ => None,
-    }
-    .ok_or(
-        "application entry outcomes require a primitive success payload (Bool, integer, or float)",
+    let scalar = |kind: &Primitive| match kind {
+        Primitive::Bool => Some(entry_abi::Scalar::Bool),
+        Primitive::I8 => Some(entry_abi::Scalar::I8),
+        Primitive::I16 => Some(entry_abi::Scalar::I16),
+        Primitive::I32 => Some(entry_abi::Scalar::I32),
+        Primitive::I64 => Some(entry_abi::Scalar::I64),
+        Primitive::U8 => Some(entry_abi::Scalar::U8),
+        Primitive::U16 => Some(entry_abi::Scalar::U16),
+        Primitive::U32 => Some(entry_abi::Scalar::U32),
+        Primitive::U64 => Some(entry_abi::Scalar::U64),
+        Primitive::F32 => Some(entry_abi::Scalar::F32),
+        Primitive::F64 => Some(entry_abi::Scalar::F64),
+        Primitive::Unit | Primitive::Char => None,
+    };
+    // `T ! E` carries a primitive; `T ?! E` carries an optional primitive.
+    let (success, inner_offset, family) = match variants[0].payload.as_slice() {
+        [Type::Primitive(kind)] => (scalar(kind), 0, entry_abi::Family::Result),
+        [Type::Enum(option)] => {
+            let definition = &program.types[option.0 as usize];
+            let optional = match &definition.kind {
+                TypeDefKind::Enum { variants } => match variants.as_slice() {
+                    [some, none]
+                        if some.name == "Some"
+                            && none.name == "None"
+                            && none.payload.is_empty()
+                            && definition.error_ancestry.is_none() =>
+                    {
+                        match some.payload.as_slice() {
+                            [Type::Primitive(kind)] => scalar(kind),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+                TypeDefKind::Struct { .. } => None,
+            };
+            let option_layout = layouts[option.0 as usize]
+                .enum_layout
+                .as_ref()
+                .expect("laid out enum");
+            (
+                optional,
+                option_layout.variants[0]
+                    .offsets
+                    .first()
+                    .copied()
+                    .unwrap_or(0),
+                entry_abi::Family::OptionalResult,
+            )
+        }
+        _ => (None, 0, entry_abi::Family::Result),
+    };
+    let success = success.ok_or(
+        "application entry outcomes require a primitive success payload (bool, integer, or float), or an optional one for `T ?! E`",
     )?;
     let failure_variant = outcome.variants().len() - 1;
     let [Type::Struct(error)] = variants[failure_variant].payload.as_slice() else {
@@ -1191,20 +1225,20 @@ fn outcome_entry(
     debug_assert_eq!(error_layout.offsets[0], entry_abi::ERROR_ID_BYTES);
     let size = layout.size;
     let metadata = entry_abi::Metadata {
-        family: match outcome {
-            EntryOutcome::Result => entry_abi::Family::Result,
-            EntryOutcome::Attempt => entry_abi::Family::Attempt,
-        },
+        family,
         success,
         payload_offset: payload_offset
             .try_into()
             .map_err(|_| "invalid entry payload offset")?,
+        inner_offset: inner_offset
+            .try_into()
+            .map_err(|_| "invalid entry optional payload offset")?,
         size,
         error_id: error_layout.error_identity.expect("laid out Error"),
         error_name: &error_name,
     }
     .encode()
-    .ok_or("application entry outcome does not fit the version 1 metadata format")?;
+    .ok_or("application entry outcome does not fit the version 2 metadata format")?;
     // Keep the return cell outside the guest stack so the configured stack
     // budget still belongs entirely to guest calls.
     let address = static_layout.reserve(size).map_err(|error| match error {

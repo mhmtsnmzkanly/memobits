@@ -22,7 +22,7 @@ pub enum EntrySuccess {
 impl fmt::Display for EntrySuccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bool(value) => write!(f, "Bool({value})"),
+            Self::Bool(value) => write!(f, "bool({value})"),
             Self::I8(value) => write!(f, "i8({value})"),
             Self::I16(value) => write!(f, "i16({value})"),
             Self::I32(value) => write!(f, "i32({value})"),
@@ -44,24 +44,23 @@ pub struct ReturnedError {
     pub code: u32,
 }
 
-/// A normal return from a compiler-known outcome entry.
+/// A normal return from a compiler-known outcome entry: `T ! E` returns `Ok`
+/// or `Err`; `T ?! E` (`Result<Option<T>, E>`) returns `OkSome`, `OkNone` or `Err`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryOutcome {
     Ok(EntrySuccess),
+    OkSome(EntrySuccess),
+    OkNone,
     Err(ReturnedError),
-    Done(EntrySuccess),
-    Skipped,
-    Failed(ReturnedError),
 }
 
 impl fmt::Display for EntryOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok(value) => write!(f, "Ok({value})"),
-            Self::Done(value) => write!(f, "Done({value})"),
-            Self::Skipped => f.write_str("Skipped"),
+            Self::OkSome(value) => write!(f, "Ok(Some({value}))"),
+            Self::OkNone => f.write_str("Ok(None)"),
             Self::Err(error) => write!(f, "Err({}, code={})", error.type_name, error.code),
-            Self::Failed(error) => write!(f, "Failed({}, code={})", error.type_name, error.code),
         }
     }
 }
@@ -84,28 +83,25 @@ pub(crate) fn decode(
         .ok_or_else(|| invalid("entry result is outside guest memory"))?;
     let payload = &result[usize::from(metadata.payload_offset)..];
     match (metadata.family, result[0]) {
-        (family, 0) => {
-            let success = read_success(metadata.success, payload)?;
-            Ok(match family {
-                Family::Result => EntryOutcome::Ok(success),
-                Family::Attempt => EntryOutcome::Done(success),
-            })
-        }
-        (Family::Attempt, 1) => Ok(EntryOutcome::Skipped),
-        (Family::Result, 1) | (Family::Attempt, 2) => {
+        (Family::Result, 0) => Ok(EntryOutcome::Ok(read_success(metadata.success, payload)?)),
+        (Family::OptionalResult, 0) => match payload[0] {
+            0 => Ok(EntryOutcome::OkSome(read_success(
+                metadata.success,
+                &payload[usize::from(metadata.inner_offset)..],
+            )?)),
+            1 => Ok(EntryOutcome::OkNone),
+            _ => Err(invalid("unknown optional tag")),
+        },
+        (_, 1) => {
             let (identity, code) = payload.split_at(ERROR_ID_BYTES as usize);
             let identity = u32::from_le_bytes(identity.try_into().expect("four identity bytes"));
             if identity != metadata.error_id {
                 return Err(invalid("unrecognized concrete error identity"));
             }
-            let error = ReturnedError {
+            Ok(EntryOutcome::Err(ReturnedError {
                 type_name: metadata.error_name.to_owned(),
                 code: u32::from_le_bytes(code[..4].try_into().expect("validated payload size")),
-            };
-            Ok(match metadata.family {
-                Family::Result => EntryOutcome::Err(error),
-                Family::Attempt => EntryOutcome::Failed(error),
-            })
+            }))
         }
         _ => Err(invalid("unknown entry outcome tag")),
     }
@@ -117,7 +113,7 @@ fn read_success(kind: Scalar, payload: &[u8]) -> Result<EntrySuccess, RunError> 
         Scalar::Bool => EntrySuccess::Bool(match payload[0] {
             0 => false,
             1 => true,
-            _ => return Err(invalid("invalid Bool success payload")),
+            _ => return Err(invalid("invalid bool success payload")),
         }),
         Scalar::I8 => EntrySuccess::I8(payload[0] as i8),
         Scalar::U8 => EntrySuccess::U8(payload[0]),
@@ -151,6 +147,7 @@ mod tests {
             family: Family::Result,
             success: Scalar::Bool,
             payload_offset: 4,
+            inner_offset: 0,
             size: 12,
             error_id: 1,
             error_name: "pkg::mod::ErrorType",
@@ -218,14 +215,24 @@ mod tests {
             Err(invalid("duplicate entry metadata"))
         );
 
-        let mut bad = vec![valid[..8].to_vec(), vec![0; 8192]];
-        for (index, value) in [(0, 2), (1, 9), (2, 0), (3, 3), (4, 8), (8, 0), (12, 255)] {
+        let mut bad = vec![valid[..9].to_vec(), vec![0; 8192]];
+        for (index, value) in [
+            (0, 1),
+            (0, 3),
+            (1, 9),
+            (2, 0),
+            (3, 3),
+            (4, 1),
+            (5, 8),
+            (9, 0),
+            (13, 255),
+        ] {
             let mut modified = valid.clone();
             modified[index] = value;
             bad.push(modified);
         }
         for name in ["bad\nname", "\x1b[2J", "bad\u{2028}name"] {
-            let mut injected = valid[..12].to_vec();
+            let mut injected = valid[..13].to_vec();
             injected.extend(name.as_bytes());
             bad.push(injected);
         }
@@ -235,6 +242,56 @@ mod tests {
                 Err(invalid("invalid or unsupported entry metadata"))
             );
         }
+    }
+
+    #[test]
+    fn decodes_optional_result_entries() {
+        let optional = Metadata {
+            family: Family::OptionalResult,
+            success: Scalar::Bool,
+            payload_offset: 4,
+            inner_offset: 1,
+            size: 12,
+            error_id: 1,
+            error_name: "pkg::mod::ErrorType",
+        }
+        .encode()
+        .unwrap();
+        let run_guest = |result: [u8; 12]| {
+            let module = guest(16, 12, result, true);
+            run(
+                &with_custom_section(&module, SECTION, &optional),
+                ENTRY_EXPORT,
+            )
+        };
+        let mut result = [0; 12];
+        result[5] = 1;
+        assert_eq!(
+            run_guest(result),
+            Ok(crate::RunValue::Outcome(EntryOutcome::OkSome(
+                EntrySuccess::Bool(true)
+            )))
+        );
+        assert_eq!(
+            EntryOutcome::OkSome(EntrySuccess::Bool(true)).to_string(),
+            "Ok(Some(bool(true)))"
+        );
+        result[4] = 1;
+        assert_eq!(
+            run_guest(result),
+            Ok(crate::RunValue::Outcome(EntryOutcome::OkNone))
+        );
+        assert_eq!(EntryOutcome::OkNone.to_string(), "Ok(None)");
+        result[4] = 2;
+        assert_eq!(run_guest(result), Err(invalid("unknown optional tag")));
+        // A `T ! E` metadata block cannot carry an inner offset.
+        let mut bad = optional.clone();
+        bad[1] = 1;
+        let module = guest(16, 12, [0; 12], true);
+        assert_eq!(
+            run(&with_custom_section(&module, SECTION, &bad), ENTRY_EXPORT),
+            Err(invalid("invalid or unsupported entry metadata"))
+        );
     }
 
     #[test]
@@ -258,7 +315,7 @@ mod tests {
             ));
         }
         let mut oversized = valid.clone();
-        oversized[4..8].copy_from_slice(&(u32::MAX - 3).to_le_bytes());
+        oversized[5..9].copy_from_slice(&(u32::MAX - 3).to_le_bytes());
         let module = guest(16, u32::MAX - 3, [0; 12], true);
         assert_eq!(
             run(
@@ -282,7 +339,7 @@ mod tests {
         result[4] = 2;
         assert_eq!(
             run_guest(16, 12, result, true),
-            Err(invalid("invalid Bool success payload"))
+            Err(invalid("invalid bool success payload"))
         );
         result[0] = 1;
         assert_eq!(

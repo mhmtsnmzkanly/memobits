@@ -706,10 +706,10 @@ fn assignment_and_short_circuit_operators_resist_user_overloads() {
         assert!(!output.status.success(), "{operator}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("TE002"), "{operator}: {stderr}");
-        assert!(stderr.contains("expected Bool"), "{operator}: {stderr}");
+        assert!(stderr.contains("expected bool"), "{operator}: {stderr}");
         assert!(
             !stderr.contains(&format!("no visible {interface} implementation")),
-            "{operator} selected an overload instead of enforcing builtin Bool operands: {stderr}"
+            "{operator} selected an overload instead of enforcing builtin bool operands: {stderr}"
         );
     }
 }

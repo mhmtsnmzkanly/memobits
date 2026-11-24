@@ -283,7 +283,7 @@ fn unary_plus_not_complement_range_update_and_optional_have_no_overload() {
                 stderr.contains("unary arithmetic requires a number"),
                 "{stderr}"
             ),
-            "!x" => assert!(stderr.contains("expected Bool, found Cell"), "{stderr}"),
+            "!x" => assert!(stderr.contains("expected bool, found Cell"), "{stderr}"),
             _ => {}
         }
     }

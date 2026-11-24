@@ -269,7 +269,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
   cause and source location when metadata is available. The runner discards
   trapped instances. Library exports use scalar signatures. Application
   entries can also use the private `main` outcome adapter for zero-argument
-  `Result` and `Attempt` functions with primitive success payloads.
+  `T ! E` and `T ?! E` functions with primitive success payloads.
 - `List<u8>` and `List<u32>` support empty locals, moves, and `.len()`.
   Whole mutable locals support `.push()`, `.pop()`, and `.clear()`. Pop
   returns the last element as an Option. Pop and clear retain capacity.
@@ -347,11 +347,11 @@ from a standalone Wasm build.
 
 ### Compiler-known outcome types
 
-Owned `T?`, `T ! E`, and `Attempt<T, E>` use the enum pipeline
+Owned `T?`, `T ! E`, and `T ?! E` use the enum pipeline
 for construction, internal calls, and `match`. The compiler-known `Error`
 root has a public `code: u32` field. Derived error types inherit fields in
 ancestor-first order and carry a hidden concrete type tag. Zero-argument
-application entries can return `Result` or `Attempt` with primitive success
+application entries can return `T ! E` or `T ?! E` with primitive success
 payloads. The runtime reports the same outcome in source and artifact runs.
 The [outcome implementation plan](outcome-implementation.md) describes the
 adapter and the function-local `(borrow T)?` slice. Explicit local

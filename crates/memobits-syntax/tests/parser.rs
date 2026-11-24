@@ -27,13 +27,13 @@ fn postfix_optional_type_preserves_grouped_reference_precedence() {
         panic!("expected a function");
     };
     assert_eq!(parameters[0].access, Access::Borrow);
-    assert_eq!(parameters[0].ty.path, ["Option"]);
+    assert_eq!(parameters[0].ty.path, ["?"]);
     let [TypeArgument::Type(borrowed_option)] = parameters[0].ty.arguments.as_slice() else {
         panic!("expected an owned Option payload");
     };
     assert_eq!(borrowed_option.path, ["i32"]);
     assert_eq!(parameters[1].access, Access::Owned);
-    assert_eq!(parameters[1].ty.path, ["Option"]);
+    assert_eq!(parameters[1].ty.path, ["?"]);
     let [TypeArgument::Reference {
         access: Access::Borrow,
         referent,
@@ -112,7 +112,7 @@ fn parses_trailing_inherent_extension_as_a_type_associated_item() {
 fn generic_trailing_inherent_extensions_parse_and_alias_extensions_remain_gated() {
     for source in [
         "type Box<T> { value: T } extend { fn value(borrow self) -> T { self.value } }",
-        "type Packet<const N: u32> { value: Array<u32, N> } extend { fn value(borrow self) -> u32 { self.value[0] } }",
+        "type Packet<const N: u32> { value: array<u32, N> } extend { fn value(borrow self) -> u32 { self.value[0] } }",
     ] {
         let parsed = parse(SourceId(41), source);
         assert!(parsed.diagnostics.is_empty(), "{source}: {:?}", parsed.diagnostics);
@@ -128,7 +128,7 @@ fn generic_trailing_inherent_extensions_parse_and_alias_extensions_remain_gated(
     }
 
     syntax_error(
-        "type Alias<T> = Array<T, 1>; extend { fn value(borrow self) -> i32 { 0 } }",
+        "type Alias<T> = array<T, 1>; extend { fn value(borrow self) -> i32 { 0 } }",
         "inherent extensions require a nominal type declaration",
     );
 }
@@ -165,7 +165,7 @@ fn interface_extension_words_remain_valid_identifiers_outside_declaration_positi
 fn generic_function_type_and_const_parameter_syntax_parses() {
     let parsed = parse(
         SourceId(0),
-        "interface Draw { fn draw(borrow self) -> i32; } type Buffer<T, const N: u32> { data: Array<T, N> } fn project<T, const N: u32>(value: T) -> Array<T, N> where T: Draw { value }",
+        "interface Draw { fn draw(borrow self) -> i32; } type Buffer<T, const N: u32> { data: array<T, N> } fn project<T, const N: u32>(value: T) -> array<T, N> where T: Draw { value }",
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let ItemKind::Type {
@@ -325,7 +325,7 @@ fn character_literals_decode_one_unicode_scalar_and_escapes() {
 
 #[test]
 fn tuples_parse_as_ordered_types_and_expressions_without_changing_grouping() {
-    let source = "fn pair(v: (i32, Bool)) -> (i32, Bool) { (1, true) } fn grouped() -> i32 { (1) } fn first(v: (i32, Bool)) -> i32 { v.0 }";
+    let source = "fn pair(v: (i32, bool)) -> (i32, bool) { (1, true) } fn grouped() -> i32 { (1) } fn first(v: (i32, bool)) -> i32 { v.0 }";
     let result = parse(SourceId(0), source);
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     let ItemKind::Function {
@@ -361,7 +361,7 @@ fn tuples_parse_as_ordered_types_and_expressions_without_changing_grouping() {
 #[test]
 fn labeled_tuple_shapes_and_initializers_preserve_labels_and_order() {
     let source =
-        "fn f(v: (left: i32, right: Bool)) -> i32 { let pair := (right: true, left: 1); v.left }";
+        "fn f(v: (left: i32, right: bool)) -> i32 { let pair := (right: true, left: 1); v.left }";
     let result = parse(SourceId(0), source);
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     let ItemKind::Function {
@@ -564,8 +564,7 @@ fn utf8_errors_and_nested_comments_have_valid_spans() {
 fn parses_reference_type_arguments_with_access_and_spans() {
     use memobits_syntax::{Access, TypeArgument};
 
-    let source =
-        "fn f(a: borrow Option<borrow math::Value>, b: Result<share Array<i32, 2>, Error>) {}";
+    let source = "fn f(a: borrow (borrow math::Value)?, b: (share array<i32, 2>)?) {}";
     let parsed = parse(SourceId(0), source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let ItemKind::Function { parameters, .. } = &parsed.module.items[0].kind else {
@@ -583,8 +582,8 @@ fn parses_reference_type_arguments_with_access_and_spans() {
         (
             &parameters[1],
             Access::Share,
-            "share Array<i32, 2>",
-            &["Array"][..],
+            "share array<i32, 2>",
+            &["array"][..],
         ),
     ] {
         let TypeArgument::Reference {
@@ -599,7 +598,7 @@ fn parses_reference_type_arguments_with_access_and_spans() {
         assert_eq!(&source[span.start..span.end], expected_text);
         assert_eq!(referent.path, expected_path);
     }
-    assert!(!parse(SourceId(0), "type Bad = Array<i32, borrow i32>;")
+    assert!(!parse(SourceId(0), "type Bad = array<i32, borrow i32>;")
         .diagnostics
         .is_empty());
 }
@@ -607,7 +606,7 @@ fn parses_reference_type_arguments_with_access_and_spans() {
 #[test]
 fn arrays_preserve_nested_types_literals_and_spans() {
     use memobits_syntax::TypeArgument;
-    let source = "fn f(a: Array<Array<i32, 0>, 1_000>) { [1, 2,]; []; [f(); 03]; }";
+    let source = "fn f(a: array<array<i32, 0>, 1_000>) { [1, 2,]; []; [f(); 03]; }";
     let parsed = parse(SourceId(0), source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let ItemKind::Function {
@@ -619,12 +618,12 @@ fn arrays_preserve_nested_types_literals_and_spans() {
     let ty = &parameters[0].ty;
     assert_eq!(
         &source[ty.span.start..ty.span.end],
-        "Array<Array<i32, 0>, 1_000>"
+        "array<array<i32, 0>, 1_000>"
     );
     let TypeArgument::Type(inner) = &ty.arguments[0] else {
         panic!()
     };
-    assert_eq!(inner.path, ["Array"]);
+    assert_eq!(inner.path, ["array"]);
     let TypeArgument::Integer(count) = &ty.arguments[1] else {
         panic!()
     };
@@ -689,14 +688,14 @@ fn malformed_arrays_recover_to_following_statements_and_items() {
         assert_eq!(body.statements.len(), 1, "{malformed}");
     }
     for ty in [
-        "Array<i32>",
-        "Array<i32, -1>",
-        "Array<i32, 1.0>",
-        "Array<i32, n>",
-        "Array<i32, 1 + 2>",
-        "Array<i32, 1, 2>",
+        "array<i32>",
+        "array<i32, -1>",
+        "array<i32, 1.0>",
+        "array<i32, n>",
+        "array<i32, 1 + 2>",
+        "array<i32, 1, 2>",
         "i32<u8, 2>",
-        "Array",
+        "array",
     ] {
         let parsed = parse(SourceId(0), &format!("fn bad(a: {ty}) {{}} fn good() {{}}"));
         assert!(!parsed.diagnostics.is_empty(), "{ty}");
@@ -722,7 +721,7 @@ fn function_body(source: &str) -> memobits_syntax::Block {
 
 #[test]
 fn block_like_statements_end_at_their_closing_brace() {
-    let body = function_body("fn f(c: Bool) -> Array<i32, 2> { if c { return [5, 6]; } [7, 8] }");
+    let body = function_body("fn f(c: bool) -> array<i32, 2> { if c { return [5, 6]; } [7, 8] }");
     assert_eq!(body.statements.len(), 1);
     assert!(
         matches!(body.statements[0].kind, StatementKind::Expression(ref e) if matches!(e.kind, ExprKind::If { .. }))
@@ -758,14 +757,14 @@ fn block_like_statements_end_at_their_closing_brace() {
         Some(ExprKind::Path(_))
     ));
 
-    let body = function_body("fn f(c: Bool) -> i32 { if c { 1 } else { 2 } [1] }");
+    let body = function_body("fn f(c: bool) -> i32 { if c { 1 } else { 2 } [1] }");
     assert_eq!(body.statements.len(), 1);
     assert!(matches!(
         body.tail.as_deref().map(|e| &e.kind),
         Some(ExprKind::Array(_))
     ));
 
-    let body = function_body("fn f(c: Bool) -> i32 { if c {} else if c {} else {} [1] }");
+    let body = function_body("fn f(c: bool) -> i32 { if c {} else if c {} else {} [1] }");
     assert_eq!(body.statements.len(), 1);
     assert!(matches!(
         body.tail.as_deref().map(|e| &e.kind),
@@ -782,7 +781,7 @@ fn block_like_statements_end_at_their_closing_brace() {
 
 #[test]
 fn block_like_expressions_outside_statement_position_are_unchanged() {
-    let body = function_body("fn f(c: Bool) { let a := if c { 1 } else { 2 } + 3; }");
+    let body = function_body("fn f(c: bool) { let a := if c { 1 } else { 2 } + 3; }");
     let StatementKind::Binding { value, .. } = &body.statements[0].kind else {
         panic!()
     };
@@ -794,7 +793,7 @@ fn block_like_expressions_outside_statement_position_are_unchanged() {
         matches!(else_branch.as_deref().map(|e| &e.kind), Some(ExprKind::Binary { operator, .. }) if operator == "+")
     );
 
-    let body = function_body("fn f(c: Bool) { foo(if c { 1 } else { 2 }); }");
+    let body = function_body("fn f(c: bool) { foo(if c { 1 } else { 2 }); }");
     let StatementKind::Expression(e) = &body.statements[0].kind else {
         panic!()
     };
@@ -803,7 +802,7 @@ fn block_like_expressions_outside_statement_position_are_unchanged() {
     };
     assert!(matches!(arguments[0].kind, ExprKind::If { .. }));
 
-    let body = function_body("fn f(c: Bool) { (if c { a } else { b })[0]; }");
+    let body = function_body("fn f(c: bool) { (if c { a } else { b })[0]; }");
     let StatementKind::Expression(e) = &body.statements[0].kind else {
         panic!()
     };
@@ -812,13 +811,13 @@ fn block_like_expressions_outside_statement_position_are_unchanged() {
     };
     assert!(matches!(base.kind, ExprKind::If { .. }));
 
-    let body = function_body("fn f(c: Bool) { var x := 0; x = if c { 1 } else { 2 }; }");
+    let body = function_body("fn f(c: bool) { var x := 0; x = if c { 1 } else { 2 }; }");
     let StatementKind::Assign { value, .. } = &body.statements[1].kind else {
         panic!()
     };
     assert!(matches!(value.kind, ExprKind::If { .. }));
 
-    let body = function_body("fn f(c: Bool) -> i32 { return if c { 1 } else { 2 }; }");
+    let body = function_body("fn f(c: bool) -> i32 { return if c { 1 } else { 2 }; }");
     let StatementKind::Return(Some(value)) = &body.statements[0].kind else {
         panic!()
     };

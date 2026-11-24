@@ -164,6 +164,27 @@ fn substitute_type(
     output
 }
 
+/// Parenthesize a type name when it would otherwise bind wrongly next to `?` or `!`.
+fn grouped(name: &str) -> String {
+    let mut depth = 0i32;
+    let mut loose_operator = false;
+    let mut previous = ' ';
+    for ch in name.chars() {
+        match ch {
+            '(' | '<' => depth += 1,
+            ')' | '>' => depth -= 1,
+            '!' if depth == 0 && previous == ' ' => loose_operator = true,
+            _ => {}
+        }
+        previous = ch;
+    }
+    if name.starts_with("borrow ") || name.starts_with("share ") || loose_operator {
+        format!("({name})")
+    } else {
+        name.to_owned()
+    }
+}
+
 fn normalize(path: &str) -> &str {
     path.strip_prefix("self::").unwrap_or(path)
 }
@@ -184,8 +205,8 @@ fn primitive(name: &str) -> Option<Ty> {
         "u64" => "u64",
         "f32" => "f32",
         "f64" => "f64",
-        "Bool" => "Bool",
-        "Char" => "Char",
+        "bool" => "bool",
+        "char" => "char",
         _ => return None,
     }))
 }
@@ -306,7 +327,14 @@ impl TypeTable {
                 ResolvedArgument::Integer(value) => value.to_string(),
             })
             .collect::<Vec<_>>();
-        let name = format!("{}<{}>", template.name, names.join(", "));
+        let name = match template.id {
+            TemplateId::Option => format!("{}?", grouped(&names[0])),
+            TemplateId::Result => match names[0].strip_suffix('?') {
+                Some(value) => format!("{} ?! {}", value, grouped(&names[1])),
+                None => format!("{} ! {}", grouped(&names[0]), grouped(&names[1])),
+            },
+            _ => format!("{}<{}>", template.name, names.join(", ")),
+        };
         let id = (self.types.len() + instances.len()) as u32;
         let info = StructInfo {
             name: name.clone(),
@@ -608,7 +636,7 @@ impl TypeTable {
                     return Err(TypeFailure {
                         span: *span,
                         code: 17,
-                        message: "Option<borrow T> requires a non-Unit referent".into(),
+                        message: "(borrow T)? requires a non-Unit referent".into(),
                     });
                 }
                 let argument = Ty::Reference {
@@ -742,8 +770,12 @@ impl TypeTable {
                 else {
                     continue;
                 };
-                if matches!(name.as_str(), "String" | "string")
-                    || templates::lookup(std::slice::from_ref(name)).is_some()
+                // Removed built-in spellings stay reserved so their TE001
+                // migration guidance can never be shadowed by a user type.
+                if matches!(
+                    name.as_str(),
+                    "String" | "string" | "Option" | "Result" | "Attempt"
+                ) || templates::lookup(std::slice::from_ref(name)).is_some()
                 {
                     diagnostics.push(diagnostic(
                         3,
@@ -1602,7 +1634,7 @@ impl TypeTable {
             match template.id {
                 TemplateId::Error => return Ok(self.error_type(ty.span)),
                 TemplateId::Utf8Error => return Ok(self.utf8_error_type(ty.span)),
-                TemplateId::Option | TemplateId::Result | TemplateId::Attempt => {
+                TemplateId::Option | TemplateId::Result => {
                     return Ok(self.instantiate_enum(template, arguments, ty.span));
                 }
                 TemplateId::Array => {
@@ -1623,12 +1655,6 @@ impl TypeTable {
                         ));
                     };
                     return Ok(Ty::List(element));
-                }
-                TemplateId::Bytes => {
-                    let [ResolvedArgument::Integer(count)] = arguments.as_slice() else {
-                        unreachable!("template argument contract checked above");
-                    };
-                    return Ok(Ty::Array(Box::new(Ty::Primitive("u8")), *count));
                 }
             }
         }
@@ -1717,10 +1743,17 @@ impl TypeTable {
 }
 
 fn unresolved_type(ty: &Type) -> TypeFailure {
+    let guidance = match ty.path.as_slice() {
+        [name] => templates::removed_spelling_guidance(name),
+        _ => None,
+    };
     TypeFailure {
         span: ty.span,
         code: 1,
-        message: format!("unsupported or unresolved type '{}'", ty.path.join("::")),
+        message: guidance.map_or_else(
+            || format!("unsupported or unresolved type '{}'", ty.path.join("::")),
+            str::to_owned,
+        ),
     }
 }
 

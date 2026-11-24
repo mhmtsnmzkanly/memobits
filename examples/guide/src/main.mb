@@ -14,7 +14,7 @@
 //   aggregates.mb      records, anonymous shapes, opaque types, share fields
 //   ownership.mb       string-owning structs, borrow/share calls, drop
 //   collections.mb     fixed arrays, byte arrays, lists, iteration
-//   enums_outcomes.mb  enums, match, optionals, references, Result and Attempt
+//   enums_outcomes.mb  enums, match, optionals, references, `T ! E` and `T ?! E`
 //   generics.mb        generic functions, structs, methods, interface bounds
 //   operators.mb       user-defined core::ops operators and compound assignment
 
@@ -60,7 +60,7 @@ use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defin
 //   forwarding are limited to the examples above; generic nominal structs are
 //   demonstrated above.
 
-// A zero-argument application entry can return Result or Attempt with a
+// A zero-argument application entry can return `T ! E` or `T ?! E` with a
 // primitive success payload. Both runners show the variant and typed value
 // or the concrete error type and code.
 fn main() -> i32 ! Error {

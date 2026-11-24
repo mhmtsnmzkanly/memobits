@@ -94,11 +94,7 @@ fn reference_type_arguments_fail_before_lowering() {
             "n.borrow()",
         ),
         (
-            "fn main() { let n := 1; let wrapped := Done(n.borrow()); }",
-            "n.borrow()",
-        ),
-        (
-            "type Bad = Result<i32, borrow Error>; fn main() {}",
+            "type Bad = i32 ! (borrow Error); fn main() {}",
             "borrow Error",
         ),
     ] {
@@ -142,7 +138,7 @@ fn bare_none_requires_a_payload_type() {
     let errors = lower_module(&parsed.module, "test", &["main".into()]).unwrap_err();
     assert!(errors
         .iter()
-        .any(|error| error.message.contains("Option<T> annotation")));
+        .any(|error| error.message.contains("'T?' annotation")));
 }
 
 #[test]
@@ -159,6 +155,7 @@ fn compiler_known_names_cannot_be_redeclared_as_user_types() {
         "type Error { code: i32 }",
         "type Result [ UserDefined ]",
         "type Attempt = i32;",
+        "type Utf8Error { code: i32 }",
     ] {
         let parsed = parse(SourceId(91), source);
         assert!(parsed.diagnostics.is_empty());
@@ -190,22 +187,23 @@ fn owned_result_and_attempt_intern_aliases_and_match_with_context() {
         "type Failure = Error;
          type Number = u32;
          type Read = Number ! Failure;
-         type Work = Attempt<Read, Failure>;
+         type Work = Read ?! Failure;
          fn make() -> u32 ! Error { Ok(7) }
-         fn work() -> Work { Done(make()) }
+         fn work() -> Work { Ok(Some(make())) }
          fn main() -> u32 {
              let error: Read = Read::Err(Error { code: 17 });
-             let waiting: Work = Skipped;
-             let failed: Work = Failed(Error { code: 23 });
+             let waiting: Work = Ok(None);
+             let failed: Work = Err(Error { code: 23 });
              let value := work();
              match value {
-                 Done(read) => match read { Ok(n) => n, Err(e) => e.code },
-                 Work::Skipped => 0,
-                 Failed(e) => e.code
+                 Ok(Some(read)) => match read { Ok(n) => n, Err(e) => e.code },
+                 Ok(None) => 0,
+                 Err(e) => e.code
              }
          }",
     );
-    assert_eq!(program.types.len(), 3);
+    // Failure, Read, Read? and Work.
+    assert_eq!(program.types.len(), 4);
     assert!(memobits_ownership::check_ownership(&program).is_empty());
 }
 
@@ -216,8 +214,8 @@ fn outcome_constructor_names_respect_shadowing() {
          fn Ok(n: i32) -> R { R::Ok(n) }
          fn main() -> i32 {
              let value: R = Ok(5);
-             let Skipped := 2;
-             match value { R::Ok(n) => n + Skipped, Err(_) => 0 }
+             let Offset := 2;
+             match value { R::Ok(n) => n + Offset, Err(_) => 0 }
          }",
     );
     rejects(
@@ -230,11 +228,9 @@ fn outcome_constructor_names_respect_shadowing() {
 #[test]
 fn incomplete_or_incompatible_outcome_constructors_report_inference_errors() {
     for (constructor, annotation) in [
-        ("Ok(1)", "Result<T, E> annotation"),
-        ("Err(Error { code: 2 })", "Result<T, E> annotation"),
-        ("Done(1)", "Attempt<T, E> annotation"),
-        ("Skipped", "Attempt<T, E> annotation"),
-        ("Failed(Error { code: 2 })", "Attempt<T, E> annotation"),
+        ("Ok(1)", "'T ! E' annotation"),
+        ("Err(Error { code: 2 })", "'T ! E' annotation"),
+        ("None", "'T?' annotation"),
     ] {
         rejects(
             &format!("fn main() {{ let value := {constructor}; }}"),
@@ -243,19 +239,9 @@ fn incomplete_or_incompatible_outcome_constructors_report_inference_errors() {
         );
     }
     rejects(
-        "fn main(value: Result) {}",
+        "fn main() -> i32 ?! Error { Ok(1) }",
         "TE002",
-        "requires two type arguments",
-    );
-    rejects(
-        "fn main(value: Attempt) {}",
-        "TE002",
-        "requires two type arguments",
-    );
-    rejects(
-        "fn main() -> Attempt<i32, Error> { Ok(1) }",
-        "TE002",
-        "belongs to Result",
+        "expected i32?",
     );
     rejects(
         "fn main() -> i32 ! Error { Ok(true) }",
@@ -268,7 +254,7 @@ fn incomplete_or_incompatible_outcome_constructors_report_inference_errors() {
         "expects 1",
     );
     rejects(
-        "fn main() -> Attempt<i32, Error> { Skipped() }",
+        "fn main() -> i32 ?! Error { None() }",
         "TE028",
         "without parentheses",
     );
@@ -282,7 +268,7 @@ fn the_error_bound_checks_identity_and_inferred_payload_evidence() {
         "requires Error or a type derived from it for its error type argument, found Lookalike",
     );
     rejects(
-        "type Bad = Attempt<i32, u32>; fn main() {}",
+        "type Bad = i32 ?! u32; fn main() {}",
         "TE002",
         "requires Error or a type derived from it for its error type argument, found u32",
     );
@@ -301,21 +287,21 @@ fn the_error_bound_checks_identity_and_inferred_payload_evidence() {
 #[test]
 fn outcome_matches_check_family_instance_and_coverage() {
     rejects(
-        "fn main() -> i32 { let v: Attempt<i32, Error> = Done(1); match v { Ok(n) => n, _ => 0 } }",
+        "fn main() -> i32 { let v: i32 ?! Error = Ok(Some(1)); match v { Some(n) => n, _ => 0 } }",
         "TE030",
-        "belongs to Result",
+        "belongs to",
     );
     rejects(
-        "type Other = Attempt<u32, Error>; fn main() -> i32 {
-             let v: Attempt<i32, Error> = Done(1); match v { Other::Done(_) => 1, _ => 0 }
+        "type Other = u32 ?! Error; fn main() -> i32 {
+             let v: i32 ?! Error = Ok(Some(1)); match v { Other::Ok(_) => 1, _ => 0 }
          }",
         "TE030",
-        "belongs to enum 'Attempt<u32, Error>'",
+        "belongs to enum 'u32 ?! Error'",
     );
     rejects(
-        "fn main() -> i32 { let v: Attempt<i32, Error> = Done(1); match v { Done(n) => n, Failed(_) => 0 } }",
+        "fn main() -> i32 { let v: i32 ?! Error = Ok(Some(1)); match v { Ok(Some(n)) => n, Err(_) => 0 } }",
         "TE031",
-        "Skipped",
+        "Ok(None)",
     );
 }
 
@@ -323,12 +309,12 @@ fn outcome_matches_check_family_instance_and_coverage() {
 fn outcome_payload_constructors_consume_owned_aggregates() {
     let program = lower(
         "type R = array<i32, 2> ! Error;
-         type A = Attempt<i32, Error>;
+         type A = i32 ?! Error;
          fn main() {
              let values := [1, 2];
              let error := Error { code: 5 };
              let success: R = Ok(values);
-             let failure: A = Failed(error);
+             let failure: A = Err(error);
              let reused_values: R = R::Ok(values);
              let reused_error: R = Err(error);
          }",
@@ -390,7 +376,7 @@ fn error_derivation_rejects_non_error_bases() {
         ("type Lookalike { pub code: u32 }", "Lookalike"),
         ("type Something [ Yes ]", "Something"),
         ("", "u32"),
-        ("", "Array<u32, 2>"),
+        ("", "array<u32, 2>"),
         (
             "type Wrapped = i32 ! Valid; type Valid: Error {}",
             "Wrapped",
@@ -449,7 +435,7 @@ fn derived_errors_are_moved_into_outcomes_and_require_context() {
         "type ParseError: Error {}
          fn main() {
              let error := ParseError { code: 7 };
-             let failed: Attempt<i32, ParseError> = Failed(error);
+             let failed: i32 ?! ParseError = Err(error);
              let reused: i32 ! ParseError = Err(error);
          }",
     );
@@ -459,7 +445,7 @@ fn derived_errors_are_moved_into_outcomes_and_require_context() {
     rejects(
         "type ParseError: Error {} fn main() { let failed := Err(ParseError { code: 7 }); }",
         "TE002",
-        "Result<T, E> annotation",
+        "'T ! E' annotation",
     );
 }
 

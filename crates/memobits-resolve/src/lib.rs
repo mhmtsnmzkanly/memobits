@@ -738,9 +738,9 @@ fn check_extension_conformance(project: &Project, resolution: &mut Resolution) {
                         | "u64"
                         | "f32"
                         | "f64"
-                        | "Bool"
+                        | "bool"
                         | "string"
-                        | "Char"
+                        | "char"
                 ) || templates::lookup_type(interface).is_some());
             if built_in_interface {
                 resolution.diagnostics.push(error(
@@ -947,8 +947,8 @@ fn canonical_type(
     ty: &memobits_syntax::Type,
 ) -> String {
     const BUILTINS: &[&str] = &[
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "Bool", "string",
-        "Char",
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "string",
+        "char",
     ];
     canonical_type_inner(
         project,

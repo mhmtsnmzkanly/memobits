@@ -21,8 +21,8 @@ pub(super) fn unsupported_reference_argument(template: &Template, span: Span) ->
         span,
         code: 17,
         message: format!(
-            "{} reference type arguments require embedded-loan tracking",
-            template.name
+            "'{}' reference type arguments require embedded-loan tracking",
+            template.annotation()
         ),
     }
 }

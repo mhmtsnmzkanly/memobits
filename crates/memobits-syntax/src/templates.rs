@@ -12,11 +12,9 @@ pub enum ParameterKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateId {
     Array,
-    Bytes,
     List,
     Option,
     Result,
-    Attempt,
     Error,
     Utf8Error,
 }
@@ -53,16 +51,9 @@ const TEMPLATES: &[Template] = &[
     Template {
         id: TemplateId::Array,
         variants: &[],
-        name: "Array",
+        name: "array",
         parameters: &[ParameterKind::Type, ParameterKind::Integer],
-        argument_error: "Array requires an element type and integer literal length",
-    },
-    Template {
-        id: TemplateId::Bytes,
-        name: "Bytes",
-        parameters: &[ParameterKind::Integer],
-        variants: &[],
-        argument_error: "Bytes requires one integer literal length",
+        argument_error: "array requires an element type and integer literal length",
     },
     Template {
         id: TemplateId::List,
@@ -83,13 +74,13 @@ const TEMPLATES: &[Template] = &[
                 payload: &[],
             },
         ],
-        name: "Option",
+        name: "?",
         parameters: &[ParameterKind::Type],
-        argument_error: "Option requires one type argument",
+        argument_error: "the optional type operator requires one type",
     },
     Template {
         id: TemplateId::Result,
-        name: "Result",
+        name: "!",
         parameters: &[ParameterKind::Type, ParameterKind::ErrorType],
         variants: &[
             VariantTemplate {
@@ -101,27 +92,7 @@ const TEMPLATES: &[Template] = &[
                 payload: &[1],
             },
         ],
-        argument_error: "Result requires two type arguments",
-    },
-    Template {
-        id: TemplateId::Attempt,
-        name: "Attempt",
-        parameters: &[ParameterKind::Type, ParameterKind::ErrorType],
-        variants: &[
-            VariantTemplate {
-                name: "Done",
-                payload: &[0],
-            },
-            VariantTemplate {
-                name: "Skipped",
-                payload: &[],
-            },
-            VariantTemplate {
-                name: "Failed",
-                payload: &[1],
-            },
-        ],
-        argument_error: "Attempt requires two type arguments",
+        argument_error: "the fallible type operator requires a value type and an error type",
     },
 ];
 
@@ -133,10 +104,9 @@ pub fn by_id(id: TemplateId) -> &'static Template {
 }
 
 pub fn lookup(path: &[String]) -> Option<&'static Template> {
-    // Only the applied spellings Bytes<N> and List<T> are built in.
+    // Only the applied spellings `array<T, N>` and `List<T>` are built in.
     // Bare names can still refer to a user-defined type or import.
-    lookup_applied(path)
-        .filter(|template| !matches!(template.id, TemplateId::Bytes | TemplateId::List))
+    lookup_applied(path).filter(|template| template.id != TemplateId::List)
 }
 
 pub fn lookup_applied(path: &[String]) -> Option<&'static Template> {
@@ -176,6 +146,28 @@ impl Template {
                 ParameterKind::Integer => "N",
             })
             .collect();
-        format!("{}<{}>", self.name, parameters.join(", "))
+        match self.id {
+            TemplateId::Option => "T?".into(),
+            TemplateId::Result => "T ! E".into(),
+            _ => format!("{}<{}>", self.name, parameters.join(", ")),
+        }
     }
+}
+
+/// Replacement guidance for a type spelling that was removed from the language.
+/// Type analysis reports it as TE001 when no user-defined type has that name.
+pub fn removed_spelling_guidance(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Option" => "'Option<T>' is no longer a type; write 'T?' instead",
+        "Result" => "'Result<T, E>' is no longer a type; write 'T ! E' instead",
+        "Attempt" => "'Attempt<T, E>' is no longer a type; write 'T ?! E' instead",
+        "Bool" => "'Bool' is no longer a type; write 'bool' instead",
+        "Char" => "'Char' is no longer a type; write 'char' instead",
+        "Array" => "'Array<T, N>' is no longer a type; write 'array<T, N>' instead",
+        _ => return None,
+    })
+}
+
+pub fn is_removed_spelling(name: &str) -> bool {
+    removed_spelling_guidance(name).is_some()
 }
