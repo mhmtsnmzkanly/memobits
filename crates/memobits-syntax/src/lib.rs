@@ -299,6 +299,27 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// `fn(x: i32) -> i32 => expr` or `fn(x: i32) -> i32 { ... }`: an
+    /// anonymous function. An expression body is a block with only a tail.
+    Function(Box<AnonymousFunction>),
+}
+/// An anonymous function expression. Parameter and result types may be
+/// omitted where an expected function type supplies them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnonymousFunction {
+    pub parameters: Vec<AnonymousParameter>,
+    pub result: Option<Type>,
+    pub body: Block,
+    /// Written `=> expr`: the result type may be inferred from the expression.
+    pub expression: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnonymousParameter {
+    pub span: Span,
+    pub mutable: bool,
+    pub name: String,
+    pub access: Access,
+    pub ty: Option<Type>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum InterpolationPart {
@@ -1013,6 +1034,10 @@ impl Parser {
     /// A type without the `!` operator: optional suffixes bind here.
     fn ty_postfix(&mut self) -> PResult<Type> {
         let start = self.current().span.start;
+        if self.at("fn") && self.next_at("(") {
+            self.bump();
+            return self.function_type(start);
+        }
         if self.at("{") {
             self.expect("{")?;
             if self.at("}") {
@@ -1242,6 +1267,104 @@ impl Parser {
             };
         }
         Ok(ty)
+    }
+    /// `fn(T1, borrow T2) -> R` after the `fn` keyword. Parameters are
+    /// `Type` (owned) or `Reference` arguments; the result is always the last
+    /// argument (`Unit` when omitted). The path is `\0fn`.
+    fn function_type(&mut self, start: usize) -> PResult<Type> {
+        self.expect("(")?;
+        let mut arguments = Vec::new();
+        while !self.at(")") && !self.eof() {
+            let parameter_start = self.current().span.start;
+            let access = self.access();
+            let ty = self.ty()?;
+            arguments.push(match access {
+                Access::Owned => TypeArgument::Type(ty),
+                Access::Borrow | Access::Share => TypeArgument::Reference {
+                    span: self.span(parameter_start),
+                    access,
+                    referent: ty,
+                },
+            });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        let result = if self.eat("->") {
+            self.ty()?
+        } else {
+            Type {
+                span: self.span(start),
+                path: vec!["\0unit".into()],
+                arguments: Vec::new(),
+            }
+        };
+        arguments.push(TypeArgument::Type(result));
+        Ok(Type {
+            span: self.span(start),
+            path: vec!["\0fn".into()],
+            arguments,
+        })
+    }
+    /// `=> expr` after a function head: a block that is only its tail value.
+    fn expression_body(&mut self) -> PResult<Block> {
+        let start = self.current().span.start;
+        let tail = self.nested(|p| p.expr(0))?;
+        Ok(Block {
+            span: self.span(start),
+            statements: Vec::new(),
+            tail: Some(Box::new(tail)),
+        })
+    }
+    /// An anonymous function after the `fn` keyword.
+    fn anonymous_function(&mut self, start: usize) -> PResult<Expr> {
+        self.expect("(")?;
+        let mut parameters = Vec::new();
+        while !self.at(")") && !self.eof() {
+            let parameter_start = self.current().span.start;
+            let mutable = self.eat("var");
+            let name = self.name()?;
+            let (access, ty) = if self.eat(":") {
+                let access = self.access();
+                (access, Some(self.ty()?))
+            } else {
+                (Access::Owned, None)
+            };
+            parameters.push(AnonymousParameter {
+                span: self.span(parameter_start),
+                mutable,
+                name,
+                access,
+                ty,
+            });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        let result = if self.eat("->") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        let expression = self.at("=>");
+        let body = if self.eat("=>") {
+            self.expression_body()?
+        } else if self.at("{") {
+            self.block()?
+        } else {
+            return self.fail("expected `=>` or a block as the body of an anonymous function");
+        };
+        Ok(Node {
+            span: self.span(start),
+            kind: ExprKind::Function(Box::new(AnonymousFunction {
+                parameters,
+                result,
+                body,
+                expression,
+            })),
+        })
     }
     /// Report a non-failing warning. The channel (`ParseResult::warnings`, then
     /// `Resolution::warnings`, then the CLI) currently has no producer: the
@@ -2144,6 +2267,9 @@ impl Parser {
                 return self.try_needs_else(try_span);
             };
             Self::try_match(try_span, operand, TryArms::Handler(handler))
+        } else if self.at("fn") && self.next_at("(") {
+            self.bump();
+            self.anonymous_function(start)?
         } else if self.eat("[") {
             let kind = self.nested(Self::array_literal_rest)?;
             Node {

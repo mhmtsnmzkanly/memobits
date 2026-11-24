@@ -312,6 +312,15 @@ impl Resolver {
                     .for_each(|field| self.expr(&mut field.value));
             }
             ExprKind::Block(block) => self.block(block),
+            ExprKind::Function(function) => {
+                for parameter in &mut function.parameters {
+                    if let Some(ty) = &mut parameter.ty {
+                        self.ty(ty);
+                    }
+                }
+                self.optional_type(&mut function.result);
+                self.block(&mut function.body);
+            }
             ExprKind::If {
                 condition,
                 then_branch,

@@ -1,0 +1,163 @@
+use alloc::List;
+
+// Function values. A function type is written `fn(T1, T2) -> R`; the result is
+// omitted for Unit (`fn(i32)`), and a parameter may carry an access mode
+// (`fn(borrow string) -> u32`, `fn(share u32)`). The modes are part of the
+// type, so `fn(string) -> u32` and `fn(borrow string) -> u32` are different.
+//
+// A function value is two words: its slot in the module's function table and
+// an environment word that is always 0 while a function captures nothing.
+// Calls go through `call_indirect`. A value without an environment is copyable,
+// like a primitive: copying `f` never moves it. Function values have no
+// equality (`==` is rejected), cannot be exported or returned by `main`, and
+// need no heap, so they work with `[build] alloc = false`.
+//
+// What is not here yet: anonymous functions that refer to a local of the
+// enclosing function (a capture). Naming a local inside `fn(...) => ...` is the
+// error "closures that capture variables arrive in the next step". Constants,
+// top-level functions and imports are not captures. `borrow fn(...)` and
+// `share fn(...)` parameters arrive with closures; declare function parameters
+// as owned `fn(...)`.
+fn inc(x: i32) -> i32 { x + 1 }
+// A named function may use an expression body: `=> expr` instead of a block.
+fn dbl(x: i32) -> i32 => x * 2
+fn add(a: i32, b: i32) -> i32 => a + b
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn twice(f: fn(i32) -> i32, x: i32) -> i32 { f(f(x)) }
+fn then(f: fn(i32) -> i32, g: fn(i32) -> i32, x: i32) -> i32 { g(f(x)) }
+fn choose(flag: bool) -> fn(i32) -> i32 { if flag { inc } else { dbl } }
+test fn named_functions_are_values() {
+    // A top-level function named without a call is a value of its type.
+    let f := inc;
+    assert(f(1) == 2);
+    assert(apply(dbl, 4) == 8);
+    assert(twice(inc, 1) == 3);
+    assert(then(inc, dbl, 2) == 6);
+    assert(choose(true)(10) == 11);
+    assert(choose(false)(10) == 20);
+    // A local binding shadows a top-level function of the same name.
+    let inc := dbl;
+    assert(inc(5) == 10);
+}
+
+// Anonymous functions are named functions without a name. Parameter types come
+// from an annotation or from an expected function type; the result type comes
+// from `-> R` or the expected type. Without either, an `=>` body infers it.
+const OFFSET: i32 = 100;
+fn shifted(x: i32) -> i32 => x + OFFSET
+test fn anonymous_functions() {
+    assert(apply(fn(x: i32) -> i32 => x + 1, 1) == 2);
+    assert(apply(fn(x) => x + 2, 1) == 3);
+    assert(apply(fn(x) { x + 3 }, 1) == 4);
+    assert(apply(fn(x: i32) -> i32 { let y := x * 2; y + 1 }, 4) == 9);
+    let annotated := fn(x: i32) -> i32 => x - 1;
+    let from_expectation: fn(i32) -> i32 = fn(x) => x - 2;
+    let inferred_result := fn(x: i32) => x * 3;
+    assert(annotated(10) == 9);
+    assert(from_expectation(10) == 8);
+    assert(inferred_result(4) == 12);
+    // No parameters, several parameters, Unit result, early return.
+    assert((fn() -> i32 => 42)() == 42);
+    assert((fn(a: i32, b: i32) -> i32 => a - b)(9, 4) == 5);
+    let early := fn(x: i32) -> i32 { if x > 5 { return 5; } x };
+    assert(early(9) == 5);
+    assert(early(2) == 2);
+    // Constants, top-level functions and imports may be named: no capture.
+    assert(apply(fn(x) => shifted(x) + OFFSET, 1) == 201);
+}
+
+// Calls go through a local, a parameter, a struct field, an array or List
+// element, or a call result. `holder.callback(x)` calls the field; if a method
+// of that name exists it wins; read the field itself with `let f := value.run;`
+// and call `f(x)`.
+type Holder { callback: fn(i32) -> i32, base: i32 }
+type Shadowing { run: fn(i32) -> i32 }
+extend Shadowing {
+    fn run(borrow self, x: i32) -> i32 => x + 1000
+}
+test fn calls_through_values() {
+    let holder := Holder { callback: inc, base: 4 };
+    assert(holder.callback(holder.base) == 5);
+    var mutable := Holder { callback: dbl, base: 4 };
+    assert(mutable.callback(mutable.base) == 8);
+    mutable.callback = inc;
+    assert(mutable.callback(mutable.base) == 5);
+    let table := [inc, dbl, shifted];
+    assert(table[0](1) == 2);
+    assert(table[1](4) == 8);
+    assert(table[2](1) == 101);
+    assert((choose(false))(3) == 6);
+    let method_wins := Shadowing { run: dbl };
+    assert(method_wins.run(1) == 1001);
+    let field_value := method_wins.run;
+    assert(field_value(4) == 8);
+}
+
+// Function values sit anywhere a copyable value does: struct, tuple and record
+// fields, array and List elements, enum payloads and `T?`.
+type Op [ Unary(fn(i32) -> i32), Binary(fn(i32, i32) -> i32), Nothing ]
+fn run_op(op: Op, x: i32) -> i32 {
+    match op {
+        Unary(f) => f(x),
+        Binary(g) => g(x, x),
+        Nothing => 0,
+    }
+}
+fn maybe_apply(f: (fn(i32) -> i32)?, x: i32) -> i32 {
+    match f { Some(g) => g(x), None => -1 }
+}
+test fn function_values_in_aggregates() {
+    let pair: (fn(i32) -> i32, i32) = (dbl, 4);
+    assert(pair.0(pair.1) == 8);
+    let record := { op: inc, base: 10 };
+    assert(record.op(record.base) == 11);
+    assert(run_op(Op::Unary(inc), 5) == 6);
+    assert(run_op(Op::Binary(add), 5) == 10);
+    assert(run_op(Op::Nothing, 5) == 0);
+    assert(maybe_apply(Some(inc), 1) == 2);
+    assert(maybe_apply(None, 1) == -1);
+    var fs: List<fn(i32) -> i32> = [];
+    fs.push(inc);
+    fs.push(fn(x) => x * 100);
+    assert(fs.len() == 2);
+    match fs.get(1) { Some(f) => assert(f(2) == 200), None => assert(false) }
+    match fs.pop() { Some(f) => assert(f(3) == 300), None => assert(false) }
+    assert(fs.len() == 1);
+    var total := 0;
+    loop f in [inc, dbl, inc] { total += f(10); }
+    assert(total == 11 + 20 + 11);
+}
+
+// Access modes are part of the type and decide how an argument is passed: a
+// `borrow` parameter takes an explicit `.borrow()`, a `share` parameter takes
+// `.share()`, and an owned parameter moves its argument in. Owners passed
+// through a function value are released exactly, as with a direct call.
+fn length(s: borrow string) -> u32 { s.len() }
+fn consume(s: string) -> u32 { s.len() }
+fn bump(n: share u32) { n = n + 1; }
+fn make_text(n: u32) -> string { let text := "ab".concat("cd"); text }
+fn through_borrow(f: fn(borrow string) -> u32, s: borrow string) -> u32 { f(s) }
+fn through_owned(f: fn(string) -> u32) -> u32 { let s := "he".concat("llo"); f(s) }
+fn through_share(f: fn(share u32), n: share u32) { f(n.share()); f(n.share()); }
+fn through_result(f: fn(u32) -> string) -> u32 { let s := f(1); s.len() }
+test fn access_modes_and_owners() {
+    let text := "hello".concat("!");
+    assert(through_borrow(length, text.borrow()) == 6);
+    assert(through_owned(consume) == 5);
+    var n: u32 = 0;
+    through_share(bump, n.share());
+    assert(n == 2);
+    assert(through_result(make_text) == 4);
+    assert(through_result(fn(k) { let r := "xyz".concat(""); r }) == 3);
+}
+
+// A generic function is a value only where an expected function type fixes its
+// type arguments; otherwise the use is an error that names the missing type.
+fn identity<T>(value: T) -> T { value }
+test fn generic_function_values() {
+    let on_numbers: fn(i32) -> i32 = identity;
+    let on_flags: fn(bool) -> bool = identity;
+    assert(on_numbers(7) == 7);
+    assert(on_flags(true));
+    assert(apply(identity, 9) == 9);
+}

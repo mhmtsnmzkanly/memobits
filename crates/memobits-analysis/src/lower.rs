@@ -40,6 +40,27 @@ use crate::types::{
     MatchPattern, PathTarget, PatternLiteral, SelectedCall, TypeFact, VariantUse,
 };
 
+/// The anonymous functions of one program. A parent's lowering lowers each
+/// anonymous function it contains and parks the result here; the program
+/// loop moves it into its own function slot afterwards.
+struct AnonymousFunctions<'a> {
+    facts: HashMap<memobits_ir::FunctionId, &'a FunctionFacts>,
+    lowered: std::cell::RefCell<HashMap<u32, Function>>,
+}
+
+impl<'a> AnonymousFunctions<'a> {
+    fn new(functions: &'a [FunctionFacts]) -> Self {
+        Self {
+            facts: functions
+                .iter()
+                .filter(|fact| fact.anonymous.is_some())
+                .map(|fact| (fact.id, fact))
+                .collect(),
+            lowered: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+}
+
 /// IR type definitions for the checked structs. `module_path` names the module
 /// of a standalone definition (whose fact module is empty).
 fn program_types(
@@ -130,6 +151,7 @@ pub fn lower_module(
     }
     let interpolations = interpolation::Interpolations::new(facts.functions.len());
     interpolations.borrow_mut().enter(package, module_path);
+    let anonymous = AnonymousFunctions::new(&facts.functions);
     let mut functions = Vec::new();
     for (item, fact) in module
         .items
@@ -182,9 +204,28 @@ pub fn lower_module(
             }],
             entry: BlockId(0),
         };
-        let mut builder = Builder::new(function, fact, &facts.types, interpolations.clone());
+        let mut builder = Builder::new(
+            function,
+            fact,
+            &facts.types,
+            interpolations.clone(),
+            &anonymous,
+        );
         builder.lower_body(body);
         functions.push(builder.function);
+    }
+    for fact in facts
+        .functions
+        .iter()
+        .filter(|fact| fact.anonymous.is_some())
+    {
+        let Some(function) = anonymous.lowered.borrow_mut().remove(&fact.id.0) else {
+            return Err(vec![error(
+                fact.span,
+                "anonymous function was not lowered with its enclosing function",
+            )]);
+        };
+        functions.push(function);
     }
     functions.extend(interpolations.take_functions());
     let program = Program {
@@ -289,8 +330,25 @@ pub fn lower_resolved(
         return Err(constant_errors);
     }
     let interpolations = interpolation::Interpolations::new(typed.functions.len());
+    let anonymous = AnonymousFunctions::new(&typed.functions);
     let mut functions = Vec::with_capacity(typed.functions.len());
     for fact in &typed.functions {
+        if fact.anonymous.is_some() {
+            if fact.id.0 as usize != functions.len() {
+                return Err(vec![error(
+                    fact.span,
+                    "typed project function ID differs from canonical program order",
+                )]);
+            }
+            let Some(function) = anonymous.lowered.borrow_mut().remove(&fact.id.0) else {
+                return Err(vec![error(
+                    fact.span,
+                    "anonymous function was not lowered with its enclosing function",
+                )]);
+            };
+            functions.push(function);
+            continue;
+        }
         let Some(source) = resolution.modules.get(&fact.source_module) else {
             return Err(vec![error(
                 fact.span,
@@ -469,7 +527,13 @@ pub fn lower_resolved(
         interpolations
             .borrow_mut()
             .enter(&project.manifest.package.name, &function.path.module);
-        let mut builder = Builder::new(function, fact, &typed.types, interpolations.clone());
+        let mut builder = Builder::new(
+            function,
+            fact,
+            &typed.types,
+            interpolations.clone(),
+            &anonymous,
+        );
         if !external {
             builder.lower_body(body);
         } else {
@@ -619,6 +683,7 @@ struct LoopTargets {
 }
 struct Builder<'a> {
     interpolations: interpolation::SharedInterpolations,
+    anonymous: &'a AnonymousFunctions<'a>,
     function: Function,
     facts: &'a FunctionFacts,
     types: &'a [TypeFact],
@@ -687,7 +752,7 @@ impl memobits_ir::OwnerTypeModel for FactOwnerModel<'_> {
         use memobits_ir::OwnerTyView as View;
         match ty {
             Type::String | Type::List(_) => View::String,
-            Type::Primitive(_) => View::Primitive,
+            Type::Primitive(_) | Type::Function(_) => View::Primitive,
             Type::Enum(_) if is_string_owner_aggregate_type(self.0, ty) => View::Heap,
             Type::Enum(_) => View::Primitive,
             Type::Struct(id)
@@ -771,6 +836,7 @@ impl<'a> Builder<'a> {
         facts: &'a FunctionFacts,
         types: &'a [TypeFact],
         interpolations: interpolation::SharedInterpolations,
+        anonymous: &'a AnonymousFunctions<'a>,
     ) -> Self {
         let expression_ids = facts
             .expressions
@@ -837,6 +903,7 @@ impl<'a> Builder<'a> {
             .collect();
         Self {
             interpolations,
+            anonymous,
             function,
             facts,
             types,
@@ -1072,7 +1139,7 @@ impl<'a> Builder<'a> {
         let primitive = matches!(
             self.operand_type(operand),
             Some(Type::Primitive(kind)) if kind != Primitive::Unit
-        );
+        ) || matches!(self.operand_type(operand), Some(Type::Function(_)));
         match operand.source {
             Source::Local(_) if primitive => self.copy_of(operand),
             Source::Value(id) if primitive && self.loaded.contains(&id.0) => self.copy_of(operand),
@@ -1131,13 +1198,7 @@ impl<'a> Builder<'a> {
             .iter()
             .rev()
             .find(|instruction| instruction.output == Some(id))
-            .is_some_and(|instruction| {
-                matches!(
-                    &instruction.kind,
-                    InstructionKind::Call { callee, .. }
-                        if matches!(callee.source, Source::Function(_))
-                )
-            });
+            .is_some_and(|instruction| matches!(&instruction.kind, InstructionKind::Call { .. }));
         if !fresh_call {
             return value;
         }
@@ -1185,7 +1246,7 @@ impl<'a> Builder<'a> {
         let list = self.hidden_local("list literal", list_ty, expr.span);
         self.initialize_local(list, consume(empty), expr.span);
         for element in elements {
-            let value = if matches!(element_ty, Type::Primitive(_)) {
+            let value = if element_ty.is_scalar() {
                 let value = self.lower_expr(element)?;
                 read(self.scalar(value)?)
             } else {
@@ -1419,9 +1480,9 @@ impl<'a> Builder<'a> {
         };
         match &callee.kind {
             ExprKind::Field { name, .. } => name == "concat",
-            ExprKind::Path(_) => {
+            // A call through a function value returns the same owned String.
+            ExprKind::Path(_) | ExprKind::Index { .. } | ExprKind::Call { .. } => {
                 self.ty(expr) == Some(Type::String)
-                    && matches!(self.path(callee), PathTarget::Function(_))
             }
             _ => false,
         }
@@ -1624,6 +1685,73 @@ impl<'a> Builder<'a> {
             self.end_owned_locals(0, span);
             self.set_terminator(current, TerminatorKind::Return(returned), Some(span));
         }
+    }
+
+    /// An anonymous function: lower its body as a function of its own and
+    /// produce its function value.
+    fn lower_anonymous(
+        &mut self,
+        expr: &Expr,
+        function: &memobits_syntax::AnonymousFunction,
+    ) -> Option<Operand> {
+        let node = expr as *const Expr as usize;
+        let id = self
+            .facts
+            .anonymous_functions
+            .iter()
+            .find_map(|(address, id)| (*address == node).then_some(*id))
+            .expect("checked anonymous function");
+        let fact = self.anonymous.facts[&id];
+        let lowered = Function {
+            path: CanonicalFunction {
+                package: self.function.path.package.clone(),
+                module: self.function.path.module.clone(),
+                name: format!("{}$anonymous${}", self.function.path.name, id.0),
+            },
+            span: expr.span,
+            signature: fact.signature.clone(),
+            parameter_locals: fact
+                .locals
+                .iter()
+                .take(function.parameters.len())
+                .map(|local| local.id)
+                .collect(),
+            locals: fact
+                .locals
+                .iter()
+                .map(|local| Local {
+                    name: local.name.clone(),
+                    ty: local.ty.clone(),
+                    mutable: local.mutable,
+                    kind: LocalKind::Ordinary,
+                    span: local.span,
+                })
+                .collect(),
+            values: Vec::new(),
+            blocks: vec![IrBlock {
+                parameters: Vec::new(),
+                instructions: Vec::new(),
+                terminator: Terminator {
+                    span: None,
+                    kind: TerminatorKind::Unreachable,
+                },
+            }],
+            entry: BlockId(0),
+        };
+        let mut builder = Builder::new(
+            lowered,
+            fact,
+            self.types,
+            self.interpolations.clone(),
+            self.anonymous,
+        );
+        builder.lower_body(&function.body);
+        self.anonymous
+            .lowered
+            .borrow_mut()
+            .insert(id.0, builder.function);
+        let ty = self.ty(expr).expect("checked anonymous function type");
+        self.constant(expr.span, Constant::Function(id), ty)
     }
 
     fn lower_body(&mut self, body: &Block) {
@@ -2181,7 +2309,7 @@ impl<'a> Builder<'a> {
             self.owned_locals.push(staged);
             return Some(staged);
         }
-        let rhs = if matches!(place_ty, Type::Primitive(_)) {
+        let rhs = if place_ty.is_scalar() {
             let rhs = self.lower_expr(value)?;
             let rhs = self.scalar(rhs)?;
             self.owned(rhs)?
@@ -2237,7 +2365,7 @@ impl<'a> Builder<'a> {
         let staged = self.stage_replacement(&arguments[1], &place_ty)?;
         self.swap_into_place(root, &positions, staged, expr.span)?;
         let old = op(Source::Local(staged), expr.span);
-        if matches!(place_ty, Type::Primitive(_)) {
+        if place_ty.is_scalar() {
             self.owned(old)
         } else {
             Some(consume(old))
@@ -2646,22 +2774,20 @@ impl<'a> Builder<'a> {
                 },
                 Some(Type::Primitive(Primitive::Char)),
             )?),
-            Type::List(ref element) if matches!(**element, Type::Primitive(_)) => {
-                consume(self.emit(
-                    items.span,
-                    InstructionKind::ListRead {
-                        source: read(receiver),
-                        index: read(position),
-                    },
-                    Some(element.as_ref().clone()),
-                )?)
-            }
+            Type::List(ref element) if element.is_scalar() => consume(self.emit(
+                items.span,
+                InstructionKind::ListRead {
+                    source: read(receiver),
+                    index: read(position),
+                },
+                Some(element.as_ref().clone()),
+            )?),
             Type::List(_) => {
                 // A non-copyable element is lent: the binding is a read-only
                 // reference into the list, which stays loaned for the loop.
                 consume(self.element_addr(receiver, position, Access::Borrow, items.span)?)
             }
-            Type::Array { ref element, .. } if !matches!(**element, Type::Primitive(_)) => {
+            Type::Array { ref element, .. } if !element.is_scalar() => {
                 consume(self.element_addr(receiver, position, Access::Borrow, items.span)?)
             }
             _ => {
@@ -2850,13 +2976,16 @@ impl<'a> Builder<'a> {
             ExprKind::Path(_) if self.variants.contains_key(&self.id(expr)) => {
                 self.lower_variant(expr, &[])
             }
-            ExprKind::Path(_) => {
-                let source = match self.path(expr) {
-                    PathTarget::Local(id) => Source::Local(id),
-                    PathTarget::Function(id) => Source::Function(id),
-                };
-                Some(op(source, expr.span))
-            }
+            ExprKind::Path(_) => match self.path(expr) {
+                PathTarget::Local(id) => Some(op(Source::Local(id), expr.span)),
+                // A function named as a value: its table slot, no environment.
+                // A direct call names its callee through `lower_callee`.
+                PathTarget::Function(id) => {
+                    let ty = self.ty(expr).expect("checked function value type");
+                    self.constant(expr.span, Constant::Function(id), ty)
+                }
+            },
+            ExprKind::Function(function) => self.lower_anonymous(expr, function),
             ExprKind::Unary { operator, operand } => {
                 if operator == "-" && self.selected_operators.contains_key(&self.id(expr)) {
                     return self.lower_selected_unary_operator(expr, operand);
@@ -3066,7 +3195,7 @@ impl<'a> Builder<'a> {
                             },
                             _ => unreachable!("checked List push receiver"),
                         };
-                        let value = if matches!(element_ty, Type::Primitive(_)) {
+                        let value = if element_ty.is_scalar() {
                             let value = self.lower_expr(&arguments[0])?;
                             read(self.scalar(value)?)
                         } else {
@@ -3091,20 +3220,23 @@ impl<'a> Builder<'a> {
                     ) {
                         return self.lower_collection_read(expr, base, name, arguments);
                     }
+                    // Any other name is a call through a function-valued field.
                     let access = match name.as_str() {
-                        "borrow" => Access::Borrow,
-                        "share" => Access::Share,
-                        _ => unreachable!("checked conversion"),
+                        "borrow" => Some(Access::Borrow),
+                        "share" => Some(Access::Share),
+                        _ => None,
                     };
-                    if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
-                        // A row, element or field that is itself an aggregate: the
-                        // chain of addresses is the reference, with `access` on
-                        // every level.
-                        let (root, projections) = self.lower_place(base)?;
-                        return self.address_chain(root, &projections, access, expr.span);
+                    if let Some(access) = access {
+                        if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                            // A row, element or field that is itself an aggregate: the
+                            // chain of addresses is the reference, with `access` on
+                            // every level.
+                            let (root, projections) = self.lower_place(base)?;
+                            return self.address_chain(root, &projections, access, expr.span);
+                        }
+                        let owner = self.lower_expr(base)?;
+                        return self.borrow(owner, access);
                     }
-                    let owner = self.lower_expr(base)?;
-                    return self.borrow(owner, access);
                 }
                 self.lower_call(expr, callee, arguments)
             }
@@ -3821,7 +3953,7 @@ impl<'a> Builder<'a> {
             MatchPattern::Or(_) => unreachable!("alternatives are expanded before lowering"),
             MatchPattern::Bind(local) => {
                 let local = local.expect("lowered match binding");
-                let value = if matches!(ty, Type::Primitive(_)) {
+                let value = if ty.is_scalar() {
                     let loaded = self.load_element(reference, span)?;
                     self.owned(loaded)?
                 } else if matches!(reference.source, Source::Local(_)) {

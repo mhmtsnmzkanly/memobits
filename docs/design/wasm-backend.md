@@ -39,6 +39,25 @@ Dynamic failure is a Wasm trap preceded by a trap record (see "Trap reporting"
 below); this is not a stable error ABI. Statically proven failures should be
 diagnosed before encoding.
 
+## Function values
+
+A function value is one `i64`: the low 32 bits are its slot in the module's
+function table, the high 32 bits an environment pointer (always 0 until closures
+exist). Before encoding, the backend erases every function type to `u64`
+(`function_values.rs`), so locals, fields, array and List elements, enum
+payloads and call arguments need no special case. The heap-ownership facts are
+computed on the typed program first, because they follow a call through a
+function value to every address-taken function of the same signature.
+
+The table has one slot per function that is used as a value and reachable, plus
+slot 0, which stays empty; an active element segment at offset 1 fills the rest.
+A function used as a value is `i64.const <slot>`. A call through a value pushes
+the arguments (and the hidden result pointer of an aggregate result), checks
+`slot - 1 < slots` (otherwise trap reason 13, below), and `call_indirect`s with the
+Wasm type of the callee's signature (signatures are deduplicated with the
+functions' own types). Modules without function values have no table or element
+section. Function values cannot be exported or returned by the entry function.
+
 ## Trap reporting
 
 Every checked failure (integer overflow, division by zero, array bounds, input
@@ -67,6 +86,7 @@ program order, starting at 1 (at most 2^23 - 1).
 | 10 | HeapAllocation | guest heap allocation failed |
 | 11 | ShiftCount | shift count must be less than the bit width |
 | 12 | AssertionFailed | assertion failed (`assert(false)`) |
+| 13 | InvalidFunction | call through an invalid function value (outside the function table) |
 
 Codes 5 and 6 are stored *before* a native Wasm division, which traps by itself.
 The host refines them by the native trap kind: divide-by-zero gives "division by

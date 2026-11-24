@@ -30,6 +30,7 @@ impl super::Program {
     /// Heap ownership propagated through bounded local, call and return edges.
     pub fn heap_strings(&self) -> Vec<HeapStrings> {
         let mut facts = vec![HeapStrings::default(); self.functions.len()];
+        let taken = self.address_taken();
         let mut moves: HashMap<Slot, Vec<Slot>> = HashMap::new();
         let mut pending = Vec::new();
         for (index, function) in self.functions.iter().enumerate() {
@@ -281,19 +282,17 @@ impl super::Program {
                                                                 .push(destination);
                                                         }
                                                         Some(InstructionKind::Call {
-                                                            callee:
-                                                                Operand {
-                                                                    source: Source::Function(callee),
-                                                                    ..
-                                                                },
+                                                            callee,
                                                             ..
                                                         }) => {
-                                                            moves
-                                                                .entry(Slot::Return(
-                                                                    callee.0 as usize,
-                                                                ))
-                                                                .or_default()
-                                                                .push(destination);
+                                                            for callee in call_targets(
+                                                                self, function, callee, &taken,
+                                                            ) {
+                                                                moves
+                                                                    .entry(Slot::Return(callee))
+                                                                    .or_default()
+                                                                    .push(destination);
+                                                            }
                                                         }
                                                         _ => {}
                                                     }
@@ -389,9 +388,10 @@ impl super::Program {
                             }
                         }
                         InstructionKind::Call { callee, arguments } => {
+                            let targets = call_targets(self, function, callee, &taken);
                             for (position, argument) in arguments.iter().enumerate() {
-                                if let Some((source, target, parameter)) =
-                                    owned_call_transfer(self, callee, position, argument)
+                                for (source, target, parameter) in
+                                    owned_call_transfers(self, &targets, callee, position, argument)
                                 {
                                     moves
                                         .entry(Slot::Local(index, source))
@@ -425,7 +425,7 @@ impl super::Program {
                                 callee,
                                 &block.instructions[position..],
                             ) {
-                                let (callee, target) = result;
+                                let (_, target) = result;
                                 if function
                                     .locals
                                     .get(target.0 as usize)
@@ -433,10 +433,12 @@ impl super::Program {
                                 {
                                     facts[index].string_call_bindings.insert(target);
                                 }
-                                moves
-                                    .entry(Slot::Return(callee))
-                                    .or_default()
-                                    .push(Slot::Local(index, target));
+                                for callee in &targets {
+                                    moves
+                                        .entry(Slot::Return(*callee))
+                                        .or_default()
+                                        .push(Slot::Local(index, target));
+                                }
                             }
                         }
                         _ => {}
@@ -852,15 +854,14 @@ pub(super) fn call_binding(
     let [call, after @ ..] = instructions else {
         return None;
     };
-    let InstructionKind::Call {
-        callee: Operand {
-            source: Source::Function(callee),
-            ..
-        },
-        ..
-    } = call.kind
-    else {
+    let InstructionKind::Call { callee, .. } = &call.kind else {
         return None;
+    };
+    // An indirect call has no single callee (`usize::MAX`); callers that need
+    // one go through `call_targets`.
+    let callee = match callee.source {
+        Source::Function(callee) => callee.0 as usize,
+        _ => usize::MAX,
     };
     let output = call.output?;
     let destination = &after.iter().find(|inst| !is_cleanup(inst))?.kind;
@@ -900,7 +901,80 @@ pub(super) fn call_binding(
         _ => return None,
     };
     (value.source == Source::Value(output) && value.mode == UseMode::Consume)
-        .then_some((callee.0 as usize, target))
+        .then_some((callee, target))
+}
+
+fn operand_type_in(function: &Function, source: Source) -> Option<&Type> {
+    match source {
+        Source::Local(local) => function.locals.get(local.0 as usize).map(|local| &local.ty),
+        Source::Value(value) => function.values.get(value.0 as usize),
+        Source::Function(_) => None,
+    }
+}
+
+impl super::Program {
+    /// Functions whose value is taken (`Constant::Function`) anywhere.
+    pub(super) fn address_taken(&self) -> Vec<usize> {
+        let mut taken = std::collections::BTreeSet::new();
+        for function in &self.functions {
+            for block in &function.blocks {
+                for instruction in &block.instructions {
+                    if let InstructionKind::Constant(super::Constant::Function(target)) =
+                        &instruction.kind
+                    {
+                        taken.insert(target.0 as usize);
+                    }
+                }
+            }
+        }
+        taken.into_iter().collect()
+    }
+}
+
+/// The functions a call can reach: its direct target, or for a call through a
+/// function value every address-taken function of the same signature.
+pub(super) fn call_targets(
+    program: &super::Program,
+    function: &Function,
+    callee: &Operand,
+    taken: &[usize],
+) -> Vec<usize> {
+    match callee.source {
+        Source::Function(target) => vec![target.0 as usize],
+        source => match operand_type_in(function, source) {
+            Some(Type::Function(signature)) => taken
+                .iter()
+                .copied()
+                .filter(|target| {
+                    program
+                        .functions
+                        .get(*target)
+                        .is_some_and(|candidate| &candidate.signature == signature)
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// `owned_call_transfer` for every function the call can reach.
+pub(super) fn owned_call_transfers(
+    program: &super::Program,
+    targets: &[usize],
+    callee: &Operand,
+    position: usize,
+    source: &Operand,
+) -> Vec<(LocalId, usize, LocalId)> {
+    targets
+        .iter()
+        .filter_map(|target| {
+            let synthetic = Operand {
+                source: Source::Function(FunctionId(*target as u32)),
+                ..*callee
+            };
+            owned_call_transfer(program, &synthetic, position, source)
+        })
+        .collect()
 }
 
 fn call_binding_result(
@@ -909,15 +983,18 @@ fn call_binding_result(
     callee: &Operand,
     instructions: &[Instruction],
 ) -> Option<(usize, LocalId)> {
-    let Source::Function(callee_id) = callee.source else {
-        return None;
+    let result = match callee.source {
+        Source::Function(callee_id) => program
+            .functions
+            .get(callee_id.0 as usize)?
+            .signature
+            .result
+            .as_ref(),
+        _ => match operand_type_in(function, callee.source)? {
+            Type::Function(signature) => signature.result.as_ref(),
+            _ => return None,
+        },
     };
-    let result = program
-        .functions
-        .get(callee_id.0 as usize)?
-        .signature
-        .result
-        .as_ref();
     if !matches!(result, Type::String) && !owns_string_aggregate(program, result) {
         return None;
     }
@@ -1250,6 +1327,8 @@ pub(super) fn array_binding(function: &Function, instructions: &[Instruction]) -
 
 pub(super) fn owned_aggregate_call_argument(
     program: &super::Program,
+    function: &Function,
+    taken: &[usize],
     block: &Block,
     producer_position: usize,
     result: &Type,
@@ -1267,18 +1346,13 @@ pub(super) fn owned_aggregate_call_argument(
     block.instructions[producer_position + 1..]
         .iter()
         .any(|instruction| {
-            let InstructionKind::Call {
-                callee:
-                    Operand {
-                        source: Source::Function(callee),
-                        ..
-                    },
-                arguments,
-            } = &instruction.kind
-            else {
+            let InstructionKind::Call { callee, arguments } = &instruction.kind else {
                 return false;
             };
-            let Some(target) = program.functions.get(callee.0 as usize) else {
+            let Some(target) = call_targets(program, function, callee, taken)
+                .first()
+                .and_then(|target| program.functions.get(*target))
+            else {
                 return false;
             };
             arguments

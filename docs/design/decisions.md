@@ -1221,3 +1221,118 @@ are allowed once cleanup is proven, and the float text is exactly Rust's).
   payload works); a struct holding only an enum or tuple field is still not a
   transport owner; there are no precision, width or exponent options (format
   specifiers remain open).
+
+## Stage 4: functions as values, closures, generics, Box (2026-11-25, user approved)
+
+- **Function types** are written `fn(T1, T2) -> R` (`-> R` omitted for
+  Unit); parameter access modes appear in the type (`fn(borrow string) -> u32`).
+- **Named functions** may use an expression body: `fn f(x: i32) -> i32 => x * 2`
+  (block bodies keep the existing tail/`return` rules). Same in `extend`.
+- **Anonymous functions** are named functions without a name:
+  `fn(x: i32) -> i32 => x * 2` or `fn(x: i32) -> i32 { … }`; with a known
+  expected function type, parameter and result types may be omitted
+  (`fn(x) => x * 2`). The bare `x => …` form is not used (it would clash
+  with match arms).
+- **One function type, access modes decide escaping** (reusing the
+  language's ownership vocabulary instead of new keywords):
+  - an owned `fn(...)` value may be stored, returned and moved; it may only
+    capture by move (owned environment, alloc layer when non-empty);
+  - a `borrow fn(...)` parameter receives any function value, including
+    closures that capture surrounding variables by read-only borrow; like
+    every borrow it is second-class: callable and passable, never stored or
+    returned (non-escaping, no heap);
+  - a `share fn(...)` parameter additionally accepts closures that mutate
+    captured variables (exclusive access for the call's duration).
+  A function value that captures nothing works everywhere and needs no heap.
+  Captures are inferred from use: read → borrow, mutation → share, explicit
+  move into an owned environment only for owned `fn` values.
+- **Generics**: several type parameters and bounds via
+  `where T: A + B, U: C`; borrowed generic parameters allowed; existing
+  single-bound forms keep working.
+- **`Box<T>`** (alloc layer, `use alloc::Box;`): single-owner heap box built
+  with `Box(value)`; field access, method calls and `match` see through the
+  box automatically; recursive types are allowed only through `Box`.
+- Order: H1 function values + anonymous non-capturing functions + `=> expr`
+  bodies → H2 borrow/share closures → H3 generics → H4 Box → H5 owned
+  (escaping) closures.
+
+### Shipped H1 details (2026-11-25)
+
+Facts about the shipped behavior of the first Stage 4 step; the Stage 4
+decision above is unchanged.
+
+- Syntax: `fn(T1, borrow T2) -> R` is a type (the `\0fn` path in the AST; the
+  last type argument is the result, the `\0unit` marker when `-> R` is
+  omitted). `(fn(i32) -> i32)?` needs the parentheses, since `-> R` takes a
+  whole type; `fn(i32) -> i32?` is a function returning `i32?`. An anonymous
+  function is `ExprKind::Function`: `fn(x: i32) -> i32 => expr`,
+  `fn(x: i32) -> i32 { ... }`, `fn(x) => expr` (types from an expected function
+  type), parameters may be `var`. `=> expr` after the head of a named function,
+  an `extend` method or a `test fn` is a block that is only its tail; a
+  trailing `;` after an expression body is optional.
+- Typing: parameter types come from annotations or the expected function type
+  (else TE002 "cannot infer the type of parameter 'x'"); the result comes from
+  `-> R`, the expected type or, for an `=>` body without either, the body's
+  type. An expected function type of another arity is TE010. The body is
+  checked as a separate function (`Checker::anonymous_function`); a name that
+  resolves to a local of an enclosing function is TE017 "closures that capture
+  variables arrive in the next step" (constants, top-level functions and
+  imports resolve normally). A `borrow`/`share` parameter of function type is
+  TE017 (it belongs to H2). Function types containing a `List` parameter or
+  result are TE017 (a List needs a direct internal call). Function values
+  have no equality: `==`/`!=` is TE007. Access modes are part of the type, so
+  `fn(string) -> u32` and `fn(borrow string) -> u32` do not unify (TE002).
+- Values: a top-level function named without a call is a value of its type,
+  including imported functions (visibility is the module loader's) and `extern`
+  host functions (a plain Wasm import; source `mb run` links it). A generic
+  function is a value only where the expected function type fixes its type
+  argument (`let f: fn(i32) -> i32 = id;`, an argument position); otherwise
+  TE002 explains it. `test fn` names are never in scope (NE001 "test functions
+  cannot be called or used as values"). A local of function type shadows a
+  top-level function of the same name.
+- Calls: `f(x)` through a local or parameter, `s.callback(x)` through a
+  function-valued field, `xs[i](x)`, `(make())(x)`, `make()(x)`. Arguments
+  follow the target's parameter access modes exactly like a direct call
+  (owned moves, `.borrow()` / `.share()` loans, String and owner temporaries
+  staged in hidden owners). A method of the same name wins over a field
+  (`value.run` still reads the field). Builtin method names (`len`, `get`,
+  `push`, ...) also win over fields of the same name.
+- Representation: one `i64` per function value: low word = slot in the
+  module's function table, high word = environment pointer (always 0 in H1).
+  Slot 0 is never filled, so one function table has `n + 1` slots, filled by
+  an active element segment at offset 1, holding only the functions used as
+  values that are reachable. IR: `Type::Function(Signature)` is a scalar
+  (`Type::is_scalar`), `Constant::Function(FunctionId)` creates a value,
+  `Call` with a local/value callee is an indirect call; named direct calls
+  keep `Source::Function`. The Wasm backend erases function types to `u64`
+  (`crates/memobits-wasm/src/function_values.rs`), emits `i64.const slot` for a
+  constant and `call_indirect` (one Wasm type per distinct signature, shared
+  with function types) for an indirect call, preceded by a slot-range check
+  that traps with reason 13 `InvalidFunction` ("call through an invalid
+  function value"); a signature mismatch cannot occur because values are only
+  made from typed functions, and `call_indirect` would trap natively anyway.
+  Function values cannot appear in exported signatures or the entry's result
+  (LE900 "Wasm exported signatures cannot use function values"). They need no
+  heap (`[build] alloc = false` works).
+- Owners through function values: the shared heap-ownership analysis
+  (`scoped_string.rs`) treats a call through a function value as a call to
+  every address-taken function of the same signature (`call_targets`), so owned
+  String/owner arguments, returned owners and `share` String parameters get the
+  same moves and exact cleanup as direct calls (capped-memory evidence below).
+- Anonymous functions are lifted: each becomes an ordinary IR function
+  (`<parent>$anonymous$<id>`) with the next function ids; the parent evaluates
+  to `Constant::Function`. Facts: `FunctionFacts::anonymous`,
+  `anonymous_functions`.
+- Limits (H1): no captures (next step), no `borrow fn`/`share fn` parameters,
+  no function types with List parameters or results, no equality, no exported
+  function values, no generic function value without an expected type.
+- Tests: `crates/memobits-cli/tests/h1_function_values.rs` (18): helpers,
+  recursion through values, every storage position (struct, tuple, record,
+  array, List, enum payload, `T?`), copyability, imports and visibility,
+  generic instantiation by expected type, externs, anonymous functions in
+  every position, `=>` bodies (functions, methods, tests), calls through
+  fields, methods, elements and results, argument modes and owners, the Wasm
+  table/element/`call_indirect` structure, `alloc = false`, the invalid-slot
+  trap, exact owner cleanup through function values (memory capped to
+  initial + 1 page, 4,096 iterations x 1,024-byte strings, plus source and
+  Wasm runs), and the negatives. Guide: `functions.mb` (6 tests, 129 total).

@@ -17,6 +17,7 @@
 //   collections.mb     fixed arrays, byte arrays, lists, iteration
 //   enums_outcomes.mb  enums, match, optionals, references, `T ! E` and `T ?! E`
 //   generics.mb        generic functions, structs, methods, interface bounds
+//   functions.mb       function types, anonymous functions, `=>` bodies, calls
 //   operators.mb       user-defined core::ops operators and compound assignment
 
 use collections::{Row, total, make_words};

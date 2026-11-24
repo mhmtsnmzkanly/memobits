@@ -85,6 +85,10 @@ impl Parser {
                     statements: Vec::new(),
                     tail: None,
                 }
+            } else if self.eat("=>") {
+                let body = self.expression_body()?;
+                self.eat(";");
+                body
             } else {
                 self.block()?
             };
@@ -424,7 +428,11 @@ impl Parser {
             } else {
                 None
             };
-            let body = if implementation {
+            let body = if implementation && self.eat("=>") {
+                let body = self.expression_body()?;
+                self.eat(";");
+                Some(body)
+            } else if implementation {
                 Some(self.block()?)
             } else {
                 self.expect(";")?;

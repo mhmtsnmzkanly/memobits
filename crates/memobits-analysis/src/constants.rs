@@ -360,6 +360,7 @@ fn check_expr(
             }
         }
         ExprKind::Block(block) => check_block(block, types, diagnostics),
+        ExprKind::Function(function) => check_block(&function.body, types, diagnostics),
         ExprKind::If {
             condition,
             then_branch,

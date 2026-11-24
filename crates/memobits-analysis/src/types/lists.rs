@@ -1,5 +1,5 @@
 //! Type checking for the supported primitive List surface.
-use super::{read_type, Checker, IrAccess, ResolvedArgument, Ty, UNIT};
+use super::{is_scalar, read_type, Checker, IrAccess, ResolvedArgument, Ty, UNIT};
 use memobits_syntax::{Expr, ExprKind};
 
 impl Checker {
@@ -34,7 +34,7 @@ impl Checker {
                 "get() requires a whole List local or a direct internal List call",
             );
         }
-        if !matches!(*element, Ty::Primitive(_)) {
+        if !is_scalar(&element) {
             self.error(
                 22,
                 expr.span,

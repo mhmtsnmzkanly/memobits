@@ -117,6 +117,8 @@ fn check_expr(expr: &Expr, in_loop: bool, diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         ExprKind::Block(block) => check_block(block, in_loop, diagnostics),
+        // `break` and `continue` never cross a function boundary.
+        ExprKind::Function(function) => check_block(&function.body, false, diagnostics),
         ExprKind::If {
             condition,
             then_branch,

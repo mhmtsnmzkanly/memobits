@@ -181,6 +181,14 @@ pub enum Type {
     Enum(TypeId),
 }
 
+impl Type {
+    /// A value copied implicitly by reading it: a primitive or a function
+    /// value (an index into the function table plus an environment word).
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Type::Primitive(_) | Type::Function(_))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
     Owned,
@@ -250,6 +258,9 @@ pub enum Constant {
     Float(String),
     Bool(bool),
     Unit,
+    /// A function value: the function's slot in the function table. It has
+    /// no environment.
+    Function(FunctionId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1161,7 +1172,7 @@ fn collect_struct_ids(ty: &Type, out: &mut Vec<usize>, count: usize) {
 fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
     match ty {
         Type::Primitive(kind) => *kind != Primitive::Unit,
-        Type::String => true,
+        Type::String | Type::Function(_) => true,
         Type::Struct(id) | Type::Enum(id) => (id.0 as usize) < type_count,
         Type::Array { element, .. } | Type::List(element) => {
             field_type_is_valid(element, type_count)
@@ -1242,9 +1253,11 @@ fn validate_type_shape(
         Type::List(element) => match element.as_ref() {
             Type::Primitive(kind) if *kind != Primitive::Unit => {}
             Type::String => {}
-            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) => {
-                validate_type_shape(type_count, element, errors, id, context)
-            }
+            Type::Array { .. }
+            | Type::Struct(_)
+            | Type::Enum(_)
+            | Type::List(_)
+            | Type::Function(_) => validate_type_shape(type_count, element, errors, id, context),
             _ => push(errors, id, None, "unsupported List element type"),
         },
         Type::Primitive(_) | Type::String => {}
@@ -1288,6 +1301,7 @@ fn validate_type_shape(
             if !matches!(
                 inner.as_ref(),
                 Type::Primitive(_)
+                    | Type::Function(_)
                     | Type::String
                     | Type::List(_)
                     | Type::Array { .. }
@@ -1312,7 +1326,7 @@ fn validate_type_shape(
         }
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
-            Type::String => {}
+            Type::String | Type::Function(_) => {}
             Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
@@ -1557,7 +1571,7 @@ fn validate_instruction(
             let receiver = mutable_list_element(function, *target);
             let owned_element = receiver
                 .as_ref()
-                .is_some_and(|element| !matches!(element, Type::Primitive(_)));
+                .is_some_and(|element| !element.is_scalar());
             let expected_mode = if owned_element {
                 UseMode::Consume
             } else {
@@ -1580,7 +1594,7 @@ fn validate_instruction(
             let input = operand_type(program, function, source, errors, id, block);
             let index_type = operand_type(program, function, index, errors, id, block);
             let element = input.as_ref().and_then(list_read_element);
-            let valid_output = matches!(element, Some(Type::Primitive(_)))
+            let valid_output = element.as_ref().is_some_and(Type::is_scalar)
                 && option_matches(program, element.as_ref(), out);
             if !matches!(source.source, Source::Local(_))
                 || source.mode != UseMode::Read
@@ -1609,7 +1623,7 @@ fn validate_instruction(
             if source.mode != UseMode::Read
                 || index.mode != UseMode::Read
                 || index_type != Some(Type::Primitive(Primitive::U32))
-                || !matches!(element, Some(Type::Primitive(_)))
+                || !element.as_ref().is_some_and(Type::is_scalar)
                 || element.as_ref() != out
             {
                 push(
@@ -1905,6 +1919,14 @@ fn validate_instruction(
                 }
                 _ => true,
             };
+            let okay = okay
+                || match (value, out) {
+                    (Constant::Function(target), Some(Type::Function(signature))) => program
+                        .functions
+                        .get(target.0 as usize)
+                        .is_some_and(|function| &function.signature == signature),
+                    _ => false,
+                };
             if out.is_some() && (!okay || !valid_char) {
                 push(
                     errors,
@@ -2025,7 +2047,7 @@ fn validate_instruction(
                         );
                     }
                 }
-                Some(Type::Primitive(_)) => {
+                Some(Type::Primitive(_) | Type::Function(_)) => {
                     if out.is_some_and(|output| Some(output) != input.as_ref()) {
                         push(
                             errors,
@@ -3418,6 +3440,14 @@ fn validate_instruction(
     }
 }
 
+fn operand_type_of(function: &Function, source: Source) -> Option<&Type> {
+    match source {
+        Source::Local(local) => function.locals.get(local.0 as usize).map(|l| &l.ty),
+        Source::Value(value) => function.values.get(value.0 as usize),
+        Source::Function(_) => None,
+    }
+}
+
 fn validate_operand_escapes(
     program: &Program,
     function: &Function,
@@ -3425,6 +3455,7 @@ fn validate_operand_escapes(
     heap_strings: &[HeapStrings],
     errors: &mut Vec<ValidationError>,
 ) {
+    let taken = program.address_taken();
     let mut read_only = vec![false; function.values.len()];
     for block in &function.blocks {
         for instruction in &block.instructions {
@@ -3549,14 +3580,28 @@ fn validate_operand_escapes(
                     "UTF-8 String result must be returned directly or immediately matched with explicit Ok(value) and Err arms");
             }
             if let InstructionKind::Call { callee, arguments } = &instruction.kind {
-                if let Source::Function(target) = callee.source {
-                    let Some(facts) = heap_strings.get(target.0 as usize) else {
-                        continue;
+                // A call through a function value can reach every address-taken
+                // function of its signature; their facts combine.
+                let targets = scoped_string::call_targets(program, function, callee, &taken);
+                let result = match callee.source {
+                    Source::Function(target) => program
+                        .functions
+                        .get(target.0 as usize)
+                        .map(|f| f.signature.result.as_ref()),
+                    source => match operand_type_of(function, source) {
+                        Some(Type::Function(signature)) => Some(signature.result.as_ref()),
+                        _ => None,
+                    },
+                };
+                if let (Some(result), false) = (result, targets.is_empty()) {
+                    let facts = &HeapStrings {
+                        returns_heap: targets.iter().any(|t| heap_strings[*t].returns_heap),
+                        writes_heap: targets
+                            .iter()
+                            .flat_map(|t| heap_strings[*t].writes_heap.iter().copied())
+                            .collect(),
+                        ..HeapStrings::default()
                     };
-                    let result = program.functions[target.0 as usize]
-                        .signature
-                        .result
-                        .as_ref();
                     if matches!(result, Type::List(_))
                         && scoped_string::call_binding(
                             program,
@@ -3582,7 +3627,7 @@ fn validate_operand_escapes(
                         )
                         .is_none()
                         && !scoped_string::owned_aggregate_call_argument(
-                            program, block, position, result,
+                            program, function, &taken, block, position, result,
                         )
                     {
                         let message = if matches!(result, Type::String) {
@@ -3691,18 +3736,15 @@ fn validate_operand_escapes(
                             return false;
                         };
                         block.instructions[position + 1..].iter().any(|candidate| {
-                            let InstructionKind::Call {
-                                callee:
-                                    Operand {
-                                        source: Source::Function(callee),
-                                        ..
-                                    },
-                                arguments,
-                            } = &candidate.kind
+                            let InstructionKind::Call { callee, arguments } = &candidate.kind
                             else {
                                 return false;
                             };
-                            let Some(target) = program.functions.get(callee.0 as usize) else {
+                            let Some(target) =
+                                scoped_string::call_targets(program, function, callee, &taken)
+                                    .first()
+                                    .and_then(|target| program.functions.get(*target))
+                            else {
                                 return false;
                             };
                             arguments.iter().zip(&target.signature.parameters).any(
@@ -4187,10 +4229,15 @@ fn validate_operand_escapes(
                     }
                 }
                 InstructionKind::Call { callee, arguments } => {
-                    report(block_id, callee, true, false);
+                    // Calling a loaded function value only reads it.
+                    report(block_id, callee, false, false);
                     for (index, argument) in arguments.iter().enumerate() {
-                        if scoped_string::owned_call_transfer(program, callee, index, argument)
-                            .is_none()
+                        let targets =
+                            scoped_string::call_targets(program, function, callee, &taken);
+                        if scoped_string::owned_call_transfers(
+                            program, &targets, callee, index, argument,
+                        )
+                        .is_empty()
                         {
                             report(block_id, argument, true, false);
                         }

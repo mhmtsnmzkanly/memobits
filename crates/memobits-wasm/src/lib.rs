@@ -14,14 +14,15 @@ use memobits_ir::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind,
-    ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
-    ImportSection, Instruction as WasmInstruction, MemArg, MemorySection, MemoryType, Module,
-    TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, CustomSection, DataSection, ElementSection, Elements,
+    EntityType, ExportKind, ExportSection, Function as WasmFunction, FunctionSection,
+    GlobalSection, GlobalType, ImportSection, Instruction as WasmInstruction, MemArg,
+    MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 
 mod arrays;
 mod float_format;
+mod function_values;
 mod interpolation;
 mod layout;
 mod list_descriptor;
@@ -183,6 +184,27 @@ fn compile_target(
     if !ownership.is_empty() {
         return Err(ownership);
     }
+    let mut function_value_errors = Vec::new();
+    for id in exports.values() {
+        if let Some(function) = program.functions.get(id.0 as usize) {
+            if function_values::signature_has_function(&function.signature) {
+                function_value_errors.push(diagnostic(
+                    "Wasm exported signatures cannot use function values; the external function ABI is not defined",
+                    Some(function.span),
+                ));
+            }
+        }
+    }
+    if !function_value_errors.is_empty() {
+        return Err(function_value_errors);
+    }
+    // Function values become plain `u64` scalars from here on.
+    // Heap facts follow calls through function values, so they come from the
+    // typed program; the erased copy only has plain scalars left.
+    let heap_strings = program.heap_strings();
+    let erased = function_values::erase(program);
+    let calls = erased.calls;
+    let program = &erased.program;
     let structs = match struct_layouts(&program.types) {
         Ok(structs) => structs,
         Err(message) => return Err(vec![diagnostic(message, None)]),
@@ -307,7 +329,6 @@ fn compile_target(
             }
         }
     }
-    let heap_strings = program.heap_strings();
     for (function, heap) in program.functions.iter().zip(&heap_strings) {
         if let Some((module, name)) = host_import(function) {
             let matches_capability = module == "memobits:console"
@@ -424,7 +445,7 @@ fn compile_target(
         return Err(errors);
     }
 
-    encode(program, exports, stack_size, entry)
+    encode(program, exports, stack_size, entry, &calls, &heap_strings)
         .map(|(bytes, trap_sites)| Compiled { bytes, trap_sites })
         .map_err(|message| vec![diagnostic(message, None)])
 }
@@ -1084,6 +1105,8 @@ pub enum TrapReason {
     HeapAllocation = 10,
     ShiftCount = 11,
     AssertionFailed = 12,
+    /// A function value that is not a slot of the function table.
+    InvalidFunction = 13,
 }
 
 impl TrapReason {
@@ -1308,6 +1331,8 @@ fn encode(
     exports: &BTreeMap<String, FunctionId>,
     stack_size: u32,
     entry: Option<EntryAdapter>,
+    calls: &[HashMap<u32, memobits_ir::Signature>],
+    heap_strings: &[memobits_ir::HeapStrings],
 ) -> Result<(Vec<u8>, Vec<Span>), String> {
     let structs = struct_layouts(&program.types)?;
     let sizes = program
@@ -1319,7 +1344,16 @@ fn encode(
                 .map_err(|error| error.message)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    encode_frames_traced(program, exports, &sizes, false, stack_size, entry)
+    encode_frames_traced(
+        program,
+        exports,
+        &sizes,
+        false,
+        stack_size,
+        entry,
+        calls,
+        heap_strings,
+    )
 }
 
 // Tests may override frame sizes to exercise allocation and restoration
@@ -1342,7 +1376,17 @@ fn encode_frames(
     observe: bool,
     stack_size: u32,
 ) -> Result<Vec<u8>, String> {
-    encode_frames_traced(program, exports, sizes, observe, stack_size, None).map(|(bytes, _)| bytes)
+    encode_frames_traced(
+        program,
+        exports,
+        sizes,
+        observe,
+        stack_size,
+        None,
+        &[],
+        &program.heap_strings(),
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 /// A private literal table. Each entry is a String descriptor with static
@@ -1403,6 +1447,8 @@ fn encode_frames_traced(
     observe: bool,
     stack_size: u32,
     entry: Option<EntryAdapter>,
+    calls: &[HashMap<u32, memobits_ir::Signature>],
+    heap_strings: &[memobits_ir::HeapStrings],
 ) -> Result<(Vec<u8>, Vec<Span>), String> {
     let mut reachable = BTreeSet::new();
     let mut pending = exports.values().copied().collect::<Vec<_>>();
@@ -1423,9 +1469,14 @@ fn encode_frames_traced(
                 {
                     pending.push(*target);
                 }
+                // A function used as a value stays reachable through its slot.
+                if let InstructionKind::Constant(Constant::Function(target)) = &instruction.kind {
+                    pending.push(*target);
+                }
             }
         }
     }
+    let slots = function_values::function_slots(program, &reachable);
     let selected = reachable
         .iter()
         .map(|id| &program.functions[*id as usize])
@@ -1473,6 +1524,20 @@ fn encode_frames_traced(
             }
         })
         .collect::<Vec<_>>();
+    // Signatures of indirect calls get a Wasm type too (often shared).
+    let mut call_types: Vec<HashMap<u32, u32>> = vec![HashMap::new(); program.functions.len()];
+    for id in &reachable {
+        for (value, signature) in calls.get(*id as usize).into_iter().flatten() {
+            let index = signatures
+                .iter()
+                .position(|known| known == signature)
+                .unwrap_or_else(|| {
+                    signatures.push(signature.clone());
+                    signatures.len() - 1
+                });
+            call_types[*id as usize].insert(*value, index as u32);
+        }
+    }
     let mut types = TypeSection::new();
     for signature in &signatures {
         // An array result is written through a hidden trailing pointer
@@ -1525,7 +1590,6 @@ fn encode_frames_traced(
         functions.function(signatures.len() as u32);
         export_section.export(entry_abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     }
-    let heap_strings = program.heap_strings();
     let has_list_push = reachable.iter().any(|id| {
         program.functions[*id as usize]
             .blocks
@@ -1668,6 +1732,10 @@ fn encode_frames_traced(
             program,
             &program.functions[*id as usize],
             &indices,
+            &FunctionValues {
+                slots: &slots,
+                calls: &call_types[*id as usize],
+            },
             sizes[*id as usize],
             observe,
             &structs,
@@ -1786,13 +1854,41 @@ fn encode_frames_traced(
         module.section(&import_section);
     }
     module.section(&functions);
+    if !slots.is_empty() {
+        let mut tables = TableSection::new();
+        tables.table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: slots.len() as u64 + 1,
+            maximum: Some(slots.len() as u64 + 1),
+            shared: false,
+        });
+        module.section(&tables);
+    }
     if has_memory {
         module.section(&memories);
     }
     if has_frames || has_traps {
         module.section(&globals);
     }
-    module.section(&export_section).section(&code);
+    module.section(&export_section);
+    if !slots.is_empty() {
+        // Slot 0 stays empty so a zero function value traps.
+        let mut by_slot = slots.iter().collect::<Vec<_>>();
+        by_slot.sort_by_key(|(_, slot)| **slot);
+        let indices = by_slot
+            .iter()
+            .map(|(id, _)| indices[id])
+            .collect::<Vec<_>>();
+        let mut elements = ElementSection::new();
+        elements.active(
+            Some(0),
+            &ConstExpr::i32_const(1),
+            Elements::Functions(std::borrow::Cow::Borrowed(&indices)),
+        );
+        module.section(&elements);
+    }
+    module.section(&code);
     if let Some(start) = strings.start {
         let mut data = DataSection::new();
         data.active(0, &ConstExpr::i32_const(start as i32), strings.bytes);
@@ -1808,10 +1904,19 @@ fn encode_frames_traced(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What a function body needs to create and call function values: the table
+/// slot of each function used as a value, and the Wasm type of each indirect
+/// call (by output value).
+struct FunctionValues<'a> {
+    slots: &'a BTreeMap<u32, u32>,
+    calls: &'a HashMap<u32, u32>,
+}
+
 fn compile_function(
     program: &Program,
     function: &Function,
     indices: &BTreeMap<u32, u32>,
+    values: &FunctionValues,
     frame_size: u32,
     observe: bool,
     structs: &[StructLayout],
@@ -1951,6 +2056,7 @@ fn compile_function(
                 scratch64,
                 cleanup_base,
                 indices,
+                values,
                 &layout,
                 frame,
                 strings,
@@ -3207,6 +3313,7 @@ fn compile_instruction(
     scratch64: u32,
     cleanup_base: u32,
     indices: &BTreeMap<u32, u32>,
+    values: &FunctionValues,
     layout: &FrameLayout,
     frame: Option<FrameState>,
     strings: &BTreeMap<&str, u32>,
@@ -3405,6 +3512,16 @@ fn compile_instruction(
                 src_mem: 0,
                 dst_mem: 0,
             });
+        }
+        InstructionKind::Constant(Constant::Function(target)) => {
+            let output = output.ok_or("function value lacks an output")?;
+            let slot = values
+                .slots
+                .get(&target.0)
+                .ok_or("function value has no table slot")?;
+            // Low word: table slot. High word: environment (none).
+            body.instruction(&WasmInstruction::I64Const(i64::from(*slot)));
+            body.instruction(&WasmInstruction::LocalSet(output));
         }
         InstructionKind::Constant(constant) => {
             let output = output.ok_or("constant lacks an output")?;
@@ -4671,37 +4788,59 @@ fn compile_instruction(
             }
         }
         InstructionKind::Call { callee, arguments } => {
-            let Source::Function(target) = callee.source else {
-                return Err("indirect calls are unsupported".into());
+            let target = match callee.source {
+                Source::Function(target) => Some(target),
+                _ => None,
+            };
+            let indirect_type = if target.is_none() {
+                let id = instruction.output.ok_or("call lacks an output")?;
+                let type_index = *values
+                    .calls
+                    .get(&id.0)
+                    .ok_or("indirect call has no recorded signature")?;
+                // Reject a function value outside the table before calling.
+                emit_operand(body, function, param_count, callee, layout, frame)?;
+                body.instruction(&WasmInstruction::I32WrapI64);
+                body.instruction(&WasmInstruction::I32Const(1));
+                body.instruction(&WasmInstruction::I32Sub);
+                body.instruction(&WasmInstruction::I32Const(values.slots.len() as i32));
+                body.instruction(&WasmInstruction::I32GeU);
+                trap_if(
+                    body,
+                    traps.site(instruction.span),
+                    TrapReason::InvalidFunction,
+                );
+                Some(type_index)
+            } else {
+                None
             };
             for argument in arguments {
                 emit_operand(body, function, param_count, argument, layout, frame)?;
             }
             let value = output.ok_or("call lacks an output")?;
             let id = instruction.output.unwrap();
-            if is_aggregate(&function.values[id.0 as usize]) {
+            let aggregate = is_aggregate(&function.values[id.0 as usize]);
+            if aggregate {
                 // Struct-return: the callee writes its result into this call's
                 // own value cell in the caller's frame (never into a dead
                 // callee frame), passed as the hidden trailing pointer.
                 let cell = array_cell_of(layout, Slot::Value(id.0))?;
                 emit_address(body, frame.ok_or("array cell requires frame")?, cell.offset);
-                body.instruction(&WasmInstruction::Call(indices[&target.0]));
-                for argument in arguments {
-                    clear_moved_heap_source(
-                        body,
-                        function,
-                        param_count,
-                        argument,
-                        layout,
-                        frame,
-                        type_definitions,
-                        cleanup_base,
-                        heap_locals,
-                    )?;
-                }
-                return Ok(());
             }
-            body.instruction(&WasmInstruction::Call(indices[&target.0]));
+            match (target, indirect_type) {
+                (Some(target), _) => {
+                    body.instruction(&WasmInstruction::Call(indices[&target.0]));
+                }
+                (None, Some(type_index)) => {
+                    emit_operand(body, function, param_count, callee, layout, frame)?;
+                    body.instruction(&WasmInstruction::I32WrapI64);
+                    body.instruction(&WasmInstruction::CallIndirect {
+                        type_index,
+                        table_index: 0,
+                    });
+                }
+                (None, None) => unreachable!("indirect call type recorded above"),
+            }
             for argument in arguments {
                 clear_moved_heap_source(
                     body,
@@ -4714,6 +4853,9 @@ fn compile_instruction(
                     cleanup_base,
                     heap_locals,
                 )?;
+            }
+            if aggregate {
+                return Ok(());
             }
             // The Program's function table is available only to the caller; a
             // Unit call leaves no Wasm stack result and receives an internal zero.

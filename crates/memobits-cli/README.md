@@ -167,6 +167,22 @@ literals and destructuring and `Self::Variant` paths (expressions and patterns).
 `extend` blocks it is SE002 ("only available inside an `extend` block"), and in
 `interface` declarations SE002 "not supported yet". `Self<..>`, a bare `Self` value and
 `Self::X` as a type are SE002.
+Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
+usable in parameters, results, locals, struct, tuple and record fields, array and List
+elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function
+(local, imported or `extern`) named without a call is a value; a generic function is a
+value only where an expected function type fixes its type argument; a `test fn` is never
+a value. Anonymous functions are `fn(x: i32) -> i32 => expr`, `fn(x: i32) -> i32 { .. }`
+and `fn(x) => expr` (types from the expected function type); one that names a local of
+its enclosing function is TE017 ("closures that capture variables arrive in the next
+step"), while constants, top-level functions and imports are fine. Named functions,
+`extend` methods and `test fn`s may use `=> expr` bodies. Calls go through a local,
+parameter, function-valued field (a method of the same name wins), element or result,
+`f(x)`, `s.callback(x)`, `xs[i](x)`, `make()(x)`, and pass arguments by the target's
+access modes. A function value is a 64-bit scalar (table slot, environment word 0) copied
+like a primitive, stored without heap (works with `alloc = false`), called with
+`call_indirect` through a function table (a bad slot traps with reason 13); it has no
+equality and cannot be exported or returned by `main` (LE900).
 Follow-ups (F1): the non-receiver arguments of inherent, interface-selected (`of I`)
 and generic nominal methods follow the function-argument rules (owned structs, tuples,
 records, arrays, enums, Lists and Strings move in with staged temporaries; `.borrow()` /

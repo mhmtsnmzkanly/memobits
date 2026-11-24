@@ -14,7 +14,7 @@ use memobits_syntax::{
 use memobits_syntax::templates::{self, ParameterKind, Template, TemplateId};
 
 use super::templates::{resolve_arguments, ResolvedArgument};
-use super::{diagnostic, TupleAliases, Ty};
+use super::{diagnostic, ir_access, FunctionParameter, TupleAliases, Ty};
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldInfo {
@@ -1496,6 +1496,44 @@ impl TypeTable {
                 return Err(failure(17, "tuple types cannot contain direct or nested references until embedded tuple loans are supported".into()));
             }
             return self.instantiate_tuple(elements, ty.span);
+        }
+        if ty.path.as_slice() == ["\0unit"] {
+            return Ok(Ty::Primitive("Unit"));
+        }
+        if ty.path.as_slice() == ["\0fn"] {
+            let Some((TypeArgument::Type(result), parameters)) = ty.arguments.split_last() else {
+                return Err(failure(2, "malformed function type".into()));
+            };
+            let parameters = parameters
+                .iter()
+                .map(|argument| match argument {
+                    TypeArgument::Type(parameter) => {
+                        self.resolve(module, parameter).map(|ty| FunctionParameter {
+                            access: memobits_ir::Access::Owned,
+                            ty,
+                        })
+                    }
+                    TypeArgument::Reference {
+                        access, referent, ..
+                    } => self.resolve(module, referent).map(|ty| FunctionParameter {
+                        access: ir_access(*access),
+                        ty,
+                    }),
+                    _ => Err(failure(2, "malformed function type parameter".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = self.resolve(module, result)?;
+            if parameters
+                .iter()
+                .any(|parameter| matches!(parameter.ty, Ty::List(_)))
+                || matches!(result, Ty::List(_))
+            {
+                return Err(failure(
+                    17,
+                    "List parameters and results are not supported in function types yet; a List argument needs a direct internal call".into(),
+                ));
+            }
+            return Ok(Ty::Function(parameters, Box::new(result)));
         }
         if ty.path.as_slice() == ["\0record"] {
             let mut labels = HashSet::new();

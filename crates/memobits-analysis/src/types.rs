@@ -142,6 +142,8 @@ struct SpecializationRegistry {
     requests: Vec<GenericSpecialization>,
     method_requests: Vec<GenericMethodSpecialization>,
     method_by_key: HashMap<String, FunctionId>,
+    /// Finished anonymous functions, in the order they were checked.
+    anonymous: Vec<FunctionFacts>,
 }
 const UNIT: Ty = Ty::Primitive("Unit");
 const BOOL: Ty = Ty::Primitive("bool");
@@ -306,6 +308,10 @@ fn access_name(access: IrAccess) -> &'static str {
         IrAccess::Share => "share",
     }
 }
+/// A value copied implicitly: a primitive or a function value.
+fn is_scalar(ty: &Ty) -> bool {
+    matches!(ty, Ty::Primitive(_) | Ty::Function(..))
+}
 fn read_type(ty: Ty) -> Ty {
     match ty {
         Ty::Reference { inner, .. } => *inner,
@@ -460,7 +466,21 @@ fn name(ty: &Ty) -> String {
         Ty::List(element) => format!("List<{}>", name(element)),
         Ty::Array(element, count) => format!("array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
-        Ty::Function(..) => "function".into(),
+        Ty::Function(parameters, result) => {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| match parameter.access {
+                    IrAccess::Owned => name(&parameter.ty),
+                    access => format!("{} {}", access_name(access), name(&parameter.ty)),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if **result == UNIT {
+                format!("fn({parameters})")
+            } else {
+                format!("fn({parameters}) -> {}", name(result))
+            }
+        }
         Ty::Reference { access, inner, .. } => {
             format!("{} {}", access_name(*access), name(inner))
         }
@@ -608,6 +628,8 @@ fn flow_expr(expr: &Expr) -> Flow {
             .iter()
             .fold(Flow::NEXT, |flow, field| flow.then(flow_expr(&field.value))),
         ExprKind::Block(block) => flow_block(block),
+        // Defining a function does not run its body.
+        ExprKind::Function(_) => Flow::NEXT,
         ExprKind::If {
             condition,
             then_branch,
@@ -896,7 +918,18 @@ pub struct FunctionFacts {
     pub matches: Vec<MatchFact>,
     pub tuple_projections: Vec<TupleProjectionFact>,
     pub tuple_initializers: Vec<TupleInitializerFact>,
+    /// Set for an anonymous function: the function that contains it.
+    pub(crate) anonymous: Option<AnonymousInfo>,
+    /// Anonymous functions written directly in this function's body, by the
+    /// address of their expression node.
+    pub(crate) anonymous_functions: Vec<(usize, FunctionId)>,
     next_expr: u32,
+}
+
+/// Where an anonymous function was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AnonymousInfo {
+    pub(crate) parent: FunctionId,
 }
 
 /// One declared struct field with its IR type.
@@ -1070,6 +1103,11 @@ struct Checker {
     imports: HashMap<String, String>,
     extension_candidates: Vec<ExtensionCandidate>,
     scopes: Vec<HashMap<String, Binding>>,
+    /// Scopes of the functions that enclose the anonymous function being
+    /// checked. A use of one of their names is a capture.
+    outer_scopes: Vec<HashMap<String, Binding>>,
+    /// The first enclosing name the current anonymous function used.
+    captured: RefCell<Option<String>>,
     result: Ty,
 }
 impl Checker {
@@ -1947,7 +1985,21 @@ impl Checker {
         Some(id)
     }
     fn lookup(&self, key: &str) -> Option<&Binding> {
-        self.scopes.iter().rev().find_map(|scope| scope.get(key))
+        if let Some(binding) = self.scopes.iter().rev().find_map(|scope| scope.get(key)) {
+            return Some(binding);
+        }
+        // A name of an enclosing function is found (so it has a type) and
+        // remembered: the anonymous function that used it is a capture.
+        let binding = self
+            .outer_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(key))?;
+        let mut captured = self.captured.borrow_mut();
+        if captured.is_none() {
+            *captured = Some(key.to_owned());
+        }
+        Some(binding)
     }
     /// `let P { x, y: alias } := value;`. The whole value is consumed; each
     /// field binds a new owned local of the field's type.
@@ -2708,7 +2760,13 @@ impl Checker {
                 } => {
                     self.allow_array_value(items);
                     let ty = match read_type(self.expr(items, None)) {
-                        Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
+                        Ty::Array(element, _)
+                            if numeric(&element)
+                                || *element == BOOL
+                                || matches!(*element, Ty::Function(..)) =>
+                        {
+                            *element
+                        }
                         Ty::Array(element, _)
                             if place_root(items).is_some()
                                 && !matches!(*element, Ty::Primitive(_) | Ty::Reference { .. }) =>
@@ -2854,6 +2912,466 @@ impl Checker {
         }
         ty
     }
+    /// `fn(x: i32) -> i32 => expr` and `fn(x) { ... }`: an anonymous function.
+    /// Its body is checked as a separate function that sees only module-level
+    /// names; a use of an enclosing function's local is a capture, which is
+    /// not supported yet.
+    fn anonymous_function(
+        &mut self,
+        expr: &Expr,
+        function: &memobits_syntax::AnonymousFunction,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let expected_signature = match expected {
+            Some(Ty::Function(parameters, result)) => {
+                Some((parameters.clone(), result.as_ref().clone()))
+            }
+            _ => None,
+        };
+        if let Some((parameters, _)) = &expected_signature {
+            if parameters.len() != function.parameters.len() {
+                self.error(
+                    10,
+                    expr.span,
+                    format!(
+                        "expected a function with {} parameters, found {}",
+                        parameters.len(),
+                        function.parameters.len()
+                    ),
+                );
+                return Ty::Error;
+            }
+        }
+        let mut parameters = Vec::new();
+        let mut failed = false;
+        for (index, parameter) in function.parameters.iter().enumerate() {
+            let expected_parameter = expected_signature
+                .as_ref()
+                .and_then(|(parameters, _)| parameters.get(index));
+            let resolved = match (&parameter.ty, expected_parameter) {
+                (Some(ty), _) => FunctionParameter {
+                    access: ir_access(parameter.access),
+                    ty: self.type_path(ty),
+                },
+                (None, Some(want)) => want.clone(),
+                (None, None) => {
+                    self.error(
+                        2,
+                        parameter.span,
+                        format!(
+                            "cannot infer the type of parameter '{}'; annotate it (`{}: i32`) or use the function where a function type is expected",
+                            parameter.name, parameter.name
+                        ),
+                    );
+                    FunctionParameter {
+                        access: IrAccess::Owned,
+                        ty: Ty::Error,
+                    }
+                }
+            };
+            failed |= resolved.ty == Ty::Error;
+            parameters.push(resolved);
+        }
+        let infer_result =
+            function.result.is_none() && expected_signature.is_none() && function.expression;
+        let mut result = match (&function.result, &expected_signature) {
+            (Some(ty), _) => self.type_path(ty),
+            (None, Some((_, result))) => result.clone(),
+            (None, None) if infer_result => Ty::Error,
+            (None, None) => UNIT,
+        };
+        // Switch to the anonymous function's own context.
+        let outer_facts = self.facts.take();
+        let node_addr = expr as *const Expr as usize;
+        let mut own_facts = None;
+        if let Some(outer) = &outer_facts {
+            if let Some(registry) = &self.specialization_registry {
+                let id = {
+                    let mut registry = registry.borrow_mut();
+                    let id = FunctionId(registry.next_id);
+                    registry.next_id += 1;
+                    id
+                };
+                own_facts = Some(FunctionFacts {
+                    id,
+                    span: expr.span,
+                    source_module: self.module.clone(),
+                    source_name: format!("$anonymous{}", id.0),
+                    specialization_key: None,
+                    signature: Signature {
+                        parameters: Vec::new(),
+                        result: Box::new(IrType::Primitive(Primitive::Unit)),
+                    },
+                    locals: Vec::new(),
+                    expressions: Vec::new(),
+                    path_uses: Vec::new(),
+                    variant_uses: Vec::new(),
+                    explicit_drops: Vec::new(),
+                    explicit_asserts: Vec::new(),
+                    explicit_replaces: Vec::new(),
+                    explicit_swaps: Vec::new(),
+                    selected_calls: Vec::new(),
+                    selected_operators: Vec::new(),
+                    selected_assignments: Vec::new(),
+                    matches: Vec::new(),
+                    tuple_projections: Vec::new(),
+                    tuple_initializers: Vec::new(),
+                    anonymous: Some(AnonymousInfo { parent: outer.id }),
+                    anonymous_functions: Vec::new(),
+                    next_expr: 0,
+                });
+            }
+        }
+        self.facts = own_facts;
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_outer = std::mem::take(&mut self.outer_scopes);
+        self.outer_scopes = saved_outer
+            .iter()
+            .chain(saved_scopes.iter())
+            .cloned()
+            .collect();
+        let saved_captured = self.captured.borrow_mut().take();
+        let saved_result = std::mem::replace(&mut self.result, result.clone());
+        let saved_origins = std::mem::take(&mut self.parameter_origins);
+        self.scopes.push(HashMap::new());
+        for (parameter, resolved) in function.parameters.iter().zip(&parameters) {
+            bind_named_parameter(
+                self,
+                &parameter.name,
+                parameter.mutable,
+                resolved.access,
+                parameter.span,
+                parameter as *const _ as usize,
+                resolved.ty.clone(),
+            );
+        }
+        if let Some(tail) = &function.body.tail {
+            self.allow_array_value(tail);
+        }
+        let expectation = (!infer_result).then(|| result.clone());
+        let (tail, returns) = self.block(&function.body, expectation.as_ref());
+        if infer_result {
+            if returns || matches!(tail, Ty::Never | Ty::Error) {
+                if !matches!(tail, Ty::Error) {
+                    self.error(
+                        2,
+                        function.body.span,
+                        "cannot infer the result type of this anonymous function; add `-> T`",
+                    );
+                }
+                result = Ty::Error;
+            } else if matches!(tail, Ty::Reference { .. }) {
+                self.error(
+                    17,
+                    function.body.span,
+                    "reference values cannot escape into an owned value or return",
+                );
+                result = Ty::Error;
+            } else {
+                result = tail;
+            }
+        } else if !returns {
+            self.ensure(
+                &tail,
+                &result,
+                function
+                    .body
+                    .tail
+                    .as_deref()
+                    .map_or(function.body.span, |e| e.span),
+            );
+        }
+        self.scopes.pop();
+        self.parameter_origins = saved_origins;
+        self.result = saved_result;
+        self.scopes = saved_scopes;
+        self.outer_scopes = saved_outer;
+        let captured = std::mem::replace(&mut *self.captured.borrow_mut(), saved_captured);
+        let own_facts = std::mem::replace(&mut self.facts, outer_facts);
+        if let Some(name) = captured {
+            self.error(
+                17,
+                expr.span,
+                format!(
+                    "closures that capture variables arrive in the next step; this function uses '{name}' from the enclosing function"
+                ),
+            );
+            return Ty::Error;
+        }
+        if failed || result == Ty::Error {
+            return Ty::Error;
+        }
+        let function_ty = Ty::Function(parameters, Box::new(result));
+        if let Some(mut own) = own_facts {
+            let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
+                self.error(
+                    7,
+                    expr.span,
+                    "anonymous function signature is outside the executable type subset",
+                );
+                return Ty::Error;
+            };
+            own.signature = signature;
+            if let Some(outer) = self.facts.as_mut() {
+                outer.anonymous_functions.push((node_addr, own.id));
+            }
+            if let Some(registry) = &self.specialization_registry {
+                registry.borrow_mut().anonymous.push(own);
+            }
+        }
+        function_ty
+    }
+
+    /// A generic function named as a value. Only an expected function type
+    /// can fix its type arguments, so the specialization is chosen from it.
+    fn generic_function_value(
+        &mut self,
+        expr: &Expr,
+        id: Option<ExprId>,
+        template: GenericFunctionTemplate,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let display = format!("{}::{}", template.module, template.name);
+        let Some(Ty::Function(expected_parameters, expected_result)) = expected else {
+            self.error(
+                2,
+                expr.span,
+                format!(
+                    "generic function '{}' cannot be used as a value without an expected function type that fixes its type arguments (for example `let f: fn(i32) -> i32 = {};`)",
+                    template.name, template.name
+                ),
+            );
+            return Ty::Error;
+        };
+        if !supported_generic_function(&template) {
+            self.error(
+                7,
+                template.span,
+                format!(
+                    "generic function '{display}' uses a generic form outside the supported unconstrained direct-type-parameter specialization subset"
+                ),
+            );
+            return Ty::Error;
+        }
+        if expected_parameters.len() != template.parameters.len() {
+            self.error(
+                10,
+                expr.span,
+                format!(
+                    "generic function '{}' takes {} arguments, but the expected function type has {}",
+                    template.name,
+                    template.parameters.len(),
+                    expected_parameters.len()
+                ),
+            );
+            return Ty::Error;
+        }
+        let type_name = &template.generic_parameters[0].name;
+        let const_name = match &template.generic_parameters[1..] {
+            [constant] => Some(constant.name.as_str()),
+            _ => None,
+        };
+        let generic_index = template
+            .parameters
+            .iter()
+            .position(|parameter| {
+                is_plain_type_parameter(&parameter.ty, type_name)
+                    || const_name.is_some_and(|const_name| {
+                        is_array_generic_pattern(&parameter.ty, type_name, const_name)
+                    })
+            })
+            .expect("supported generic template contains an inference parameter");
+        let actual = expected_parameters[generic_index].ty.clone();
+        let mut substitution = HashMap::new();
+        let mut const_substitution = HashMap::new();
+        let array_pattern = const_name.is_some_and(|const_name| {
+            is_array_generic_pattern(
+                &template.parameters[generic_index].ty,
+                type_name,
+                const_name,
+            )
+        });
+        let inferred = if array_pattern {
+            match &actual {
+                Ty::Array(element, length) => {
+                    substitution.insert(type_name.clone(), element.as_ref().clone());
+                    const_substitution.insert(
+                        const_name
+                            .expect("array pattern has a const parameter")
+                            .to_owned(),
+                        *length,
+                    );
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            infer_direct_type_parameter(
+                &HashSet::from([type_name.clone()]),
+                &template.parameters[generic_index].ty,
+                &actual,
+                &mut substitution,
+            )
+            .is_ok()
+        };
+        if !inferred {
+            self.error(
+                2,
+                expr.span,
+                format!(
+                    "the expected function type does not fix the type arguments of generic function '{}'",
+                    template.name
+                ),
+            );
+            return Ty::Error;
+        }
+        let mut specialization_evidence = Vec::new();
+        for (bound_index, bound) in template.bounds.iter().enumerate() {
+            let interface = &template.bound_interfaces[bound_index];
+            let target = substitution.get(&bound.parameter).unwrap_or(&actual);
+            let forwarded = self
+                .generic_evidence
+                .iter()
+                .find(|evidence| {
+                    evidence.interface == *interface && evidence.candidate.target == *target
+                })
+                .cloned();
+            let candidate = if let Some(evidence) = forwarded {
+                evidence.candidate
+            } else {
+                let matching = self
+                    .extension_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.visible
+                            && candidate.target == *target
+                            && candidate.interface.as_deref() == Some(interface.as_str())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matching.len() != 1 {
+                    self.error(
+                        7,
+                        expr.span,
+                        format!(
+                            "no unique visible implementation of '{interface}' for {} satisfies the generic bound",
+                            name(target)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                matching[0].clone()
+            };
+            specialization_evidence.push(GenericEvidence {
+                interface: interface.clone(),
+                candidate,
+            });
+        }
+        let previous_generic_evidence =
+            std::mem::replace(&mut self.generic_evidence, specialization_evidence.clone());
+        let previous_generic_types =
+            std::mem::replace(&mut self.generic_types, substitution.clone());
+        let previous_generic_consts =
+            std::mem::replace(&mut self.generic_consts, const_substitution.clone());
+        let parameter_types = template
+            .parameters
+            .iter()
+            .map(|parameter| FunctionParameter {
+                access: ir_access(parameter.access),
+                ty: self.type_path(&parameter.ty),
+            })
+            .collect::<Vec<_>>();
+        let result = template
+            .result
+            .as_ref()
+            .map(|result| self.type_path(result))
+            .unwrap_or(UNIT);
+        self.generic_types = previous_generic_types;
+        self.generic_consts = previous_generic_consts;
+        self.generic_evidence = previous_generic_evidence;
+        if result == Ty::Error
+            || parameter_types
+                .iter()
+                .any(|parameter| parameter.ty == Ty::Error)
+        {
+            return Ty::Error;
+        }
+        let function_ty = Ty::Function(parameter_types, Box::new(result));
+        if function_ty != Ty::Function(expected_parameters.clone(), expected_result.clone()) {
+            self.error(
+                2,
+                expr.span,
+                format!(
+                    "expected {}, found {} (generic function '{}')",
+                    name(&Ty::Function(
+                        expected_parameters.clone(),
+                        expected_result.clone()
+                    )),
+                    name(&function_ty),
+                    template.name
+                ),
+            );
+            return Ty::Error;
+        }
+        let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
+            self.error(
+                7,
+                expr.span,
+                "generic specialization has a type outside the executable function subset",
+            );
+            return Ty::Error;
+        };
+        let evidence_key = specialization_evidence
+            .iter()
+            .map(|evidence| {
+                format!(
+                    "{}@{}..{}",
+                    evidence.candidate.module,
+                    evidence.candidate.span.start,
+                    evidence.candidate.span.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!(
+            "{}::{}@{}..{}<{function_ty:?}>[{evidence_key}]",
+            template.module, template.name, template.span.start, template.span.end
+        );
+        let registry = self
+            .specialization_registry
+            .as_ref()
+            .expect("generic specialization registry is present")
+            .clone();
+        let specialization_id = {
+            let mut registry = registry.borrow_mut();
+            if let Some(id) = registry.by_key.get(&key).copied() {
+                id
+            } else {
+                let id = FunctionId(registry.next_id);
+                registry.next_id += 1;
+                registry.by_key.insert(key.clone(), id);
+                registry.requests.push(GenericSpecialization {
+                    template: template.clone(),
+                    substitution,
+                    const_substitution,
+                    evidence: specialization_evidence,
+                    signature,
+                    id,
+                    key,
+                });
+                id
+            }
+        };
+        if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
+            facts.path_uses.push(PathUse {
+                expression,
+                target: PathTarget::Function(specialization_id),
+                access: None,
+            });
+        }
+        function_ty
+    }
+
     /// `assert(condition)`: a `bool` check that traps when it is false.
     fn explicit_assert(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
         let [condition] = arguments else {
@@ -5705,6 +6223,22 @@ impl Checker {
                 if let Some((template, variant)) = self.prelude_variant(path) {
                     return self.infer_variant(expr, id, template, variant, None, expected);
                 }
+                let generic = if path.len() == 1 {
+                    (self.lookup(&path[0]).is_none() && !self.functions.contains_key(&path[0]))
+                        .then(|| self.generic_functions.get(&path[0]).cloned())
+                        .flatten()
+                } else {
+                    let expanded = self.imports.get(&path[0]).map_or_else(
+                        || path.join("::"),
+                        |target| format!("{}::{}", target, path[1..].join("::")),
+                    );
+                    self.generic_functions
+                        .get(expanded.strip_prefix("self::").unwrap_or(&expanded))
+                        .cloned()
+                };
+                if let Some(template) = generic {
+                    return self.generic_function_value(expr, id, template, expected);
+                }
                 if path.len() != 1 {
                     let expanded = self.imports.get(&path[0]).map_or_else(
                         || path.join("::"),
@@ -6477,6 +7011,12 @@ impl Checker {
                                 left.span,
                                 "enums cannot be compared with `==` or `!=` yet; use `match` to inspect the variant",
                             );
+                        } else if matches!(left_ty, Ty::Function(..)) {
+                            self.error(
+                                7,
+                                left.span,
+                                "function values cannot be compared with `==` or `!=`; they have no equality",
+                            );
                         } else if !numeric(&left_ty)
                             && left_ty != BOOL
                             && left_ty != Ty::Primitive("char")
@@ -6861,6 +7401,7 @@ impl Checker {
             ExprKind::Match { scrutinee, arms } => {
                 self.match_expr(expr, id, scrutinee, arms, expected)
             }
+            ExprKind::Function(function) => self.anonymous_function(expr, function, expected),
             ExprKind::If {
                 condition,
                 then_branch,
@@ -7183,6 +7724,8 @@ fn check_standalone(
         imports: HashMap::new(),
         extension_candidates: Vec::new(),
         scopes: Vec::new(),
+        outer_scopes: Vec::new(),
+        captured: RefCell::new(None),
         result: UNIT,
     };
     let mut next_function = 0u32;
@@ -7234,6 +7777,11 @@ fn check_standalone(
             | ItemKind::InherentExtension { .. } => {}
         }
     }
+    let registry = Rc::new(RefCell::new(SpecializationRegistry {
+        next_id: next_function,
+        ..SpecializationRegistry::default()
+    }));
+    c.specialization_registry = Some(Rc::clone(&registry));
     let mut functions = Vec::new();
     for item in &module.items {
         if let ItemKind::Function {
@@ -7275,6 +7823,8 @@ fn check_standalone(
                     tuple_projections: Vec::new(),
                     tuple_initializers: Vec::new(),
                     next_expr: 0,
+                    anonymous: None,
+                    anonymous_functions: Vec::new(),
                 });
             }
             check_function_body(&mut c, parameters, body, params, *result);
@@ -7283,6 +7833,7 @@ fn check_standalone(
             }
         }
     }
+    functions.append(&mut registry.borrow_mut().anonymous);
     let types = if capture {
         type_facts(&c.table)
     } else {
@@ -7652,6 +8203,8 @@ pub(crate) fn check_resolved_mode(
                             tuple_projections: Vec::new(),
                             tuple_initializers: Vec::new(),
                             next_expr: 0,
+                            anonymous: None,
+                            anonymous_functions: Vec::new(),
                         });
                     }
                     check_function_body(&mut c, parameters, body, params.clone(), *result.clone());
@@ -7732,6 +8285,8 @@ pub(crate) fn check_resolved_mode(
                             tuple_projections: Vec::new(),
                             tuple_initializers: Vec::new(),
                             next_expr: 0,
+                            anonymous: None,
+                            anonymous_functions: Vec::new(),
                         });
                     }
                 }
@@ -7865,6 +8420,8 @@ pub(crate) fn check_resolved_mode(
                     tuple_projections: Vec::new(),
                     tuple_initializers: Vec::new(),
                     next_expr: 0,
+                    anonymous: None,
+                    anonymous_functions: Vec::new(),
                 });
             }
             check_function_body(&mut c, parameters, body, params, result);
@@ -8012,6 +8569,8 @@ pub(crate) fn check_resolved_mode(
                         tuple_projections: Vec::new(),
                         tuple_initializers: Vec::new(),
                         next_expr: 0,
+                        anonymous: None,
+                        anonymous_functions: Vec::new(),
                     });
                 }
             }
@@ -8027,6 +8586,7 @@ pub(crate) fn check_resolved_mode(
             break;
         }
     }
+    all_facts.append(&mut specialization_registry.borrow_mut().anonymous);
     if diagnostics.is_empty() {
         all_facts.sort_by_key(|facts| facts.id.0);
         Ok(TypedModule {
@@ -8070,6 +8630,8 @@ fn checker() -> Checker {
         imports: HashMap::new(),
         extension_candidates: Vec::new(),
         scopes: Vec::new(),
+        outer_scopes: Vec::new(),
+        captured: RefCell::new(None),
         result: UNIT,
     }
 }
@@ -8102,15 +8664,39 @@ fn infer_direct_type_parameter(
     }
 }
 fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
-    if p.mutable && p.access != Access::Owned {
+    bind_named_parameter(
+        c,
+        &p.name,
+        p.mutable,
+        ir_access(p.access),
+        p.span,
+        p as *const _ as usize,
+        ty,
+    );
+}
+fn bind_named_parameter(
+    c: &mut Checker,
+    name: &str,
+    var: bool,
+    access: IrAccess,
+    span: Span,
+    origin: usize,
+    ty: Ty,
+) {
+    if var && access != IrAccess::Owned {
         c.error(
             17,
-            p.span,
+            span,
             "borrow/share parameters cannot be rebound; remove the var modifier",
         );
     }
-    let access = ir_access(p.access);
-    let origin = p as *const _ as usize;
+    if access != IrAccess::Owned && matches!(ty, Ty::Function(..)) {
+        c.error(
+            17,
+            span,
+            "a borrow or share function parameter arrives with closures that capture variables (the next step); declare the parameter as an owned `fn(...)`",
+        );
+    }
     c.parameter_origins.insert(origin);
     let local_ty = match access {
         IrAccess::Owned => ty.clone(),
@@ -8120,30 +8706,24 @@ fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
             origin: ReferenceOrigin::Binding(origin),
         },
     };
-    let id = c.register_local(
-        &p.name,
-        &local_ty,
-        p.access == Access::Owned && p.mutable,
-        access,
-        p.span,
-        origin,
-    );
+    let mutable = access == IrAccess::Owned && var;
+    let id = c.register_local(name, &local_ty, mutable, access, span, origin);
     if c.scopes
         .last_mut()
         .unwrap()
         .insert(
-            p.name.clone(),
+            name.to_owned(),
             Binding {
                 ty: local_ty,
-                mutable: p.access == Access::Owned && p.mutable,
+                mutable,
                 access,
                 id,
-                origin: p as *const _ as usize,
+                origin,
             },
         )
         .is_some()
     {
-        c.error(3, p.span, format!("duplicate parameter '{}'", p.name));
+        c.error(3, span, format!("duplicate parameter '{name}'"));
     }
 }
 

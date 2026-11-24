@@ -33,6 +33,7 @@ pub enum TrapReason {
     HeapAllocation,
     ShiftCount,
     AssertionFailed,
+    InvalidFunction,
 }
 
 impl TrapReason {
@@ -50,6 +51,7 @@ impl TrapReason {
             10 => Self::HeapAllocation,
             11 => Self::ShiftCount,
             12 => Self::AssertionFailed,
+            13 => Self::InvalidFunction,
             _ => return None,
         })
     }
@@ -69,6 +71,7 @@ impl TrapReason {
             Self::HeapAllocation => "guest heap allocation failed",
             Self::ShiftCount => "shift count must be less than the bit width",
             Self::AssertionFailed => "assertion failed",
+            Self::InvalidFunction => "call through an invalid function value",
         }
     }
 }

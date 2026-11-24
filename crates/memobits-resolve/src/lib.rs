@@ -1112,6 +1112,30 @@ fn canonical_type_inner(
             .collect::<Vec<_>>();
         return format!("tuple({})", elements.join(","));
     }
+    if ty.path.as_slice() == ["\0unit"] {
+        return "Unit".into();
+    }
+    if ty.path.as_slice() == ["\0fn"] {
+        let parts = ty
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                TypeArgument::Type(element) => canonical_type_inner(
+                    project, resolution, module, imports, element, seen, builtins,
+                ),
+                TypeArgument::Reference {
+                    access, referent, ..
+                } => format!(
+                    "{access:?} {}",
+                    canonical_type_inner(
+                        project, resolution, module, imports, referent, seen, builtins
+                    )
+                ),
+                _ => "<invalid-function-type>".into(),
+            })
+            .collect::<Vec<_>>();
+        return format!("fn({})", parts.join(","));
+    }
     if ty.path.as_slice() == ["\0record"] {
         let mut fields = ty
             .arguments

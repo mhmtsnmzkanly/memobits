@@ -469,7 +469,11 @@ impl Checker<'_> {
             }
             return;
         }
-        if ty.path.as_slice() == ["\0tuple"] || ty.path.as_slice() == ["\0record"] {
+        if ty.path.as_slice() == ["\0tuple"]
+            || ty.path.as_slice() == ["\0record"]
+            || ty.path.as_slice() == ["\0fn"]
+            || ty.path.as_slice() == ["\0unit"]
+        {
             return;
         }
         if let Some(template) = templates::lookup_type(ty) {
@@ -736,7 +740,7 @@ impl Checker<'_> {
                         .any(|variants| variants.contains(&path[0]))
                 {
                     let hint = if self.test_names.contains(&path[0]) {
-                        " (test functions cannot be called)"
+                        " (test functions cannot be called or used as values)"
                     } else {
                         ""
                     };
@@ -807,6 +811,25 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Block(b) => self.block(b),
+            ExprKind::Function(function) => {
+                for parameter in &function.parameters {
+                    if let Some(ty) = &parameter.ty {
+                        self.ty(ty);
+                    }
+                }
+                if let Some(result) = &function.result {
+                    self.ty(result);
+                }
+                self.scopes.push(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                );
+                self.block(&function.body);
+                self.scopes.pop();
+            }
             ExprKind::If {
                 condition,
                 then_branch,

@@ -1,5 +1,5 @@
 //! Fixed-array element gates and owned-position propagation.
-use super::{Checker, Ty};
+use super::{is_scalar, Checker, Ty};
 use memobits_diagnostics::Span;
 use memobits_syntax::{Expr, ExprKind, IntegerLiteral};
 
@@ -34,6 +34,7 @@ impl Checker {
                     | Ty::Enum(..)
             )
             && !matches!(element, Ty::Primitive(kind) if *kind != "Unit")
+            && !matches!(element, Ty::Function(..))
         {
             self.error(17, span, "executable arrays support non-Unit primitive, struct/tuple, enum and nested array elements only");
         }
@@ -82,7 +83,7 @@ impl Checker {
     /// Aggregate projections cannot be moved out by an implicit field or index read.
     pub(super) fn reject_extraction(&mut self, expr: &Expr, ty: &Ty) {
         if self.lowering
-            && !matches!(ty, Ty::Primitive(_))
+            && !is_scalar(ty)
             && !self.failed_fields.contains(&(expr as *const Expr as usize))
             && matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
         {

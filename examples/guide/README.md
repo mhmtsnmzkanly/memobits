@@ -2,9 +2,9 @@
 
 The guide walks through the executable language with small checked examples,
 split into topic modules under [`src/`](src/): `numbers`, `text`, `tuples`,
-`aggregates`, `ownership`, `collections`, `enums_outcomes`, `generics` and
-`operators`. Each topic documents its feature in comments and checks it with
-`test fn` items that use `assert`. [`src/main.mb`](src/main.mb) holds `main`, a
+`aggregates`, `ownership`, `collections`, `enums_outcomes`, `generics`,
+`functions` and `operators`. Each topic documents its feature in comments and
+checks it with `test fn` items that use `assert`. [`src/main.mb`](src/main.mb) holds `main`, a
 small program that combines a few guide features and returns `Ok(42)`. The
 guide is the reference for current syntax, together with the accepted rules in
 [decisions](../../docs/design/decisions.md).
@@ -40,7 +40,7 @@ The report lists every test as `test <module>::<name> ... ok` and ends with the
 summary line below (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
 ```text
-test result: ok. 123 passed; 0 failed; 0 filtered out
+test result: ok. 129 passed; 0 failed; 0 filtered out
 ```
 
 `mb test` runs each test in a fresh instance and exits 1 if any fails. Add a

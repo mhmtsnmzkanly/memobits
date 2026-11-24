@@ -12,7 +12,11 @@ impl Builder<'_> {
         let Type::Function(signature) = self.ty(callee).expect("checked callee") else {
             unreachable!("checked function")
         };
-        let callee = self.lower_expr(callee)?;
+        let callee = match (&callee.kind, self.paths_function(callee)) {
+            // A named function is called directly, not through its value.
+            (ExprKind::Path(_), Some(id)) => op(Source::Function(id), callee.span),
+            _ => self.lower_expr(callee)?,
+        };
         let callee = self.capture(callee)?;
         let scope_start = self.owned_locals.len();
         let result = (|| {
@@ -20,7 +24,9 @@ impl Builder<'_> {
             for (index, (argument, parameter)) in
                 arguments.iter().zip(&signature.parameters).enumerate()
             {
-                let direct = matches!(callee.source, Source::Function(_));
+                // A function value always names an internal function, so its
+                // arguments follow the same moves as a direct call's.
+                let direct = true;
                 let value = self.lower_call_argument(
                     argument,
                     parameter,
@@ -43,6 +49,19 @@ impl Builder<'_> {
         }
         self.owned_locals.truncate(scope_start);
         result
+    }
+
+    /// The function a path expression names, if it names one directly.
+    fn paths_function(&self, expr: &Expr) -> Option<memobits_ir::FunctionId> {
+        match self.paths.get(
+            &self
+                .expression_ids
+                .get(&(expr as *const Expr as usize))
+                .copied()?,
+        )? {
+            PathTarget::Function(id) => Some(*id),
+            PathTarget::Local(_) => None,
+        }
     }
 
     /// Lower one ordinary call argument (never a method receiver) against its

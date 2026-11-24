@@ -442,7 +442,7 @@ fn numeric_literal_separators_are_removed_before_wasm_encoding() {
 }
 
 #[test]
-fn rejects_unimplemented_indirect_calls_with_backend_code() {
+fn indirect_calls_through_function_values_compile_and_exported_ones_are_rejected() {
     use memobits_ir::{
         Access, Block, CanonicalFunction, Function, Instruction, InstructionKind, Local, Operand,
         ParameterType, Signature, Terminator, TerminatorKind, Type, UseMode, ValueId,
@@ -530,7 +530,11 @@ fn rejects_unimplemented_indirect_calls_with_backend_code() {
         }],
         ..Program::default()
     };
-    let errors = memobits_wasm::compile(&program, &BTreeMap::new()).unwrap_err();
+    // Indirect calls are supported (H1); the unexported function is simply unreachable.
+    memobits_wasm::compile(&program, &BTreeMap::new()).unwrap();
+    // A function value in an exported signature has no external ABI.
+    let exports = BTreeMap::from([("apply".to_owned(), memobits_ir::FunctionId(0))]);
+    let errors = memobits_wasm::compile(&program, &exports).unwrap_err();
     assert!(errors.iter().any(|error| error.code.to_string() == "LE900"));
     assert!(errors.iter().any(|error| error.span == Some(span)));
 }

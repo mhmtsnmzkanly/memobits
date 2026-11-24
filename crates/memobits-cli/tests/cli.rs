@@ -653,10 +653,9 @@ fn temporary_owned_string_arguments_run_from_source_and_wasm() {
 #[test]
 fn heap_returns_reject_nested_temporaries() {
     let f = Fixture::new();
-    for body in [
-        "take({ make() });",
-        "let indirect := take; indirect(make());",
-    ] {
+    // A call through a function value (`let indirect := take;`) now follows the
+    // direct-call rules (H1), so only the nested temporary is rejected.
+    for body in ["take({ make() });"] {
         f.write(
             "text.mb",
             &format!(

@@ -513,10 +513,8 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         | InstructionKind::Extract { .. }
         | InstructionKind::EnumTag { .. }
         | InstructionKind::VariantExtract { .. } => None,
-        InstructionKind::Call { callee, .. } => match callee.source {
-            Source::Function(_) => None,
-            _ => Some("indirect function calls are not supported by this Wasm backend yet".into()),
-        },
+        // Calls through function values are erased to `call_indirect`.
+        InstructionKind::Call { .. } => None,
         InstructionKind::Unary { .. } => None,
         InstructionKind::Binary {
             op: BinaryOp::And | BinaryOp::Or,

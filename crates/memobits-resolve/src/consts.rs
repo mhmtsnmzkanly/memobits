@@ -288,6 +288,7 @@ fn module_names_repeat_count(module: &Module) -> bool {
             ExprKind::Field { base, .. } => expr(base),
             ExprKind::Struct { fields, .. } => fields.iter().any(|f| expr(&f.value)),
             ExprKind::Block(b) => block(b),
+            ExprKind::Function(function) => block(&function.body),
             ExprKind::If {
                 condition,
                 then_branch,
@@ -1521,6 +1522,25 @@ impl Rewriter<'_, '_> {
                 }
             }
             ExprKind::Block(block) => self.block(block),
+            ExprKind::Function(function) => {
+                for parameter in &mut function.parameters {
+                    if let Some(ty) = &mut parameter.ty {
+                        self.ty(ty);
+                    }
+                }
+                if let Some(result) = &mut function.result {
+                    self.ty(result);
+                }
+                self.scopes.push(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                );
+                self.block(&mut function.body);
+                self.scopes.pop();
+            }
             ExprKind::If {
                 condition,
                 then_branch,

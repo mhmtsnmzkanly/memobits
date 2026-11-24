@@ -294,6 +294,7 @@ fn the_trap_reasons_agree_between_backend_and_runtime() {
         (Wasm::HeapAllocation, Runtime::HeapAllocation),
         (Wasm::ShiftCount, Runtime::ShiftCount),
         (Wasm::AssertionFailed, Runtime::AssertionFailed),
+        (Wasm::InvalidFunction, Runtime::InvalidFunction),
     ] {
         assert_eq!(Runtime::from_explicit_code(wasm.code()), Some(runtime));
     }
