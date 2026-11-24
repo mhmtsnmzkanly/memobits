@@ -116,8 +116,7 @@ impl Checker {
             );
         }
         for (argument, parameter) in arguments.iter().zip(&parameters) {
-            let actual = self.expr(argument, Some(&parameter.ty));
-            self.ensure(&actual, &parameter.ty, argument.span);
+            self.check_call_argument(argument, Some(parameter), true);
         }
         if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
             let mut function_parameters = vec![FunctionParameter {

@@ -514,6 +514,8 @@ impl Checker<'_> {
         } else if let Some(path) = self.imports.get(&ty.path[0]) {
             self.qualified.push((path.clone(), ty.span, Requires::Type));
         } else if !self.types.contains(&ty.path[0])
+            // A misplaced `Self` is already reported as SE002 at this span.
+            && ty.path[0] != "Self"
             && !templates::is_removed_spelling(&ty.path[0])
             && !self
                 .generic_types

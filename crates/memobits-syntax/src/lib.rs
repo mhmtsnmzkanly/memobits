@@ -1,6 +1,7 @@
 //! Source-spanned syntax for the initial Memobits language subset.
 //! Parsing does not perform name, type, ownership, or control-flow checks.
 mod items;
+mod literals;
 pub mod numeric;
 mod self_type;
 pub mod templates;
@@ -471,44 +472,9 @@ pub fn lex(source: SourceId, text: &str) -> LexResult {
             }
             TokenKind::Word(text[start..i].into())
         } else if c.is_ascii_digit() {
-            i += 1;
-            while i < text.len()
-                && (text.as_bytes()[i].is_ascii_digit() || text.as_bytes()[i] == b'_')
-            {
-                i += 1;
-            }
-            if text.as_bytes().get(i) == Some(&b'.')
-                && text.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit)
-            {
-                i += 1;
-                while i < text.len()
-                    && (text.as_bytes()[i].is_ascii_digit() || text.as_bytes()[i] == b'_')
-                {
-                    i += 1;
-                }
-            }
-            if matches!(text.as_bytes().get(i), Some(b'e' | b'E')) {
-                i += 1;
-                if matches!(text.as_bytes().get(i), Some(b'+' | b'-')) {
-                    i += 1;
-                }
-                let digits = i;
-                while i < text.len() && text.as_bytes()[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if digits == i {
-                    diagnostics.push(diagnostic(
-                        1,
-                        Span {
-                            source,
-                            start,
-                            end: i,
-                        },
-                        "expected exponent digits",
-                    ));
-                }
-            }
-            TokenKind::Number(text[start..i].into())
+            let (end, number) = literals::lex_number(source, text, start, &mut diagnostics);
+            i = end;
+            TokenKind::Number(number)
         } else if let Some(op) = [
             "..=", "..", "::", ":=", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=",
             "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",

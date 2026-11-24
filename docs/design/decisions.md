@@ -985,7 +985,56 @@ Facts about the shipped behavior; no new decisions.
 - `~x`: bitwise complement of any integer type at its own width (Rust `!x`; `~0u8` is 255, `~(-128i8)` is 127, `~0u64` is `u64::MAX`). Prefix operator with the precedence of unary `-`/`!` (`~x as T` complements first; `-~x` and `~~x` nest). Floats, `bool`, `char`, `string` and nominal types are TE007 ``"`~` requires an integer, found T"``; there is no `core::ops::Not`-style interface and no overloading (primitive-only, `!` stays `bool`-only). An expected type applies to the operand (`let c: u8 = ~0;`); with no context an operand built only from untyped literals defaults to `u32`, like `& | ^ << >>` (`let a := ~0;` is `4294967295`), and `~x` with a typed `x` has the type of `x` (`let c: u16 = ~a` with `a: u8` is TE002). The parser gate that rejected `~` (lexical SE001) is gone; `~` is a lexer symbol and a prefix operator.
 - Evaluation is shared: `memobits-syntax/src/numeric.rs::complement` (`kind.wrap(!value)`) is used by the `const` item evaluator (`memobits-resolve/src/consts.rs`) and the static-expression folder (`memobits-analysis/src/constants.rs`), so constant and dynamic results agree; `const` items fold `~`, and a statically known `~x` participates in LE001/LE002/LE003 checks like any other folded operator. IR `UnaryOp::Complement` (validation requires an integer operand and equal output); Wasm lowers it to `xor -1` and re-normalizes narrow results (unsigned masked, signed stays sign-extended), so 8/16-bit results are exact; no trap is possible.
 - `Self` (resolved in `memobits-syntax/src/self_type.rs`, right after parsing, so later passes only see the written type): inside `extend` blocks of every form (inherent `extend T { }`, trailing `type T ... extend { }`, `extend T of Interface { }`, including its `type Output = Self;` bindings) `Self` is the extension target type with its generic and const arguments (`extend Pair<T>`-style trailing blocks: `Self` is `Pair<T>`; `Lane<const N>`: `Lane<N>`; `extend Pair<i32>`: `Pair<i32>`; a qualified target keeps its path). Positions: parameter and result types, `let` annotations, nested type arguments (`array<Self, 2>` style), struct literals `Self { .. }` (the target's type arguments are filled in), destructuring `let Self { .. } := v;`, enum variant paths in expressions and patterns (`Self::Variant`, `Self::Variant(x)`), anywhere inside method bodies. There are no static-style calls in the language yet (every method takes a receiver), so `Self::method(..)` is not applicable. `Self<..>` is rejected ("takes no type arguments"), a bare `Self` value ("names a type, not a value"), `Self::X` as a type ("is not a type").
-- Errors (all SE002, at the `Self` token): outside `extend` blocks (free functions, type declarations, `const` items) ``"`Self` is only available inside an `extend` block ..."`` (this replaces the former NE003 "unknown type 'Self'"; the old NE003 still follows because the unresolved name remains, so expect two diagnostics at the same span).
+- Errors (all SE002, at the `Self` token): outside `extend` blocks (free functions, type declarations, `const` items) ``"`Self` is only available inside an `extend` block ..."`` (this replaces the former NE003 "unknown type 'Self'"; F1 removed the duplicate NE003 that used to follow at the same span).
 - Interface declarations: `Self` in an `interface` declaration is rejected with ``"`Self` in interface declarations is not supported yet"``. The existing interface machinery selects implementations by the explicit target and would need new dispatch semantics (the bound receiver `T`, associated projections and the `of Interface` selection do not model a `Self` return), so it is deferred, not approximated.
 - Tests: `crates/memobits-cli/tests/g8_complement_self.rs` (12): `~` against Rust `!x` on all eight widths (dynamic table hash, double complement, `~x & x`/`| x`/`^ x`, assignment), boundary values written out, `const` items and static folds against Rust for every width (LE002 hit counts), literal defaulting, TE007/TE002 negatives, `Self` in every position over source `mb test`/`mb run` and standalone Wasm (generic, const-generic, instantiated, enum, generic enum, `of Add`/`of Neg`/user interface, cross-module public extensions), an explicit-type twin of the same program, outside-extend and interface negatives. `wp20_s_gaps` now expects TE007 for `~` on a nominal type. Guide: `numbers.mb` `bitwise_complement`, `generics.mb` `self_in_extend_blocks`, `operators.mb` `self_in_interface_extensions` (112 tests).
 - Limits: no `~` overloading or `Not` interface; `Self` in interface declarations; no `Self` in free functions, type declarations or constants; no `Self::associated_type` projection.
+
+### Shipped F1 details (2026-11-24)
+
+Facts about the shipped behavior; no new decisions (principle A: compositions
+are allowed once cleanup is proven).
+
+- Method arguments: every non-receiver argument of an inherent method, an
+  interface-selected (`of I`) method and a generic nominal method is checked
+  and lowered by the same code as a free-function argument
+  (`check_call_argument` in analysis `types.rs`, `lower_call_argument` in
+  `lower/calls.rs`). An owned struct, tuple, record, array, enum, List or
+  String moves in (a temporary is staged in a hidden owner, a String owner uses
+  the shared transport predicate), `.borrow()` / `.share()` conversions pass a
+  loan to `borrow` / `share` parameters, and a mismatch is the same TE002 /
+  TE017 as for a function ("argument does not match the borrow parameter
+  access; use an explicit .borrow() or .share() conversion"). Argument count
+  errors stay TE010. Receiver rules are unchanged. The former TE017 on
+  `q.eqx(r)` and the TE002 "expected R, found borrow R" are gone.
+- Heap String and owner call results: a call that returns a heap `string` or a
+  String-owning aggregate (struct, tuple, record, enum, array) and is not bound
+  directly is staged in a hidden `call result` owner local
+  (`stage_fresh_call` in `lower.rs`), so the IR validation rule "assigned
+  directly to a whole local" holds. Positions: function tail and `return`
+  operand, `push` argument, array, List and tuple elements, enum payloads
+  (`Some(g())`, `Ok(g())`, user variants), `push_str` suffix (released right
+  after the append), plus the already working binding, assignment, owned
+  argument, struct field and branch-sink positions. The hidden owner is
+  registered for cleanup before later operands run, so an early `return`
+  releases it. `string ! E` still needs its immediate consuming match (TE018),
+  and List call results keep their own rule.
+- Literals: the lexer (`memobits-syntax/src/literals.rs`) accepts `0x`/`0X`
+  hexadecimal, `0b` binary and `0o` octal integers and `_` between the digits
+  of any integer or float literal (also in the fraction and the exponent),
+  doubled `__` included. It emits one canonical decimal spelling (value as
+  `u128`), so contextual typing, range checks (type error on overflow of the
+  contextual type), `const` items, literal patterns, array lengths, repeat
+  counts and constant folding see the same text as for decimal and are
+  unchanged. Spans keep the original spelling. SE001: nothing after a prefix,
+  `_` directly after a prefix, a trailing `_`, an invalid digit for the radix
+  (also letters, so `0xFFu8` fails: there are no literal suffixes and none were
+  added), `1e_5` / missing exponent digits, and a radix literal above
+  `u128::MAX`. A malformed literal lexes as `0` to avoid cascading errors.
+- `Self` outside an `extend` block reports only SE002 now: name resolution no
+  longer adds NE003 "unknown type 'Self'" at the same span.
+- Tests: `crates/memobits-cli/tests/f1_followups.rs`. Stale negatives that
+  pinned the lifted gates were updated (see launch-progress F1).
+- Limits: unchanged otherwise; a tuple holding an enum that owns a String is
+  still rejected at validation (F2), and `string ! E` call results still need
+  the immediate match.

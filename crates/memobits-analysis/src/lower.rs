@@ -1094,9 +1094,41 @@ impl<'a> Builder<'a> {
     fn is_string_transport_owner(&self, ty: &Type) -> bool {
         is_string_tuple_type(self.types, ty) || is_flat_string_owner_struct_type(self.types, ty)
     }
+    /// A String or String-owning aggregate that a call just produced is not
+    /// yet bound to any owner. Stage it in a hidden owner local so the value
+    /// has a direct binding and exact cleanup wherever it is consumed
+    /// (tail, `return`, element, payload, field, argument).
+    fn stage_fresh_call(&mut self, value: Operand, ty: &Type, span: Span) -> Operand {
+        let owner = matches!(ty, Type::String) || self.is_string_owner_struct(ty);
+        let Source::Value(id) = value.source else {
+            return value;
+        };
+        let (true, Some(current)) = (owner, self.current) else {
+            return value;
+        };
+        let fresh_call = self.function.blocks[current.0 as usize]
+            .instructions
+            .iter()
+            .rev()
+            .find(|instruction| instruction.output == Some(id))
+            .is_some_and(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    InstructionKind::Call { callee, .. }
+                        if matches!(callee.source, Source::Function(_))
+                )
+            });
+        if !fresh_call {
+            return value;
+        }
+        let staged = self.hidden_local("call result", ty.clone(), span);
+        self.initialize_local(staged, consume(value), span);
+        consume(op(Source::Local(staged), span))
+    }
     /// Evaluate one element expression that moves into an array or List.
     fn owned_element(&mut self, element: &Expr, element_ty: &Type) -> Option<Operand> {
         let value = self.lower_expr(element)?;
+        let value = self.stage_fresh_call(value, element_ty, element.span);
         if self.is_string_transport_owner(element_ty)
             || (matches!(element_ty, Type::Enum(_))
                 && self.is_string_owner_struct(element_ty)
@@ -1303,10 +1335,13 @@ impl<'a> Builder<'a> {
         // Keep the exclusive loan live across suffix evaluation. Reborrow
         // read-only for concat, then end both loans before replacing the slot.
         let exclusive = self.borrow(receiver, Access::Share)?;
+        let scope_start = self.owned_locals.len();
+        let suffix_span = suffix.span;
         let suffix = self.lower_expr(suffix)?;
+        // A heap String call result is staged so the suffix is released here.
+        let suffix = self.stage_fresh_call(suffix, &Type::String, suffix_span);
         let right = self.borrow(suffix, Access::Borrow)?;
         let left = self.borrow(exclusive, Access::Borrow)?;
-        let scope_start = self.owned_locals.len();
         let staged = self.hidden_local("String append result", Type::String, expr.span);
         self.initialize_concat(staged, left, right, expr.span);
         self.replace_local(
@@ -1599,6 +1634,7 @@ impl<'a> Builder<'a> {
     /// aggregate (a struct or record literal, a call result) is staged in a
     /// hidden local first so its construction has a direct binding.
     fn owned_result(&mut self, value: Operand, result: &Type) -> Option<Operand> {
+        let value = self.stage_fresh_call(value, result, self.function.span);
         let value = self.owned_to(value, result)?;
 
         if matches!(result, Type::Struct(_))
@@ -2674,6 +2710,7 @@ impl<'a> Builder<'a> {
                         self.owned_locals.truncate(scope_start);
                         return None;
                     };
+                    let value = self.stage_fresh_call(value, field_ty, element.span);
                     let Some(mut value) = (if *field_ty == Type::String {
                         self.owned_to(value, field_ty)
                     } else if self.is_string_transport_owner(field_ty) {
@@ -4001,6 +4038,7 @@ impl<'a> Builder<'a> {
         let mut payload = Vec::with_capacity(arguments.len());
         for (argument, ty) in arguments.iter().zip(&declared.payload) {
             let value = self.lower_expr(argument)?;
+            let value = self.stage_fresh_call(value, ty, argument.span);
             // String is the only Ok payload, so it can move at construction
             // without an intervening capture for argument evaluation order.
             let value = if ty == &Type::String

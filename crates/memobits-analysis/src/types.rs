@@ -3162,6 +3162,118 @@ impl Checker {
             }
         }
     }
+    /// Check one call argument against its parameter: owned aggregate values
+    /// are admitted, explicit `.borrow()` / `.share()` conversions must match
+    /// the parameter access. Shared by free-function and method calls.
+    fn check_call_argument(
+        &mut self,
+        arg: &Expr,
+        param: Option<&FunctionParameter>,
+        direct: bool,
+    ) -> Ty {
+        if param.is_some_and(|parameter| {
+            parameter.access == IrAccess::Owned
+                && matches!(
+                    parameter.ty,
+                    Ty::String
+                        | Ty::List(_)
+                        | Ty::Array(..)
+                        | Ty::Struct(..)
+                        | Ty::Tuple(..)
+                        | Ty::Enum(..)
+                )
+        }) {
+            // An owned aggregate parameter takes a literal, repetition,
+            // call result, `if` or named value moved into the call.
+            self.allow_array_value(arg);
+        }
+        let previous_concat = self.concat_destination;
+        let previous_borrow = self.temporary_borrow_argument;
+        if let Some(parameter) = param.filter(|_| direct) {
+            let argument = arg as *const Expr as usize;
+            match (&parameter.ty, parameter.access) {
+                (Ty::String, IrAccess::Owned) => self.concat_destination = Some(argument),
+                (Ty::String | Ty::List(_), IrAccess::Borrow) => {
+                    self.temporary_borrow_argument = Some(argument)
+                }
+                _ => {}
+            }
+        }
+        let actual = self.expr(arg, param.map(|parameter| &parameter.ty));
+        self.concat_destination = previous_concat;
+        self.temporary_borrow_argument = previous_borrow;
+        if param.is_some_and(|parameter| {
+            parameter.access == IrAccess::Owned
+                && self.struct_has_unsupported_nested_string_owner(&parameter.ty)
+        }) {
+            self.error(
+                17,
+                arg.span,
+                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, primitive and nested owner fields)",
+            );
+        }
+        if param.is_some_and(|parameter| {
+            parameter.access == IrAccess::Owned
+                && self.tuple_has_unsupported_nested_string_owner(&parameter.ty)
+        }) {
+            self.error(
+                17,
+                arg.span,
+                "owned tuple calls cannot transport nested String-owning aggregates other than tuples in this slice",
+            );
+        }
+        if let Some(parameter) = param.filter(|parameter| matches!(parameter.ty, Ty::List(_))) {
+            if !direct {
+                self.error(
+                    17,
+                    arg.span,
+                    "List arguments require a direct internal call",
+                );
+            } else if parameter.access == IrAccess::Owned
+                && !(matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
+                    || matches!(&arg.kind, ExprKind::Call { callee, .. } if self.direct_callee(callee)))
+            {
+                self.error(
+                    17,
+                    arg.span,
+                    "owned List arguments require a named whole local or a direct internal List call result",
+                );
+            }
+        }
+        if param.is_none_or(|parameter| parameter.access == IrAccess::Owned) {
+            self.reject_extraction(arg, &actual);
+        }
+        if let Some(param) = param {
+            if param.access == IrAccess::Owned {
+                self.ensure(&actual, &param.ty, arg.span);
+            } else if matches!(&actual, Ty::Reference { inner, .. }
+                if !(compatible(inner, &param.ty)
+                    || direct && self.table.has_error_ancestor(inner, &param.ty)))
+            {
+                self.error(
+                    2,
+                    arg.span,
+                    format!(
+                        "expected {} {}, found {}",
+                        access_name(param.access),
+                        name(&param.ty),
+                        name(&actual)
+                    ),
+                );
+            } else if !reference_access_matches(&actual, param.access) {
+                self.error(
+                    17,
+                    arg.span,
+                    format!(
+                        "argument does not match the {} parameter access; use an explicit .borrow() or .share() conversion",
+                        access_name(param.access)
+                    ),
+                );
+            }
+        }
+        actual
+    }
+
     fn direct_callee(&self, callee: &Expr) -> bool {
         matches!(&callee.kind, ExprKind::Path(path)
             if path.len() != 1 || self.lookup(&path[0]).is_none())
@@ -6670,8 +6782,7 @@ impl Checker {
                             );
                         }
                         for (argument, parameter) in arguments.iter().zip(&parameters) {
-                            let actual = self.expr(argument, Some(&parameter.ty));
-                            self.ensure(&actual, &parameter.ty, argument.span);
+                            self.check_call_argument(argument, Some(parameter), true);
                         }
                         if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
                             let mut function_parameters = vec![FunctionParameter {
@@ -6719,114 +6830,7 @@ impl Checker {
                     }
                     let mut diverges = false;
                     for (i, arg) in arguments.iter().enumerate() {
-                        if params.get(i).is_some_and(|parameter| {
-                            parameter.access == IrAccess::Owned
-                                && matches!(
-                                    parameter.ty,
-                                    Ty::String
-                                        | Ty::List(_)
-                                        | Ty::Array(..)
-                                        | Ty::Struct(..)
-                                        | Ty::Tuple(..)
-                                        | Ty::Enum(..)
-                                )
-                        }) {
-                            // An owned aggregate parameter takes a literal, repetition,
-                            // call result, `if` or named value moved into the call.
-                            self.allow_array_value(arg);
-                        }
-                        let previous_concat = self.concat_destination;
-                        let previous_borrow = self.temporary_borrow_argument;
-                        if let Some(parameter) = params.get(i).filter(|_| direct) {
-                            let argument = arg as *const Expr as usize;
-                            match (&parameter.ty, parameter.access) {
-                                (Ty::String, IrAccess::Owned) => {
-                                    self.concat_destination = Some(argument)
-                                }
-                                (Ty::String | Ty::List(_), IrAccess::Borrow) => {
-                                    self.temporary_borrow_argument = Some(argument)
-                                }
-                                _ => {}
-                            }
-                        }
-                        let actual = self.expr(arg, params.get(i).map(|parameter| &parameter.ty));
-                        self.concat_destination = previous_concat;
-                        self.temporary_borrow_argument = previous_borrow;
-                        if params.get(i).is_some_and(|parameter| {
-                            parameter.access == IrAccess::Owned
-                                && self.struct_has_unsupported_nested_string_owner(&parameter.ty)
-                        }) {
-                            self.error(
-                                17,
-                                arg.span,
-                                "owned struct calls can transport only String-owning structs admitted by the transport rule (String, primitive and nested owner fields)",
-                            );
-                        }
-                        if params.get(i).is_some_and(|parameter| {
-                            parameter.access == IrAccess::Owned
-                                && self.tuple_has_unsupported_nested_string_owner(&parameter.ty)
-                        }) {
-                            self.error(
-                                17,
-                                arg.span,
-                                "owned tuple calls cannot transport nested String-owning aggregates other than tuples in this slice",
-                            );
-                        }
-                        if let Some(parameter) = params
-                            .get(i)
-                            .filter(|parameter| matches!(parameter.ty, Ty::List(_)))
-                        {
-                            if !direct {
-                                self.error(
-                                    17,
-                                    arg.span,
-                                    "List arguments require a direct internal call",
-                                );
-                            } else if parameter.access == IrAccess::Owned
-                                && !(matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
-                                    || matches!(&arg.kind, ExprKind::Call { callee, .. } if self.direct_callee(callee)))
-                            {
-                                self.error(
-                                    17,
-                                    arg.span,
-                                    "owned List arguments require a named whole local or a direct internal List call result",
-                                );
-                            }
-                        }
-                        if params
-                            .get(i)
-                            .is_none_or(|parameter| parameter.access == IrAccess::Owned)
-                        {
-                            self.reject_extraction(arg, &actual);
-                        }
-                        if let Some(param) = params.get(i) {
-                            if param.access == IrAccess::Owned {
-                                self.ensure(&actual, &param.ty, arg.span);
-                            } else if matches!(&actual, Ty::Reference { inner, .. }
-                                if !(compatible(inner, &param.ty)
-                                    || direct && self.table.has_error_ancestor(inner, &param.ty)))
-                            {
-                                self.error(
-                                    2,
-                                    arg.span,
-                                    format!(
-                                        "expected {} {}, found {}",
-                                        access_name(param.access),
-                                        name(&param.ty),
-                                        name(&actual)
-                                    ),
-                                );
-                            } else if !reference_access_matches(&actual, param.access) {
-                                self.error(
-                                    17,
-                                    arg.span,
-                                    format!(
-                                        "argument does not match the {} parameter access; use an explicit .borrow() or .share() conversion",
-                                        access_name(param.access)
-                                    ),
-                                );
-                            }
-                        }
+                        let actual = self.check_call_argument(arg, params.get(i), direct);
                         diverges |= actual == Ty::Never;
                     }
                     if diverges {

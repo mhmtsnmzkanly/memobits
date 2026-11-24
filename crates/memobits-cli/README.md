@@ -161,6 +161,18 @@ literals and destructuring and `Self::Variant` paths (expressions and patterns).
 `extend` blocks it is SE002 ("only available inside an `extend` block"), and in
 `interface` declarations SE002 "not supported yet". `Self<..>`, a bare `Self` value and
 `Self::X` as a type are SE002.
+Follow-ups (F1): the non-receiver arguments of inherent, interface-selected (`of I`)
+and generic nominal methods follow the function-argument rules (owned structs, tuples,
+records, arrays, enums, Lists and Strings move in with staged temporaries; `.borrow()` /
+`.share()` pass loans; receiver rules are unchanged). A heap `string` or String-owning
+aggregate returned by a call can be used directly as a function tail or `return`
+operand, a `push` argument, an element, a payload (`Some(g())`), a `push_str` suffix or
+an owned argument: the result is staged in a hidden owner released exactly once.
+Integer literals accept `0x`/`0X` hexadecimal, `0b` binary and `0o` octal digits, and `_`
+separates digits of any integer or float literal (not first, last or after a prefix;
+`__` is fine); they are range checked like decimal literals, also in `const` items and
+literal patterns. There are no literal suffixes (`0xFFu8` is a lexical error). A
+misplaced `Self` is reported once (SE002).
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

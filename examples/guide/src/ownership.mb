@@ -59,7 +59,8 @@ test fn local_heap_string_fields() {
 // internal parameter from a named local. The callee owns it and releases the
 // String at its exit, on an early return too. The caller cannot use the moved
 // local afterwards. A function can also return such a struct by moving a named
-// local; bind the call result to a new local (`let label := make_label();`).
+// local; the call result can be bound to a new local (`let label := make_label();`)
+// or used directly (see `call_results_in_every_value_position`).
 // Such a struct can also be a tuple element or a fixed-array element when it
 // moves in from a named local (see `string_struct_elements`), a field of another
 // String-owning struct, or an enum payload (see `nested_string_owners`).
@@ -365,4 +366,73 @@ test fn struct_literal_as_function_result() {
     assert(one.text.len() == 2);
     assert(two.number == 4);
     assert(two.text.len() == 3);
+}
+// A heap String or String-owning aggregate that a call returns can be used
+// directly: as a function's last expression or `return` operand, a `push`
+// argument, a field, an array or tuple element, an enum payload, an assigned
+// value or an owned argument. The compiler holds the result in a hidden
+// owner, so it is released exactly once, also on an early return.
+fn fresh_text() -> string {
+    let text := "ab".concat("cd");
+    text
+}
+fn relay_text() -> string { fresh_text() }
+fn early_text(early: bool) -> string {
+    if early { return fresh_text(); }
+    relay_text()
+}
+fn fresh_label() -> TextLabel { TextLabel { number: 4, text: fresh_text() } }
+fn relay_label() -> TextLabel { fresh_label() }
+fn text_length(text: string) -> u32 { text.len() }
+test fn call_results_in_every_value_position() {
+    var words: List<string> = [];
+    words.push(fresh_text());
+    words.push(early_text(true));
+    var current := fresh_text();
+    current = relay_text();
+    current.push_str(fresh_text());
+    let pair := [fresh_text(), early_text(false)];
+    let tuple := (fresh_text(), 1);
+    let maybe: string? = Some(fresh_text());
+    let label := TextLabel { number: 1, text: fresh_text() };
+    let relayed := relay_label();
+    let chosen := if words.len() > 1 { fresh_text() } else { relay_text() };
+    assert(words.len() == 2);
+    assert(words[1].len() == 4);
+    assert(current.len() == 8);
+    assert(pair[0].len() + pair[1].len() == 8);
+    assert(tuple.0.len() == 4);
+    assert(match maybe { Some(text) => text.len() == 4, None => false });
+    assert(label.text.len() == 4);
+    assert(relayed.number == 4);
+    assert(chosen.len() == 4);
+    assert(text_length(fresh_text()) == 4);
+    assert(label_total(relay_label(), false) == 8);
+}
+// Methods take the same arguments as functions: an owned struct, tuple, enum,
+// array, List or String moves in (a temporary is staged and released by the
+// callee), and `.borrow()` / `.share()` pass a loan for a `borrow` / `share`
+// parameter. Only the receiver keeps its own rules. `of Interface` calls and
+// generic nominal methods work the same way.
+type Meter { base: u32 }
+extend Meter {
+    fn plus_label(borrow self, label: TextLabel) -> u32 {
+        self.base + label.number + label.text.len()
+    }
+    fn plus_text(borrow self, text: string) -> u32 { self.base + text.len() }
+    fn plus_view(borrow self, label: borrow TextLabel) -> u32 {
+        self.base + label.number
+    }
+    fn plus_pair(borrow self, pair: (string, u32)) -> u32 { self.base + pair.0.len() + pair.1 }
+}
+test fn method_arguments_follow_function_rules() {
+    let meter := Meter { base: 100 };
+    let kept := relay_label();
+    assert(meter.plus_view(kept.borrow()) == 104);
+    assert(meter.plus_label(kept) == 108);
+    assert(meter.plus_label(relay_label()) == 108);
+    assert(meter.plus_label(TextLabel { number: 1, text: "ab" }) == 103);
+    assert(meter.plus_text(fresh_text()) == 104);
+    assert(meter.plus_text("xyz") == 103);
+    assert(meter.plus_pair((fresh_text(), 2)) == 106);
 }

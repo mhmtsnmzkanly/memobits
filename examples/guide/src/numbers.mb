@@ -120,6 +120,40 @@ test fn checked_arithmetic() {
     assert(match one.checked_shl(16) { Some(_) => false, None => true });
     assert(one.wrapping_shl(17) == 2);
 }
+// Integer literals can be written in hexadecimal (`0xFF`, `0XFF`), binary
+// (`0b1010`) or octal (`0o17`), and `_` may separate the digits of any integer
+// or float literal (`1_000`, `0xFF_FF`, `1_0.5_0`, `1e1_0`). A separator sits
+// between digits: not first, not last and not right after a radix prefix;
+// doubled `__` is allowed. They take their type from context and are range
+// checked exactly like decimal literals, also in constants and in patterns.
+// Literal suffixes such as `0xFFu8` do not exist; annotate the binding.
+const RADIX_MASK: u32 = 0xFF_00;
+fn radix_class(value: u8) -> u32 {
+    match value { 0x00 => 1, 0b1 => 2, 0o10 => 3, 0xF0 | 0xF5 | 0xFF => 4, _ => 0 }
+}
+test fn radix_literals() {
+    let hex: u8 = 0xFF;
+    let binary: u8 = 0b1010_0101;
+    let octal: i32 = 0o755;
+    let smallest: i8 = -0x80;
+    let largest: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    let spaced := 1__000;
+    assert(hex == 255);
+    assert(binary == 165);
+    assert(octal == 493);
+    assert(smallest == -128);
+    assert(largest == 18_446_744_073_709_551_615);
+    assert(spaced == 1_000);
+    assert(0XfF == 255);
+    assert(RADIX_MASK >> 8 == 0xFF);
+    assert(1_000.5_0 > 1000.49);
+    assert(1e1_0 > 9.9e9);
+    assert(radix_class(0) == 1);
+    assert(radix_class(1) == 2);
+    assert(radix_class(8) == 3);
+    assert(radix_class(0xF5) == 4);
+    assert(radix_class(2) == 0);
+}
 // Bitwise operators `& | ^` and shifts `<< >>` work on every integer width
 // (operands share one type; the shift count is always u32), and so do the
 // compound forms `&= |= ^= <<= >>=` and the methods `bit_and`, `bit_or`,

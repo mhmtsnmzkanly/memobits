@@ -566,11 +566,8 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
             "TE018",
             "requires a new local binding",
         ),
-        (
-            "fn forward() -> Label { make() } fn main() {}",
-            "TE018",
-            "must be assigned directly",
-        ),
+        // `fn forward() -> Label { make() }` is accepted since F1 (the call
+        // result is staged in a hidden owner); see `f1_followups.rs`.
         (
             "fn view(l: borrow Label) -> Label { l } fn main() {}",
             "TE017",

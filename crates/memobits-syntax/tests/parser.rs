@@ -632,7 +632,8 @@ fn arrays_preserve_nested_types_literals_and_spans() {
     let TypeArgument::Integer(count) = &ty.arguments[1] else {
         panic!()
     };
-    assert_eq!(count.raw, "1_000");
+    // The lexer hands over the canonical spelling without digit separators.
+    assert_eq!(count.raw, "1000");
     let StatementKind::Expression(expr) = &body.statements[2].kind else {
         panic!()
     };

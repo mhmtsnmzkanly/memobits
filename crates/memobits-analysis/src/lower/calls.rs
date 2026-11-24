@@ -21,79 +21,12 @@ impl Builder<'_> {
                 arguments.iter().zip(&signature.parameters).enumerate()
             {
                 let direct = matches!(callee.source, Source::Function(_));
-                let direct_string = direct && parameter.ty == Type::String;
-                let direct_list = direct && matches!(parameter.ty, Type::List(_));
-                let direct_result_enum = matches!(parameter.ty, Type::Enum(id)
-                    if self.types.get(id.0 as usize).is_some_and(|info|
-                        info.entry_outcome == Some(memobits_ir::EntryOutcome::Result)));
-                let direct_owned_string_aggregate = direct
-                    && parameter.access == Access::Owned
-                    && (self.is_string_transport_owner(&parameter.ty)
-                        || matches!(parameter.ty, Type::Enum(_) | Type::Array { .. })
-                            && !direct_result_enum
-                            && self.is_string_owner_struct(&parameter.ty));
-                let temporary_receiver = match &argument.kind {
-                    ExprKind::Call { .. } | ExprKind::Interpolation(_)
-                        if (direct_string || direct_list) && parameter.access == Access::Owned =>
-                    {
-                        Some(argument)
-                    }
-                    ExprKind::Call {
-                        callee: conversion, ..
-                    } if (direct_string || direct_list) && parameter.access == Access::Borrow => {
-                        match &conversion.kind {
-                            ExprKind::Field { base, name }
-                                if name == "borrow"
-                                    && matches!(
-                                        base.kind,
-                                        ExprKind::Call { .. } | ExprKind::Interpolation(_)
-                                    ) =>
-                            {
-                                Some(base.as_ref())
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                let value = if let Some(base) = temporary_receiver {
-                    self.lower_with_temporary_owner(base)?
-                } else {
-                    self.lower_expr(argument)?
-                };
-                let value = if parameter.access != Access::Owned {
-                    // Keep the original pointee and loan.
-                    let mut reference = self.borrow(value, parameter.access)?;
-                    reference.mode = access_mode(parameter.access);
-                    reference
-                } else if direct_string || direct_list || direct_owned_string_aggregate {
-                    let owned = self.owned_to(value, &parameter.ty)?;
-                    // An owner temporary (literal or call result) is staged in
-                    // a hidden local first, like tuple and array elements, so
-                    // the callee receives a named, exactly-cleaned owner.
-                    let must_stage_owned_aggregate_temporary =
-                        direct_owned_string_aggregate && matches!(owned.source, Source::Value(_));
-                    let must_stage_before_later_argument = index + 1 < arguments.len()
-                        && temporary_receiver.is_none()
-                        && matches!(owned.source, Source::Local(_));
-                    if must_stage_owned_aggregate_temporary || must_stage_before_later_argument {
-                        // Give an owned tuple temporary a local descriptor
-                        // before transfer. This also keeps ownership
-                        // available for cleanup if a later argument exits.
-                        let staged = self.hidden_local(
-                            "owned call argument",
-                            parameter.ty.clone(),
-                            argument.span,
-                        );
-                        self.function.locals[staged.0 as usize].mutable = false;
-                        self.initialize_local(staged, owned, argument.span);
-                        consume(op(Source::Local(staged), argument.span))
-                    } else {
-                        owned
-                    }
-                } else {
-                    self.owned_captured(value, &parameter.ty)?
-                };
+                let value = self.lower_call_argument(
+                    argument,
+                    parameter,
+                    direct,
+                    index + 1 < arguments.len(),
+                )?;
                 args.push(value);
             }
             self.emit(
@@ -110,6 +43,90 @@ impl Builder<'_> {
         }
         self.owned_locals.truncate(scope_start);
         result
+    }
+
+    /// Lower one ordinary call argument (never a method receiver) against its
+    /// parameter. Owned Strings, Lists and String-owning aggregates are moved
+    /// in (temporaries staged in hidden owner locals), borrow and share
+    /// parameters take an explicit reference conversion.
+    pub(super) fn lower_call_argument(
+        &mut self,
+        argument: &Expr,
+        parameter: &memobits_ir::ParameterType,
+        direct: bool,
+        has_later_argument: bool,
+    ) -> Option<Operand> {
+        let direct_string = direct && parameter.ty == Type::String;
+        let direct_list = direct && matches!(parameter.ty, Type::List(_));
+        let direct_result_enum = matches!(parameter.ty, Type::Enum(id)
+            if self.types.get(id.0 as usize).is_some_and(|info|
+                info.entry_outcome == Some(memobits_ir::EntryOutcome::Result)));
+        let direct_owned_string_aggregate = direct
+            && parameter.access == Access::Owned
+            && (self.is_string_transport_owner(&parameter.ty)
+                || matches!(parameter.ty, Type::Enum(_) | Type::Array { .. })
+                    && !direct_result_enum
+                    && self.is_string_owner_struct(&parameter.ty));
+        let temporary_receiver = match &argument.kind {
+            ExprKind::Call { .. } | ExprKind::Interpolation(_)
+                if (direct_string || direct_list) && parameter.access == Access::Owned =>
+            {
+                Some(argument)
+            }
+            ExprKind::Call {
+                callee: conversion, ..
+            } if (direct_string || direct_list) && parameter.access == Access::Borrow => {
+                match &conversion.kind {
+                    ExprKind::Field { base, name }
+                        if name == "borrow"
+                            && matches!(
+                                base.kind,
+                                ExprKind::Call { .. } | ExprKind::Interpolation(_)
+                            ) =>
+                    {
+                        Some(base.as_ref())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let value = if let Some(base) = temporary_receiver {
+            self.lower_with_temporary_owner(base)?
+        } else {
+            self.lower_expr(argument)?
+        };
+        let value = if parameter.access != Access::Owned {
+            // Keep the original pointee and loan.
+            let mut reference = self.borrow(value, parameter.access)?;
+            reference.mode = access_mode(parameter.access);
+            reference
+        } else if direct_string || direct_list || direct_owned_string_aggregate {
+            let owned = self.owned_to(value, &parameter.ty)?;
+            // An owner temporary (literal or call result) is staged in
+            // a hidden local first, like tuple and array elements, so
+            // the callee receives a named, exactly-cleaned owner.
+            let must_stage_owned_aggregate_temporary =
+                direct_owned_string_aggregate && matches!(owned.source, Source::Value(_));
+            let must_stage_before_later_argument = has_later_argument
+                && temporary_receiver.is_none()
+                && matches!(owned.source, Source::Local(_));
+            if must_stage_owned_aggregate_temporary || must_stage_before_later_argument {
+                // Give an owned tuple temporary a local descriptor
+                // before transfer. This also keeps ownership
+                // available for cleanup if a later argument exits.
+                let staged =
+                    self.hidden_local("owned call argument", parameter.ty.clone(), argument.span);
+                self.function.locals[staged.0 as usize].mutable = false;
+                self.initialize_local(staged, owned, argument.span);
+                consume(op(Source::Local(staged), argument.span))
+            } else {
+                owned
+            }
+        } else {
+            self.owned_captured(value, &parameter.ty)?
+        };
+        Some(value)
     }
 
     pub(super) fn lower_selected_call(
@@ -140,12 +157,17 @@ impl Builder<'_> {
                 let receiver = self.lower_expr(base)?;
                 values.push(self.lower_selected_argument(receiver, receiver_parameter)?);
             }
-            for (argument, parameter) in arguments
+            for (index, (argument, parameter)) in arguments
                 .iter()
                 .zip(selected.signature.parameters.iter().skip(1))
+                .enumerate()
             {
-                let value = self.lower_expr(argument)?;
-                values.push(self.lower_selected_argument(value, parameter)?);
+                values.push(self.lower_call_argument(
+                    argument,
+                    parameter,
+                    true,
+                    index + 1 < arguments.len(),
+                )?);
             }
             self.emit(
                 expr.span,
