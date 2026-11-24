@@ -100,6 +100,9 @@ impl Checker {
             },
             _ => false,
         };
+        if writable {
+            self.note_write_root(base);
+        }
         let Ty::List(element) = read_type(receiver) else {
             let root = super::root_note(base);
             self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter{root}"));

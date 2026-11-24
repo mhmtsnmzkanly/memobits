@@ -773,3 +773,319 @@ fn captures_of_immutable_variables_cannot_be_mutated() {
         "cannot capture 'n' by share",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Temporary List owners passed through function values
+
+/// Every round passes fresh List owners (each holding a heap String) to an
+/// owned List parameter four ways: directly, through a function-typed local,
+/// and through a function value received as a parameter (a local and a name).
+/// `{extra}` lets the mutation check keep one String per round.
+fn list_owner_program(extra: &str) -> String {
+    let text = "x".repeat(TEXT_BYTES);
+    format!(
+        r#"use alloc::List;
+fn make() -> List<string> {{
+    var l: List<string> = [];
+    let s := "{text}".concat("");
+    l.push(s);
+    l
+}}
+fn take(l: List<string>, k: u32) -> u32 {{ (l.len() as u32) + l[0].len() + k }}
+fn indirect(f: fn(List<string>, u32) -> u32, l: List<string>, k: u32) -> u32 {{ f(l, k) }}
+fn round(early: bool, keep: share List<string>) -> u32 {{
+    let f: fn(List<string>, u32) -> u32 = take;
+    let a := take(make(), 0);
+    if early {{ return a + f(make(), 1); }}
+    {extra}
+    a + f(make(), 1) + indirect(f, make(), 2) + indirect(take, make(), 3)
+}}
+fn main() -> u32 {{
+    var keep: List<string> = [];
+    var iteration: u32 = 0;
+    var total: u32 = 0;
+    loop {{
+        if iteration == {ITERATIONS} {{ break; }}
+        total += round(iteration % 2 == 0, keep.share());
+        iteration += 1;
+    }}
+    total
+}}
+"#
+    )
+}
+
+#[test]
+fn temporary_list_owners_through_function_values_release_exactly_under_capped_memory() {
+    let t = TEXT_BYTES as u64;
+    let one = t + 1; // len() + first element length
+    let early = one + (one + 1);
+    let late = one + (one + 1) + (one + 2) + (one + 3);
+    let rounds = u64::from(ITERATIONS);
+    let expected = (rounds / 2) * early + (rounds / 2) * late;
+    let source = list_owner_program("");
+    let f = Fixture::with(&source, "[build]\nstack_size=4096\n");
+    let source_run = f.run(&["run"]);
+    assert!(
+        source_run.status.success(),
+        "source run: {}",
+        text(&source_run.stderr)
+    );
+    assert_eq!(
+        text(&source_run.stdout),
+        format!("Result: u32({expected})\n")
+    );
+    let (f, capped) = run_capped(&source);
+    assert!(
+        capped.status.success() && capped.stderr.is_empty(),
+        "capped Wasm run failed: {}",
+        text(&capped.stderr)
+    );
+    assert_eq!(text(&capped.stdout), format!("Result: i32({expected})\n"));
+    let memory = wasmparser::Parser::new(0)
+        .parse_all(&fs::read(f.0.join("capped.wasm")).unwrap())
+        .find_map(|payload| match payload.unwrap() {
+            wasmparser::Payload::MemorySection(section) => section.into_iter().next(),
+            _ => None,
+        })
+        .expect("Wasm memory section")
+        .unwrap();
+    assert_eq!(memory.maximum, Some(memory.initial + 1));
+}
+
+#[test]
+fn mutation_check_keeping_a_list_string_per_round_exhausts_the_capped_memory() {
+    // A String moved into a never-emptied List each (late) round: the cap must
+    // trap, so the clean run above really measures the cleanup.
+    let text = "x".repeat(TEXT_BYTES);
+    let keep = format!(r#"let junk := "{text}".concat(""); keep.push(junk);"#);
+    let (_f, kept) = run_capped(&list_owner_program(&keep));
+    assert!(!kept.status.success(), "{kept:?}");
+    assert!(
+        text_of(&kept.stderr).contains("guest heap allocation failed"),
+        "{}",
+        text_of(&kept.stderr)
+    );
+}
+
+#[test]
+fn a_temporary_list_owner_is_accepted_directly_and_through_a_function_value() {
+    // 2 + 2 + 2 + 2: the same owner temporary, four routes.
+    single(
+        r#"use alloc::List;
+fn make() -> List<i32> { var l: List<i32> = []; l.push(1); l.push(2); l }
+fn take(l: List<i32>, k: i32) -> i32 { (l.len() as i32) + k }
+fn indirect(f: fn(List<i32>, i32) -> i32, l: List<i32>, k: i32) -> i32 { f(l, k) }
+fn main() -> i32 {
+    let f: fn(List<i32>, i32) -> i32 = take;
+    take(make(), 0) + f(make(), 0) + indirect(take, make(), 0) + indirect(f, make(), 0)
+}
+"#,
+        0,
+        8,
+        "temporary List owners",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capture classification (structural capture analysis)
+
+/// A chain of `levels` nested `share fn` literals, each binding one parameter,
+/// whose innermost body adds all of them to `t`.
+fn nested_closures(levels: usize) -> String {
+    let names: Vec<String> = (0..levels).map(|i| format!("p{i}")).collect();
+    let mut body = format!("t += {};", names.join(" + "));
+    for name in names.iter().rev() {
+        body = format!("each(fn({name}) {{ {body} }}, 2);");
+    }
+    format!(
+        "fn each(f: share fn(i32), n: i32) {{ loop i in 0..n {{ f(i); }} }}\nfn main() -> i32 {{ var t := 0; {body} t }}\n"
+    )
+}
+
+#[test]
+fn deeply_nested_closures_check_in_linear_time() {
+    // Every level is analysed once: 12 levels used to take over a minute
+    // (the cost doubled per level). The bound is generous for a debug build.
+    for (levels, expected) in [(6, 192), (12, 24_576)] {
+        let f = Fixture::new(&nested_closures(levels));
+        let start = std::time::Instant::now();
+        let checked = f.run(&["check"]);
+        let elapsed = start.elapsed();
+        assert!(checked.status.success(), "{}", text(&checked.stderr));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{levels} levels took {elapsed:?}"
+        );
+        if levels == 6 {
+            verify(&f, 0, expected, "six nested levels");
+        } else {
+            let run = f.run(&["run"]);
+            assert_eq!(
+                text(&run.stdout),
+                format!("Result: i32({expected})\n"),
+                "{}",
+                text(&run.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn mutation_through_a_nested_projection_makes_a_share_capture() {
+    single(
+        r#"use alloc::List;
+type P { x: i32 }
+type Q { pts: List<P> }
+fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }
+fn main() -> i32 {
+    var pts: List<P> = [];
+    pts.push(P { x: 1 });
+    pts.push(P { x: 2 });
+    var q := Q { pts: pts };
+    each(fn(i) { q.pts[1].x += i; }, 3);
+    q.pts[1].x
+}
+"#,
+        0,
+        5,
+        "nested projection",
+    );
+    rejects(
+        r#"use alloc::List;
+type P { x: i32 }
+fn probe(f: borrow fn(i32), n: i32) { f(n); }
+fn main() -> i32 { var pts: List<P> = []; pts.push(P { x: 1 }); probe(fn(i) { pts[0].x = i; }, 3); 0 }
+"#,
+        "TE017",
+        "needs a `share fn` parameter",
+    );
+}
+
+#[test]
+fn a_share_self_receiver_makes_a_share_capture() {
+    let methods = "type Lane { width: i32 } extend {\n    fn span(borrow self) -> i32 { self.width }\n    fn widen(share self) { self.width += 1; }\n}\n";
+    single(
+        &format!(
+            "{methods}fn each(f: share fn(i32), n: i32) {{ loop i in 0..n {{ f(i); }} }}\nfn main() -> i32 {{ var l := Lane {{ width: 1 }}; each(fn(i) {{ l.widen(); }}, 3); l.span() }}\n"
+        ),
+        0,
+        4,
+        "share self receiver",
+    );
+    // A borrow self receiver only reads: a `borrow fn` parameter accepts it.
+    single(
+        &format!(
+            "{methods}fn probe(f: borrow fn() -> i32) -> i32 {{ f() }}\nfn main() -> i32 {{ var l := Lane {{ width: 1 }}; l.widen(); probe(fn() => l.span()) }}\n"
+        ),
+        0,
+        2,
+        "borrow self receiver",
+    );
+    rejects(
+        &format!(
+            "{methods}fn probe(f: borrow fn()) {{ f(); }}\nfn main() -> i32 {{ var l := Lane {{ width: 1 }}; probe(fn() {{ l.widen(); }}); 0 }}\n"
+        ),
+        "TE017",
+        "needs a `share fn` parameter",
+    );
+}
+
+#[test]
+fn mutation_through_a_nested_closure_propagates_outward() {
+    single(
+        "fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn main() -> i32 { var t := 0; each(fn(i) { each(fn(j) { t += i + j; }, 2); }, 3); t }\n",
+        0,
+        9,
+        "nested closure mutation",
+    );
+    // A middle literal that only passes the inner one on still mutates.
+    rejects(
+        "fn probe(f: borrow fn(i32), n: i32) { f(n); }\nfn each(f: share fn(i32), n: i32) { f(n); }\nfn main() -> i32 { var t := 0; probe(fn(i) { each(fn(j) { t += j; }, 2); }, 3); t }\n",
+        "TE017",
+        "needs a `share fn` parameter",
+    );
+}
+
+#[test]
+fn a_variable_mutated_only_outside_the_closure_is_a_read_capture() {
+    // t is mutated before and after the closure, never inside it, so a
+    // `borrow fn` parameter accepts the literal. 7 + 6 = 13.
+    single(
+        "fn probe(f: borrow fn(i32) -> i32, x: i32) -> i32 { f(x) }\nfn main() -> i32 { var t := 1; t += 4; let r := probe(fn(x) => x + t, 2); t += 1; r + t }\n",
+        0,
+        13,
+        "read capture of a mutated variable",
+    );
+    // A parameter that shadows the outer name is not a capture at all.
+    single(
+        "fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn main() -> i32 { var t := 0; each(fn(t: i32) { var u := t; u += 1; }, 3); t }\n",
+        0,
+        0,
+        "shadowing parameter",
+    );
+}
+
+#[test]
+fn builtin_mutators_and_overwrites_make_share_captures() {
+    single(
+        r#"use alloc::List;
+fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }
+fn main() -> i32 {
+    var l: List<i32> = [];
+    var s := "a".concat("");
+    var t := 0;
+    each(fn(i) { l.push(i); s.push_str("b"); t = i + 1; }, 3);
+    each(fn(i) { l.clear(); }, 1);
+    (l.len() as i32) + (s.len() as i32) + t
+}
+"#,
+        0,
+        7,
+        "push, push_str, clear, overwrite",
+    );
+    single(
+        r#"use alloc::List;
+fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }
+fn main() -> i32 {
+    let first := "ab".concat("");
+    let second := "cde".concat("");
+    var w: List<string> = [first, second];
+    each(fn(i) { swap(w[0], w[1]); }, 3);
+    var s := "q".concat("");
+    each(fn(i) { let o := replace(s, "zz".concat("")); }, 2);
+    (w[0].len() as i32) * 10 + (s.len() as i32)
+}
+"#,
+        0,
+        32,
+        "swap and replace",
+    );
+    single(
+        "fn bump(n: share i32) { n += 1; }\nfn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn main() -> i32 { var t := 0; each(fn(i) { bump(t.share()); }, 3); t }\n",
+        0,
+        3,
+        "share argument",
+    );
+    single(
+        "fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn bump(n: share i32) { each(fn(i) { n += i; }, 3); }\nfn main() -> i32 { var t := 0; bump(t.share()); t }\n",
+        0,
+        3,
+        "share parameter captured",
+    );
+}
+
+#[test]
+fn function_typed_captures_take_the_access_of_their_effect() {
+    single(
+        "fn each(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn twice(f: share fn(i32)) { each(fn(i) { f(i); f(i); }, 2); }\nfn main() -> i32 { var t := 0; twice(fn(i) { t += i + 1; }); t }\n",
+        0,
+        6,
+        "share fn capture",
+    );
+    rejects(
+        "fn each(f: borrow fn(i32), n: i32) { loop i in 0..n { f(i); } }\nfn twice(f: share fn(i32)) { each(fn(i) { f(i); }, 2); }\nfn main() -> i32 { 0 }\n",
+        "TE017",
+        "needs a `share fn` parameter",
+    );
+}

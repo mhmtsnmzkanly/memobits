@@ -1348,14 +1348,27 @@ Facts about the shipped non-escaping closures; the Stage 4 decision is unchanged
   parameter (a `share fn` never to a `borrow fn`), never stored, returned or put
   in fields/collections (`read_type` keeps function references, so `ensure` and
   `push` reject them: "reference values cannot escape").
-- Captures are inferred in the checker (`closure_body`): the body is first checked
-  without facts while enclosing locals are viewed as read-only references
-  (`Probe`); an error that names a captured variable (`'x'`) promotes it to a share
-  capture and the probe repeats; then the real check binds the captures as
-  trailing hidden `borrow`/`share` parameters of the lifted function. Names of
-  grandparent functions are captured transitively. A function-typed capture takes
-  the access of its effect (`share fn` parameter or mutating closure = share).
-  Mutation-denial diagnostics therefore quote the variable name.
+- Captures are inferred in the checker by a structural capture analysis (H2b),
+  not by probing diagnostics. Per function literal one analysis pass
+  (`closure_body` with `BodyMode::Infer`) checks the body once without facts, with
+  every enclosing name bound as a hidden share parameter (a function-typed name
+  takes the access of its effect). The checker records the names it looks up
+  (uses) and calls `note_write` wherever it accepts a write permission:
+  assignment and compound-assignment targets (whole, `x.f`, `x[i]`), `replace` /
+  `swap` places, `push` / `pop` / `clear` / `push_str`, `.share()` conversions,
+  a share reference passed on as it is, receivers of `share self` methods, and the
+  captures of nested literals (propagated outward). Everything else is a read.
+  The result (used names in first-use order, written subset) is cached per literal
+  for the duration of the outermost literal, so a nested body is analysed once and
+  the real check binds the captures as trailing hidden `borrow`/`share` parameters
+  of the lifted function with those accesses. Cost is linear in the body size
+  (12 nested levels check in milliseconds; the earlier probe-and-promote design
+  doubled per level) and nothing depends on diagnostic wording (`root_note` is
+  diagnostics only). Names of grandparent functions are captured transitively. A
+  function-typed capture takes the access of its effect (`share fn` parameter or
+  mutating closure = share). One consequence over the probe design: a `share self`
+  method call inside a literal now makes a share capture (it used to fail IR
+  validation).
 - A capturing literal is valid only as a direct argument of a `borrow fn`/`share fn`
   parameter or as the initializer of an immutable `let` (`ClosureContext`); the
   `let` local is second-class (`Binding::closure`): usable only as a callee or as

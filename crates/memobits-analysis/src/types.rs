@@ -492,8 +492,8 @@ fn name(ty: &Ty) -> String {
 /// The named local at the root of a projection chain: any mix of indexing and
 /// field access such as `a[i].pts[j].x`.
 /// ` ('name' is not writable here)` for the root binding of a place, so an
-/// error about a missing write permission names the variable (a closure
-/// capture that hits it becomes a share capture).
+/// error about a missing write permission names the variable. Diagnostics
+/// only: capture inference does not read messages.
 fn root_note(expr: &Expr) -> String {
     match place_root(expr) {
         Some(path) if path.len() == 1 => format!(" ('{}' is not writable here)", path[0]),
@@ -1093,9 +1093,11 @@ struct CapturePlan {
 }
 
 enum BodyMode<'a> {
-    /// Find the captures: no facts, diagnostics returned. `shared` names the
-    /// enclosing variables viewed as share references.
-    Probe { shared: &'a HashSet<String> },
+    /// The capture analysis: the body is checked once without facts, with every
+    /// enclosing variable visible as a hidden share parameter. The checker
+    /// records which of them it writes (`Checker::note_write`) and which it
+    /// uses; diagnostics are dropped.
+    Infer,
     /// The real check with the captures bound as trailing parameters.
     Final { captures: &'a [CapturePlan] },
 }
@@ -1103,11 +1105,26 @@ enum BodyMode<'a> {
 struct ClosureBodyResult {
     result: Ty,
     own_facts: Option<FunctionFacts>,
-    /// Enclosing names the body used: name and index of the outer scope.
-    captured: Vec<(String, usize)>,
-    /// Diagnostics of a probe (removed from the checker).
-    errors: Vec<Diagnostic>,
+    /// Enclosing names the body used, in order of first use (analysis only).
+    captured: Vec<String>,
+    /// The used names the body writes (analysis only).
+    shared: HashSet<String>,
 }
+
+/// What the capture analysis found for one function literal.
+#[derive(Clone)]
+struct CaptureAnalysis {
+    /// Enclosing names the body uses, in order of first use.
+    used: Vec<String>,
+    /// The subset the body mutates (needs a share capture).
+    shared: HashSet<String>,
+    /// The body's result type as the analysis saw it.
+    result: Ty,
+}
+
+/// Origins of the hidden capture parameters of the analysis carry this bit, so
+/// the checker can tell a write to a capture from a write to anything else.
+const CAPTURE_ORIGIN: usize = 1 << (usize::BITS - 1);
 
 /// The access a function value needs when it is only called: `Share` for a
 /// `share fn` parameter or a closure that mutates its captures.
@@ -1124,22 +1141,19 @@ fn function_effect(binding: &Binding) -> IrAccess {
     }
 }
 
-/// How the body of a closure sees one enclosing variable while captures are
-/// being found: as an immutable reference (read-only borrow, or a share
-/// reference for the names already known to be mutated).
-fn capture_view(name: &str, binding: &Binding, shared: &HashSet<String>, expr: &Expr) -> Binding {
+/// How the capture analysis sees one enclosing variable: a hidden share
+/// parameter (a function value takes the access its own effect has), so that
+/// any permitted use type-checks. The checker records the writes.
+fn infer_view(binding: &Binding, origin: usize) -> Binding {
     let inner = match &binding.ty {
         Ty::Reference { inner, .. } => inner.as_ref().clone(),
         other => other.clone(),
     };
     let access = if matches!(inner, Ty::Function(..)) {
         function_effect(binding)
-    } else if shared.contains(name) {
-        IrAccess::Share
     } else {
-        IrAccess::Borrow
+        IrAccess::Share
     };
-    let origin = expr as *const Expr as usize;
     Binding {
         closure: None,
         ty: Ty::Reference {
@@ -1228,6 +1242,15 @@ struct Checker {
     /// The enclosing names the current anonymous function used, with the
     /// index of the outer scope that holds each, in order of first use.
     captured: RefCell<Vec<(String, usize)>>,
+    /// Capture analysis: origins of capture parameters the body has written.
+    capture_writes: HashSet<usize>,
+    /// Capture analysis results of the function literals under the outermost
+    /// one being checked, so each body is analysed once.
+    capture_cache: HashMap<usize, CaptureAnalysis>,
+    next_capture_origin: usize,
+    /// Nesting of function literals being checked, and of analysis passes.
+    closure_depth: usize,
+    infer_depth: usize,
     /// Set by the caller right before a function literal is checked: where the
     /// literal stands (a capturing closure is only valid in two positions).
     closure_context: Option<ClosureContext>,
@@ -1798,10 +1821,31 @@ impl Checker {
     fn error(&mut self, n: u16, span: Span, message: impl Into<String>) {
         self.diagnostics.push(diagnostic(n, span, message));
     }
+    /// The capture analysis: the body writes (or shares) the place rooted at a
+    /// binding. Called wherever the checker accepts a write permission.
+    fn note_write(&mut self, origin: usize) {
+        if origin & CAPTURE_ORIGIN != 0 {
+            self.capture_writes.insert(origin);
+        }
+    }
+    /// `note_write` for the named local at the root of a place expression.
+    fn note_write_root(&mut self, place: &Expr) {
+        if let Some(path) = place_root(place) {
+            if path.len() == 1 {
+                if let Some(binding) = self.lookup(&path[0]) {
+                    let origin = binding.origin;
+                    self.note_write(origin);
+                }
+            }
+        }
+    }
     /// TE004: a write through a projection chain (`a[i].x`, `l.pts[j]`) needs
     /// the root binding to be a `var` owner or a share reference.
     fn check_place_writable(&mut self, target: &Expr, root: &str, binding: &Binding) {
         let writable = binding.mutable || binding.access == IrAccess::Share;
+        if writable {
+            self.note_write(binding.origin);
+        }
         let aggregate = |ty: &Ty| match ty {
             Ty::Array(..) => Some("an element of immutable array"),
             Ty::List(_) => Some("an element of immutable List"),
@@ -2131,6 +2175,14 @@ impl Checker {
     }
     fn lookup(&self, key: &str) -> Option<&Binding> {
         if let Some(binding) = self.scopes.iter().rev().find_map(|scope| scope.get(key)) {
+            if binding.origin & CAPTURE_ORIGIN != 0 {
+                // The capture analysis sees every enclosing name as a hidden
+                // parameter; a lookup is a use.
+                let mut captured = self.captured.borrow_mut();
+                if !captured.iter().any(|(name, _)| name == key) {
+                    captured.push((key.to_owned(), 0));
+                }
+            }
             return Some(binding);
         }
         // A name of an enclosing function is found (so it has a type) and
@@ -2521,6 +2573,7 @@ impl Checker {
                                         } if binding.mutable
                                             || binding.access == IrAccess::Share =>
                                         {
+                                            self.note_write(binding.origin);
                                             inner.as_ref().clone()
                                         }
                                         Ty::Reference {
@@ -2553,7 +2606,10 @@ impl Checker {
                                             );
                                             inner.as_ref().clone()
                                         }
-                                        _ if binding.access == IrAccess::Share => binding.ty,
+                                        _ if binding.access == IrAccess::Share => {
+                                            self.note_write(binding.origin);
+                                            binding.ty
+                                        }
                                         _ if !binding.mutable => {
                                             self.error(
                                                 4,
@@ -3084,6 +3140,22 @@ impl Checker {
         function: &memobits_syntax::AnonymousFunction,
         expected: Option<&Ty>,
     ) -> Ty {
+        self.closure_depth += 1;
+        let ty = self.anonymous_function_checked(expr, function, expected);
+        self.closure_depth -= 1;
+        if self.closure_depth == 0 {
+            self.capture_cache.clear();
+            self.capture_writes.clear();
+        }
+        ty
+    }
+
+    fn anonymous_function_checked(
+        &mut self,
+        expr: &Expr,
+        function: &memobits_syntax::AnonymousFunction,
+        expected: Option<&Ty>,
+    ) -> Ty {
         let expected_signature = match expected {
             Some(Ty::Function(parameters, result)) => {
                 Some((parameters.clone(), result.as_ref().clone()))
@@ -3145,41 +3217,41 @@ impl Checker {
         let context = self.closure_context.take();
         let node_addr = expr as *const Expr as usize;
         let enclosed = !self.scopes.is_empty() || !self.outer_scopes.is_empty();
-        // Find the captures. The body is checked without facts as many times
-        // as it takes for the set of shared captures to settle: a capture is
-        // first viewed as a read-only borrow, and a mutation attempt is an
-        // error that names the variable, which then becomes a share capture.
-        let mut shared: HashSet<String> = HashSet::new();
-        let mut discovered: Vec<(String, usize)> = Vec::new();
-        if enclosed {
-            for _ in 0..=64 {
-                let probe = self.closure_body(
-                    expr,
-                    function,
-                    &parameters,
-                    &result,
-                    infer_result,
-                    BodyMode::Probe { shared: &shared },
-                );
-                discovered = probe.captured;
-                let promoted = discovered
-                    .iter()
-                    .filter(|(name, _)| !shared.contains(name))
-                    .filter(|(name, _)| {
-                        let quoted = format!("'{name}'");
-                        probe
-                            .errors
-                            .iter()
-                            .any(|diagnostic| diagnostic.message.contains(&quoted))
-                    })
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
-                if promoted.is_empty() {
-                    break;
+        // The capture analysis: one pass over the body (nested literals are
+        // analysed inside it, once) finds the enclosing names it uses and the
+        // ones it writes. The result is cached for the real check below.
+        let analysis = if enclosed {
+            let cached = self.capture_cache.get(&node_addr).cloned();
+            Some(match cached {
+                Some(found) => found,
+                None => {
+                    self.infer_depth += 1;
+                    let probe = self.closure_body(
+                        expr,
+                        function,
+                        &parameters,
+                        &result,
+                        infer_result,
+                        BodyMode::Infer,
+                    );
+                    self.infer_depth -= 1;
+                    let found = CaptureAnalysis {
+                        used: probe.captured,
+                        shared: probe.shared,
+                        result: probe.result,
+                    };
+                    self.capture_cache.insert(node_addr, found.clone());
+                    found
                 }
-                shared.extend(promoted);
-            }
-        }
+            })
+        } else {
+            None
+        };
+        let (discovered, shared) = analysis
+            .as_ref()
+            .map_or((Vec::new(), HashSet::new()), |found| {
+                (found.used.clone(), found.shared.clone())
+            });
         // The enclosing bindings the captures come from (the parent's view).
         let chain = self
             .outer_scopes
@@ -3190,8 +3262,13 @@ impl Checker {
         let boundary = self.outer_scopes.len();
         let mut plan: Vec<CapturePlan> = Vec::new();
         let mut share_effect = false;
-        for (name, index) in &discovered {
-            let Some(source) = chain.get(*index).and_then(|scope| scope.get(name)).cloned() else {
+        for name in &discovered {
+            let Some((index, source)) = chain
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, scope)| scope.get(name).map(|b| (index, b.clone())))
+            else {
                 continue;
             };
             let inner = match &source.ty {
@@ -3226,14 +3303,27 @@ impl Checker {
                 inner,
                 local: source.id,
             });
-            if *index < boundary {
-                // The name belongs to a function that encloses the parent:
-                // the parent has to capture it too.
+            if index < boundary || source.origin & CAPTURE_ORIGIN != 0 {
+                // The name belongs to a function that encloses the parent
+                // (or is a hidden parameter of the parent's analysis): the
+                // parent has to capture it too.
                 let mut log = self.captured.borrow_mut();
                 if !log.iter().any(|(logged, _)| logged == name) {
-                    log.push((name.clone(), *index));
+                    log.push((name.clone(), index));
                 }
             }
+            if access == IrAccess::Share && !is_function {
+                self.note_write(source.origin);
+            }
+        }
+        if self.infer_depth > 0 {
+            // Inside an analysis only the type and the capture effects are
+            // needed; the real check of this literal happens with its parent's.
+            let result = analysis.map_or(result, |found| found.result);
+            if failed || result == Ty::Error {
+                return Ty::Error;
+            }
+            return Ty::Function(parameters, Box::new(result));
         }
         let body = self.closure_body(
             expr,
@@ -3325,10 +3415,11 @@ impl Checker {
     }
 
     /// Check the body of an anonymous function as a function of its own and
-    /// return what it needs. `Probe` runs without facts or diagnostics and
-    /// reports which enclosing names the body uses (viewed as read-only
-    /// borrows, or as shares for the names in `shared`); `Final` binds the
-    /// planned captures as trailing reference parameters and records facts.
+    /// return what it needs. `Infer` is the capture analysis: one pass without
+    /// facts or diagnostics, with every enclosing name bound as a hidden share
+    /// parameter, that reports which names the body uses and which it writes
+    /// (see `note_write`). `Final` binds the planned captures as trailing
+    /// reference parameters and records facts.
     fn closure_body(
         &mut self,
         expr: &Expr,
@@ -3339,7 +3430,7 @@ impl Checker {
         mode: BodyMode,
     ) -> ClosureBodyResult {
         let mut result = result.clone();
-        let probing = matches!(mode, BodyMode::Probe { .. });
+        let probing = matches!(mode, BodyMode::Infer);
         // Switch to the anonymous function's own context.
         let outer_facts = self.facts.take();
         let mut own_facts = None;
@@ -3391,17 +3482,8 @@ impl Checker {
         let saved_boundary = std::mem::replace(&mut self.outer_boundary, saved_outer.len());
         let chain = saved_outer.iter().chain(saved_scopes.iter());
         self.outer_scopes = match &mode {
-            // Everything the body can reach outside is seen as a reference.
-            BodyMode::Probe { shared } => chain
-                .map(|scope| {
-                    scope
-                        .iter()
-                        .map(|(name, binding)| {
-                            (name.clone(), capture_view(name, binding, shared, expr))
-                        })
-                        .collect()
-                })
-                .collect(),
+            // The analysis binds the enclosing names as hidden parameters.
+            BodyMode::Infer => Vec::new(),
             BodyMode::Final { .. } => chain.cloned().collect(),
         };
         let saved_captured = std::mem::take(&mut *self.captured.borrow_mut());
@@ -3419,6 +3501,27 @@ impl Checker {
                 parameter as *const _ as usize,
                 resolved.ty.clone(),
             );
+        }
+        let mut capture_origins: Vec<(String, usize)> = Vec::new();
+        if matches!(mode, BodyMode::Infer) {
+            // Every enclosing name (the innermost binding of each) is a hidden
+            // share parameter; the parameters of the literal shadow them.
+            let mut visible: HashMap<&String, &Binding> = HashMap::new();
+            for scope in saved_outer.iter().chain(saved_scopes.iter()) {
+                for (name, binding) in scope {
+                    visible.insert(name, binding);
+                }
+            }
+            for (name, binding) in visible {
+                if self.scopes[0].contains_key(name) {
+                    continue;
+                }
+                self.next_capture_origin += 1;
+                let origin = CAPTURE_ORIGIN | self.next_capture_origin;
+                self.parameter_origins.insert(origin);
+                self.scopes[0].insert(name.clone(), infer_view(binding, origin));
+                capture_origins.push((name.clone(), origin));
+            }
         }
         if let BodyMode::Final { captures } = &mode {
             for (index, capture) in captures.iter().enumerate() {
@@ -3478,16 +3581,19 @@ impl Checker {
         self.closure_context = saved_context;
         let captured = std::mem::replace(&mut *self.captured.borrow_mut(), saved_captured);
         let own_facts = std::mem::replace(&mut self.facts, outer_facts);
-        let errors = if probing {
-            self.diagnostics.drain(diagnostics_mark..).collect()
-        } else {
-            Vec::new()
-        };
+        if probing {
+            self.diagnostics.truncate(diagnostics_mark);
+        }
+        let shared = capture_origins
+            .into_iter()
+            .filter(|(_, origin)| self.capture_writes.contains(origin))
+            .map(|(name, _)| name)
+            .collect();
         ClosureBodyResult {
             result,
             own_facts,
-            captured,
-            errors,
+            captured: captured.into_iter().map(|(name, _)| name).collect(),
+            shared,
         }
     }
 
@@ -3790,6 +3896,7 @@ impl Checker {
                         inner,
                         ..
                     } if binding.mutable || binding.access == IrAccess::Share => {
+                        self.note_write(binding.origin);
                         inner.as_ref().clone()
                     }
                     Ty::Reference { inner, .. } => {
@@ -4090,6 +4197,12 @@ impl Checker {
         }
         let actual = self.expr(arg, param.map(|parameter| &parameter.ty));
         self.closure_context = None;
+        if param.is_some_and(|parameter| parameter.access == IrAccess::Share)
+            && matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1)
+        {
+            // A share reference passed on as it is.
+            self.note_write_root(arg);
+        }
         // A `share fn` parameter may mutate through its closure, so it cannot
         // be passed on where only read-only closures are accepted.
         let passes_share_parameter = matches!(&actual, Ty::Reference {
@@ -4473,6 +4586,9 @@ impl Checker {
         }));
         self.allow_array_value(base);
         self.expr(base, None);
+        if writable {
+            self.note_write_root(base);
+        }
         if !writable {
             self.error(
                 17,
@@ -4677,6 +4793,9 @@ impl Checker {
         }
 
         if access == IrAccess::Share {
+            if let Some(binding) = &owner_binding {
+                self.note_write(binding.origin);
+            }
             let already_shared = current_access == Some(IrAccess::Share);
             let incoming_share = owner_binding
                 .as_ref()
@@ -7632,6 +7751,9 @@ impl Checker {
                         if receiver_access == Access::Owned {
                             self.reject_extraction(base, &receiver);
                         }
+                        if receiver_access == Access::Share {
+                            self.note_write_root(base);
+                        }
                         if parameters.len() != arguments.len() {
                             self.error(
                                 10,
@@ -8175,6 +8297,11 @@ fn check_standalone(
         outer_scopes: Vec::new(),
         outer_boundary: 0,
         captured: RefCell::new(Vec::new()),
+        capture_writes: HashSet::new(),
+        capture_cache: HashMap::new(),
+        next_capture_origin: 0,
+        closure_depth: 0,
+        infer_depth: 0,
         closure_context: None,
         closure_exprs: HashMap::new(),
         closure_uses: HashSet::new(),
@@ -9086,6 +9213,11 @@ fn checker() -> Checker {
         outer_scopes: Vec::new(),
         outer_boundary: 0,
         captured: RefCell::new(Vec::new()),
+        capture_writes: HashSet::new(),
+        capture_cache: HashMap::new(),
+        next_capture_origin: 0,
+        closure_depth: 0,
+        infer_depth: 0,
         closure_context: None,
         closure_exprs: HashMap::new(),
         closure_uses: HashSet::new(),
