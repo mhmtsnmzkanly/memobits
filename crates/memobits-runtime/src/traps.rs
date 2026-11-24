@@ -32,6 +32,7 @@ pub enum TrapReason {
     ArgumentRange,
     HeapAllocation,
     ShiftCount,
+    AssertionFailed,
 }
 
 impl TrapReason {
@@ -48,6 +49,7 @@ impl TrapReason {
             9 => Self::ArgumentRange,
             10 => Self::HeapAllocation,
             11 => Self::ShiftCount,
+            12 => Self::AssertionFailed,
             _ => return None,
         })
     }
@@ -66,6 +68,7 @@ impl TrapReason {
             Self::ArgumentRange => "argument out of range for its parameter type",
             Self::HeapAllocation => "guest heap allocation failed",
             Self::ShiftCount => "shift count must be less than 32",
+            Self::AssertionFailed => "assertion failed",
         }
     }
 }

@@ -478,3 +478,65 @@ This section supersedes earlier spelling statements in this file, including
   live owner are introduced.
 - Literal patterns, or-patterns, guards and pattern bindings with `@` remain
   open (not part of this decision).
+
+## Platform layers and memory model (2026-11-24, user decision)
+
+- The library surface is layered like Rust's core/alloc/std:
+  - **core** — always available, needs no heap: primitives, `bool`, `char`,
+    `array<T, N>`, `T?`, `T ! E`, tuples, records, enums, interfaces,
+    `core::ops`, string literals and read-only string operations.
+  - **alloc** — available when the build includes the guest allocator:
+    `List<T>` (imported as `use alloc::List;`, a Rust-owned virtual module like
+    `core::ops`), heap-producing string operations (`concat`, `push_str`,
+    `to_utf8_string`, …) and, later, `Box<T>`.
+  - **platform** — host capabilities selected by `[host] profile`.
+- `List<T>` is a library type, so it keeps a capitalized name; built-in
+  language features are lowercase. Its first implementation stays in the
+  compiler (Rust intrinsics); a self-hosted Memobits implementation is a later,
+  separate consideration (needs allocator interface, drop, `Index`, iteration).
+- A future allocator-free profile (working name `core-only`) omits the
+  allocator and heap; using `alloc` there is a compile error.
+- Memory model is kept: one Wasm linear memory holding reserved space, a
+  shadow stack for fixed-size scope-bound values, static data, and a heap only
+  for dynamically sized values. Research items (no behavior change): scalar
+  replacement of small aggregates into Wasm locals, and multi-memory to
+  isolate stack from heap (verify engine support first).
+
+## Source-level tests, assert, replace/swap (2026-11-24, user decision)
+
+- Test functions are top-level items `test fn name() { ... }`: no parameters,
+  Unit result, normal module visibility (a test may call private items of its
+  own module). They are type-checked by `check`, `build` and `test`, but are
+  excluded from normal `build`/`run` artifacts.
+- `assert(condition)` takes a `bool`. A false condition is a controlled trap
+  ("assertion failed") with source location, discarding the instance like
+  every other trap. It is usable in ordinary code as well. As with `drop`, an
+  in-scope function, import or value named `assert` takes precedence.
+- `mb test` compiles the project's tests, runs each test in a fresh instance,
+  reports each test by qualified name (`ok` / `FAILED` with trap reason and
+  location), prints a summary and exits non-zero if any test fails. A filter
+  argument selects tests by substring. A test artifact can be built and run
+  standalone for source/Wasm parity.
+- `replace(place, value)` returns the old value of an owned place and installs
+  the new one; `swap(a, b)` exchanges two disjoint places of the same type.
+  Both are built-in functions whose first arguments are places (fields,
+  elements, locals), consistent with `drop(value)`. Details are designed with
+  the general owned-element work.
+
+### Shipped T1 details (2026-11-24)
+
+- Syntax: `test` is a contextual word (`test` directly before `fn` at item
+  start). Shape errors are syntax errors (SE002): `pub`, parameters, a
+  non-`Unit` result and generic parameters are rejected. Test names share the
+  module namespace (a clash is ME005) and are never callable.
+- Reachability: normal `resolve` targets drop test items, so tests never load
+  modules, change artifacts, or appear in exports. `Target::Test` loads every
+  project module with its tests. `mb check` and `mb build` additionally
+  compile the test target (when a loaded module has tests) and report its
+  errors; `mb run` ignores tests.
+- `assert(condition)` lowers to the IR instruction `Assert`; the Wasm backend
+  traps with reason code 12 ("assertion failed") at the call's source
+  location (`memobits.traps` metadata).
+- Test artifact: a library-style module exporting each test as
+  `test::<module>::<name>`. `mb test` runs the exports in qualified-name order,
+  one fresh instance each; source and standalone runs print identical reports.

@@ -684,6 +684,7 @@ pub struct FunctionFacts {
     /// Enum variant constructions: a unit variant path or a payload call.
     pub variant_uses: Vec<VariantUse>,
     pub explicit_drops: Vec<ExprId>,
+    pub explicit_asserts: Vec<ExprId>,
     /// Interface extension selected for each explicitly constrained call.
     pub selected_calls: Vec<SelectedCall>,
     /// User-defined binary operator implementations selected for lowering.
@@ -2574,6 +2575,33 @@ impl Checker {
             });
         }
         ty
+    }
+    /// `assert(condition)`: a `bool` check that traps when it is false.
+    fn explicit_assert(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
+        let [condition] = arguments else {
+            self.error(
+                10,
+                span,
+                format!("assert() expects one argument, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        let ty = self.expr(condition, Some(&BOOL));
+        if ty == Ty::Error {
+            return Ty::Error;
+        }
+        let before = self.diagnostics.len();
+        self.ensure(&ty, &BOOL, condition.span);
+        if self.diagnostics.len() != before {
+            return Ty::Error;
+        }
+        if let Some((facts, id)) = self.facts.as_mut().zip(id) {
+            facts.explicit_asserts.push(id);
+        }
+        UNIT
     }
     fn explicit_drop(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
         let [value] = arguments else {
@@ -5274,6 +5302,13 @@ impl Checker {
                     {
                         return self.explicit_drop(expr.span, arguments, id);
                     }
+                    if path.as_slice() == ["assert"]
+                        && self.lookup("assert").is_none()
+                        && !self.functions.contains_key("assert")
+                        && !self.imports.contains_key("assert")
+                    {
+                        return self.explicit_assert(expr.span, arguments, id);
+                    }
                     if let Some((template, variant)) = self.prelude_variant(path) {
                         return self.infer_variant(
                             expr,
@@ -6123,6 +6158,7 @@ fn check_standalone(
                     path_uses: Vec::new(),
                     variant_uses: Vec::new(),
                     explicit_drops: Vec::new(),
+                    explicit_asserts: Vec::new(),
                     selected_calls: Vec::new(),
                     selected_operators: Vec::new(),
                     selected_assignments: Vec::new(),
@@ -6493,6 +6529,7 @@ pub(crate) fn check_resolved_mode(
                             path_uses: Vec::new(),
                             variant_uses: Vec::new(),
                             explicit_drops: Vec::new(),
+                            explicit_asserts: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
                             selected_assignments: Vec::new(),
@@ -6570,6 +6607,7 @@ pub(crate) fn check_resolved_mode(
                             path_uses: Vec::new(),
                             variant_uses: Vec::new(),
                             explicit_drops: Vec::new(),
+                            explicit_asserts: Vec::new(),
                             selected_calls: Vec::new(),
                             selected_operators: Vec::new(),
                             selected_assignments: Vec::new(),
@@ -6699,6 +6737,7 @@ pub(crate) fn check_resolved_mode(
                     path_uses: Vec::new(),
                     variant_uses: Vec::new(),
                     explicit_drops: Vec::new(),
+                    explicit_asserts: Vec::new(),
                     selected_calls: Vec::new(),
                     selected_operators: Vec::new(),
                     selected_assignments: Vec::new(),
@@ -6842,6 +6881,7 @@ pub(crate) fn check_resolved_mode(
                         path_uses: Vec::new(),
                         variant_uses: Vec::new(),
                         explicit_drops: Vec::new(),
+                        explicit_asserts: Vec::new(),
                         selected_calls: Vec::new(),
                         selected_operators: Vec::new(),
                         selected_assignments: Vec::new(),

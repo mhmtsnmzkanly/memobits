@@ -259,3 +259,20 @@ pub fn heap_text_result() -> bool {
         Err(_) => false
     }
 }
+
+// Source-level tests. A top-level `test fn name() { ... }` takes no
+// parameters, has no result and is never `pub`. It is type-checked like any
+// function (and may call this module's private items) but is left out of the
+// application artifact, so `mb run` and `mb build` ignore it. `assert(cond)`
+// takes a bool and traps with "assertion failed" and its source location when
+// the condition is false; it also works in ordinary code. From the repository
+// root, `mb test --project examples/guide/project.toml` runs every test in a
+// fresh instance and prints `test text::name ... ok`; add a filter such as
+// `concat` to run only matching tests. `mb build --tests --output X.wasm`
+// writes the test artifact and `mb test X.wasm` runs it with the same report.
+test fn text_length_and_concat() {
+    let joined := "é".concat("!");
+    assert(joined.len() == 3);
+    assert(text().len() == 10);
+    assert(character_roundtrip('😀'));
+}

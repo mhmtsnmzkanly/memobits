@@ -127,6 +127,18 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+/// The names of a module's function exports, in module order.
+pub fn exported_functions(bytes: &[u8]) -> Result<Vec<String>, RunError> {
+    let engine = Engine::new(&Config::default());
+    let module =
+        Module::new(&engine, bytes).map_err(|error| RunError::Validate(error.to_string()))?;
+    Ok(module
+        .exports()
+        .filter(|export| matches!(export.ty(), ExternType::Func(_)))
+        .map(|export| export.name().to_owned())
+        .collect())
+}
+
 /// Validate, instantiate, and call a zero-parameter Wasm function export.
 ///
 /// Validate, instantiate, and call a zero-parameter Wasm function export with

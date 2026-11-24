@@ -19,6 +19,33 @@ cargo run -p memobits-cli -- build --project examples/guide/project.toml --outpu
 cargo run -p memobits-cli -- run "$artifact_dir/guide.wasm"
 ```
 
+## Source-level tests
+
+A top-level `test fn name() { ... }` is a test: no parameters, no result, never
+`pub`, and checked like an ordinary function in its module (so it can call that
+module's private items). Tests are excluded from the application artifact.
+`assert(condition)` takes a `bool` and traps with `assertion failed` and its
+source location when the condition is false; it works in ordinary code too, and
+a function, import or value named `assert` takes precedence. The guide's first
+test is `text_length_and_concat` in [`src/text.mb`](src/text.mb):
+
+```sh
+cargo run -p memobits-cli -- test --project examples/guide/project.toml
+```
+
+```text
+running 1 test
+test text::text_length_and_concat ... ok
+
+test result: ok. 1 passed; 0 failed; 0 filtered out
+```
+
+`mb test` runs each test in a fresh instance and exits 1 if any fails. Add a
+substring filter to select tests by qualified name. `mb build --tests --output
+guide-tests.wasm` writes the test artifact and `mb test guide-tests.wasm` runs
+it with the same report. The numbered checks below are not converted to tests
+yet.
+
 ## Check codes
 
 `main` runs every topic check in order. A failing check returns

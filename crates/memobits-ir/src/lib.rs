@@ -299,6 +299,10 @@ pub enum InstructionKind {
     DropLocal {
         value: Operand,
     },
+    /// Trap with an assertion failure unless the `bool` condition holds.
+    Assert {
+        condition: Operand,
+    },
     /// Read the byte length of an owned String or a reference to one.
     /// Validate a logical byte prefix and optionally copy it into an owned String.
     ValidateUtf8 {
@@ -1638,6 +1642,20 @@ fn validate_instruction(
                         "concat requires read-only String borrows",
                     );
                 }
+            }
+        }
+        InstructionKind::Assert { condition } => {
+            let ty = operand_type(program, function, condition, errors, id, block);
+            if instruction.output.is_some()
+                || condition.mode == UseMode::Consume
+                || ty != Some(Type::Primitive(Primitive::Bool))
+            {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "assert requires a non-consumed bool condition and no output",
+                );
             }
         }
         InstructionKind::DropLocal { value } => {
@@ -3855,6 +3873,7 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::EmptyList
                 | InstructionKind::DropLocal { .. }
+                | InstructionKind::Assert { .. }
                 | InstructionKind::EndListLocal { .. }
                 | InstructionKind::Constant(_)
                 | InstructionKind::EndStructLocal { .. }

@@ -219,7 +219,9 @@ fn transfer_instruction(
             transfer_operand(&receiver, state, diagnostics, function);
         }
         InstructionKind::EmptyList | InstructionKind::Constant(_) => {}
-        InstructionKind::Capture(operand) | InstructionKind::DropLocal { value: operand } => {
+        InstructionKind::Capture(operand)
+        | InstructionKind::DropLocal { value: operand }
+        | InstructionKind::Assert { condition: operand } => {
             transfer_operand(operand, state, diagnostics, function)
         }
         InstructionKind::ListGet {

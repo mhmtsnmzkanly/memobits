@@ -358,6 +358,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         | InstructionKind::EndStructLocal { .. }
         | InstructionKind::EndStringLocal { .. }
         | InstructionKind::DropLocal { .. }
+        | InstructionKind::Assert { .. }
         | InstructionKind::Capture(_)
         | InstructionKind::Copy { .. }
         | InstructionKind::StringLen { .. }

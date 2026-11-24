@@ -22,6 +22,8 @@ pub enum ItemKind {
     Function {
         public: bool,
         external: bool,
+        /// A source-level `test fn`: never public, no parameters, Unit result.
+        test: bool,
         name: String,
         generic_parameters: Vec<GenericParameter>,
         bounds: Vec<WhereBound>,
@@ -662,6 +664,7 @@ pub fn parse(source: SourceId, text: &str) -> ParseResult {
                     && !["pub", "fn", "use", "type", "interface", "extend"]
                         .iter()
                         .any(|s| p.at(s))
+                    && !(p.at("test") && p.next_at("fn"))
                 {
                     p.bump();
                 }

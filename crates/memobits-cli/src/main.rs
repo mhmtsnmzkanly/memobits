@@ -17,7 +17,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check, build and test but never included in the application or library artifact. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -155,6 +155,197 @@ fn build_exports(
         exports.insert("main".into(), function);
     }
     Ok(exports)
+}
+
+/// Export-name prefix of a test in a test artifact; the rest is the qualified
+/// test name `module::name`.
+const TEST_EXPORT_PREFIX: &str = "test::";
+
+fn build_test_exports(
+    resolution: &memobits_resolve::Resolution,
+    program: &Program,
+) -> Result<BTreeMap<String, FunctionId>, String> {
+    let mut exports = BTreeMap::new();
+    for (module, source) in &resolution.modules {
+        for item in &source.syntax.items {
+            let memobits_syntax::ItemKind::Function {
+                test: true, name, ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            let function = canonical_function_id(program, &format!("{module}::{name}"))
+                .ok_or_else(|| {
+                    diagnostic(
+                        6,
+                        format!("test '{module}::{name}' is not a lowered function"),
+                    )
+                })?;
+            exports.insert(format!("{TEST_EXPORT_PREFIX}{module}::{name}"), function);
+        }
+    }
+    Ok(exports)
+}
+
+/// Resolve every project module, check it with its tests, and compile the test
+/// artifact. Returns the Wasm bytes and the number of tests it exports.
+fn compile_tests(project: &Project) -> Result<(Vec<u8>, usize), String> {
+    let resolution = resolve(project, Target::Test);
+    print_warnings(&resolution.warnings, &resolution);
+    if !resolution.diagnostics.is_empty() {
+        return Err(render_source_diagnostics(
+            &resolution.diagnostics,
+            &resolution,
+        ));
+    }
+    let program = memobits_analysis::lower_resolved(project, &resolution)
+        .map_err(|diagnostics| render_source_diagnostics(&diagnostics, &resolution))?;
+    let exports = build_test_exports(&resolution, &program)?;
+    let options = backend_options(project);
+    let bytes = compile_with_locations(&program, &exports, &options, &resolution, true)?;
+    Ok((bytes, exports.len()))
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+/// Run every test export of `bytes` whose qualified name contains `filter`,
+/// each in a fresh instance. Returns the report and whether all tests passed.
+fn run_test_artifact(
+    bytes: &[u8],
+    filter: Option<&str>,
+    options: &memobits_runtime::RunOptions,
+    capabilities: &[HostCapability],
+) -> Result<(String, bool), String> {
+    let mut tests: Vec<(String, String)> = memobits_runtime::exported_functions(bytes)
+        .map_err(runtime_error)?
+        .into_iter()
+        .filter_map(|export| {
+            export
+                .strip_prefix(TEST_EXPORT_PREFIX)
+                .map(|name| (name.to_owned(), export.clone()))
+        })
+        .collect();
+    tests.sort();
+    let total = tests.len();
+    tests.retain(|(name, _)| filter.is_none_or(|filter| name.contains(filter)));
+    let mut report = format!("running {}\n", plural(tests.len(), "test"));
+    let mut failed = 0;
+    for (name, export) in &tests {
+        match memobits_runtime::run_with_capabilities(bytes, export, options, capabilities) {
+            Ok(_) => {
+                let _ = writeln!(report, "test {name} ... ok");
+            }
+            Err(error) => {
+                failed += 1;
+                let _ = writeln!(report, "test {name} ... FAILED");
+                let mut detail = String::new();
+                match &error {
+                    memobits_runtime::RunError::Checked {
+                        reason,
+                        location: Some(location),
+                    } => {
+                        let _ = writeln!(detail, "{}", reason.message());
+                        write_location(
+                            &mut detail,
+                            &location.file,
+                            location.line as usize,
+                            location.column as usize,
+                            location.width as usize,
+                            &location.text,
+                        );
+                    }
+                    memobits_runtime::RunError::Checked { reason, .. } => {
+                        let _ = writeln!(detail, "{}", reason.message());
+                    }
+                    other => {
+                        let _ = writeln!(detail, "{other}");
+                    }
+                }
+                for line in detail.lines() {
+                    let _ = writeln!(report, "    {line}");
+                }
+            }
+        }
+    }
+    let _ = writeln!(
+        report,
+        "\ntest result: {}. {} passed; {failed} failed; {} filtered out",
+        if failed == 0 { "ok" } else { "FAILED" },
+        tests.len() - failed,
+        total - tests.len()
+    );
+    Ok((report, failed == 0))
+}
+
+/// `mb test`: returns the stdout report and whether the command succeeded.
+/// Compile and usage errors are returned as `Err` (stderr, exit status 1).
+fn test_command(arguments: Vec<OsString>) -> Result<(String, bool), String> {
+    let mut selected = None;
+    let mut fuel = FuelArgs::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut args = arguments.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            if args.next().is_some() {
+                return Err(diagnostic(4, "unexpected arguments after --help"));
+            }
+            return Ok((HELP.into(), true));
+        }
+        if fuel.take(&arg, &mut args)? {
+            continue;
+        }
+        if arg == "--project" {
+            if selected.is_some() {
+                return Err(diagnostic(4, "--project may only be specified once"));
+            }
+            selected = Some(
+                args.next()
+                    .filter(|value| !value.is_empty() && !value.to_string_lossy().starts_with('-'))
+                    .map(PathBuf::from)
+                    .ok_or_else(|| diagnostic(4, "--project requires a manifest path"))?,
+            );
+            continue;
+        }
+        let text = arg.to_string_lossy().into_owned();
+        if text.starts_with('-') && text != "-" {
+            return Err(diagnostic(
+                4,
+                format!(
+                    "unexpected test argument '{text}'; test accepts --project, --fuel, --no-fuel-limit and a FILTER"
+                ),
+            ));
+        }
+        positional.push(text);
+    }
+    let run_options = fuel.options()?;
+    let artifact = positional
+        .first()
+        .filter(|first| first.ends_with(".wasm"))
+        .cloned();
+    let filter_index = usize::from(artifact.is_some());
+    if positional.len() > filter_index + 1 {
+        return Err(diagnostic(
+            4,
+            "test accepts at most one FILTER (after an optional FILE.wasm)",
+        ));
+    }
+    let filter = positional.get(filter_index).map(String::as_str);
+    if let Some(wasm_path) = artifact {
+        let project = selected
+            .as_deref()
+            .map(|path| Project::load(".", Some(path)).map_err(project_error))
+            .transpose()?;
+        let capabilities = host_capabilities(project.as_ref());
+        let bytes =
+            fs::read(&wasm_path).map_err(|error| diagnostic(1, format!("{wasm_path}: {error}")))?;
+        return run_test_artifact(&bytes, filter, &run_options, &capabilities);
+    }
+    let project = Project::load(".", selected.as_deref()).map_err(project_error)?;
+    let (bytes, _) = compile_tests(&project)?;
+    let capabilities = host_capabilities(Some(&project));
+    run_test_artifact(&bytes, filter, &run_options, &capabilities)
 }
 
 fn default_build_output(project: &Project, library: bool) -> PathBuf {
@@ -701,6 +892,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     }
     let mut selected = None;
     let mut library = false;
+    let mut tests = false;
     let mut output = None;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -720,6 +912,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 return Err(diagnostic(4, "--lib may only be specified once"));
             }
             library = true;
+            continue;
+        }
+        if arg == "--tests" && (command == "build" || command == "check") {
+            if tests {
+                return Err(diagnostic(4, "--tests may only be specified once"));
+            }
+            tests = true;
             continue;
         }
         if arg == "--output" && command == "build" {
@@ -751,7 +950,29 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             .ok_or_else(|| diagnostic(4, "--project requires a manifest path"))?;
         selected = Some(PathBuf::from(value));
     }
+    if tests && library {
+        return Err(diagnostic(4, "--tests cannot be combined with --lib"));
+    }
     let project = Project::load(".", selected.as_deref()).map_err(project_error)?;
+    if tests {
+        let (bytes, count) = compile_tests(&project)?;
+        if command == "check" {
+            return Ok(format!(
+                "Check passed: {}, {} bytes of Wasm validated; no artifact written\n",
+                plural(count, "test"),
+                bytes.len()
+            ));
+        }
+        let output_path = output
+            .unwrap_or_else(|| default_build_output(&project, false).with_file_name("tests.wasm"));
+        write_atomically(&output_path, &bytes)?;
+        return Ok(format!(
+            "Built {}: {}, {} bytes\n",
+            output_path.display(),
+            plural(count, "test"),
+            bytes.len()
+        ));
+    }
     if command == "resolve"
         || command == "analyze-project"
         || command == "ownership-project"
@@ -803,6 +1024,10 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             let exports = build_exports(&project, &result, &program, library)?;
             let options = backend_options(&project);
             let bytes = compile_with_locations(&program, &exports, &options, &result, library)?;
+            if result.ignored_tests > 0 {
+                // Tests never enter the artifact, but they must still check.
+                compile_tests(&project)?;
+            }
             if command == "check" {
                 return Ok(format!(
                     "Check passed: {} export(s), {} bytes of Wasm validated; no artifact written\n",
@@ -912,7 +1137,25 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
 }
 
 fn main() -> ExitCode {
-    match run(std::env::args_os().skip(1)) {
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    if arguments.peek().is_some_and(|command| command == "test") {
+        arguments.next();
+        return match test_command(arguments.collect()) {
+            Ok((report, passed)) => {
+                print!("{report}");
+                if passed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => {
+                eprint!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match run(arguments) {
         Ok(output) => {
             print!("{output}");
             ExitCode::SUCCESS

@@ -625,6 +625,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::ListPush { value, .. } => vec![value],
         InstructionKind::Capture(operand)
         | InstructionKind::DropLocal { value: operand }
+        | InstructionKind::Assert { condition: operand }
         | InstructionKind::Copy { source: operand }
         | InstructionKind::ListLen { source: operand }
         | InstructionKind::StringLen { source: operand }

@@ -91,9 +91,16 @@ fn every_example_project_documents_and_matches_its_output() {
         let build = mb(&["build", "--project", manifest_arg, "--output", wasm_arg]);
         // The manifest is passed again so host-capability profiles apply.
         let artifact = mb(&["run", wasm_arg, "--project", manifest_arg]);
+        let tests = mb(&["test", "--project", manifest_arg]);
         let result = std::panic::catch_unwind(|| {
             check_clean_success(&format!("{name} check"), &check);
             check_clean_success(&format!("{name} build"), &build);
+            let tests = artifact_stdout(&format!("{name} test"), &tests);
+            assert!(tests.contains("test result: ok."), "{name}: {tests}");
+            assert!(
+                tests.contains(" tests\n") || tests.contains("running 1 test\n"),
+                "{name}: {tests}"
+            );
             let source = artifact_stdout(&format!("{name} source run"), &source);
             let artifact = artifact_stdout(&format!("{name} wasm run"), &artifact);
             assert_eq!(source, expected, "{name}: source stdout");

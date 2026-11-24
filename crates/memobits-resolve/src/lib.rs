@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 pub enum Target {
     Application,
     Library,
+    /// Every project module, including its `test fn` items.
+    Test,
 }
 pub struct SourceModule {
     pub id: SourceId,
@@ -28,6 +30,9 @@ pub struct Resolution {
     pub warnings: Vec<Diagnostic>,
     /// Explicit direct module imports, kept separate from symbol imports and preludes.
     pub module_imports: BTreeMap<String, BTreeSet<String>>,
+    /// Number of `test fn` items left out of an application or library
+    /// resolution (tests never take part in normal builds or reachability).
+    pub ignored_tests: usize,
 }
 /// One extension declaration visible to a module under IFACE-04.
 #[derive(Clone, Debug)]
@@ -266,6 +271,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         diagnostics: vec![],
         warnings: vec![],
         module_imports: BTreeMap::new(),
+        ignored_tests: 0,
     };
     if project
         .modules
@@ -296,6 +302,18 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 None,
             )),
         },
+        Target::Test => {
+            for module in &project.modules {
+                pending.push(Reference {
+                    from: None,
+                    path: module.name.clone(),
+                    span: None,
+                    public: false,
+                    requires_type: false,
+                    module_only: true,
+                });
+            }
+        }
         Target::Library => {
             if project.manifest.export.is_empty() {
                 result
@@ -336,11 +354,13 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             continue;
         };
         if reference.module_only {
-            result
-                .module_imports
-                .entry(reference.from.clone().unwrap_or_default())
-                .or_default()
-                .insert(module.clone());
+            if let Some(from) = &reference.from {
+                result
+                    .module_imports
+                    .entry(from.clone())
+                    .or_default()
+                    .insert(module.clone());
+            }
         } else {
             references.push(reference);
         }
@@ -372,9 +392,17 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 .position(|m| m.name == module)
                 .unwrap_or(project.modules.len()) as u32,
         );
-        let parsed = memobits_syntax::parse(id, &text);
+        let mut parsed = memobits_syntax::parse(id, &text);
         result.diagnostics.extend(parsed.diagnostics);
         result.warnings.extend(parsed.warnings);
+        if !matches!(target, Target::Test) {
+            let before = parsed.module.items.len();
+            parsed
+                .module
+                .items
+                .retain(|item| !matches!(item.kind, ItemKind::Function { test: true, .. }));
+            result.ignored_tests += before - parsed.module.items.len();
+        }
         let mut names = BTreeSet::new();
         for item in &parsed.module.items {
             let name = match &item.kind {
@@ -611,6 +639,8 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             .items
             .iter()
             .find_map(|item| match &item.kind {
+                // Test functions cannot be named from any source.
+                ItemKind::Function { test: true, .. } => None,
                 ItemKind::Function {
                     public, name: n, ..
                 }

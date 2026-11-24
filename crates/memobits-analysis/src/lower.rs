@@ -602,6 +602,7 @@ struct Builder<'a> {
     paths: HashMap<ExprId, PathTarget>,
     variants: HashMap<ExprId, VariantUse>,
     explicit_drops: HashSet<ExprId>,
+    explicit_asserts: HashSet<ExprId>,
     selected_calls: HashMap<ExprId, SelectedCall>,
     selected_operators: HashMap<ExprId, SelectedCall>,
     selected_assignments: HashMap<ExprId, SelectedCall>,
@@ -786,6 +787,7 @@ impl<'a> Builder<'a> {
             paths,
             variants,
             explicit_drops: facts.explicit_drops.iter().copied().collect(),
+            explicit_asserts: facts.explicit_asserts.iter().copied().collect(),
             selected_calls,
             selected_operators,
             selected_assignments,
@@ -2333,6 +2335,18 @@ impl<'a> Builder<'a> {
             }
             ExprKind::Call { arguments, .. } if self.variants.contains_key(&self.id(expr)) => {
                 self.lower_variant(expr, arguments)
+            }
+            ExprKind::Call { arguments, .. } if self.explicit_asserts.contains(&self.id(expr)) => {
+                let condition = self.lower_expr(&arguments[0])?;
+                let condition = self.scalar(condition)?;
+                self.emit(
+                    expr.span,
+                    InstructionKind::Assert {
+                        condition: read(condition),
+                    },
+                    None,
+                );
+                self.unit(expr.span)
             }
             ExprKind::Call { arguments, .. } if self.explicit_drops.contains(&self.id(expr)) => {
                 let value = consume(self.lower_expr(&arguments[0])?);

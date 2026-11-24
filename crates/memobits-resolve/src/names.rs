@@ -15,8 +15,15 @@ pub(crate) fn check(
     let prelude: BTreeMap<String, String> = prelude.collect();
     let mut imports = prelude.clone();
     let mut globals: BTreeSet<String> = prelude.keys().cloned().collect();
+    let mut test_names = BTreeSet::new();
     for item in &module.items {
         match &item.kind {
+            // Test functions are never callable, so they bind no global name.
+            ItemKind::Function {
+                name, test: true, ..
+            } => {
+                test_names.insert(name.clone());
+            }
             ItemKind::Function { name, .. }
             | ItemKind::Type { name, .. }
             | ItemKind::Interface { name, .. } => {
@@ -110,6 +117,7 @@ pub(crate) fn check(
         variant_scopes: Vec::new(),
         diagnostics: vec![],
         qualified: vec![],
+        test_names,
     };
     for item in &module.items {
         if let ItemKind::Function {
@@ -359,6 +367,8 @@ struct Checker<'a> {
     variant_scopes: Vec<BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
     qualified: Vec<(String, Span, bool)>,
+    /// Names of the module's `test fn` items, for a better unknown-name hint.
+    test_names: BTreeSet<String>,
 }
 fn const_names(parameters: &[memobits_syntax::GenericParameter]) -> BTreeSet<String> {
     parameters
@@ -627,7 +637,12 @@ impl Checker<'_> {
                         .rev()
                         .any(|variants| variants.contains(&path[0]))
                 {
-                    self.error(1, expr.span, format!("unknown name '{}'", path[0]));
+                    let hint = if self.test_names.contains(&path[0]) {
+                        " (test functions cannot be called)"
+                    } else {
+                        ""
+                    };
+                    self.error(1, expr.span, format!("unknown name '{}'{hint}", path[0]));
                 }
             }
             ExprKind::Path(path) => self.qualified_path(path, expr.span),
@@ -651,9 +666,10 @@ impl Checker<'_> {
                 arguments,
                 interface,
             } => {
-                // An unbound `drop` is a built-in only in call position.
-                if !matches!(&callee.kind, ExprKind::Path(path) if path.as_slice() == ["drop"]
-                    && !self.scopes.iter().rev().any(|scope| scope.contains("drop")))
+                // An unbound `drop` or `assert` is a built-in only in call position.
+                if !matches!(&callee.kind, ExprKind::Path(path)
+                    if (path.as_slice() == ["drop"] || path.as_slice() == ["assert"])
+                    && !self.scopes.iter().rev().any(|scope| scope.contains(&path[0])))
                 {
                     self.expr(callee);
                 }

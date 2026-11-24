@@ -726,6 +726,7 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 | InstructionKind::EndStructLocal { .. }
                 | InstructionKind::EndStringLocal { .. } => {}
                 InstructionKind::Capture(operand)
+                | InstructionKind::Assert { condition: operand }
                 | InstructionKind::Copy { source: operand }
                 | InstructionKind::ListLen { source: operand }
                 | InstructionKind::StringLen { source: operand }
@@ -1034,6 +1035,7 @@ pub enum TrapReason {
     ArgumentRange = 9,
     HeapAllocation = 10,
     ShiftCount = 11,
+    AssertionFailed = 12,
 }
 
 impl TrapReason {
@@ -3011,6 +3013,20 @@ fn compile_instruction(
         .output
         .map(|id| value_local(function, param_count, id));
     match &instruction.kind {
+        InstructionKind::Assert { condition } => {
+            refresh_operand(body, function, param_count, condition, layout, frame)?;
+            body.instruction(&WasmInstruction::LocalGet(operand_local(
+                function,
+                param_count,
+                condition,
+            )?));
+            body.instruction(&WasmInstruction::I32Eqz);
+            trap_if(
+                body,
+                traps.site(instruction.span),
+                TrapReason::AssertionFailed,
+            );
+        }
         InstructionKind::DropLocal { value } => {
             let Source::Local(local) = value.source else {
                 return Err("drop requires a local".into());

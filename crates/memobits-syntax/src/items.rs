@@ -10,10 +10,29 @@ impl Parser {
         let start = self.current().span.start;
         let public = self.eat("pub");
         let mut item_span = None;
+        let test_start = self.current().span;
+        let test = self.at("test") && self.next_at("fn");
+        if test {
+            self.bump();
+            if public {
+                self.diagnostics.push(super::diagnostic(
+                    2,
+                    test_start,
+                    "a test function cannot be `pub`; write `test fn name() { ... }`",
+                ));
+            }
+        }
         let external = self.eat("extern");
         let kind = if self.eat("fn") {
             let name = self.name()?;
             let generic_parameters = self.generic_parameters()?;
+            if test && !generic_parameters.is_empty() {
+                self.diagnostics.push(super::diagnostic(
+                    2,
+                    generic_parameters[0].span,
+                    format!("test function '{name}' cannot have generic parameters"),
+                ));
+            }
             self.expect("(")?;
             let mut parameters = Vec::new();
             while !self.at(")") && !self.eof() {
@@ -35,11 +54,29 @@ impl Parser {
                 }
             }
             self.expect(")")?;
+            if test {
+                if let Some(parameter) = parameters.first() {
+                    self.diagnostics.push(super::diagnostic(
+                        2,
+                        parameter.span,
+                        format!("test function '{name}' cannot take parameters"),
+                    ));
+                }
+            }
             let result = if self.eat("->") {
                 Some(self.ty()?)
             } else {
                 None
             };
+            if let (true, Some(result)) = (test, &result) {
+                if result.path != ["Unit"] || !result.arguments.is_empty() {
+                    self.diagnostics.push(super::diagnostic(
+                        2,
+                        result.span,
+                        format!("test function '{name}' must not return a value; remove the result type"),
+                    ));
+                }
+            }
             let bounds = self.where_bounds()?;
             let body = if external {
                 self.expect(";")?;
@@ -54,6 +91,7 @@ impl Parser {
             ItemKind::Function {
                 public,
                 external,
+                test,
                 name,
                 generic_parameters,
                 bounds,

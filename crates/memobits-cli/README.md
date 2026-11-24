@@ -188,10 +188,63 @@ Runtime diagnostic codes are `RE001` invalid Wasm, `RE002` unsupported host
 import, `RE003` instantiation error, `RE004` missing export, `RE005` unsupported
 signature, `RE006` fuel exhaustion (raise the budget with `--fuel N` or use
 `--no-fuel-limit`), `RE007` guest trap, `RE008` stack overflow, and `RE009`
-invalid outcome entry adapter. A checked failure (integer overflow, division by zero, array index out of bounds) is an RE007 that names the
+invalid outcome entry adapter. A checked failure (integer overflow, division by zero, array index out of bounds, a false `assert`) is an RE007 that names the
 reason and shows the source line and column, for source runs and built artifacts
 alike; an artifact without the `memobits.traps` section reports the generic trap.
 
 `[build].stack_size` (bytes, default 1048576, multiple of 16, 4096 to 268435456)
 sets the stack used by `mb build` and `mb run`. A function frame larger than the
 stack is an LE900 compile error; exhausting the stack at run time reports RE008.
+
+## Source-level tests
+
+A top-level `test fn name() { ... }` declares a test: no parameters, no result
+(or `Unit`), no generic parameters, and is never `pub`. Violations are
+syntax errors (SE002). Tests are checked like ordinary functions with their
+module's visibility, so a test can call the private items of its own module,
+but nothing can call a test (`unknown name ... (test functions cannot be
+called)`). Test names share the module's namespace, so a test cannot reuse the
+name of another item.
+
+`assert(condition)` is a built-in taking a `bool`; it works in ordinary code
+and in tests. A false condition is a controlled trap with the reason
+`assertion failed` (trap code 12) and the source location of the call, and
+discards the instance like every other trap. A function, import or value named
+`assert` in scope takes precedence, as with `drop`. A wrong argument count is
+TE010 and a non-`bool` argument is TE002.
+
+- Tests are excluded from `mb build` and `mb run` artifacts and from
+  reachability: a normal artifact is byte-identical with or without tests, and
+  modules used only by tests are not loaded. `mb check` and `mb build` still
+  type-check, lower and compile the tests (when a loaded module has any) and
+  report their errors; `mb run` ignores them.
+- `mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]` compiles the
+  test artifact from every module of the project (including modules the
+  application does not import), runs each test in a fresh instance under the
+  normal fuel and `stack_size` limits, and prints a report to stdout. The
+  FILTER is a substring of the qualified name `module::name`.
+- `mb build --tests [--project PATH] [--output PATH]` writes the test artifact
+  (default `target/memobits/tests.wasm`). It exports each test as
+  `test::<module>::<name>`. `mb check --tests` compiles it without writing.
+- `mb test FILE.wasm [FILTER]` runs an existing test artifact and prints the
+  same report as the source form (`--project` supplies host capabilities, as
+  for `run`; trap locations come from the artifact's `memobits.traps` section).
+- Exit status: 0 when every selected test passes (including zero tests), 1 when
+  any test fails or the project does not compile (compile errors go to
+  stderr; the report goes to stdout).
+
+```text
+running 3 tests
+test main::also_passes ... ok
+test main::fails ... FAILED
+    assertion failed
+     --> src/main.mb:8:5
+     8 |     assert(value == 5);
+       |     ^^^^^^^^^^^^^^^^^^
+test main::passes ... ok
+
+test result: FAILED. 2 passed; 1 failed; 0 filtered out
+```
+
+Tests are listed in qualified-name order. A project without tests prints
+`running 0 tests` and `test result: ok. 0 passed; 0 failed; 0 filtered out`.
