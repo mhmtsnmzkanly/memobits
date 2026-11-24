@@ -244,7 +244,7 @@ fn list_iteration_loan_covers_the_body_and_ends_on_exit() {
          loop value in handle { handle.push(value); break; }",
     );
     let codes = ownership(
-        "fn move_out(items: List<u32>) -> List<u32> { \
+        "use alloc::List; fn move_out(items: List<u32>) -> List<u32> { \
          loop value in items { return items; } items } fn main() {}",
     );
     assert!(codes.iter().any(|code| code == "BE005"), "{codes:?}");

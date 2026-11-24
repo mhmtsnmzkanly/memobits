@@ -833,6 +833,8 @@ struct Binding {
     origin: usize,
 }
 struct Checker {
+    /// `[build] alloc`: heap-producing string operations are errors when false.
+    alloc: bool,
     diagnostics: Vec<Diagnostic>,
     lowering: bool,
     /// Addresses of expressions in an owned-value position (binding initialiser,
@@ -905,6 +907,7 @@ impl Checker {
             }
         }
         let mut type_checker = Checker {
+            alloc: self.alloc,
             module: candidate.module.clone(),
             table: Rc::clone(&self.table),
             generic_types: substitution.clone(),
@@ -2671,6 +2674,19 @@ impl Checker {
             if path.len() != 1 || self.lookup(&path[0]).is_none())
     }
 
+    /// TE033: a heap-producing operation needs the alloc layer.
+    fn require_alloc(&mut self, span: Span, operation: &str) {
+        if !self.alloc {
+            self.error(
+                33,
+                span,
+                format!(
+                    "{operation} allocates on the heap and is unavailable: the project sets `[build] alloc = false`"
+                ),
+            );
+        }
+    }
+
     fn string_read(
         &mut self,
         expression: &Expr,
@@ -2678,6 +2694,9 @@ impl Checker {
         method: &str,
         arguments: &[Expr],
     ) -> Ty {
+        if method == "concat" {
+            self.require_alloc(expression.span, "String concat()");
+        }
         self.allow_array_value(base);
         let previous = self.concat_destination;
         if method != "concat" {
@@ -2759,6 +2778,9 @@ impl Checker {
     }
 
     fn byte_utf8(&mut self, expr: &Expr, base: &Expr, method: &str, arguments: &[Expr]) -> Ty {
+        if method == "to_utf8_string" {
+            self.require_alloc(expr.span, "to_utf8_string()");
+        }
         self.allow_array_value(base);
         let input = read_type(self.expr(base, None));
         let mut diverges = input == Ty::Never;
@@ -2853,6 +2875,7 @@ impl Checker {
     }
 
     fn string_push_str(&mut self, expression: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
+        self.require_alloc(expression.span, "String push_str()");
         let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
         && self.lookup(&path[0]).is_some_and(|binding| {
             (binding.mutable && binding.ty == Ty::String)
@@ -5921,6 +5944,7 @@ fn extension_candidates_for(
             imports.entry(alias.clone()).or_insert_with(|| path.clone());
         }
         let mut checker = Checker {
+            alloc: project.manifest.alloc(),
             module: declaration_module.clone(),
             table: Rc::clone(table),
             imports: imports.clone(),
@@ -6058,6 +6082,7 @@ fn check_standalone(
     let capture = mode != CheckMode::Types;
     let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
     let mut c = Checker {
+        alloc: true,
         diagnostics: table_diagnostics,
         lowering: capture,
         allowed_arrays: HashSet::new(),
@@ -6120,6 +6145,12 @@ fn check_standalone(
                     c.error(14, item.span, format!("duplicate function '{name}'"));
                 }
             }
+            // Standalone mode has no module loader; the virtual `alloc` module
+            // is the only import it can satisfy.
+            ItemKind::Use { path, .. }
+                if path.first().is_some_and(|head| head == "alloc")
+                    && c.alloc
+                    && matches!(path.as_slice(), [_] | [_, _]) => {}
             ItemKind::Use { .. } => c.error(15, item.span, "imports require module resolution"),
             ItemKind::Type { .. }
             | ItemKind::Interface { .. }
@@ -6431,6 +6462,7 @@ pub(crate) fn check_resolved_mode(
     let mut signatures = HashMap::new();
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
+            alloc: project.manifest.alloc(),
             lowering,
             module: module_name.clone(),
             table: Rc::clone(&table),
@@ -6474,6 +6506,7 @@ pub(crate) fn check_resolved_mode(
     let mut all_facts = Vec::with_capacity(next_id as usize);
     for (module_name, source) in &resolution.modules {
         let mut c = Checker {
+            alloc: project.manifest.alloc(),
             lowering,
             module: module_name.clone(),
             table: Rc::clone(&table),
@@ -6683,6 +6716,7 @@ pub(crate) fn check_resolved_mode(
                 unreachable!("generic template points to a function item")
             };
             let mut c = Checker {
+                alloc: project.manifest.alloc(),
                 lowering,
                 module: request.template.module.clone(),
                 table: Rc::clone(&table),
@@ -6824,6 +6858,7 @@ pub(crate) fn check_resolved_mode(
             }];
             parameters.extend(method.parameters.iter().cloned());
             let mut c = Checker {
+                alloc: project.manifest.alloc(),
                 lowering,
                 module: request.module.clone(),
                 table: Rc::clone(&table),
@@ -6921,6 +6956,7 @@ pub(crate) fn check_resolved_mode(
 
 fn checker() -> Checker {
     Checker {
+        alloc: true,
         diagnostics: Vec::new(),
         lowering: true,
         allowed_arrays: HashSet::new(),

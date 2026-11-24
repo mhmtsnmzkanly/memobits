@@ -11,6 +11,7 @@ pub(crate) fn check(
     module: &Module,
     prelude: impl Iterator<Item = (String, String)>,
     allow_self_type: bool,
+    alloc_enabled: bool,
 ) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
     let prelude: BTreeMap<String, String> = prelude.collect();
     let mut imports = prelude.clone();
@@ -106,7 +107,12 @@ pub(crate) fn check(
             _ => {}
         }
     }
+    let alloc_module_imported = module.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Use { path, .. } if path.as_slice() == [templates::ALLOC_MODULE])
+    });
     let mut checker = Checker {
+        alloc_enabled,
+        alloc_module_imported,
         types,
         imports,
         variants,
@@ -353,6 +359,10 @@ fn collect_anonymous_enum_variants(ty: &Type, variants: &mut BTreeMap<String, BT
 }
 
 struct Checker<'a> {
+    /// `[build] alloc`; only changes the wording of the missing-import note.
+    alloc_enabled: bool,
+    /// The module contains `use alloc;`, which permits `alloc::List<T>`.
+    alloc_module_imported: bool,
     types: BTreeSet<String>,
     imports: BTreeMap<String, String>,
     variants: BTreeMap<String, BTreeSet<String>>,
@@ -416,7 +426,21 @@ impl Checker<'_> {
         if ty.path.as_slice() == ["\0tuple"] || ty.path.as_slice() == ["\0record"] {
             return;
         }
-        if templates::lookup_type(ty).is_some() {
+        if let Some(template) = templates::lookup_type(ty) {
+            if template.id == templates::TemplateId::List && !self.list_is_imported(ty) {
+                let note = if self.alloc_enabled {
+                    "add `use alloc::List;` to use List"
+                } else {
+                    "List is part of the alloc layer, which `[build] alloc = false` disables"
+                };
+                let mut d = Diagnostic::new(
+                    DiagnosticCode::new(Category::Name, 3).unwrap(),
+                    Severity::Error,
+                    "unknown type 'List'".to_owned(),
+                );
+                d.span = Some(ty.span);
+                self.diagnostics.push(d.with_label(ty.span, note));
+            }
             return;
         }
         if ty.path.len() > 1 {
@@ -505,6 +529,17 @@ impl Checker<'_> {
                 full.join("::")
             };
             self.qualified.push((expanded, span, false));
+        }
+    }
+    /// `List<T>` needs `use alloc::List;` (any alias-free symbol import or the
+    /// prelude) or `use alloc;` with the path `alloc::List<T>`.
+    fn list_is_imported(&self, ty: &Type) -> bool {
+        match ty.path.as_slice() {
+            [name] => self
+                .imports
+                .get(name)
+                .is_some_and(|path| path == "alloc::List"),
+            _ => self.alloc_module_imported,
         }
     }
     fn error(&mut self, number: u16, span: Span, message: String) {
@@ -737,7 +772,7 @@ mod tests {
         ] {
             let parsed = memobits_syntax::parse(SourceId(0), source);
             assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-            let (errors, _) = check(&parsed.module, std::iter::empty(), false);
+            let (errors, _) = check(&parsed.module, std::iter::empty(), false, true);
             assert_eq!(errors.len(), 1);
             assert_eq!(errors[0].code.to_string(), code);
             assert_eq!(errors[0].span.unwrap().start, source.rfind(member).unwrap());
@@ -750,7 +785,7 @@ mod tests {
         let parsed = memobits_syntax::parse(SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 
-        let (errors, qualified) = check(&parsed.module, std::iter::empty(), false);
+        let (errors, qualified) = check(&parsed.module, std::iter::empty(), false, true);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(qualified.is_empty(), "{qualified:?}");
     }
@@ -762,7 +797,7 @@ mod tests {
         let parsed = memobits_syntax::parse(SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 
-        let (errors, _) = check(&parsed.module, std::iter::empty(), false);
+        let (errors, _) = check(&parsed.module, std::iter::empty(), false, true);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].code.to_string(), "NE001");
         assert!(errors[0].message.contains("unknown name 'Ready'"));
@@ -781,7 +816,7 @@ mod alias_variant_tests {
     fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, bool)>) {
         let parsed = memobits_syntax::parse(SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        check(&parsed.module, std::iter::empty(), false)
+        check(&parsed.module, std::iter::empty(), false, true)
     }
 
     #[test]
@@ -871,7 +906,7 @@ mod array_tests {
             "fn f(a: array<array<Missing, 2>, 3>) { [unknown]; [other; 2]; a[index]; }",
         );
         assert!(parsed.diagnostics.is_empty());
-        let (diagnostics, _) = check(&parsed.module, std::iter::empty(), false);
+        let (diagnostics, _) = check(&parsed.module, std::iter::empty(), false, true);
         for name in ["Missing", "unknown", "other", "index"] {
             assert!(
                 diagnostics.iter().any(|d| d.message.contains(name)),
@@ -887,7 +922,7 @@ mod array_tests {
             SourceId(0),
             "fn f(a: array<array<self::model::Value, 2>, 3>) {}",
         );
-        let (diagnostics, qualified) = check(&parsed.module, std::iter::empty(), false);
+        let (diagnostics, qualified) = check(&parsed.module, std::iter::empty(), false, true);
         assert!(diagnostics.is_empty());
         assert_eq!(qualified.len(), 1);
         assert_eq!(qualified[0].0, "self::model::Value");

@@ -132,6 +132,7 @@ let valid := inspect(player.borrow());
 // CoW may share physical storage internally, but copies behave independently.
 // CoW is not the same operation as an exclusive mutable share borrow.
 
+// (List lives in the alloc layer: `use alloc::List;` at the top of the module.)
 let source: List<i32> = [1, 2, 3];
 var duplicate := source.copy();
 duplicate[0] = 9;

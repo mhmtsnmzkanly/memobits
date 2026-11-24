@@ -817,7 +817,7 @@ fn list_replacement_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn rebuild(old: borrow List<u32>) -> List<u32> {
+        use alloc::List; fn rebuild(old: borrow List<u32>) -> List<u32> {
             var result: List<u32> = [];
             result.push(0);
             let previous := match old.get(0) { Some(value) => value, None => 0 };
@@ -881,7 +881,7 @@ fn list_replacement_rejects_live_loans_and_unavailable_sources() {
     ] {
         f.write(
             "list.mb",
-            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+            &format!("use alloc::List; fn main() {{ var items: List<u8> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }
@@ -895,7 +895,7 @@ fn owned_list_returns_run_from_source_and_wasm() {
         "[package]\nname='list-return'\nentry='main::main'\n",
     );
     f.write("src/main.mb", r#"
-        fn bytes(empty: bool) -> List<u8> {
+        use alloc::List; fn bytes(empty: bool) -> List<u8> {
             var result: List<u8> = [];
             if empty { return result; }
             result.push(255);
@@ -942,7 +942,7 @@ fn discarded_list_returns_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn make_bytes(log: share List<u8>, empty: bool) -> List<u8> {
+        use alloc::List; fn make_bytes(log: share List<u8>, empty: bool) -> List<u8> {
             log.push(7);
             var result: List<u8> = [];
             if empty { return result; }
@@ -996,7 +996,7 @@ fn collection_contains_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type Rows { flags: array<bool, 2> }
+        use alloc::List; type Rows { flags: array<bool, 2> }
         fn make(log: share List<u8>) -> List<u32> {
             log.push(1);
             var words: List<u32> = [];
@@ -1061,7 +1061,7 @@ fn collection_index_of_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type Flags { values: array<bool, 2> }
+        use alloc::List; type Flags { values: array<bool, 2> }
 
         fn at(result: u32?, expected: u32) -> bool {
             match result { Some(index) => index == expected, None => false }
@@ -1164,7 +1164,7 @@ fn temporary_list_reads_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn bytes(log: share List<u8>) -> List<u8> {
+        use alloc::List; fn bytes(log: share List<u8>) -> List<u8> {
             log.push(1);
             var items: List<u8> = [];
             items.push(255);
@@ -1217,7 +1217,7 @@ fn temporary_list_borrows_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn bytes(log: share List<u8>) -> List<u8> {
+        use alloc::List; fn bytes(log: share List<u8>) -> List<u8> {
             log.push(1);
             var items: List<u8> = [];
             items.push(255);
@@ -1301,7 +1301,7 @@ fn temporary_list_borrows_require_an_explicit_direct_argument() {
         f.write(
             "list.mb",
             &format!(
-                r#"fn make() -> List<u8> {{ let items: List<u8> = []; items }}
+                r#"use alloc::List; fn make() -> List<u8> {{ let items: List<u8> = []; items }}
                    fn inspect(items: borrow List<u8>) {{ items.len(); }}
                    fn inspect_words(items: borrow List<u32>) {{ items.len(); }}
                    fn mutate(items: share List<u8>) {{ items.clear(); }}
@@ -1344,13 +1344,13 @@ fn list_returns_keep_temporary_and_abi_gates() {
         f.write(
             "list.mb",
             &format!(
-                "fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn main() {{ {body} }}"
+                "use alloc::List; fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn main() {{ {body} }}"
             ),
         );
         let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
         assert!(diagnostic.contains(message), "{body}: {diagnostic}");
     }
-    f.write("list.mb", "fn make() -> List<u8> { let items: List<u8> = []; items } fn forward() -> List<u8> { make() }");
+    f.write("list.mb", "use alloc::List; fn make() -> List<u8> { let items: List<u8> = []; items } fn forward() -> List<u8> { make() }");
     err(f.run(&["ownership", "list.mb"]), "TE018");
 
     f.write(
@@ -1359,7 +1359,7 @@ fn list_returns_keep_temporary_and_abi_gates() {
     );
     f.write(
         "src/main.mb",
-        "pub fn make() -> List<u8> { let items: List<u8> = []; items } fn main() {}",
+        "use alloc::List; pub fn make() -> List<u8> { let items: List<u8> = []; items } fn main() {}",
     );
     let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -1378,7 +1378,7 @@ fn owned_list_arguments_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn finish(words: List<u32>) -> bool {
+        use alloc::List; fn finish(words: List<u32>) -> bool {
             match words.get(1) { Some(word) => word == 100, None => false }
         }
         fn take(bytes: List<u8>, proceed: bool, var words: List<u32>) -> bool {
@@ -1454,7 +1454,7 @@ fn owned_list_arguments_keep_move_loan_and_abi_gates() {
     ] {
         f.write(
             "list.mb",
-            &format!("fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn make_words() -> List<u32> {{ let items: List<u32> = []; items }} fn take(items: List<u8>, later: u32) {{}} fn main() {{ let items: List<u8> = []; {body} }}"),
+            &format!("use alloc::List; fn make() -> List<u8> {{ let items: List<u8> = []; items }} fn make_words() -> List<u32> {{ let items: List<u32> = []; items }} fn take(items: List<u8>, later: u32) {{}} fn main() {{ let items: List<u8> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }
@@ -1464,7 +1464,7 @@ fn owned_list_arguments_keep_move_loan_and_abi_gates() {
     );
     f.write(
         "src/main.mb",
-        "pub fn take(items: List<u8>) { items.len(); } fn main() {}",
+        "use alloc::List; pub fn take(items: List<u8>) { items.len(); } fn main() {}",
     );
     let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -1483,7 +1483,7 @@ fn shared_list_push_updates_caller_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn add(bytes: share List<u8>, words: share List<u32>) {
+        use alloc::List; fn add(bytes: share List<u8>, words: share List<u32>) {
             bytes.push(255);
             let held := words.borrow();
             let value := held.len() + 1000;
@@ -1529,7 +1529,7 @@ fn shared_list_replacement_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn fresh(previous: borrow List<u32>) -> List<u32> {
+        use alloc::List; fn fresh(previous: borrow List<u32>) -> List<u32> {
             var result: List<u32> = [];
             result.push(0);
             let old := match previous.get(0) { Some(value) => value, None => 0 };
@@ -1580,7 +1580,7 @@ fn list_clear_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn reset(words: share List<u32>) { words.clear() }
+        use alloc::List; fn reset(words: share List<u32>) { words.clear() }
         fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             bytes.clear();
@@ -1637,7 +1637,7 @@ fn list_clear_rejects_read_only_and_conflicting_receivers() {
     ] {
         f.write(
             "list.mb",
-            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+            &format!("use alloc::List; fn main() {{ var items: List<u8> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }
@@ -1653,7 +1653,7 @@ fn list_pop_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn take(items: share List<u32>) -> u32? { items.pop() }
+        use alloc::List; fn take(items: share List<u32>) -> u32? { items.pop() }
         fn main() -> bool ! Error {
             var bytes: List<u8> = [];
             let empty := match bytes.pop() { None => true, Some(_) => false };
@@ -1709,7 +1709,7 @@ fn list_pop_rejects_read_only_and_borrowed_receivers() {
     ] {
         f.write(
             "list.mb",
-            &format!("fn main() {{ var items: List<u8> = []; {body} }}"),
+            &format!("use alloc::List; fn main() {{ var items: List<u8> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }
@@ -1725,7 +1725,7 @@ fn stored_list_share_updates_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn rebuild(previous: borrow List<u32>) -> List<u32> {
+        use alloc::List; fn rebuild(previous: borrow List<u32>) -> List<u32> {
             var next: List<u32> = [];
             next.push(0);
             let old := match previous.get(0) { Some(value) => value, None => 0 };
@@ -1775,51 +1775,51 @@ fn list_shares_reject_conflicts_and_immutable_handle_replacement() {
     let f = Fixture::new();
     for (source, code) in [
         (
-            r#"fn add(view: share List<u8>) { view.push(1); }
+            r#"use alloc::List; fn add(view: share List<u8>) { view.push(1); }
              fn main() { var items: List<u8> = []; let view := items.borrow();
                          add(items.share()); view.len(); }"#,
             "BE005",
         ),
         (
-            r#"fn both(left: share List<u8>, right: share List<u8>) {
+            r#"use alloc::List; fn both(left: share List<u8>, right: share List<u8>) {
                   left.push(1); right.push(2);
              }
              fn main() { var items: List<u8> = []; both(items.share(), items.share()); }"#,
             "BE005",
         ),
         (
-            r#"fn add(view: share List<u8>) {
+            r#"use alloc::List; fn add(view: share List<u8>) {
                   let held := view.borrow(); view.push(1); held.len();
              }
              fn main() {}"#,
             "BE005",
         ),
         (
-            r#"fn reset(view: share List<u8>) {
+            r#"use alloc::List; fn reset(view: share List<u8>) {
                   let held := view.borrow(); view = []; held.len();
                } fn main() {}"#,
             "BE005",
         ),
         (
-            r#"fn main() { var items: List<u8> = []; var handle := items.share();
+            r#"use alloc::List; fn main() { var items: List<u8> = []; var handle := items.share();
                          let held := handle.borrow(); handle = []; held.len(); }"#,
             "BE005",
         ),
         (
-            r#"fn reset(view: share List<u8>) { let alias := view; alias = []; } fn main() {}"#,
+            r#"use alloc::List; fn reset(view: share List<u8>) { let alias := view; alias = []; } fn main() {}"#,
             "TE004",
         ),
         (
-            r#"fn main() { var items: List<u8> = []; var alias := items.share();
+            r#"use alloc::List; fn main() { var items: List<u8> = []; var alias := items.share();
                          let held := alias.borrow(); alias.push(1); held.len(); }"#,
             "BE005",
         ),
         (
-            r#"fn main() { var items: List<u8> = []; var alias := items.borrow(); alias.push(1); }"#,
+            r#"use alloc::List; fn main() { var items: List<u8> = []; var alias := items.borrow(); alias.push(1); }"#,
             "TE017",
         ),
         (
-            r#"fn main() { var items: List<u8> = []; let alias := items.share(); alias.push(1); }"#,
+            r#"use alloc::List; fn main() { var items: List<u8> = []; let alias := items.share(); alias.push(1); }"#,
             "TE017",
         ),
     ] {
@@ -1833,7 +1833,7 @@ fn list_shares_reject_conflicts_and_immutable_handle_replacement() {
     );
     f.write(
         "src/main.mb",
-        "pub fn add(items: share List<u8>) { items.push(1); } fn main() {}",
+        "use alloc::List; pub fn add(items: share List<u8>) { items.push(1); } fn main() {}",
     );
     let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -1852,7 +1852,7 @@ fn borrowed_list_reads_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn word_at(items: borrow List<u32>, index: u32) -> u32? {
+        use alloc::List; fn word_at(items: borrow List<u32>, index: u32) -> u32? {
             if index < items.len() { return items.get(index); }
             None
         }
@@ -1940,7 +1940,7 @@ fn list_borrow_conflicts_and_call_boundaries_are_checked() {
         ),
     ] {
         f.write("list.mb", &format!(
-            "fn inspect(view: borrow List<u8>) {{ view.len(); }} fn main() {{ var items: List<u8> = []; {body} }}"
+            "use alloc::List; fn inspect(view: borrow List<u8>) {{ view.len(); }} fn main() {{ var items: List<u8> = []; {body} }}"
         ));
         let diagnostic = err(f.run(&["ownership", "list.mb"]), code);
         assert!(diagnostic.contains(message), "{body}: {diagnostic}");
@@ -1952,7 +1952,7 @@ fn list_borrow_conflicts_and_call_boundaries_are_checked() {
     );
     f.write(
         "src/main.mb",
-        "pub fn inspect(view: borrow List<u8>) -> u32 { view.len() } fn main() {}",
+        "use alloc::List; pub fn inspect(view: borrow List<u8>) -> u32 { view.len() } fn main() {}",
     );
     let diagnostic = err(f.run(&["build", "--lib"]), "LE900");
     assert!(
@@ -1971,7 +1971,7 @@ fn list_get_reads_copied_values_after_growth_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn byte_is(value: u8?, expected: u8) -> bool {
+        use alloc::List; fn byte_is(value: u8?, expected: u8) -> bool {
             match value { Some(byte) => byte == expected, None => false }
         }
         fn word_is(value: u32?, expected: u32) -> bool {
@@ -2032,7 +2032,7 @@ fn list_get_rejects_invalid_indices_and_moves_during_evaluation() {
     ] {
         f.write(
             "list.mb",
-            &format!("fn main() {{ let items: List<u32> = []; {body} }}"),
+            &format!("use alloc::List; fn main() {{ let items: List<u32> = []; {body} }}"),
         );
         err(f.run(&["ownership", "list.mb"]), code);
     }
@@ -2048,7 +2048,7 @@ fn list_push_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn check(move_it: bool) -> bool {
+        use alloc::List; fn check(move_it: bool) -> bool {
             var bytes: List<u8> = [];
             var words: List<u32> = [];
             var calls := 0;
@@ -2103,10 +2103,10 @@ fn empty_lists_and_local_moves_run_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        type List { count: u32 }
+        use alloc::List; type Counter { count: u32 }
         type Words = List<u32>;
         fn main() -> bool ! Error {
-            let existing: List = List { count: 7 };
+            let existing: Counter = Counter { count: 7 };
             let bytes: List<u8> = [];
             var words: Words = [];
             let before := bytes.len() + words.len();
@@ -2142,20 +2142,20 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
     let f = Fixture::new();
     for (source, code) in [
         (
-            "fn main() { let items: List<u8> = []; let moved := items; items.len(); }",
+            "use alloc::List; fn main() { let items: List<u8> = []; let moved := items; items.len(); }",
             "BE001",
         ),
-        ("fn main() { let items: List<i32> = []; }", "TE017"),
-        ("fn main() { let items: List<u8> = [1]; }", "TE017"),
+        ("use alloc::List; fn main() { let items: List<i32> = []; }", "TE017"),
+        ("use alloc::List; fn main() { let items: List<u8> = [1]; }", "TE017"),
         (
-            "fn main() { let items: List<u8> = []; let array := [items]; }",
+            "use alloc::List; fn main() { let items: List<u8> = []; let array := [items]; }",
             "TE017",
         ),
         (
-            "fn main() { let items: List<u8> = []; items.share(); }",
+            "use alloc::List; fn main() { let items: List<u8> = []; items.share(); }",
             "TE017",
         ),
-        ("fn main() -> List<u32> { [] }", "TE018"),
+        ("use alloc::List; fn main() -> List<u32> { [] }", "TE018"),
     ] {
         f.write("lists.mb", source);
         err(f.run(&["ownership", "lists.mb"]), code);
@@ -9661,7 +9661,7 @@ fn list_iteration_runs_from_source_and_wasm() {
     f.write(
         "src/main.mb",
         r#"
-        fn bytes(calls: share u32, empty: bool) -> List<u8> {
+        use alloc::List; fn bytes(calls: share u32, empty: bool) -> List<u8> {
             calls += 1;
             var items: List<u8> = [];
             if !empty {
@@ -9725,7 +9725,7 @@ fn explicit_drop_releases_owners_and_allows_reinitialization() {
     f.write(
         "src/main.mb",
         r#"
-        fn consume(value: List<u32>) { drop(value); }
+        use alloc::List; fn consume(value: List<u32>) { drop(value); }
         fn check(drop_first: bool) -> bool {
             var text := "old".concat("!");
             var bytes: List<u8> = [];
@@ -9812,7 +9812,7 @@ fn explicit_drop_checks_availability_loans_and_operand_shape() {
         f.write(
             "src/main.mb",
             &format!(
-                "fn check(flag: bool) {{ let text := \"hi\".concat(\"!\"); var words: List<u32> = []; {body} }} fn main() {{ check(true); }}"
+                "use alloc::List; fn check(flag: bool) {{ let text := \"hi\".concat(\"!\"); var words: List<u32> = []; {body} }} fn main() {{ check(true); }}"
             ),
         );
         let diagnostic = err(f.run(&["build"]), code);

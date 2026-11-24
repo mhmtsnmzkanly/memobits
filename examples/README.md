@@ -20,6 +20,7 @@ examples/
 | [guide](guide/README.md) | Whole language, one module per topic | `cargo run -p memobits-cli -- run --project examples/guide/project.toml` | `Result: Ok(i32(42))` |
 | [basics](topics/basics/README.md) | Arithmetic, loops and `string` basics as modules of one project | `cargo run -p memobits-cli -- run --project examples/topics/basics/project.toml` | `Result: Ok(i32(462))` |
 | [arrays](topics/arrays/README.md) | Fixed arrays: locals, calls, results, nested arrays | `cargo run -p memobits-cli -- run --project examples/topics/arrays/project.toml` | `Result: Ok(i32(493))` |
+| [core-only](topics/core-only/README.md) | `[build] alloc = false`: a program with no allocator or heap (arrays, literals, `match`) | `cargo run -p memobits-cli -- run --project examples/topics/core-only/project.toml` | `Result: Ok(i32(57911))` |
 | [enums](topics/enums/README.md) | Variants, `match`, exhaustiveness, aliases, state machine | `cargo run -p memobits-cli -- run --project examples/topics/enums/project.toml` | `Result: Ok(i32(1094300))` |
 | [generics-operators](topics/generics-operators/README.md) | `core::ops` Add/Sub/PartialEq on a `Vec2` and a bounded generic function | `cargo run -p memobits-cli -- run --project examples/topics/generics-operators/project.toml` | `Result: Ok(i32(41))` |
 | [host-capability](topics/host-capability/README.md) | CLI host import declared in the manifest, bound with `extern fn` | `cargo run -p memobits-cli -- run --project examples/topics/host-capability/project.toml` | `Host i32: 42` and `Result: i32(7)` |

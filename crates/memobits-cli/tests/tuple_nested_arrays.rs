@@ -124,7 +124,7 @@ fn tuple_array_elements_keep_reference_and_list_gates() {
         ),
         (
             "list",
-            "fn main() -> i32 { let values: List<u8> = []; let rows := [(values, 2)]; 0 }",
+            "use alloc::List; fn main() -> i32 { let values: List<u8> = []; let rows := [(values, 2)]; 0 }",
             "arrays cannot contain tuples with List fields",
         ),
     ] {

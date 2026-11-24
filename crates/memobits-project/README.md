@@ -20,6 +20,7 @@ Point = "geometry::Point"
 
 [build]
 stack_size = 1048576 # optional bytes; default shown (1 MiB)
+alloc = true # optional; default shown; false removes the allocator and heap
 
 [dependencies.geometry]
 type = "binary" # source or binary
@@ -31,6 +32,10 @@ external = false # optional; default shown
 `[build].stack_size` is the size of the stack in bytes. It must be a multiple of
 16 between 4096 and 268435456 (256 MiB); other values are rejected (PE007 in
 `mb`), and unknown `[build]` keys are rejected like other unknown fields.
+`[build].alloc` (default `true`) selects whether the guest allocator and heap are
+part of the build; see `Manifest::alloc`. With `alloc = false`, importing from the
+`alloc` module and heap-producing string operations are compile errors that name
+the setting. It is independent of `[host] profile`.
 An entry or at least one export is required. Unknown fields are rejected.
 `[package].src` is the initial schema placement of the accepted source-root
 setting. Export and prelude keys are ASCII identifiers, with `::`-separated

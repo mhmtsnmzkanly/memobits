@@ -167,6 +167,12 @@ fn split(path: &str, project: &Project) -> Option<(String, String)> {
     if path == "core::ops" {
         return Some(("core::ops".into(), String::new()));
     }
+    if path == templates::ALLOC_MODULE {
+        return Some((path.into(), String::new()));
+    }
+    if let Some(name) = path.strip_prefix("alloc::") {
+        return Some((templates::ALLOC_MODULE.into(), name.into()));
+    }
     if let Some(name) = path.strip_prefix("core::ops::") {
         return Some(("core::ops".into(), name.into()));
     }
@@ -190,8 +196,19 @@ const CORE_OPS_SOURCE: &str = "pub interface Add { type Rhs; type Output; fn add
 fn is_core_module(name: &str) -> bool {
     name == "core::ops"
 }
+/// Source text of a Rust-owned virtual module. `alloc` declares `List` only so
+/// that imports validate; the type itself is compiler-implemented and the
+/// module is removed from the resolution once references are checked.
+fn virtual_source(name: &str) -> Option<&'static str> {
+    match name {
+        "core::ops" => Some(CORE_OPS_SOURCE),
+        templates::ALLOC_MODULE => Some(ALLOC_SOURCE),
+        _ => None,
+    }
+}
+const ALLOC_SOURCE: &str = "pub type List;";
 fn is_project_module(project: &Project, name: &str) -> bool {
-    is_core_module(name) || project.modules.iter().any(|item| item.name == name)
+    virtual_source(name).is_some() || project.modules.iter().any(|item| item.name == name)
 }
 
 /// Follow a variant's type aliases in their defining modules. The references
@@ -285,6 +302,18 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         ));
         return result;
     }
+    if project
+        .modules
+        .iter()
+        .any(|module| module.name == templates::ALLOC_MODULE)
+    {
+        result.diagnostics.push(error(
+            11,
+            "module name `alloc` is reserved for the compiler-provided alloc module".into(),
+            None,
+        ));
+        return result;
+    }
     let mut pending = Vec::new();
     match target {
         Target::Application => match &project.manifest.package.entry {
@@ -353,6 +382,14 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             ));
             continue;
         };
+        if module == templates::ALLOC_MODULE && !project.manifest.alloc() {
+            result.diagnostics.push(error(
+                12,
+                "module 'alloc' is unavailable: the project sets `[build] alloc = false`".into(),
+                reference.span,
+            ));
+            continue;
+        }
         if reference.module_only {
             if let Some(from) = &reference.from {
                 result
@@ -367,8 +404,8 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         if !visited.insert(module.clone()) {
             continue;
         }
-        let text = if is_core_module(&module) {
-            CORE_OPS_SOURCE.to_owned()
+        let text = if let Some(source) = virtual_source(&module) {
+            source.to_owned()
         } else if let Some(candidate) = project.modules.iter().find(|m| m.name == module) {
             match std::fs::read_to_string(&candidate.path) {
                 Ok(text) => text,
@@ -597,6 +634,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
                 .iter()
                 .map(|(alias, path)| (alias.clone(), path.clone())),
             is_core_module(&module),
+            project.manifest.alloc(),
         );
         result.diagnostics.extend(diagnostics);
         for (path, span, requires_type) in qualified {
@@ -711,6 +749,7 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
             _ => {}
         }
     }
+    result.modules.remove(templates::ALLOC_MODULE);
     check_extension_conformance(project, &mut result);
     result
 }

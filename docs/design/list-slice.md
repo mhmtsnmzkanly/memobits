@@ -15,8 +15,13 @@ local bindings, non-consuming `.len()`, `.get(index)`, `.contains(value)`,
 and `.index_of(value)`, plus `.push(value)`, `.pop()`, and `.clear()` on
 whole mutable locals. Empty construction
 allocates no heap block. A push evaluates the element once and returns unit.
-Moves transfer the block and normal scope exits release the owner. The applied spelling is built in, and bare `List`
-can still name a user type. Direct internal calls accept `borrow List<T>`
+Moves transfer the block and normal scope exits release the owner. `List<T>` is a compiler-implemented
+library type in the Rust-owned virtual module `alloc` and needs
+`use alloc::List;` (or `use alloc;` and `alloc::List<T>`); without the import it
+is an unknown-type error whose note names the import. The applied spelling is
+reserved; a module that does not import it can still declare a bare user type
+named `List`. `[build] alloc = false` removes the module (ME012) and the
+allocator, so Lists are unavailable there. Direct internal calls accept `borrow List<T>`
 for these element types. Use `.borrow()` on a whole local to create the
 read-only handle. A direct borrow parameter also accepts `make_list().borrow()`
 as the argument itself when the factory is a direct internal call. The caller

@@ -74,6 +74,9 @@ pub struct Build {
     /// Size of the stack in bytes. Kept signed so a negative value reaches
     /// validation with a clear message; see [`Manifest::stack_size`].
     pub stack_size: Option<i64>,
+    /// Whether the guest allocator and heap are part of the build (the
+    /// `alloc` layer). Omitted means enabled; see [`Manifest::alloc`].
+    pub alloc: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -168,6 +171,10 @@ impl Manifest {
             .stack_size
             .and_then(|size| u32::try_from(size).ok())
             .unwrap_or(DEFAULT_STACK_SIZE)
+    }
+    /// Whether the `alloc` layer is enabled (`[build] alloc`, default `true`).
+    pub fn alloc(&self) -> bool {
+        self.build.alloc.unwrap_or(true)
     }
     pub fn validate(&self) -> Result<(), Error> {
         if let Some(size) = self.build.stack_size {

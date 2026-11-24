@@ -1,5 +1,6 @@
 use text::{byte_is, byte_length};
 use collections::make_words;
+use alloc::List;
 
 // drop consumes a whole named owned String, List<u8>, or List<u32>.
 // A mutable binding can be assigned again. A loan must end before drop.

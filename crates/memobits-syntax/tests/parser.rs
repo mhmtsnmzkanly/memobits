@@ -642,7 +642,7 @@ fn arrays_preserve_nested_types_literals_and_spans() {
 
 #[test]
 fn nested_generic_closers_remain_separate_from_right_shift_tokens() {
-    let source = "fn f(value: List<List<u32>>) -> u32 { value >> 1 }";
+    let source = "use alloc::List; fn f(value: List<List<u32>>) -> u32 { value >> 1 }";
     let parsed = parse(SourceId(0), source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 }

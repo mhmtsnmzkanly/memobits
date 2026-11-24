@@ -99,7 +99,7 @@ fn memory_covers_reserved_space_and_stack_in_whole_pages() {
 fn list_pop_keeps_the_backing_block_when_empty() {
     let program = lower(
         r#"
-        fn main() -> bool ! Error {
+        use alloc::List; fn main() -> bool ! Error {
             var items: List<u32> = [];
             items.push(305_419_896);
             let removed := match items.pop() {
@@ -135,7 +135,7 @@ fn list_pop_keeps_the_backing_block_when_empty() {
 fn list_clear_retains_backing_storage_for_repeated_refills() {
     let program = lower(
         r#"
-        fn main() -> bool ! Error {
+        use alloc::List; fn main() -> bool ! Error {
             var items: List<u32> = [];
             items.push(305_419_896);
             var round: u32 = 0;
@@ -193,7 +193,7 @@ fn assert_empty_backed_list(data: &[u8], word: u32) {
 fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
     let program = lower(
         r#"
-        fn append(bytes: share List<u8>, words: share List<u32>, index: u32) {
+        use alloc::List; fn append(bytes: share List<u8>, words: share List<u32>, index: u32) {
             bytes.push(if index % 2 == 0 { 195 } else { 169 });
             words.push(305_419_896 + index);
         }
@@ -286,7 +286,7 @@ fn list_push_grows_and_reuses_aligned_blocks_with_exact_contents() {
 fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
     let program = lower(
         r#"
-        fn fill() -> List<u32> {
+        use alloc::List; fn fill() -> List<u32> {
             var items: List<u32> = [];
             loop {
                 items.push(items.len());
@@ -353,7 +353,7 @@ fn list_replacement_reuses_blocks_after_empty_and_mixed_moves() {
 fn owned_list_calls_and_returns_reuse_blocks_after_normal_exits() {
     let program = lower(
         r#"
-        fn consume(items: List<u32>, early: bool) -> bool {
+        use alloc::List; fn consume(items: List<u32>, early: bool) -> bool {
             if early { return items.len() == 12_000; }
             false
         }
@@ -830,7 +830,7 @@ fn immediate_string_reads_reuse_memory_after_read_and_early_exit() {
 fn repeated_list_discard_reuses_storage_in_one_instance() {
     let program = lower(
         r#"
-        fn make(count: u32) -> List<u32> {
+        use alloc::List; fn make(count: u32) -> List<u32> {
             var result: List<u32> = [];
             loop {
                 result.push(result.len());
@@ -884,7 +884,7 @@ fn repeated_list_discard_reuses_storage_in_one_instance() {
 fn temporary_list_reads_reuse_storage_across_normal_and_early_exits() {
     let program = lower(
         r#"
-        fn make(count: u32) -> List<u32> {
+        use alloc::List; fn make(count: u32) -> List<u32> {
             var result: List<u32> = [];
             loop {
                 result.push(result.len());
@@ -951,7 +951,7 @@ fn temporary_list_reads_reuse_storage_across_normal_and_early_exits() {
 fn temporary_list_arguments_reuse_storage_across_normal_and_early_exits() {
     let program = lower(
         r#"
-        fn make(count: u32) -> List<u32> {
+        use alloc::List; fn make(count: u32) -> List<u32> {
             var result: List<u32> = [];
             loop {
                 result.push(result.len());
@@ -1337,7 +1337,7 @@ fn other_traps_do_not_set_the_overflow_flag() {
 fn list_iteration_reuses_temporary_storage_after_each_exit() {
     let program = lower(
         r#"
-        fn make() -> List<u32> {
+        use alloc::List; fn make() -> List<u32> {
             var items: List<u32> = [];
             loop {
                 items.push(items.len());

@@ -104,15 +104,24 @@ pub fn by_id(id: TemplateId) -> &'static Template {
 }
 
 pub fn lookup(path: &[String]) -> Option<&'static Template> {
-    // Only the applied spellings `array<T, N>` and `List<T>` are built in.
+    // Only the applied spellings `array<T, N>` and `List<T>` (which also
+    // needs `use alloc::List;`) are built in.
     // Bare names can still refer to a user-defined type or import.
     lookup_applied(path).filter(|template| template.id != TemplateId::List)
 }
 
 pub fn lookup_applied(path: &[String]) -> Option<&'static Template> {
-    let [name] = path else { return None };
+    let name = match path {
+        [name] => name,
+        // `List<T>` lives in the Rust-owned virtual module `alloc`.
+        [module, name] if module == ALLOC_MODULE && name == "List" => name,
+        _ => return None,
+    };
     TEMPLATES.iter().find(|template| template.name == name)
 }
+
+/// Name of the Rust-owned virtual module that exports `List`.
+pub const ALLOC_MODULE: &str = "alloc";
 
 pub fn lookup_type(ty: &Type) -> Option<&'static Template> {
     if ty.arguments.is_empty() {

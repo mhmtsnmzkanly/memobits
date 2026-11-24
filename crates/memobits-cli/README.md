@@ -65,7 +65,7 @@ The ownership commands check owned `String` transfers and internal loans.
 `mb build [--project PATH] [--lib] [--output PATH]` lowers the selected
 application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
-primitive/aggregate references. `List<u8>` and `List<u32>` support
+primitive/aggregate references. `List<u8>` and `List<u32>` (after `use alloc::List;`) support
 contextual empty `[]`, local moves, and non-consuming `.len()`.
 `.push(value)` appends through a whole mutable local. Empty construction
 allocates no heap block. `.get(index)` copies an element into `T?`
@@ -195,6 +195,20 @@ alike; an artifact without the `memobits.traps` section reports the generic trap
 `[build].stack_size` (bytes, default 1048576, multiple of 16, 4096 to 268435456)
 sets the stack used by `mb build` and `mb run`. A function frame larger than the
 stack is an LE900 compile error; exhausting the stack at run time reports RE008.
+
+`[build] alloc = true|false` (default `true`) selects the alloc layer. `List<T>`
+lives in the compiler-provided virtual module `alloc` and must be imported with
+`use alloc::List;` (a direct or grouped symbol import, or `use alloc;` with the
+path `alloc::List<T>`); without the import `List` is an unknown type (NE003) and
+a note names the import. Renaming it (`use alloc::List as X;`) is not supported.
+With `alloc = false` the build is core-only: any `alloc` import is ME012 and
+every heap-producing string operation (`concat`, `push_str`, `to_utf8_string`)
+is TE033, both naming `[build] alloc`; string literals and read-only string
+operations (`len`, `byte_at`, `scalar_at`, `is_char_boundary`, `validate_utf8`)
+keep working, and the emitted module contains no allocator function, no
+`memory.grow` and a memory whose maximum equals its minimum. The setting
+applies to `check`, `build`, `run` and `test` and is independent of
+`[host] profile`. See `examples/topics/core-only`.
 
 ## Source-level tests
 

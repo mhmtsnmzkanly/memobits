@@ -541,3 +541,37 @@ This section supersedes earlier spelling statements in this file, including
 - Test artifact: a library-style module exporting each test as
   `test::<module>::<name>`. `mb test` runs the exports in qualified-name order,
   one fresh instance each; source and standalone runs print identical reports.
+
+## Alloc layer switch (2026-11-24, architect under the platform-layer decision)
+
+- `[build] alloc = true|false` in `project.toml` (default `true`) selects
+  whether the guest allocator and heap are part of the build. It is
+  independent of `[host] profile`.
+- `List<T>` lives in the Rust-owned virtual module `alloc` and must be
+  imported: `use alloc::List;`. Using `List` without the import is an
+  unknown-type error whose note names the import.
+- With `alloc = false`: importing from `alloc` and heap-producing string
+  operations (`concat`, `push_str`, `to_utf8_string`, …) are compile errors
+  that name the `[build] alloc` setting; string literals and read-only string
+  operations remain available; the emitted module contains no allocator code.
+
+### Shipped A1 details (2026-11-24)
+
+- `alloc` is a Rust-owned virtual module (declares `pub type List;` only so
+  imports validate; it is removed from the resolution afterwards). Accepted
+  forms: `use alloc::List;`, `use alloc::{List};`, and `use alloc;` with
+  `alloc::List<T>` in types. Aliasing (`use alloc::List as X;`) is not
+  supported. A project module named `alloc` is ME011.
+- Missing import: NE003 `unknown type 'List'` with the note ``add `use alloc::List;` to use List``.
+  The applied `List<T>` stays reserved (as `array<T, N>` and `Error`); a
+  module that does not import it may still declare a bare user type `List`.
+- `[build] alloc = false`: `alloc` imports are ME012; `concat`, `push_str`
+  and `to_utf8_string` are TE033, both naming `[build] alloc`. The Wasm
+  backend already emits the allocator only when a heap operation is
+  reachable, so the artifact has no allocator functions, no `memory.grow` and
+  `memory.maximum == memory.minimum` (checked in
+  `crates/memobits-cli/tests/alloc_layer.rs`). Example:
+  `examples/topics/core-only`.
+- Standalone single-file commands (`mb analyze FILE`, `mb ownership FILE`)
+  accept `use alloc...` but do not enforce the import requirement (they have no
+  module resolver).

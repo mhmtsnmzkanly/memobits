@@ -1,0 +1,27 @@
+use checksum;
+use text;
+
+type Shape [ Dot, Square(u32), Rect(u32, u32) ]
+
+fn area(shape: Shape) -> u32 {
+    match shape {
+        Shape::Dot => 1,
+        Shape::Square(side) => side * side,
+        Shape::Rect(width, height) => width * height,
+    }
+}
+
+test fn shape_areas() {
+    assert(area(Shape::Dot) == 1);
+    assert(area(Shape::Square(3)) == 9);
+    assert(area(Shape::Rect(2, 5)) == 10);
+}
+
+// Core-only program: checksum + digit count + areas, no heap anywhere.
+fn main() -> i32 ! Error {
+    let data: array<u8, 6> = [1, 2, 3, 4, 5, 6];
+    let label := "a1b22c333";
+    let total := checksum::checksum(data.borrow()) + text::digits(label.borrow())
+        + area(Shape::Rect(2, 5));
+    Ok(total as i32)
+}

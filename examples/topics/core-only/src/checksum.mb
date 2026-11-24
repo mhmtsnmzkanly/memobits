@@ -1,0 +1,23 @@
+// Fixed arrays, loops and u32 arithmetic need no heap.
+fn rotate_mix(state: u32, byte: u32) -> u32 {
+    (state * 31 + byte) % 65521
+}
+
+// A checksum over a fixed array of bytes.
+pub fn checksum(data: borrow array<u8, 6>) -> u32 {
+    var state: u32 = 7;
+    var index: u32 = 0;
+    loop {
+        if index >= 6 { break; }
+        state = rotate_mix(state, data[index] as u32);
+        index = index + 1;
+    }
+    state
+}
+
+test fn checksum_is_stable() {
+    let data: array<u8, 6> = [1, 2, 3, 4, 5, 6];
+    let again: array<u8, 6> = [1, 2, 3, 4, 5, 6];
+    assert(checksum(data.borrow()) == checksum(again.borrow()));
+    assert(checksum(data.borrow()) == 57895);
+}

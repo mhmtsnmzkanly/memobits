@@ -119,3 +119,25 @@ fn rejects_symlink_cycles() {
         .to_string()
         .contains("symlinks"));
 }
+
+#[test]
+fn build_alloc_defaults_to_true_and_parses_both_values() {
+    use memobits_project::Manifest;
+    let base = "[package]\nname = 'a'\nentry = 'main::main'\n";
+    assert!(Manifest::parse(base).unwrap().alloc());
+    assert!(Manifest::parse(&format!("{base}[build]\n"))
+        .unwrap()
+        .alloc());
+    assert!(Manifest::parse(&format!("{base}[build]\nalloc = true\n"))
+        .unwrap()
+        .alloc());
+    let off = Manifest::parse(&format!(
+        "{base}[build]\nalloc = false\nstack_size = 8192\n"
+    ))
+    .unwrap();
+    assert!(!off.alloc());
+    assert_eq!(off.stack_size(), 8192);
+    // Only booleans are accepted.
+    assert!(Manifest::parse(&format!("{base}[build]\nalloc = 'no'\n")).is_err());
+    assert!(Manifest::parse(&format!("{base}[build]\nalloc = 0\n")).is_err());
+}

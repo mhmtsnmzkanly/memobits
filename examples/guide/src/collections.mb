@@ -1,4 +1,12 @@
 use text::{byte_is, no_byte};
+use alloc;
+use alloc::List;
+
+// `List<T>` is a library type in the compiler-provided `alloc` module, so it
+// must be imported with `use alloc::List;`. Without the import, `List` is an
+// unknown type. `use alloc;` also admits the qualified spelling
+// `alloc::List<T>`. A project that sets `[build] alloc = false` has no `alloc`
+// module and no heap at all (see examples/topics/core-only).
 
 // Fixed arrays, structs, and ownership.
 pub type Row = array<i32, 3>;
@@ -155,6 +163,11 @@ test fn list_iteration() {
     assert(digits == 42);
     assert(bytes.len() == 0);
     assert(first == 1000);
+}
+test fn qualified_list_path() {
+    var bytes: alloc::List<u8> = [];
+    bytes.push(7);
+    assert(bytes.len() == 1);
 }
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
