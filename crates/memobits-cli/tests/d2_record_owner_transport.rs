@@ -382,8 +382,8 @@ fn make() { let t := "a".concat("b"); let r: { name: string, n: u32 } = { name: 
         ),
         (
             format!("{bind} let a := [r; 3]; }} fn main() {{}}"),
-            "TE018",
-            "can only move directly into a new local",
+            "TE017",
+            "would copy a String-owning element",
         ),
         (
             format!("{bind} take({{ name: \"a\", n: 1 }}); }} fn main() {{}}"),

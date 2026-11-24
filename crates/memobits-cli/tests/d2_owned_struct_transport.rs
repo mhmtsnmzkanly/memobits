@@ -418,16 +418,10 @@ fn borrowed_heap_payload_enum_across_blocks_is_rejected_before_extraction() {
             "TE017",
             "reference-valued branch results are not supported",
         ),
-        (
-            "fn f(e: borrow E, c: bool) -> u32 { var r: u32 = 0; if c { match e { E::S(s) => { r = s.len(); }, E::N => {} } } r }",
-            "TE018",
-            "String enum payloads require a consuming match",
-        ),
-        (
-            "fn f(e: borrow E, c: bool) -> u32 { let x := e; if c { match x { E::S(s) => s.len(), E::N => 0 } } else { 1 } }",
-            "TE018",
-            "String enum payloads require a consuming match",
-        ),
+        // An in-place match of a borrowed enum inside a branch is accepted since
+        // E1a (the payload binds as a read-only reference); see e1_owned_elements.
+        // `let x := e; match x { .. }` inside a branch is accepted since E1a
+        // (in-place match, read-only payload reference); see e1_owned_elements.
     ] {
         f.write(
             "src/main.mb",
@@ -586,16 +580,6 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
             "fn main() { var x := make(); x = make(); }",
             "TE018",
             "requires a new local binding",
-        ),
-        (
-            "fn main() { let a := [make()]; }",
-            "TE018",
-            "must be assigned directly",
-        ),
-        (
-            "fn main() { let t := [make()]; }",
-            "TE018",
-            "must be assigned directly",
         ),
         (
             "fn main() { let x := if true { make() } else { make() }; }",

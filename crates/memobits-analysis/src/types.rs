@@ -2173,6 +2173,16 @@ impl Checker {
                             // Reads the place (privacy, existence, bounds of constant
                             // indices) and yields its type.
                             let place = self.expr(target, None);
+                            if self.lowering
+                                && matches!(target.kind, ExprKind::Index { .. })
+                                && self.contains_string_owner(&place, &mut HashSet::new())
+                            {
+                                self.error(
+                                    22,
+                                    target.span,
+                                    "an element that owns String storage cannot be overwritten in place; take the old element out with `replace` or `swap` (not available yet), or rebuild the array",
+                                );
+                            }
                             match place_root(target) {
                                 Some(path) if path.len() == 1 => {
                                     if let Some(binding) = self.lookup(&path[0]).cloned() {
@@ -4435,6 +4445,16 @@ impl Checker {
                     );
                 }
                 self.check_element_support(&element, expr.span);
+                if self.lowering
+                    && self.contains_string_owner(&element, &mut HashSet::new())
+                    && !matches!(value.kind, ExprKind::StringLiteral(_))
+                {
+                    self.error(
+                        17,
+                        value.span,
+                        "`[value; N]` would copy a String-owning element; owners are moved, never copied, so list each element in an array literal or build the array from separate named owners",
+                    );
+                }
                 let count = self.array_count(count);
                 if let Some(context) = context {
                     if !matches!(element, Ty::Never | Ty::Error) {

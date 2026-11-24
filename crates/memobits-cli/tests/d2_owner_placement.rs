@@ -341,8 +341,8 @@ fn make() { let t := "a".concat("b"); let l := Label { text: t, n: 1 };"#;
         // Repeat form copies the owner.
         (
             &format!("{bind} let a := [l; 3]; }} fn main() {{}}"),
-            "TE018",
-            "can only move directly into a new local",
+            "TE017",
+            "would copy a String-owning element",
         ),
         // Element move-out (no implicit partial moves).
         (

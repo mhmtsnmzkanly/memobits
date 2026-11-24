@@ -433,11 +433,16 @@ fn field_addr_rooted_at_local(function: &Function, source: Source) -> bool {
             Source::Local(local) => function.locals.get(local.0 as usize).is_some(),
             Source::Value(value) if visited.insert(value) => {
                 let result = producers.get(&value).is_some_and(|instruction| {
-                    let InstructionKind::FieldAddr {
+                    let (InstructionKind::FieldAddr {
                         base,
                         access: memobits_ir::Access::Borrow,
                         ..
-                    } = &instruction.kind
+                    }
+                    | InstructionKind::ElementAddr {
+                        base,
+                        access: memobits_ir::Access::Borrow,
+                        ..
+                    }) = &instruction.kind
                     else {
                         return false;
                     };

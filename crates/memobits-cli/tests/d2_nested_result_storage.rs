@@ -142,7 +142,12 @@ fn main() -> u32 {
             let output = fixture.run(args);
             assert!(!output.status.success(), "{source}");
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("TE018"), "{stderr}");
+            // Overwriting an owning element in place is TE022 (E1a); the other
+            // shapes stay TE018.
+            assert!(
+                stderr.contains("TE018") || stderr.contains("TE022"),
+                "{stderr}"
+            );
         }
         assert!(!fixture.0.join("nested.wasm").exists());
     }

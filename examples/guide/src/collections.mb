@@ -261,3 +261,42 @@ test fn primitive_lists() {
     assert(byte_is(bytes.get(0), 42));
     assert(no_byte(bytes.get(1)));
 }
+
+// Owned elements. array<string, N> and arrays of String-owning structs own
+// their elements: leaving the scope (or returning early) releases every
+// element exactly once, and an owned parameter or result moves the whole array.
+// An element is a place. Use it in place as a borrow or share receiver or
+// argument, in an in-place match, or through a projection such as
+// items[i].text.len(). Moving an element out (let t := items[0];) is rejected
+// with TE022 (`replace`, `swap` and `pop` are planned), and so is repeating an
+// owner ([name; 2]) or overwriting an owning element in place.
+type Entry {
+    label: string,
+    weight: u32,
+}
+fn size_of(text: borrow string) -> u32 {
+    text.len()
+}
+fn entry_weight(entry: borrow Entry) -> u32 {
+    entry.label.len() + entry.weight
+}
+test fn owned_array_elements() {
+    let first := "alpha".concat("");
+    let second := "be".concat("ta");
+    let names: array<string, 2> = [first, second];
+    let at: u32 = 1;
+    // Constant and dynamic indices are bounds-checked places.
+    assert(names[0].len() == 5);
+    assert(names[at].len() == 4);
+    assert(size_of(names[at].borrow()) == 4);
+
+    let head := Entry { label: "head".concat(""), weight: 1 };
+    let tail := Entry { label: "tail!".concat(""), weight: 2 };
+    let entries := [head, tail];
+    // Projections and borrows reach through the element.
+    assert(entries[at].label.len() == 5);
+    assert(entry_weight(entries[0].borrow()) == 5);
+    let row := [entries];
+    // Nested element places: grid[i][j].
+    assert(entry_weight(row[0][1].borrow()) == 7);
+}

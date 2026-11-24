@@ -2483,11 +2483,6 @@ fn wasm_gates_string_exports_and_nested_storage() {
             "exported signatures cannot use String",
         ),
         (
-            r#"fn main() { let values := ["é"]; }"#,
-            &["build"][..],
-            "String array elements",
-        ),
-        (
             r#"pub fn main() -> string ! Error { Ok("é") }"#,
             &["build"][..],
             "primitive success payload",

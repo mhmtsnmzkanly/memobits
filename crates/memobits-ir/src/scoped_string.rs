@@ -1019,18 +1019,19 @@ pub(super) fn array_binding(function: &Function, instructions: &[Instruction]) -
     if !matches!(constructor.kind, InstructionKind::ArrayNew { .. }) {
         return None;
     }
+    // A mutable array local may also be reassigned from a new array value.
     let InstructionKind::Assign {
         target,
         value,
-        initialize: true,
+        initialize,
     } = &after.iter().find(|inst| !is_cleanup(inst))?.kind
     else {
         return None;
     };
-    (matches!(
-        function.locals.get(target.0 as usize)?.ty,
-        Type::Array { .. }
-    ) && value.source == Source::Value(output)
+    let binding = function.locals.get(target.0 as usize)?;
+    (matches!(binding.ty, Type::Array { .. })
+        && (*initialize || (binding.mutable && !function.parameter_locals.contains(target)))
+        && value.source == Source::Value(output)
         && value.mode == UseMode::Consume)
         .then_some(*target)
 }
@@ -1441,7 +1442,13 @@ pub(super) fn validate(
                     if (!list_local(*target)
                         && !struct_local(*target)
                         && !string_destination(function, *target, *initialize))
-                        || (struct_local(*target) && !initialize)
+                        || (struct_local(*target)
+                            && !initialize
+                            && !function.locals.get(target.0 as usize).is_some_and(|local| {
+                                matches!(local.ty, Type::Array { .. })
+                                    && local.mutable
+                                    && !function.parameter_locals.contains(target)
+                            }))
                         || source_outside_scope
                         || (!initialize && !in_scope.contains(target))
                     {

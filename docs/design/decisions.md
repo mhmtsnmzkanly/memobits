@@ -575,3 +575,30 @@ This section supersedes earlier spelling statements in this file, including
 - Standalone single-file commands (`mb analyze FILE`, `mb ownership FILE`)
   accept `use alloc...` but do not enforce the import requirement (they have no
   module resolver).
+
+## Owned elements in collections (2026-11-24, architect, from accepted principles)
+
+Derived from "composition allowed by default", "references stay second-class"
+and "no implicit partial moves"; no new user-facing principle.
+- `List<T>` and `array<T, N>` accept any admitted element type, including
+  `string` and String-owning aggregates. (`List<T>` is no longer limited to
+  `u8`/`u32`; the old "unchanged for now" note in "Built-in type spelling"
+  is superseded.)
+- Non-empty list literals use the existing contextual form: with an expected
+  `List<T>`, `[a, b, c]` builds a list (as `[]` already builds an empty one);
+  elements evaluate once in written order and move in.
+- `items[i]` on a list is a place, like array indexing: bounds-checked
+  (controlled trap), copyable elements read by copy, non-copyable elements
+  usable only in place — as `borrow`/`share` receiver or argument, in an
+  in-place `match`, or through a projection (`items[i].name.len()`). Moving
+  an element out of a live collection is rejected (partial move); use
+  `pop()`, `replace(items[i], v)` or `swap(...)` instead. `get(i) -> T?`
+  stays available only for copyable `T`.
+- A live loan of an element blocks operations that may move or reallocate
+  storage (`push`, `pop`, `clear`, replacement) — enforced by the existing
+  loan checker at owner granularity.
+- `loop x in items` binds copies for copyable elements and read-only loans
+  for non-copyable elements, for the duration of each iteration. Consuming
+  iteration is not part of this step.
+- Element-borrow limits recorded during D2 (`grid[i][j].borrow()`,
+  `bag.items[0].borrow()`, `d.title.size()`) are lifted under these rules.

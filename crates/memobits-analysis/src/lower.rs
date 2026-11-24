@@ -1306,8 +1306,8 @@ impl<'a> Builder<'a> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
             let search = matches!(method, "contains" | "index_of");
-            let string_field =
-                matches!(base.kind, ExprKind::Field { .. }) && self.ty(base) == Some(Type::String);
+            let string_field = matches!(base.kind, ExprKind::Field { .. } | ExprKind::Index { .. })
+                && self.ty(base) == Some(Type::String);
             let receiver = if search || string_field {
                 // Keep the receiver loan live across value evaluation.
                 self.lower_read_receiver(base)?
@@ -2202,6 +2202,20 @@ impl<'a> Builder<'a> {
                 let mut operands = Vec::with_capacity(elements.len());
                 for element in elements {
                     let value = self.lower_expr(element)?;
+                    if self.is_string_transport_owner(&element_ty) {
+                        // An owner element (literal or call result) is staged
+                        // in a hidden local first, as for tuple elements, so
+                        // its construction has a direct binding.
+                        let value = self.owned_to(value, &element_ty)?;
+                        let staged = self.hidden_local(
+                            "array owner element",
+                            (*element_ty).clone(),
+                            element.span,
+                        );
+                        self.initialize_local(staged, value, element.span);
+                        operands.push(consume(op(Source::Local(staged), element.span)));
+                        continue;
+                    }
                     // Capture locals now so every element is read in source order.
                     operands.push(self.owned_captured(value, &element_ty)?);
                 }

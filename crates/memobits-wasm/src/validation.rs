@@ -271,26 +271,44 @@ pub(super) fn validate_string_struct_borrows(
             .then_some(value)
         })
         .collect();
-    let borrows: HashMap<_, _> = instructions()
-        .filter_map(|instruction| {
-            let output = instruction.output?;
-            let index = output.0 as usize;
-            let (owner, access) = match &instruction.kind {
-                InstructionKind::Borrow { owner, access, .. }
-                | InstructionKind::ElementAddr {
-                    base: owner,
-                    access,
-                    ..
-                } => (owner, access),
-                _ => return None,
-            };
-            if !matches!(access, Access::Borrow | Access::Share) {
+    // A call argument that is a reference produced by a single-use chain of
+    // `borrow`/`share` reborrows and field or element projections is allowed
+    // when the chain is rooted at a named owner (or a borrowed parameter) that
+    // holds String storage: `grid[i][j].borrow()`, `bag.items[0].borrow()`,
+    // `d.title.size()`.
+    let single_use_chain = |value: ValueId| -> Option<(Vec<ValueId>, Source)> {
+        let mut current = value;
+        let mut chain = Vec::new();
+        loop {
+            if uses.get(current.0 as usize) != Some(&1) || chain.len() > function.values.len() {
                 return None;
             }
-            (uses[index] == 1 && is_string_struct_ref(&function.values[index]))
-                .then_some((output, owner.source))
-        })
-        .collect();
+            let producer = producers.get(&current)?;
+            let base = match &producer.kind {
+                InstructionKind::Borrow {
+                    owner: base,
+                    access: Access::Borrow | Access::Share,
+                    ..
+                }
+                | InstructionKind::ElementAddr {
+                    base,
+                    access: Access::Borrow | Access::Share,
+                    ..
+                }
+                | InstructionKind::FieldAddr {
+                    base,
+                    access: Access::Borrow | Access::Share,
+                    ..
+                } => base,
+                _ => return None,
+            };
+            chain.push(current);
+            match base.source {
+                Source::Value(next) => current = next,
+                root => return Some((chain, root)),
+            }
+        }
+    };
     let mut allowed = HashSet::new();
     let mut forwarded_parameter = false;
     for instruction in instructions() {
@@ -316,25 +334,16 @@ pub(super) fn validate_string_struct_borrows(
                 Source::Value(value) => value,
                 _ => continue,
             };
-            let Some(&source) = borrows.get(&value) else {
+            let Some((chain, root @ Source::Local(_))) = single_use_chain(value) else {
                 continue;
             };
-            // Argument lowering reborrows the explicit `owner.borrow()`.
-            // Both addresses must be used only in this chain to the call.
-            let (root, original) = match source {
-                Source::Value(original) => (borrows.get(&original).copied(), Some(original)),
-                _ => (Some(source), None),
-            };
-            if matches!(root, Some(Source::Local(local))
-            if function.locals.get(local.0 as usize)
-                .is_some_and(|binding| type_owns_string_storage(
-                    program,
-                    &binding.ty,
-                    &mut HashSet::new(),
-                )))
-            {
-                allowed.insert(value);
-                allowed.extend(original);
+            // The root stays a named owner local (a borrowed parameter cannot
+            // be forwarded as a whole struct; see `forwarded_parameter`).
+            if matches!(root, Source::Local(local)
+            if function.locals.get(local.0 as usize).is_some_and(|binding| {
+                type_owns_string_storage(program, &binding.ty, &mut HashSet::new())
+            })) {
+                allowed.extend(chain);
             }
         }
     }
@@ -462,7 +471,7 @@ pub(super) fn supported_type(ty: &Type) -> bool {
         Type::Array { element, .. } => match element.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
             nested @ Type::Array { .. } => supported_type(nested),
-            Type::Struct(_) | Type::Enum(_) => true,
+            Type::String | Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },
         _ => false,

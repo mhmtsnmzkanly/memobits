@@ -269,6 +269,16 @@ pub enum BinaryOp {
     Or,
 }
 
+/// The base operand of a projection, seen as a plain loan when the access is a
+/// share (the heap-String check treats borrows and shares of an owner alike).
+fn projection_base(base: &Operand, access: Access) -> Operand {
+    let mut base = base.clone();
+    if access == Access::Share && base.mode == UseMode::Share {
+        base.mode = UseMode::Borrow;
+    }
+    base
+}
+
 /// Initialisation of a freshly created array. Elements are never observably
 /// uninitialised.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2497,7 +2507,16 @@ fn validate_instruction(
                         None
                     }
                 });
-            if payload_type == Some(Type::String) {
+            // `string ! E` entry-style results keep requiring a consuming match;
+            // other enums may bind a String payload in place as a read-only
+            // reference (in-place `match` of an element place, E1a).
+            if payload_type == Some(Type::String)
+                && enum_id
+                    .and_then(|type_id| program.types.get(type_id.0 as usize))
+                    .is_some_and(|definition| {
+                        definition.entry_outcome == Some(EntryOutcome::Result)
+                    })
+            {
                 push(
                     errors,
                     id,
@@ -3481,33 +3500,47 @@ fn validate_operand_escapes(
                         let Source::Local(source) = value.source else {
                             return false;
                         };
-                        let Some(source_ty) = function.locals.get(source.0 as usize).map(|local| &local.ty) else {
+                        let Some(source_ty) = function
+                            .locals
+                            .get(source.0 as usize)
+                            .map(|local| &local.ty)
+                        else {
                             return false;
                         };
-                        block.instructions[position + 1..].iter().enumerate().any(|(offset, candidate)| {
-                            let InstructionKind::ArrayNew { init: ArrayInit::Elements(elements) } = &candidate.kind else {
-                                return false;
-                            };
-                            let destination = scoped_string::array_binding(
-                                function,
-                                &block.instructions[position + 1 + offset..],
-                            ).is_some()
-                                || matches!(&block.terminator.kind,
+                        block.instructions[position + 1..].iter().enumerate().any(
+                            |(offset, candidate)| {
+                                let InstructionKind::ArrayNew {
+                                    init: ArrayInit::Elements(elements),
+                                } = &candidate.kind
+                                else {
+                                    return false;
+                                };
+                                let destination = scoped_string::array_binding(
+                                    function,
+                                    &block.instructions[position + 1 + offset..],
+                                )
+                                .is_some()
+                                    || matches!(&block.terminator.kind,
                                     TerminatorKind::Return(Some(Operand {
                                         source: Source::Value(returned),
                                         mode: UseMode::Consume,
                                         ..
                                     })) if candidate.output == Some(*returned));
-                            destination
-                                && candidate.output.and_then(|id| function.values.get(id.0 as usize))
-                                    .is_some_and(|ty| matches!(ty, Type::Array { element, .. }
+                                destination
+                                    && candidate
+                                        .output
+                                        .and_then(|id| function.values.get(id.0 as usize))
+                                        .is_some_and(|ty| {
+                                            matches!(ty, Type::Array { element, .. }
                                         if **element == *source_ty
-                                            && scoped_string::owns_string_aggregate(program, element)))
-                                && elements.iter().any(|element| {
-                                    element.source == Source::Value(output)
-                                        && element.mode == UseMode::Consume
-                                })
-                        })
+                                            && scoped_string::owns_string_storage(program, element))
+                                        })
+                                    && elements.iter().any(|element| {
+                                        element.source == Source::Value(output)
+                                            && element.mode == UseMode::Consume
+                                    })
+                            },
+                        )
                     });
                     if !feeds_owned_enum_payload
                         && !feeds_owned_call_argument
@@ -3530,13 +3563,22 @@ fn validate_operand_escapes(
                 | InstructionKind::Load { reference: value } => {
                     report(block_id, value, false, false)
                 }
-                InstructionKind::ElementAddr { base, index, .. } => {
-                    report(block_id, base, false, false);
+                InstructionKind::ElementAddr {
+                    base,
+                    index,
+                    access,
+                    ..
+                } => {
+                    // A shared projection of a heap owner is a checked loan
+                    // like a borrow; the loan checker orders it.
+                    report(block_id, &projection_base(base, *access), false, false);
                     report(block_id, index, false, false);
                 }
-                InstructionKind::FieldAddr { base, .. }
-                | InstructionKind::VariantAddr { base, .. }
-                | InstructionKind::EnumTag { base } => report(block_id, base, false, false),
+                InstructionKind::FieldAddr { base, access, .. }
+                | InstructionKind::VariantAddr { base, access, .. } => {
+                    report(block_id, &projection_base(base, *access), false, false)
+                }
+                InstructionKind::EnumTag { base } => report(block_id, base, false, false),
                 InstructionKind::VariantExtract { base, variant, .. } => {
                     // A non-local base is a temporary. Extracting an owned
                     // String payload is only sound when that temporary owns
@@ -3784,7 +3826,7 @@ fn validate_operand_escapes(
                             let moved_owner = destination
                                 && element.mode == UseMode::Consume
                                 && element_ty.is_some_and(|ty| {
-                                    scoped_string::owns_string_aggregate(program, ty)
+                                    scoped_string::owns_string_storage(program, ty)
                                         && matches!(element.source, Source::Local(local)
                                             if function.locals.get(local.0 as usize)
                                                 .is_some_and(|binding| binding.ty == *ty))

@@ -99,7 +99,12 @@ impl Checker {
             } else {
                 "a struct or array element cannot be moved out by indexing"
             };
-            self.error(22, expr.span, format!("{what}; only primitive values are copied implicitly and partial moves are deferred, so borrow or share the aggregate, or read a primitive inside it"));
+            let advice = if matches!(expr.kind, ExprKind::Index { .. }) {
+                "borrow or share the element, read a primitive inside it, or take an element out of its owner with `replace`, `swap` or `pop` (not available yet)"
+            } else {
+                "borrow or share the aggregate, or read a primitive inside it"
+            };
+            self.error(22, expr.span, format!("{what}; only primitive values are copied implicitly and partial moves are deferred, so {advice}"));
         }
     }
 }

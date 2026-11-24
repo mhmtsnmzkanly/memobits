@@ -367,9 +367,6 @@ pub(super) fn type_layout<'a>(
             {
                 return Err("Wasm does not yet support nesting structs with String fields".into());
             }
-            if **element == Type::String {
-                return Err("Wasm does not yet support String array elements".into());
-            }
             let (size, align) = type_layout(struct_layout, element)?;
             let bytes = len.checked_mul(size).ok_or(LAYOUT_OVERFLOW)?;
             Ok((bytes, align))
