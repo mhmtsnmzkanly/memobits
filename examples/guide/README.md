@@ -63,6 +63,7 @@ check (1xx `numbers`, 2xx `text`, 3xx `tuples`, 4xx `aggregates`,
 | 704 | `enums_outcomes` | `optional_borrow` |
 | 705 | `enums_outcomes` | `outcomes` |
 | 706 | `enums_outcomes` | `nested_result_storage` |
+| 707 | `enums_outcomes` | `nested_patterns` |
 | 801 | `generics` | `generic_structs` |
 | 802 | `generics` | `nested_generic_methods` |
 | 803 | `generics` | `generic_functions` |

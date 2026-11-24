@@ -1043,8 +1043,8 @@ fn match_arms_patterns_and_optional_commas_parse() {
     let PatternKind::Variant { slots, .. } = &arms[2].pattern.kind else {
         panic!()
     };
-    assert_eq!(slots[0].name.as_deref(), Some("w"));
-    assert_eq!(slots[1].name, None);
+    assert!(matches!(&slots[0].kind, PatternKind::Binding(name) if name == "w"));
+    assert!(matches!(slots[1].kind, PatternKind::Wildcard));
     assert!(matches!(arms[3].pattern.kind, PatternKind::Wildcard));
     assert!(matches!(arms[1].body.kind, ExprKind::Block(_)));
 }
@@ -1098,8 +1098,8 @@ fn unsupported_patterns_are_gated_with_messages() {
         "literal patterns",
     );
     syntax_error(
-        "fn f(s: S) { match s { A::B(C::D(x)) => {} } }",
-        "nested patterns",
+        "fn f(s: S) { match s { A::B(C::D(1)) => {} } }",
+        "literal patterns",
     );
     syntax_error(
         "fn f(s: S) { match s { A::B(x) if x > 1 => {} _ => {} } }",
@@ -1245,4 +1245,58 @@ fn parses_shift_right_assignment_after_nested_generic_closer() {
         panic!("expected assignment");
     };
     assert_eq!(operator, ">>=");
+}
+
+#[test]
+fn nested_variant_tuple_wildcard_and_binding_patterns_parse_at_any_depth() {
+    use memobits_syntax::PatternKind;
+    let body = first_body(
+        "fn f(r: R) -> i32 { match r { Ok(Some(v)) => 1, Ok(None) => 2, Err(_) => 3, \
+         A::B(C::D((x, _)), (y,), z) => 4, (Some(a), (b, c)) => 5, ((d)) => 6 } }",
+    );
+    let tail = body.tail.expect("match is the tail expression");
+    let ExprKind::Match { arms, .. } = &tail.kind else {
+        panic!("{tail:?}")
+    };
+    assert_eq!(arms.len(), 6);
+    let PatternKind::Variant { path, slots } = &arms[0].pattern.kind else {
+        panic!()
+    };
+    assert_eq!(path, &["Ok"]);
+    let PatternKind::Variant { path, slots } = &slots[0].kind else {
+        panic!()
+    };
+    assert_eq!(path, &["Some"]);
+    assert!(matches!(&slots[0].kind, PatternKind::Binding(name) if name == "v"));
+    // A bare `None` has no parentheses, so the parser reports a lone identifier.
+    let PatternKind::Variant { slots, .. } = &arms[1].pattern.kind else {
+        panic!()
+    };
+    assert!(matches!(&slots[0].kind, PatternKind::Binding(name) if name == "None"));
+    let PatternKind::Variant { slots, .. } = &arms[3].pattern.kind else {
+        panic!()
+    };
+    assert_eq!(slots.len(), 3);
+    let PatternKind::Variant { slots: inner, .. } = &slots[0].kind else {
+        panic!()
+    };
+    let PatternKind::Tuple(pair) = &inner[0].kind else {
+        panic!()
+    };
+    assert_eq!(pair.len(), 2);
+    assert!(matches!(&slots[1].kind, PatternKind::Tuple(single) if single.len() == 1));
+    assert!(matches!(&slots[2].kind, PatternKind::Binding(name) if name == "z"));
+    assert!(matches!(&arms[4].pattern.kind, PatternKind::Tuple(items) if items.len() == 2));
+    // Redundant parentheses group a single pattern.
+    assert!(matches!(&arms[5].pattern.kind, PatternKind::Binding(name) if name == "d"));
+}
+
+#[test]
+fn malformed_nested_patterns_are_syntax_errors() {
+    syntax_error("fn f(s: S) { match s { A::B(C::D(1)) => {} } }", "literal");
+    syntax_error("fn f(s: S) { match s { A::B(()) => {} } }", "empty tuple");
+    syntax_error(
+        "fn f(s: S) { match s { A::B(C { x }) => {} } }",
+        "struct patterns",
+    );
 }

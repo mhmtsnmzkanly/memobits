@@ -35,7 +35,7 @@ fn struct_field_index(definition: &TypeFact, name: &str) -> Option<usize> {
 
 use crate::types::{
     check_resolved_mode, check_typed_module, CheckMode, ExprId, FunctionFacts, MatchFact,
-    PathTarget, SelectedCall, TypeFact, VariantUse,
+    MatchPattern, PathTarget, SelectedCall, TypeFact, VariantUse,
 };
 
 /// IR type definitions for the checked structs. `module_path` names the module
@@ -537,6 +537,54 @@ enum Projection {
     Index(Operand, bool),
     Field(String),
     FieldSlot(u32),
+}
+/// A pattern that tests nothing: `_`, a binding, or a tuple of such.
+fn irrefutable_pattern(pattern: &MatchPattern) -> bool {
+    match pattern {
+        MatchPattern::Wildcard | MatchPattern::Bind(_) => true,
+        // A tuple has one constructor: it tests nothing by itself.
+        MatchPattern::Tuple(args) => args.iter().all(irrefutable_pattern),
+        MatchPattern::Variant { .. } => false,
+    }
+}
+static MATCH_WILDCARD: MatchPattern = MatchPattern::Wildcard;
+/// One row of the match pattern matrix: the arm and its remaining patterns,
+/// one per occurrence still to inspect.
+#[derive(Clone)]
+struct MatchRow<'p> {
+    arm: usize,
+    patterns: Vec<&'p MatchPattern>,
+}
+impl<'p> MatchRow<'p> {
+    /// The row with its pattern at `column` replaced by `replacement`.
+    fn replacing(&self, column: usize, replacement: Vec<&'p MatchPattern>) -> Self {
+        let mut patterns = self.patterns.clone();
+        patterns.splice(column..=column, replacement);
+        Self {
+            arm: self.arm,
+            patterns,
+        }
+    }
+}
+/// What the leaves of one match's decision tree need.
+struct MatchPlan<'p> {
+    arms: &'p [crate::types::MatchArmFact],
+    /// The block of each arm's body, entered from its leaves.
+    bodies: Vec<BlockId>,
+    /// The hidden owner of a consuming match.
+    owner: Option<LocalId>,
+    /// The local the decision phase reads: the owner, or a reference.
+    root: LocalId,
+    root_ty: Type,
+}
+/// A value a match still inspects: a local holding a reference to it.
+#[derive(Clone)]
+struct MatchOccurrence {
+    reference: LocalId,
+    ty: Type,
+    /// `reference` is the consuming match's owner itself, not a reference to
+    /// it: its tag is read in place, as the ownership validator expects.
+    direct_owner: bool,
 }
 struct LoopTargets {
     header: BlockId,
@@ -2528,17 +2576,25 @@ impl<'a> Builder<'a> {
             ExprKind::Match { scrutinee, arms } => self.lower_match(expr, scrutinee, arms),
         }
     }
-    /// `match` on an owned enum. The scrutinee is consumed once, into a hidden
-    /// local, so every arm reads the same cell. The tag is read once and a
-    /// `Switch` dispatches to one block per arm; an arm moves out the payloads
-    /// it binds with `VariantExtract` (the last one consumes the cell) and
-    /// joins its value like an `if` branch.
+    /// `match` over an enum or tuple, with patterns nested to any depth.
+    ///
+    /// The scrutinee lives in one place for the whole match: a hidden owner
+    /// local (consuming match) or a reference to the matched place (in-place
+    /// match). The decision phase only reads: it compiles the pattern matrix
+    /// into a tree of `EnumTag` / `Switch` blocks, deriving a reference to
+    /// each nested payload it must test with `VariantAddr` / `FieldAddr`.
+    /// Each leaf binds for the arm it selected, then jumps to that arm's body
+    /// block, which is lowered exactly once. A consuming match moves each
+    /// bound payload out of the scrutinee (the last extraction from a value
+    /// consumes it) and releases every unbound owned part exactly once; an
+    /// in-place match copies primitive payloads and lends aggregates.
     fn lower_match(&mut self, expr: &Expr, scrutinee: &Expr, arms: &[MatchArm]) -> Option<Operand> {
         let fact = self.matches[&self.id(expr)];
         let span = scrutinee.span;
-        // `cell` is the hidden owner of a consuming match, or the reference to
-        // the matched place of a borrowing one.
-        let (cell, enum_id, tag) = if fact.borrowed {
+        // `owner` is the hidden owner of a consuming match; `root` is the
+        // local the decision phase reads (the owner, or the reference to the
+        // matched place of an in-place match).
+        let (owner, root, root_ty) = if fact.borrowed {
             let reference = if matches!(
                 scrutinee.kind,
                 ExprKind::Index { .. } | ExprKind::Field { .. }
@@ -2548,21 +2604,16 @@ impl<'a> Builder<'a> {
             } else {
                 self.lower_expr(scrutinee)?
             };
-            let Some(Type::Reference { access, inner }) = self.operand_type(reference) else {
+            let Some(Type::Reference { inner, .. }) = self.operand_type(reference) else {
                 unreachable!("checked borrowing match scrutinee")
             };
-            let Type::Enum(enum_id) = *inner else {
-                unreachable!("checked borrowing match scrutinee")
-            };
-            let cell = match reference.source {
+            let root = match reference.source {
                 Source::Local(local) => local,
                 _ => {
                     let local = self.hidden_local(
                         "match scrutinee",
-                        Type::Reference {
-                            access,
-                            inner: Box::new(Type::Enum(enum_id)),
-                        },
+                        self.operand_type(reference)
+                            .expect("typed match scrutinee reference"),
                         span,
                     );
                     self.emit(
@@ -2577,20 +2628,13 @@ impl<'a> Builder<'a> {
                     local
                 }
             };
-            let mut base = op(Source::Local(cell), span);
-            base.mode = UseMode::Borrow;
-            let tag = self.emit(
-                span,
-                InstructionKind::EnumTag { base },
-                Some(Type::Primitive(Primitive::U32)),
-            )?;
-            (cell, enum_id, tag)
+            (None, root, *inner)
         } else {
             let source = self.lower_expr(scrutinee)?;
-            let Some(Type::Enum(enum_id)) = self.operand_type(source) else {
+            let Some(ty @ (Type::Enum(_) | Type::Struct(_))) = self.operand_type(source) else {
                 unreachable!("checked match scrutinee")
             };
-            let cell = self.hidden_local("match scrutinee", Type::Enum(enum_id), span);
+            let cell = self.hidden_local("match scrutinee", ty.clone(), span);
             let moved = self.owned(source)?;
             self.emit(
                 span,
@@ -2601,138 +2645,53 @@ impl<'a> Builder<'a> {
                 },
                 None,
             );
-            let tag = self.emit(
-                span,
-                InstructionKind::EnumTag {
-                    base: read(op(Source::Local(cell), span)),
-                },
-                Some(Type::Primitive(Primitive::U32)),
-            )?;
-            (cell, enum_id, tag)
+            (Some(cell), cell, ty)
         };
-        let types = self.types;
-        let definition = &types[enum_id.0 as usize];
         let join_id = self.new_block();
         let parameter = self.ty(expr).map(|ty| {
             let id = self.new_value(ty);
             self.function.blocks[join_id.0 as usize].parameters.push(id);
             id
         });
-        let mut targets = Vec::new();
-        let mut default = None;
-        let mut arm_blocks = Vec::new();
-        for arm_fact in &fact.arms {
-            let block = self.new_block();
-            arm_blocks.push(block);
-            let edge = Edge {
-                target: block,
-                arguments: Vec::new(),
-            };
-            match arm_fact.variant {
-                Some(variant) => targets.push((variant, edge)),
-                None => default = Some(edge),
-            }
-        }
-        let current = self.current.expect("scrutinee completed");
-        self.finish(
-            current,
-            TerminatorKind::Switch {
-                tag: read(tag),
-                ty: enum_id,
-                targets,
-                default,
-            },
-            Some(span),
-        );
+        let plan = MatchPlan {
+            arms: &fact.arms,
+            bodies: arms.iter().map(|_| self.new_block()).collect(),
+            owner,
+            root,
+            root_ty: root_ty.clone(),
+        };
+        let rows = fact
+            .arms
+            .iter()
+            .enumerate()
+            .map(|(arm, fact)| MatchRow {
+                arm,
+                patterns: vec![&fact.pattern],
+            })
+            .collect();
+        self.decide_match(
+            &plan,
+            rows,
+            vec![MatchOccurrence {
+                reference: root,
+                ty: root_ty,
+                direct_owner: owner.is_some(),
+            }],
+            true,
+            arms,
+            span,
+        )?;
         let mut reaches = false;
-        for ((arm, arm_fact), block) in arms.iter().zip(&fact.arms).zip(arm_blocks) {
+        for ((arm, arm_fact), body) in arms.iter().zip(&fact.arms).zip(&plan.bodies) {
             let scope_start = self.owned_locals.len();
-            self.current = Some(block);
-            if let Some(variant) = arm_fact.variant {
-                let payload = &definition.variants[variant as usize].payload;
-                let bound: Vec<(usize, LocalId)> = arm_fact
-                    .bindings
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, local)| local.map(|local| (index, local)))
-                    .collect();
-                if fact.borrowed {
-                    for (index, local) in &bound {
-                        let ty = payload[*index].clone();
-                        let loan = LoanId(self.next_loan);
-                        self.next_loan += 1;
-                        let mut base = op(Source::Local(cell), arm.pattern.span);
-                        base.mode = UseMode::Borrow;
-                        let mut reference = self.emit(
-                            arm.pattern.span,
-                            InstructionKind::VariantAddr {
-                                loan,
-                                base,
-                                variant,
-                                field: *index as u32,
-                                access: Access::Borrow,
-                            },
-                            Some(Type::Reference {
-                                access: Access::Borrow,
-                                inner: Box::new(ty.clone()),
-                            }),
-                        )?;
-                        reference.mode = UseMode::Borrow;
-                        let value = if matches!(ty, Type::Primitive(_)) {
-                            let loaded = self.load_element(reference, arm.pattern.span)?;
-                            self.owned(loaded)?
-                        } else {
-                            consume(reference)
-                        };
-                        self.emit(
-                            arm.pattern.span,
-                            InstructionKind::Assign {
-                                target: *local,
-                                value,
-                                initialize: true,
-                            },
-                            None,
-                        );
-                    }
-                }
-                let mut extracted = if fact.borrowed {
-                    Vec::new()
-                } else {
-                    bound.clone()
-                };
-                if !fact.borrowed {
-                    for (index, ty) in payload.iter().enumerate() {
-                        if arm_fact.bindings.get(index).is_some_and(Option::is_none)
-                            && (matches!(ty, Type::String)
-                                || is_string_owner_aggregate_type(types, ty))
-                        {
-                            let local = self.hidden_local(
-                                "discarded match payload",
-                                ty.clone(),
-                                arm.pattern.span,
-                            );
-                            extracted.push((index, local));
-                        }
-                    }
-                }
-                extracted.sort_by_key(|(index, _)| *index);
-                for (position, (index, local)) in extracted.iter().enumerate() {
-                    let mut base = op(Source::Local(cell), arm.pattern.span);
-                    base.mode = if position + 1 == extracted.len() {
-                        UseMode::Consume
-                    } else {
-                        UseMode::Read
-                    };
-                    let extracted = self.emit(
-                        arm.pattern.span,
-                        InstructionKind::VariantExtract {
-                            base,
-                            variant,
-                            field: *index as u32,
-                        },
-                        Some(payload[*index].clone()),
-                    )?;
-                    self.initialize_local(*local, consume(extracted), arm.pattern.span);
+            self.current = Some(*body);
+            // The leaves bound this arm's locals; the body owns their cleanup.
+            let mut bindings = Vec::new();
+            arm_fact.pattern.collect_bindings(&mut bindings);
+            for local in bindings {
+                let ty = &self.function.locals[local.0 as usize].ty;
+                if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty) {
+                    self.owned_locals.push(local);
                 }
             }
             if let Some(value) = self.lower_expr(&arm.body) {
@@ -2746,6 +2705,518 @@ impl<'a> Builder<'a> {
         }
         self.current = reaches.then_some(join_id);
         parameter.map(|id| op(Source::Value(id), expr.span))
+    }
+    /// Compile the pattern matrix `rows` over the `occurrences` (the values
+    /// still to inspect) into decision blocks; every leaf binds for the first
+    /// row that matches and jumps to that arm's body. `owner_in_scope` says
+    /// whether the consuming match's owner is still a live owner at this
+    /// point: a `Switch` on the owner drops it on edges whose variant owns
+    /// no heap storage, which the ownership validator mirrors.
+    #[allow(clippy::too_many_arguments)]
+    fn decide_match(
+        &mut self,
+        plan: &MatchPlan<'a>,
+        rows: Vec<MatchRow<'a>>,
+        occurrences: Vec<MatchOccurrence>,
+        owner_in_scope: bool,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Option<()> {
+        let current = self.current.expect("match decision block");
+        let Some(first) = rows.first() else {
+            // Exhaustiveness is proven before lowering; no value reaches here.
+            self.finish(current, TerminatorKind::Unreachable, Some(span));
+            return Some(());
+        };
+        let Some(column) = first
+            .patterns
+            .iter()
+            .position(|pattern| !irrefutable_pattern(pattern))
+        else {
+            let arm = first.arm;
+            let pattern_span = arms[arm].pattern.span;
+            let pattern = &plan.arms[arm].pattern;
+            if plan.owner.is_none() {
+                let mut reference = op(Source::Local(plan.root), pattern_span);
+                reference.mode = UseMode::Borrow;
+                self.bind_in_place(pattern, reference, &plan.root_ty, pattern_span)?;
+            } else {
+                let cell = plan.owner.expect("consuming match owner");
+                self.move_out_of(pattern, cell, &plan.root_ty, owner_in_scope, pattern_span)?;
+            }
+            self.goto(plan.bodies[arm], Vec::new(), pattern_span);
+            return Some(());
+        };
+        let occurrence = occurrences[column].clone();
+        let types = self.types;
+        let mut rest_occurrences = occurrences;
+        rest_occurrences.remove(column);
+        let reference = || {
+            let mut base = op(Source::Local(occurrence.reference), span);
+            base.mode = UseMode::Borrow;
+            base
+        };
+        match &occurrence.ty {
+            Type::Enum(enum_id) => {
+                let definition = &types[enum_id.0 as usize];
+                let mut present: Vec<u32> = rows
+                    .iter()
+                    .filter_map(|row| match row.patterns[column] {
+                        MatchPattern::Variant { variant, .. } => Some(*variant),
+                        _ => None,
+                    })
+                    .collect();
+                present.sort_unstable();
+                present.dedup();
+                let mut tag_base = reference();
+                if occurrence.direct_owner {
+                    tag_base.mode = UseMode::Read;
+                }
+                let tag = self.emit(
+                    span,
+                    InstructionKind::EnumTag { base: tag_base },
+                    Some(Type::Primitive(Primitive::U32)),
+                )?;
+                let variant_blocks: Vec<(u32, BlockId)> = present
+                    .iter()
+                    .map(|variant| (*variant, self.new_block()))
+                    .collect();
+                let default_block =
+                    (present.len() < definition.variants.len()).then(|| self.new_block());
+                let edge = |target| Edge {
+                    target,
+                    arguments: Vec::new(),
+                };
+                self.finish(
+                    current,
+                    TerminatorKind::Switch {
+                        tag: read(tag),
+                        ty: *enum_id,
+                        targets: variant_blocks
+                            .iter()
+                            .map(|(variant, block)| (*variant, edge(*block)))
+                            .collect(),
+                        default: default_block.map(edge),
+                    },
+                    Some(span),
+                );
+                for (variant, block) in variant_blocks {
+                    self.current = Some(block);
+                    let payload = &definition.variants[variant as usize].payload;
+                    let needed: Vec<usize> = (0..payload.len())
+                        .filter(|field| {
+                            rows.iter().any(|row| {
+                                matches!(row.patterns[column], MatchPattern::Variant { variant: found, args }
+                                    if *found == variant && !irrefutable_pattern(&args[*field]))
+                            })
+                        })
+                        .collect();
+                    let mut children = Vec::new();
+                    for field in &needed {
+                        let child = self.variant_reference(
+                            reference(),
+                            variant,
+                            *field as u32,
+                            payload[*field].clone(),
+                            span,
+                        )?;
+                        children.push(MatchOccurrence {
+                            reference: child,
+                            ty: payload[*field].clone(),
+                            direct_owner: false,
+                        });
+                    }
+                    let specialized = rows
+                        .iter()
+                        .filter_map(|row| {
+                            let replacement: Vec<&MatchPattern> = match row.patterns[column] {
+                                MatchPattern::Variant {
+                                    variant: found,
+                                    args,
+                                } => {
+                                    if *found != variant {
+                                        return None;
+                                    }
+                                    needed.iter().map(|field| &args[*field]).collect()
+                                }
+                                _ => needed.iter().map(|_| &MATCH_WILDCARD).collect(),
+                            };
+                            Some(row.replacing(column, replacement))
+                        })
+                        .collect();
+                    let mut next = rest_occurrences.clone();
+                    next.splice(column..column, children);
+                    // The validator drops the owner on an edge to a variant
+                    // that owns no storage.
+                    let in_scope = if occurrence.direct_owner {
+                        owner_in_scope && payload.iter().any(|ty| self.owns_storage(ty))
+                    } else {
+                        owner_in_scope
+                    };
+                    self.decide_match(plan, specialized, next, in_scope, arms, span)?;
+                }
+                if let Some(block) = default_block {
+                    self.current = Some(block);
+                    let defaults = rows
+                        .iter()
+                        .filter(|row| irrefutable_pattern(row.patterns[column]))
+                        .map(|row| row.replacing(column, Vec::new()))
+                        .collect();
+                    self.decide_match(
+                        plan,
+                        defaults,
+                        rest_occurrences,
+                        owner_in_scope,
+                        arms,
+                        span,
+                    )?;
+                }
+            }
+            Type::Struct(struct_id) => {
+                let definition = &types[struct_id.0 as usize];
+                let fields: Vec<Type> = definition.fields.iter().map(|f| f.ty.clone()).collect();
+                let needed: Vec<usize> = (0..fields.len())
+                    .filter(|field| {
+                        rows.iter().any(|row| {
+                            matches!(row.patterns[column], MatchPattern::Tuple(args)
+                                if !irrefutable_pattern(&args[*field]))
+                        })
+                    })
+                    .collect();
+                let mut children = Vec::new();
+                for field in &needed {
+                    let child = self.field_addr_index(reference(), *field, Access::Borrow, span)?;
+                    let local = self.hidden_local(
+                        "match payload reference",
+                        self.operand_type(child).expect("typed field address"),
+                        span,
+                    );
+                    self.emit(
+                        span,
+                        InstructionKind::Assign {
+                            target: local,
+                            value: consume(child),
+                            initialize: true,
+                        },
+                        None,
+                    );
+                    children.push(MatchOccurrence {
+                        reference: local,
+                        ty: fields[*field].clone(),
+                        direct_owner: false,
+                    });
+                }
+                let specialized = rows
+                    .iter()
+                    .map(|row| {
+                        let replacement: Vec<&MatchPattern> = match row.patterns[column] {
+                            MatchPattern::Tuple(args) => {
+                                needed.iter().map(|field| &args[*field]).collect()
+                            }
+                            _ => needed.iter().map(|_| &MATCH_WILDCARD).collect(),
+                        };
+                        row.replacing(column, replacement)
+                    })
+                    .collect();
+                let mut next = rest_occurrences;
+                next.splice(column..column, children);
+                self.decide_match(plan, specialized, next, owner_in_scope, arms, span)?;
+            }
+            _ => unreachable!("checked match column type"),
+        }
+        Some(())
+    }
+    /// A reference local to payload `field` of `variant`, derived from the
+    /// reference `base` (valid on the edge where `variant` is the tag).
+    fn variant_reference_operand(
+        &mut self,
+        mut base: Operand,
+        variant: u32,
+        field: u32,
+        ty: Type,
+        span: Span,
+    ) -> Option<Operand> {
+        base.mode = UseMode::Borrow;
+        let loan = LoanId(self.next_loan);
+        self.next_loan += 1;
+        let mut reference = self.emit(
+            span,
+            InstructionKind::VariantAddr {
+                loan,
+                base,
+                variant,
+                field,
+                access: Access::Borrow,
+            },
+            Some(Type::Reference {
+                access: Access::Borrow,
+                inner: Box::new(ty),
+            }),
+        )?;
+        reference.mode = UseMode::Borrow;
+        Some(reference)
+    }
+    /// `variant_reference_operand`, held in a hidden reference local so the
+    /// decision tree can use it in later blocks.
+    fn variant_reference(
+        &mut self,
+        base: Operand,
+        variant: u32,
+        field: u32,
+        ty: Type,
+        span: Span,
+    ) -> Option<LocalId> {
+        let reference = self.variant_reference_operand(base, variant, field, ty, span)?;
+        let local = self.hidden_local(
+            "match payload reference",
+            self.operand_type(reference).expect("typed variant address"),
+            span,
+        );
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: local,
+                value: consume(reference),
+                initialize: true,
+            },
+            None,
+        );
+        Some(local)
+    }
+    /// Bind an in-place match arm: primitives are copied, aggregates are
+    /// lent as read-only references into the matched place.
+    fn bind_in_place(
+        &mut self,
+        pattern: &MatchPattern,
+        reference: Operand,
+        ty: &Type,
+        span: Span,
+    ) -> Option<()> {
+        match pattern {
+            MatchPattern::Wildcard => {}
+            MatchPattern::Bind(local) => {
+                let local = local.expect("lowered match binding");
+                let value = if matches!(ty, Type::Primitive(_)) {
+                    let loaded = self.load_element(reference, span)?;
+                    self.owned(loaded)?
+                } else {
+                    consume(reference)
+                };
+                self.emit(
+                    span,
+                    InstructionKind::Assign {
+                        target: local,
+                        value,
+                        initialize: true,
+                    },
+                    None,
+                );
+            }
+            MatchPattern::Variant { variant, args } => {
+                let Type::Enum(id) = ty else {
+                    unreachable!("checked variant pattern")
+                };
+                let payload = &self.types[id.0 as usize].variants[*variant as usize].payload;
+                for (field, arg) in args.iter().enumerate() {
+                    if matches!(arg, MatchPattern::Wildcard) {
+                        continue;
+                    }
+                    let child = self.variant_reference_operand(
+                        reference,
+                        *variant,
+                        field as u32,
+                        payload[field].clone(),
+                        span,
+                    )?;
+                    self.bind_in_place(arg, child, &payload[field], span)?;
+                }
+            }
+            MatchPattern::Tuple(args) => {
+                let Type::Struct(id) = ty else {
+                    unreachable!("checked tuple pattern")
+                };
+                let fields = &self.types[id.0 as usize].fields;
+                for (field, arg) in args.iter().enumerate() {
+                    if matches!(arg, MatchPattern::Wildcard) {
+                        continue;
+                    }
+                    let field_ty = fields[field].ty.clone();
+                    let child = self.field_addr_index(reference, field, Access::Borrow, span)?;
+                    self.bind_in_place(arg, child, &field_ty, span)?;
+                }
+            }
+        }
+        Some(())
+    }
+    /// Bind a consuming match arm out of the owner local `cell`: bound
+    /// payloads move into their binding locals and every other owned part is
+    /// released. The last extraction from a value consumes it. `in_scope` is
+    /// false when the validator already dropped `cell` because its variant
+    /// owns no storage, so there is nothing to end.
+    fn move_out_of(
+        &mut self,
+        pattern: &MatchPattern,
+        cell: LocalId,
+        ty: &Type,
+        in_scope: bool,
+        span: Span,
+    ) -> Option<()> {
+        let types = self.types;
+        match pattern {
+            MatchPattern::Wildcard => {
+                if in_scope {
+                    self.release_owned(cell, ty, span);
+                }
+            }
+            MatchPattern::Bind(local) => {
+                let local = local.expect("lowered match binding");
+                self.bind_local(local, consume(op(Source::Local(cell), span)), span);
+            }
+            MatchPattern::Variant { variant, args } => {
+                let Type::Enum(id) = ty else {
+                    unreachable!("checked variant pattern")
+                };
+                let payload = &types[id.0 as usize].variants[*variant as usize].payload;
+                // Unbound owned payloads are extracted too: a consuming
+                // extraction clears the whole cell, so each must be released
+                // through its own local.
+                let needed: Vec<usize> = (0..args.len())
+                    .filter(|field| {
+                        !matches!(args[*field], MatchPattern::Wildcard)
+                            || self.owns_storage(&payload[*field])
+                    })
+                    .collect();
+                let mut children = Vec::new();
+                for (position, field) in needed.iter().enumerate() {
+                    let mut base = op(Source::Local(cell), span);
+                    base.mode = if position + 1 == needed.len() {
+                        UseMode::Consume
+                    } else {
+                        UseMode::Read
+                    };
+                    let extracted = self.emit(
+                        span,
+                        InstructionKind::VariantExtract {
+                            base,
+                            variant: *variant,
+                            field: *field as u32,
+                        },
+                        Some(payload[*field].clone()),
+                    )?;
+                    self.bind_extracted(
+                        &args[*field],
+                        extracted,
+                        &payload[*field],
+                        span,
+                        &mut children,
+                    );
+                }
+                if needed.is_empty() && in_scope {
+                    self.release_owned(cell, ty, span);
+                }
+                for (arg, child, child_ty) in children {
+                    self.move_out_of(arg, child, &child_ty, true, span)?;
+                }
+            }
+            MatchPattern::Tuple(args) => {
+                let Type::Struct(id) = ty else {
+                    unreachable!("checked tuple pattern")
+                };
+                let fields: Vec<Type> = types[id.0 as usize]
+                    .fields
+                    .iter()
+                    .map(|field| field.ty.clone())
+                    .collect();
+                if args.iter().all(|arg| matches!(arg, MatchPattern::Wildcard)) {
+                    if in_scope {
+                        self.release_owned(cell, ty, span);
+                    }
+                    return Some(());
+                }
+                // A tuple that owns Strings is destructured by extracting
+                // every field in order, each straight into its local.
+                let mut children = Vec::new();
+                for (field, field_ty) in fields.iter().enumerate() {
+                    let mut base = op(Source::Local(cell), span);
+                    base.mode = if field + 1 == fields.len() {
+                        UseMode::Consume
+                    } else {
+                        UseMode::Read
+                    };
+                    let extracted = self.emit(
+                        span,
+                        InstructionKind::Extract {
+                            base,
+                            field: field as u32,
+                        },
+                        Some(field_ty.clone()),
+                    )?;
+                    self.bind_extracted(&args[field], extracted, field_ty, span, &mut children);
+                }
+                for (arg, child, child_ty) in children {
+                    self.move_out_of(arg, child, &child_ty, true, span)?;
+                }
+            }
+        }
+        Some(())
+    }
+    /// Initialize an arm's binding local. The arm body registers the local's
+    /// cleanup once, however many leaves reach the arm.
+    fn bind_local(&mut self, local: LocalId, value: Operand, span: Span) {
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: local,
+                value,
+                initialize: true,
+            },
+            None,
+        );
+    }
+    /// Put an extracted payload into its local: the binding itself, or a
+    /// hidden local that still has sub-patterns or owned parts to settle.
+    fn bind_extracted<'p>(
+        &mut self,
+        pattern: &'p MatchPattern,
+        extracted: Operand,
+        ty: &Type,
+        span: Span,
+        children: &mut Vec<(&'p MatchPattern, LocalId, Type)>,
+    ) {
+        match pattern {
+            MatchPattern::Bind(local) => {
+                let local = local.expect("lowered match binding");
+                self.bind_local(local, consume(extracted), span);
+            }
+            _ => {
+                // The ownership validator recognizes this name: an ignored
+                // heap `Ok` payload of a `string ! E` is not an accepted
+                // immediate consuming match.
+                let name = if matches!(pattern, MatchPattern::Wildcard) {
+                    "discarded match payload"
+                } else {
+                    "match payload"
+                };
+                let child = self.hidden_local(name, ty.clone(), span);
+                self.bind_local(child, consume(extracted), span);
+                children.push((pattern, child, ty.clone()));
+            }
+        }
+    }
+    fn owns_storage(&self, ty: &Type) -> bool {
+        matches!(ty, Type::String) || is_string_owner_aggregate_type(self.types, ty)
+    }
+    /// End a hidden owner local that no binding takes over. Cleanup is
+    /// directed by the type and the active variant, so it releases exactly
+    /// the owned parts the value holds.
+    fn release_owned(&mut self, local: LocalId, ty: &Type, span: Span) {
+        let end = match ty {
+            Type::String => InstructionKind::EndStringLocal { local },
+            Type::List(_) => InstructionKind::EndListLocal { local },
+            _ if self.owns_storage(ty) => InstructionKind::EndStructLocal { local },
+            _ => return,
+        };
+        self.emit(span, end, None);
     }
     /// An enum variant construction. Payload arguments are evaluated and
     /// captured left to right, then handed to `EnumNew` in declaration order.

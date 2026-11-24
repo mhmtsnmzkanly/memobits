@@ -24,7 +24,7 @@ use tuples::{tuple_values};
 use aggregates::{anonymous_shapes, shared_string_field_replacement};
 use ownership::{explicit_drop, local_string_fields, local_heap_string_fields, borrow_string_struct, owned_string_struct_argument, temporary_string_fields, replace_local_string_field};
 use collections::{stations, fixed_bytes, primitive_lists, fixed_iteration, list_iteration};
-use enums_outcomes::{trailing_enum_extension, optional_sugar, enums, optional_borrow, outcomes, nested_result_storage};
+use enums_outcomes::{trailing_enum_extension, optional_sugar, enums, optional_borrow, outcomes, nested_result_storage, nested_patterns};
 use generics::{generic_structs, nested_generic_methods, generic_functions, generic_array_forwarding, generic_interface_forwarding};
 use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defined_div, user_defined_rem, user_defined_bitand, user_defined_bitor, user_defined_bitxor, user_defined_negation, user_defined_equality, user_defined_ordering, user_defined_add_assign, user_defined_sub_assign, user_defined_mul_assign, user_defined_div_assign, user_defined_rem_assign, user_defined_bitand_assign, user_defined_bitor_assign, user_defined_bitxor_assign, user_defined_shl, user_defined_shl_assign, user_defined_shr_assign, generic_compound_assignments, user_defined_shr};
 
@@ -106,6 +106,7 @@ fn main() -> i32 ! Error {
     if !optional_borrow() { return Err(Error { code: 704 }); }
     if !outcomes() { return Err(Error { code: 705 }); }
     if !nested_result_storage() { return Err(Error { code: 706 }); }
+    if !nested_patterns() { return Err(Error { code: 707 }); }
     // Generic functions, structs and interface bounds.
     if !generic_structs() { return Err(Error { code: 801 }); }
     if !nested_generic_methods() { return Err(Error { code: 802 }); }

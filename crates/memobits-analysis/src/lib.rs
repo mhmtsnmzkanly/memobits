@@ -150,8 +150,8 @@ mod constants;
 mod types;
 pub use types::{
     check_resolved_types, check_typed_module, check_types, ExprId, ExpressionFact, FieldFact,
-    FunctionFacts, LocalFact, MatchArmFact, MatchFact, PathTarget, PathUse, TypeFact, TypedModule,
-    VariantFact, VariantUse,
+    FunctionFacts, LocalFact, MatchArmFact, MatchFact, MatchPattern, PathTarget, PathUse, TypeFact,
+    TypedModule, VariantFact, VariantUse,
 };
 
 mod lower;

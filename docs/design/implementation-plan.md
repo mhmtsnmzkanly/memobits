@@ -223,7 +223,7 @@ the implemented subset; a milestone is not complete merely because its crate exi
 - **Owned `match` with exhaustiveness** (`memobits-syntax`, `-resolve`, `-analysis`,
   `-ir`, `-ownership`, `-wasm`): `match scrutinee { Enum::Variant(a, _) => expr,
   Enum::Unit => { block }, _ => expr }` as an expression, in owned locals, call
-  results, constructions and owned parameters. Flat patterns only. Arms unify
+  results, constructions and owned parameters. Flat patterns only at B2 (nested patterns followed, see enum-implementation.md). Arms unify
   like `if` branches (divergent arms allowed); missing variants are TE031,
   wrong-enum / arity / unsupported patterns TE030, unreachable arms TE032,
   non-enum or borrowed scrutinees TE029, matching a field or element TE022.

@@ -35,12 +35,14 @@ visibility, exhaustive matching, and control-flow legality are not performed.
 
 `match scrutinee { Pattern => expr, Pattern => { block } }` parses to `ExprKind::Match`
 with one `MatchArm { pattern, body }` per arm, in source order. A pattern is `_`
-(`PatternKind::Wildcard`) or a variant path with optional slots
-(`PatternKind::Variant { path, slots }`; each `PatternSlot` is an identifier or `_`). Arms are
+(`PatternKind::Wildcard`), a lone identifier (`PatternKind::Binding`, which analysis resolves
+to a bare variant or a binding), a variant path with optional slots
+(`PatternKind::Variant { path, slots }`) or a tuple (`PatternKind::Tuple`). Every slot is
+itself a pattern, so patterns nest to any depth. Arms are
 separated by commas, which may be omitted after a block-like body (`{`, `if`, `match`);
 `return`, `break` and `continue` are accepted directly as an arm body (parsed as a
 one-statement block); `=>` is a token. The scrutinee is parsed like an `if` condition, so a
-struct literal there is SE002 (parenthesise it). Literal, nested and struct patterns, guards
+struct literal there is SE002 (parenthesise it). Literal and struct patterns, guards
 (`if` after a pattern), and a missing separator are SE002 with a message naming the gated
 form. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
 is left to analysis.

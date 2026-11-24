@@ -444,11 +444,13 @@ This section supersedes earlier spelling statements in this file, including
   - `T ! E` — a value or an error; variants `Ok(T)` and `Err(E)`. `E` must be
     `Error` or derived from it. Example: `fn main() -> i32 ! Error`.
   - `T ?! E` — exactly the same type as `T? ! E` (a fallible operation whose
-    success may carry no value). There is no separate `Attempt` type.
-    `Done(v)`, `Skipped` and `Failed(e)` remain as constructor and pattern
-    aliases for `Ok(Some(v))`, `Ok(None)` and `Err(e)` on this type.
+    success may carry no value). There is no separate `Attempt` type, and
+    `Done`, `Skipped` and `Failed` are removed entirely (no aliases): values
+    are built and matched as `Ok(Some(v))`, `Ok(None)` and `Err(e)` using
+    nested patterns.
   - `?` binds tighter than `!`: `u32? ! E` is `(u32?) ! E`; parentheses group
-    explicitly, e.g. `(u32 ! E)?` and `(borrow T)?`.
+    explicitly, e.g. `(u32 ! E)?`, `(borrow T)?` and `T ! (borrow E)`.
+    Grouping is syntax only; it does not widen reference transport gates.
 - Removed spellings are compile errors (TE001) with guidance naming the
   replacement: `Option<T>` → `T?`, `Result<T, E>` → `T ! E`,
   `Attempt<T, E>` → `T ?! E`, `Bool` → `bool`, `Char` → `char`,
@@ -460,3 +462,19 @@ This section supersedes earlier spelling statements in this file, including
 - `List<T>` is unchanged for now; its name and model are decided with the
   general collection work.
 - Diagnostics and host-visible type names use the new spellings.
+
+## Nested patterns (2026-11-23, user decision)
+
+- `match` arms accept nested constructor patterns at any depth: enum and
+  optional/fallible variants (`Ok(Some(v))`, `Ok(None)`, `Err(e)`,
+  `Shape::Pair(Point::Origin, other)`), tuple patterns inside payloads and
+  arms, `_` wildcards and binding names in any position.
+- Exhaustiveness and unreachable-arm checks cover nested patterns; missing
+  cases are reported with an example of an uncovered pattern.
+- Ownership follows the existing match rules: an owned match consumes the
+  whole scrutinee, moves bound payloads into the arm and releases unbound
+  owned parts exactly once; an in-place (borrowed) match copies primitive
+  payloads and lends aggregate payloads read-only. No partial moves out of a
+  live owner are introduced.
+- Literal patterns, or-patterns, guards and pattern bindings with `@` remain
+  open (not part of this decision).

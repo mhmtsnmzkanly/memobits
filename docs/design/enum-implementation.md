@@ -19,7 +19,7 @@ tag read until B2.
 
 **B2 — owned `match` with exhaustiveness (implemented; see the B2 checkpoint).**
 `match v { Shape::Empty => .., Shape::Circle(r) => .., Shape::Rect(w, h) => .. }`
-over an owned scrutinee. Flat patterns only: a variant path with identifier or
+over an owned scrutinee. Flat patterns at B2 (nested patterns were added later, see "Nested patterns (N-PAT)"): a variant path with identifier or
 `_` payload bindings, plus a `_` arm. Exhaustiveness is a set difference over
 the variants (missing variants are named). All arms share one result type under
 the `if` rule. The scrutinee is consumed; each arm binds its payload by moving
@@ -290,11 +290,11 @@ test-only `__test_memory` export, not by any language-level tag access.
 | --- | --- |
 | Scrutinee is not an enum | TE029 |
 | (B2 only; lifted by B3) borrowed enum scrutinee, enum in a field or element | TE029 / TE022 |
-| Pattern names another enum, an unknown variant, a non-variant path, a bare identifier (binding pattern), has the wrong payload count, or binds a name twice | TE030 |
-| Missing variants without a `_` arm | TE031 (names them) |
-| Unreachable arm: duplicate variant, arm after `_`, or `_` after every variant is matched | TE032 (an error, not a warning) |
+| Pattern names another enum, an unknown variant, a non-variant path, a top-level bare identifier (binding pattern), has the wrong payload or tuple element count, a constructor pattern against the wrong type, or binds a name twice | TE030 |
+| Uncovered values (missing variants or nested cases) | TE031 (names example patterns, such as `Ok(None)`) |
+| Unreachable arm: no value reaches it after the earlier arms (duplicate variant, arm after `_`, `_` after full coverage, a covered nested pattern) | TE032 (an error, not a warning) |
 | Arm result types disagree | TE013 |
-| Literal pattern, nested pattern, guard, struct pattern, malformed arm separator | SE002 (message says what is gated) |
+| Literal pattern, guard, struct pattern, malformed arm separator | SE002 (message says what is gated) |
 | `==` / `!=` on enums | TE007 ("use `match`") |
 | Use after the scrutinee was matched; reusing a moved payload | BE001 |
 | Moving or consuming an enum while a reference to it is live | BE005 |
@@ -387,9 +387,49 @@ names); `memobits-wasm` (`VariantAddr` offset, no new layout).
 
 ### Gated, still
 
-Nested patterns, literal patterns, guards, or-patterns, bare binding patterns,
-mutable matching (writes through payload bindings: TE004; matching a `share`
+Literal patterns, guards, or-patterns, `@` bindings, a top-level bare binding
+pattern, mutable matching (writes through payload bindings: TE004; matching a `share`
 does not make bindings writable), `==`/`!=` on enums (TE007), a match scrutinee
 projecting through a call result (`f().field`, TE017), enums in `main` /
 `[export]` signatures (LE900), reference-valued arm results and returning or
 escaping a payload reference (TE017).
+
+## Nested patterns (N-PAT)
+
+Decision: "Nested patterns" in `decisions.md`. `match` arms nest variant and
+tuple patterns to any depth, with `_` and bindings in any position. A lone
+identifier is a bare variant when the matched enum has one by that name (`None`,
+an inline-enum variant) and a binding otherwise; at the top of an arm only `_`
+or a variant is accepted.
+
+- **Syntax.** `PatternKind` is `Wildcard`, `Binding(name)`, `Variant { path,
+  slots: Vec<Pattern> }` or `Tuple(Vec<Pattern>)`; `(p)` only groups.
+- **Checking** (`types.rs` `check_pattern`). Each sub-pattern is checked against
+  its payload type. An in-place match binds primitives by copy and aggregates as
+  read-only references at every depth. The checked pattern (`MatchPattern`)
+  goes into `MatchFact` for lowering.
+- **Coverage** (`types/patterns.rs`). A pattern-matrix usefulness algorithm over
+  enum variants and tuples. An arm is unreachable when it is not useful against
+  the earlier arms (TE032); uncovered values are reported as example patterns,
+  up to four (TE031).
+- **Lowering** (`lower_match`). No new IR operation. The decision phase reads
+  only: it specializes the matrix on the first column the first arm tests, emits
+  `EnumTag` and `Switch` for an enum column, and derives a reference to each
+  nested payload it must test with `VariantAddr` (`FieldAddr` for tuples).
+  A consuming match switches on the owner itself at the root (the validator
+  requires that shape for `string ! E`) and on references below it. Every leaf
+  binds for the arm it selected, then jumps to that arm's body block, which is
+  lowered once; a leaf per path is needed because the ownership validator drops
+  the owner on edges to variants that own no heap storage.
+- **Ownership.** A consuming leaf moves each bound payload out with
+  `VariantExtract` / `Extract` (the last extraction from a value consumes it),
+  extracts unbound owned payloads too and ends them (`EndStringLocal` /
+  `EndStructLocal`), and ends a whole unbound owner directly, so every owned
+  part is released exactly once on every arm. No part of a live owner is moved:
+  the scrutinee is consumed as a whole. An in-place leaf copies primitive
+  payloads and lends aggregates, consuming nothing.
+- **Limits.** Heap-String gates that applied to flat matches still apply
+  (in-place matches over String payloads, construction of nested heap-String
+  values inside one expression). A refutable sub-pattern inside a String-owning
+  tuple payload needs a reference to that tuple and hits the existing backend
+  gate for whole borrows of String-owning structs (LE900).

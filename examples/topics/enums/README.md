@@ -23,7 +23,10 @@ It demonstrates:
   matched again; primitive payloads are copied, aggregate payloads would be
   read-only borrows (writing through a match is not allowed).
 
-Still gated: nested patterns, literal patterns, guards, `==` on enums (use `match`), and
+Patterns nest to any depth (`Ok(Some(v))`, `Shape::Pair(Point::Origin, other)`, tuples
+in payloads); see the guide's `nested_patterns` check.
+
+Still gated: literal patterns, guards, `==` on enums (use `match`), and
 user-defined enums in Wasm entry or library export signatures. The separate
 [application outcome adapter](../../../docs/design/outcome-implementation.md)
 supports compiler-known Result and Attempt entries with primitive success

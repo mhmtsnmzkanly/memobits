@@ -265,7 +265,7 @@ fn match_diagnostics_name_the_problem() {
         "TE031",
     );
     assert!(
-        text.contains("missing Shape::Circle, Shape::Rect"),
+        text.contains("missing `Shape::Circle(_)`, `Shape::Rect(_, _)`"),
         "{text}"
     );
     let text = f.error(
@@ -339,7 +339,7 @@ fn unsupported_pattern_forms_are_syntax_errors_with_hints() {
     let f = Fixture::new();
     for (pattern, hint) in [
         ("1 => 0,", "literal patterns"),
-        ("Shape::Circle(Shape::Empty) => 0,", "nested patterns"),
+        ("Shape::Circle(1.0) => 0,", "literal patterns"),
         ("Shape::Circle(r) if r > 1.0 => 0,", "guards"),
     ] {
         let text = f.error(

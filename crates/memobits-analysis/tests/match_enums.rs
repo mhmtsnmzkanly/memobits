@@ -149,14 +149,14 @@ fn exhaustiveness_names_the_missing_variants() {
     rejected(
         "match make(1) { Shape::Empty => 1, Shape::Circle(_) => 2 }",
         "TE031",
-        "missing Shape::Rect, Shape::Poly",
+        "missing `Shape::Rect(_, _)`, `Shape::Poly(_, _)`",
     );
     rejected(
         "match make(1) { Shape::Empty => 1, Shape::Rect(_, _) => 2, Shape::Poly(_, _) => 3 }",
         "TE031",
-        "missing Shape::Circle;",
+        "missing `Shape::Circle(_)`;",
     );
-    rejected("match make(1) { }", "TE031", "missing Shape::Empty");
+    rejected("match make(1) { }", "TE031", "missing `Shape::Empty`");
 }
 
 #[test]

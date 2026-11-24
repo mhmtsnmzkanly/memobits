@@ -278,18 +278,19 @@ pub struct Pattern {
 pub enum PatternKind {
     /// `_`: matches any value.
     Wildcard,
-    /// `Type::Variant` or `Type::Variant(a, _)`; a unit variant has no slots.
-    /// The parser does not check the path against any declaration.
+    /// A lone identifier. It names a unit variant of the matched enum when one
+    /// is in context (`None`, a bare inline-enum variant) and binds the matched
+    /// value otherwise; the parser cannot tell the two apart.
+    Binding(String),
+    /// `Type::Variant` or `Type::Variant(p, q)`; a unit variant has no slots.
+    /// Each slot is a pattern of any depth. The parser does not check the path
+    /// against any declaration.
     Variant {
         path: Vec<String>,
-        slots: Vec<PatternSlot>,
+        slots: Vec<Pattern>,
     },
-}
-/// One payload slot of a variant pattern: an identifier, or `_` (`name: None`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct PatternSlot {
-    pub span: Span,
-    pub name: Option<String>,
+    /// `(p, q)`: matches a tuple element by element.
+    Tuple(Vec<Pattern>),
 }
 /// One `field` or `field: alias` entry of a destructuring pattern.
 #[derive(Clone, Debug, PartialEq)]
@@ -1483,6 +1484,8 @@ impl Parser {
             }),
         })
     }
+    /// One pattern at any nesting depth: `_`, a binding name, a variant path
+    /// with optional parenthesized sub-patterns, or a tuple pattern.
     fn pattern(&mut self) -> PResult<Pattern> {
         let start = self.current().span.start;
         if matches!(self.current().kind, TokenKind::Number(_))
@@ -1491,6 +1494,9 @@ impl Parser {
             || self.at("-")
         {
             return self.fail("literal patterns are not supported yet; match on enum variants");
+        }
+        if self.at("(") {
+            return self.tuple_pattern();
         }
         let path = self.path()?;
         if path == ["_"] {
@@ -1502,36 +1508,57 @@ impl Parser {
         if self.at("{") {
             return self.fail("struct patterns are not supported in `match` yet");
         }
-        let mut slots = Vec::new();
-        if self.eat("(") {
-            while !self.at(")") && !self.eof() {
-                let slot_start = self.current().span.start;
-                if matches!(self.current().kind, TokenKind::Number(_))
-                    || self.at("true")
-                    || self.at("false")
-                    || self.at("-")
-                {
-                    return self.fail("literal patterns are not supported yet");
+        if !self.at("(") {
+            let kind = if path.len() == 1 {
+                PatternKind::Binding(path.into_iter().next().unwrap())
+            } else {
+                PatternKind::Variant {
+                    path,
+                    slots: Vec::new(),
                 }
-                let name = self.name()?;
-                if self.at("(") || self.at("::") || self.at("{") {
-                    return self.fail(
-                        "nested patterns are not supported yet; bind the payload and match it in a second `match`",
-                    );
-                }
-                slots.push(PatternSlot {
-                    span: self.span(slot_start),
-                    name: (name != "_").then_some(name),
-                });
-                if !self.eat(",") {
-                    break;
-                }
-            }
-            self.expect(")")?;
+            };
+            return Ok(Pattern {
+                span: self.span(start),
+                kind,
+            });
         }
+        self.expect("(")?;
+        let mut slots = Vec::new();
+        while !self.at(")") && !self.eof() {
+            slots.push(self.pattern()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
         Ok(Pattern {
             span: self.span(start),
             kind: PatternKind::Variant { path, slots },
+        })
+    }
+    /// `(p)` groups one pattern; `(p, q)` and `(p,)` are tuple patterns.
+    fn tuple_pattern(&mut self) -> PResult<Pattern> {
+        let start = self.current().span.start;
+        self.expect("(")?;
+        let mut elements = Vec::new();
+        let mut trailing_comma = false;
+        while !self.at(")") && !self.eof() {
+            elements.push(self.pattern()?);
+            trailing_comma = self.eat(",");
+            if !trailing_comma {
+                break;
+            }
+        }
+        self.expect(")")?;
+        if elements.is_empty() {
+            return self.fail("an empty tuple pattern is not supported");
+        }
+        if elements.len() == 1 && !trailing_comma {
+            return Ok(elements.pop().unwrap());
+        }
+        Ok(Pattern {
+            span: self.span(start),
+            kind: PatternKind::Tuple(elements),
         })
     }
     fn before_block(&mut self) -> PResult<Expr> {

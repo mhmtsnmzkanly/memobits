@@ -47,6 +47,47 @@ pub fn nested_result_storage() -> bool {
     let items := [first, second];
     stored.tag == 3 && from_field == 8 && failure_code(items) == 9
 }
+// Nested patterns. A variant or tuple pattern may hold further patterns at any
+// depth, with `_` and bindings in any position. The compiler checks the whole
+// pattern matrix: a missing case such as `Ok(None)` is reported with an example
+// pattern, and an arm that earlier arms already cover is an error. An owned
+// match consumes the value, moves the bound parts out and releases the rest;
+// a borrowed match copies primitives and lends aggregates.
+type Spot [ Empty, At(i32, i32) ]
+type Link [ Direct(Spot), Via(Spot, Spot), Lost ]
+fn probe(reading: u32? ! Error) -> u32 {
+    match reading {
+        Ok(Some(value)) => value,
+        Ok(None) => 100,
+        Err(error) => 200 + error.code,
+    }
+}
+fn route(link: borrow Link) -> i32 {
+    match link {
+        Link::Direct(Spot::At(x, y)) => x + y,
+        Link::Via(Spot::Empty, Spot::At(x, _)) => x,
+        Link::Via(_, _) => -1,
+        Link::Direct(Spot::Empty) => 0,
+        Link::Lost => -2,
+    }
+}
+fn join(first: i32?, second: i32?) -> i32 {
+    match (first, second) {
+        (Some(a), Some(b)) => a + b,
+        (Some(a), None) => a,
+        (None, other) => match other { Some(b) => b, None => 0 },
+    }
+}
+pub fn nested_patterns() -> bool {
+    let found: u32? ! Error = Ok(Some(5));
+    let absent: u32? ! Error = Ok(None);
+    let failed: u32? ! Error = Err(Error { code: 3 });
+    let direct := Link::Direct(Spot::At(2, 3));
+    let via := Link::Via(Spot::Empty, Spot::At(7, 8));
+    probe(found) == 5 && probe(absent) == 100 && probe(failed) == 203
+        && route(direct.borrow()) == 5 && route(via.borrow()) == 7
+        && join(Some(1), Some(2)) == 3 && join(None, Some(4)) == 4
+}
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, bool) ]
 type Sample = Reading;

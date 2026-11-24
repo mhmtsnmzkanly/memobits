@@ -591,6 +591,29 @@ impl Checker<'_> {
                 .insert(element.binding.clone());
         }
     }
+    /// Names every binding of a match pattern in the current arm scope and
+    /// checks qualified variant paths at any depth.
+    fn pattern(&mut self, pattern: &memobits_syntax::Pattern) {
+        match &pattern.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Binding(name) => {
+                self.scopes.last_mut().unwrap().insert(name.clone());
+            }
+            PatternKind::Variant { path, slots } => {
+                if path.len() > 1 {
+                    self.qualified_path(path, pattern.span);
+                }
+                for slot in slots {
+                    self.pattern(slot);
+                }
+            }
+            PatternKind::Tuple(elements) => {
+                for element in elements {
+                    self.pattern(element);
+                }
+            }
+        }
+    }
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
             ExprKind::Path(path) if path.len() == 1 => {
@@ -677,16 +700,7 @@ impl Checker<'_> {
                 self.expr(scrutinee);
                 for arm in arms {
                     self.scopes.push(BTreeSet::new());
-                    if let PatternKind::Variant { path, slots } = &arm.pattern.kind {
-                        if path.len() > 1 {
-                            self.qualified_path(path, arm.pattern.span);
-                        }
-                        for slot in slots {
-                            if let Some(name) = &slot.name {
-                                self.scopes.last_mut().unwrap().insert(name.clone());
-                            }
-                        }
-                    }
+                    self.pattern(&arm.pattern);
                     self.expr(&arm.body);
                     self.scopes.pop();
                 }
