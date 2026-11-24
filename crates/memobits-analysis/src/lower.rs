@@ -5,8 +5,8 @@ use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span}
 use memobits_ir::{
     Access, ArrayInit, BinaryOp, Block as IrBlock, BlockId, CanonicalFunction, CanonicalType,
     Constant, Edge, FieldDef, Function, Instruction, InstructionKind, LoanId, Local, LocalId,
-    Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef, TypeDefKind,
-    UnaryOp, UseMode, ValueId, VariantDef,
+    LocalKind, Operand, Primitive, Program, Source, Terminator, TerminatorKind, Type, TypeDef,
+    TypeDefKind, UnaryOp, UseMode, ValueId, VariantDef,
 };
 use memobits_project::Project;
 use memobits_resolve::Resolution;
@@ -163,6 +163,7 @@ pub fn lower_module(
                     name: l.name.clone(),
                     ty: l.ty.clone(),
                     mutable: l.mutable,
+                    kind: LocalKind::Ordinary,
                     span: l.span,
                 })
                 .collect(),
@@ -444,6 +445,7 @@ pub fn lower_resolved(
                     name: local.name.clone(),
                     ty: local.ty.clone(),
                     mutable: local.mutable,
+                    kind: LocalKind::Ordinary,
                     span: local.span,
                 })
                 .collect(),
@@ -615,6 +617,10 @@ struct Builder<'a> {
     owned_locals: Vec<LocalId>,
     loops: Vec<LoopTargets>,
     next_loan: u32,
+    /// When set, the next `if`/`match` expression delivers each branch value
+    /// into this hidden owner local instead of joining it as a block
+    /// argument (heap values cannot cross a join). Taken on entry.
+    value_sink: Option<(LocalId, Type)>,
     /// Values produced by `Load`: read-only provenance that must be copied
     /// before it can be used as an owned value.
     loaded: HashSet<u32>,
@@ -647,41 +653,42 @@ fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
 }
 
 /// Nominal String-owning struct (flat or nested), classified by the shared
-/// memobits-ir rule; the recursion and visited set live here because
-/// `TypeFact` is this crate's type model.
-fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
-    fn admitted(types: &[TypeFact], id: u32, visited: &mut HashSet<u32>) -> bool {
-        use memobits_ir::OwnerFieldShape as Shape;
-        let Some(info) = types.get(id as usize) else {
-            return false;
-        };
-        if info.module == "\0tuple" || info.is_enum || !visited.insert(id) {
-            return false;
+/// Adapter feeding the analysis type facts to the shared `memobits_ir`
+/// transport rule.
+struct FactOwnerModel<'t>(&'t [TypeFact]);
+
+impl memobits_ir::OwnerTypeModel for FactOwnerModel<'_> {
+    type Ty = Type;
+    fn view<'a>(&self, ty: &'a Type) -> memobits_ir::OwnerTyView<'a, Type> {
+        use memobits_ir::OwnerTyView as View;
+        match ty {
+            Type::String => View::String,
+            Type::Primitive(_) => View::Primitive,
+            Type::Struct(id) => View::Struct(id.0),
+            Type::Array { element, len } => View::Array {
+                element,
+                nonempty: *len != 0,
+            },
+            _ => View::Other,
         }
-        fn shape(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> Shape {
-            match ty {
-                Type::String => Shape::String,
-                Type::Primitive(_) => Shape::Primitive,
-                Type::Struct(child) if admitted(types, child.0, visited) => Shape::Owner,
-                Type::Array { element, len } if *len != 0 => match shape(types, element, visited) {
-                    Shape::Owner => Shape::Owner,
-                    _ => Shape::Other,
-                },
-                _ => Shape::Other,
-            }
-        }
-        let fields: Vec<Shape> = info
-            .fields
-            .iter()
-            .map(|field| shape(types, &field.ty, visited))
-            .collect();
-        visited.remove(&id);
-        memobits_ir::is_string_owner_struct(info.error_ancestry.is_some(), fields)
     }
+    fn nominal_struct(&self, id: u32) -> Option<memobits_ir::OwnerStructDef<Type>> {
+        let info = self.0.get(id as usize)?;
+        if info.module == "\0tuple" || info.is_enum {
+            return None;
+        }
+        Some(memobits_ir::OwnerStructDef {
+            has_error_ancestry: info.error_ancestry.is_some(),
+            fields: info.fields.iter().map(|field| field.ty.clone()).collect(),
+        })
+    }
+}
+
+fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
     let Type::Struct(id) = ty else {
         return false;
     };
-    admitted(types, id.0, &mut HashSet::new())
+    memobits_ir::is_nominal_string_owner(&FactOwnerModel(types), id.0)
 }
 
 fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
@@ -800,6 +807,7 @@ impl<'a> Builder<'a> {
             tuple_initializers,
             current: Some(BlockId(0)),
             owned_locals,
+            value_sink: None,
             loops: Vec::new(),
             next_loan: 0,
             loaded: HashSet::new(),
@@ -1478,6 +1486,16 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_block(&mut self, block: &Block) -> Option<Operand> {
+        self.lower_block_with(block, None)
+    }
+    /// Lower a block. With a value sink the tail moves into the sink's hidden
+    /// local before the block's own locals are released, and a unit
+    /// placeholder stands for "delivered".
+    fn lower_block_with(
+        &mut self,
+        block: &Block,
+        sink: Option<&(LocalId, Type)>,
+    ) -> Option<Operand> {
         let scope_start = self.owned_locals.len();
         for statement in &block.statements {
             if self.current.is_none() {
@@ -1633,14 +1651,21 @@ impl<'a> Builder<'a> {
             }
         }
         let value = if self.current.is_some() {
-            match block.tail.as_deref() {
-                Some(tail) => self.lower_expr(tail),
-                None => self.unit(block.span),
+            match (block.tail.as_deref(), sink) {
+                (Some(tail), Some(sink)) => self
+                    .lower_branch_into(tail, sink)
+                    .and_then(|()| self.unit(block.span)),
+                (Some(tail), None) => self.lower_expr(tail),
+                (None, _) => self.unit(block.span),
             }
         } else {
             None
         };
-        let value = value.and_then(|value| self.preserve_scope_result(value, scope_start));
+        let value = if sink.is_some() {
+            value
+        } else {
+            value.and_then(|value| self.preserve_scope_result(value, scope_start))
+        };
         if self.current.is_some() {
             self.end_owned_locals(scope_start, block.span);
         }
@@ -1945,6 +1970,20 @@ impl<'a> Builder<'a> {
     fn stage_replacement(&mut self, value: &Expr, place_ty: &Type) -> Option<LocalId> {
         let scope_start = self.owned_locals.len();
         let span = value.span;
+        if matches!(value.kind, ExprKind::If { .. } | ExprKind::Match { .. })
+            && (matches!(place_ty, Type::String | Type::List(_))
+                || self.is_string_owner_struct(place_ty))
+        {
+            // Branch values move into the hidden local from inside each
+            // branch; nothing heap-typed crosses the join.
+            let staged = self.hidden_local("replacement value", place_ty.clone(), span);
+            self.value_sink = Some((staged, place_ty.clone()));
+            let result = self.lower_expr(value);
+            self.value_sink = None;
+            result?;
+            self.owned_locals.push(staged);
+            return Some(staged);
+        }
         let rhs = if matches!(place_ty, Type::Primitive(_)) {
             let rhs = self.lower_expr(value)?;
             let rhs = self.scalar(rhs)?;
@@ -2124,11 +2163,21 @@ impl<'a> Builder<'a> {
         Some(reference)
     }
     fn hidden_local(&mut self, name: &str, ty: Type, span: Span) -> LocalId {
+        self.hidden_local_of_kind(name, ty, span, LocalKind::Ordinary)
+    }
+    fn hidden_local_of_kind(
+        &mut self,
+        name: &str,
+        ty: Type,
+        span: Span,
+        kind: LocalKind,
+    ) -> LocalId {
         let id = LocalId(self.function.locals.len() as u32);
         self.function.locals.push(Local {
             name: name.into(),
             ty,
             mutable: true,
+            kind,
             span,
         });
         id
@@ -2805,6 +2854,7 @@ impl<'a> Builder<'a> {
     /// consumes it) and releases every unbound owned part exactly once; an
     /// in-place match copies primitive payloads and lends aggregates.
     fn lower_match(&mut self, expr: &Expr, scrutinee: &Expr, arms: &[MatchArm]) -> Option<Operand> {
+        let sink = self.value_sink.take();
         let fact = self.matches[&self.id(expr)];
         let span = scrutinee.span;
         // `owner` is the hidden owner of a consuming match; `root` is the
@@ -2864,7 +2914,7 @@ impl<'a> Builder<'a> {
             (Some(cell), cell, ty)
         };
         let join_id = self.new_block();
-        let parameter = self.ty(expr).map(|ty| {
+        let parameter = self.ty(expr).filter(|_| sink.is_none()).map(|ty| {
             let id = self.new_value(ty);
             self.function.blocks[join_id.0 as usize].parameters.push(id);
             id
@@ -2910,7 +2960,13 @@ impl<'a> Builder<'a> {
                     self.owned_locals.push(local);
                 }
             }
-            if let Some(value) = self.lower_expr(&arm.body) {
+            if let Some(sink) = &sink {
+                if self.lower_branch_into(&arm.body, sink).is_some() {
+                    self.end_owned_locals(scope_start, arm.body.span);
+                    self.goto(join_id, Vec::new(), arm.body.span);
+                    reaches = true;
+                }
+            } else if let Some(value) = self.lower_expr(&arm.body) {
                 if let Some(value) = self.preserve_scope_result(value, scope_start) {
                     self.end_owned_locals(scope_start, arm.body.span);
                     self.join(join_id, value, arm.body.span);
@@ -2920,6 +2976,9 @@ impl<'a> Builder<'a> {
             self.owned_locals.truncate(scope_start);
         }
         self.current = reaches.then_some(join_id);
+        if sink.is_some() {
+            return if reaches { self.unit(expr.span) } else { None };
+        }
         parameter.map(|id| op(Source::Value(id), expr.span))
     }
     /// Compile the pattern matrix `rows` over the `occurrences` (the values
@@ -3405,15 +3464,15 @@ impl<'a> Builder<'a> {
                 self.bind_local(local, consume(extracted), span);
             }
             _ => {
-                // The ownership validator recognizes this name: an ignored
-                // heap `Ok` payload of a `string ! E` is not an accepted
-                // immediate consuming match.
-                let name = if matches!(pattern, MatchPattern::Wildcard) {
-                    "discarded match payload"
+                // The ownership validator recognizes the discard kind: an
+                // ignored heap `Ok` payload of a `string ! E` is not an
+                // accepted immediate consuming match.
+                let (name, kind) = if matches!(pattern, MatchPattern::Wildcard) {
+                    ("discarded match payload", LocalKind::DiscardedMatchPayload)
                 } else {
-                    "match payload"
+                    ("match payload", LocalKind::Ordinary)
                 };
-                let child = self.hidden_local(name, ty.clone(), span);
+                let child = self.hidden_local_of_kind(name, ty.clone(), span, kind);
                 self.bind_local(child, consume(extracted), span);
                 children.push((pattern, child, ty.clone()));
             }
@@ -3480,6 +3539,42 @@ impl<'a> Builder<'a> {
             Some(Type::Enum(id)),
         )
     }
+    /// Evaluate a branch expression so that its owner value ends up in the
+    /// sink's hidden local. `None` when no value reaches the end.
+    fn lower_branch_into(&mut self, expr: &Expr, sink: &(LocalId, Type)) -> Option<()> {
+        match &expr.kind {
+            ExprKind::If { .. } | ExprKind::Match { .. } => {
+                self.value_sink = Some(sink.clone());
+                let result = self.lower_expr(expr);
+                self.value_sink = None;
+                result.map(|_| ())
+            }
+            ExprKind::Block(block) => self.lower_block_with(block, Some(sink)).map(|_| ()),
+            _ => {
+                let value = self.lower_expr(expr)?;
+                self.deliver_to_sink(sink, value, expr.span)
+            }
+        }
+    }
+    /// Move one branch value into the hidden local of a value sink.
+    fn deliver_to_sink(
+        &mut self,
+        sink: &(LocalId, Type),
+        value: Operand,
+        span: Span,
+    ) -> Option<()> {
+        let owned = self.owned_to(value, &sink.1)?;
+        self.emit(
+            span,
+            InstructionKind::Assign {
+                target: sink.0,
+                value: consume(owned),
+                initialize: true,
+            },
+            None,
+        );
+        Some(())
+    }
     fn join(&mut self, target: BlockId, value: Operand, span: Span) {
         let Some(value) = self.owned(value) else {
             return;
@@ -3493,12 +3588,13 @@ impl<'a> Builder<'a> {
         then_branch: &Block,
         else_branch: Option<&Expr>,
     ) -> Option<Operand> {
+        let sink = self.value_sink.take();
         let condition_value = self.lower_expr(condition)?;
         let condition_value = self.scalar(condition_value)?;
         let then_id = self.new_block();
         let else_id = self.new_block();
         let join_id = self.new_block();
-        let result_ty = self.ty(expr);
+        let result_ty = self.ty(expr).filter(|_| sink.is_none());
         let parameter = result_ty.map(|ty| {
             let id = self.new_value(ty);
             self.function.blocks[join_id.0 as usize].parameters.push(id);
@@ -3521,22 +3617,39 @@ impl<'a> Builder<'a> {
             Some(condition.span),
         );
         self.current = Some(then_id);
-        let then_value = self.lower_block(then_branch);
         let mut reaches = false;
-        if let Some(value) = then_value {
-            self.join(join_id, value, then_branch.span);
-            reaches = true;
-        }
-        self.current = Some(else_id);
-        let else_value = match else_branch {
-            Some(other) => self.lower_expr(other),
-            None => self.unit(expr.span),
-        };
-        if let Some(value) = else_value {
-            self.join(join_id, value, expr.span);
-            reaches = true;
+        if let Some(sink) = &sink {
+            // Branch values move into the sink inside each branch.
+            if self.lower_block_with(then_branch, Some(sink)).is_some() {
+                self.goto(join_id, Vec::new(), then_branch.span);
+                reaches = true;
+            }
+            self.current = Some(else_id);
+            let delivered =
+                else_branch.is_some_and(|other| self.lower_branch_into(other, sink).is_some());
+            if delivered {
+                self.goto(join_id, Vec::new(), expr.span);
+                reaches = true;
+            }
+        } else {
+            if let Some(value) = self.lower_block(then_branch) {
+                self.join(join_id, value, then_branch.span);
+                reaches = true;
+            }
+            self.current = Some(else_id);
+            let else_value = match else_branch {
+                Some(other) => self.lower_expr(other),
+                None => self.unit(expr.span),
+            };
+            if let Some(value) = else_value {
+                self.join(join_id, value, expr.span);
+                reaches = true;
+            }
         }
         self.current = reaches.then_some(join_id);
+        if sink.is_some() {
+            return if reaches { self.unit(expr.span) } else { None };
+        }
         parameter.map(|id| op(Source::Value(id), expr.span))
     }
     fn lower_short_circuit(

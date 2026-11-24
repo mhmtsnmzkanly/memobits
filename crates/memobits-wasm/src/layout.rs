@@ -167,6 +167,16 @@ pub(super) fn struct_layout_at(
         TypeDefKind::Struct { fields } => {
             let has_string_fields = fields.iter().any(|field| field.ty == Type::String);
             let is_tuple = definition.path.module.as_slice() == ["\0tuple"];
+            if definition.error_ancestry.is_some()
+                && fields
+                    .iter()
+                    .any(|field| type_has_string_storage(types, &field.ty))
+            {
+                return Err(format!(
+                    "Error-derived type '{}' cannot own heap Strings yet: a field holds a String directly or through a nested struct, array or enum",
+                    definition.path.name
+                ));
+            }
             if has_string_fields
                 && (definition.error_ancestry.is_some()
                     || (!is_tuple

@@ -98,6 +98,7 @@ fn function(mutable: bool, extra_values: Vec<Type>, instructions: Vec<Instructio
         name: name.into(),
         ty: struct_ty(),
         mutable,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(1),
     };
     let mut body = vec![

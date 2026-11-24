@@ -195,6 +195,34 @@ fn address_action(function: &Function, output: Option<ValueId>, access: Access) 
     }
 }
 
+/// Whether the address value is one operand of a user `swap` of two places:
+/// both operands are projected addresses (an overwrite or `replace` pairs one
+/// address with a hidden local).
+fn feeds_swap(function: &Function, output: Option<ValueId>) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    let instructions = || function.blocks.iter().flat_map(|block| &block.instructions);
+    let is_address = |operand: &Operand| match operand.source {
+        Source::Value(value) => instructions().any(|instruction| {
+            instruction.output == Some(value)
+                && matches!(
+                    instruction.kind,
+                    InstructionKind::ElementAddr { .. } | InstructionKind::FieldAddr { .. }
+                )
+        }),
+        _ => false,
+    };
+    instructions().any(|instruction| match &instruction.kind {
+        InstructionKind::SwapPlaces { left, right } => {
+            (left.source == Source::Value(output) || right.source == Source::Value(output))
+                && is_address(left)
+                && is_address(right)
+        }
+        _ => false,
+    })
+}
+
 fn loan_state(access: Access) -> &'static str {
     if access == Access::Share {
         "shared"
@@ -1526,12 +1554,21 @@ fn check_instruction(
                 active_conflict(&provenance.roots, *access, active_before, &ancestors)
             {
                 if !repeated_site && !transient {
-                    diagnostics.push(conflict_diagnostic(
+                    let mut pending = conflict_diagnostic(
                         instruction.span,
                         address_action(function, instruction.output, *access),
                         (function, program),
                         conflict,
-                    ));
+                    );
+                    if let (Some(span), true) =
+                        (instruction.span, feeds_swap(function, instruction.output))
+                    {
+                        pending.diagnostic.labels.push(Label {
+                            span,
+                            message: "swap needs two disjoint places; dynamic indices into the same collection are not provably disjoint".into(),
+                        });
+                    }
+                    diagnostics.push(pending);
                 }
             }
         }

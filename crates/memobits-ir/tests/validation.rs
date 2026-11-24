@@ -188,6 +188,7 @@ fn validates_reference_parameters_and_loads() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty()];
@@ -226,6 +227,7 @@ fn validates_exclusive_reference_stores() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty()];
@@ -271,6 +273,7 @@ fn loaded_reference_values_cannot_be_consumed_as_owned() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty()];
@@ -310,6 +313,7 @@ fn read_only_load_provenance_survives_capture_and_block_arguments() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty(), i32_ty(), i32_ty()];
@@ -375,6 +379,7 @@ fn reference_types_reject_owned_access_and_reference_results() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     });
     f.signature.result = Box::new(Type::Reference {
@@ -413,6 +418,7 @@ fn calls_require_reference_arguments_for_borrow_and_share_parameters() {
             inner: Box::new(i32_ty()),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     callee.values.clear();
@@ -429,6 +435,7 @@ fn calls_require_reference_arguments_for_borrow_and_share_parameters() {
             inner: Box::new(i32_ty()),
         },
         mutable: true,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     caller.values = vec![Type::Primitive(Primitive::Unit)];
@@ -536,6 +543,7 @@ fn checks_call_signature_and_use_modes() {
         name: "x".into(),
         ty: i32_ty(),
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     });
     callee.parameter_locals.push(LocalId(0));
@@ -571,6 +579,7 @@ fn array_function(index_ty: Type) -> Function {
         name: "a".into(),
         ty: array_ty(2),
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![
@@ -887,6 +896,7 @@ fn array_reference_function(access: Access) -> Function {
             inner: Box::new(array_ty(2)),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![
@@ -1087,6 +1097,7 @@ fn copy_function(source_ty: Type, output_ty: Type, mode: UseMode) -> Function {
             inner: Box::new(source_ty),
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty(), output_ty];
@@ -1202,6 +1213,7 @@ fn struct_program() -> Program {
         name: "p".into(),
         ty: Type::Struct(TypeId(0)),
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![
@@ -1437,6 +1449,7 @@ fn accepts_struct_signatures_references_and_block_parameters() {
                 name: "q".into(),
                 ty: local_ty,
                 mutable: false,
+                kind: memobits_ir::LocalKind::Ordinary,
                 span: span(),
             });
             f.parameter_locals.push(LocalId(f.locals.len() as u32 - 1));
@@ -1717,6 +1730,7 @@ fn enum_program() -> Program {
         name: "e".into(),
         ty: Type::Enum(TypeId(0)),
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![i32_ty(), Type::Enum(TypeId(0))];
@@ -1959,6 +1973,7 @@ fn enum_typed_struct_fields_and_array_elements_are_valid() {
             len: 3,
         },
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     });
     assert_eq!(p.validate(), Ok(()));
@@ -2324,6 +2339,7 @@ fn borrowed_payload_program(
         name: "holder".into(),
         ty: ref_ty(Access::Borrow, holder),
         mutable: false,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(),
     }];
     f.values = vec![];

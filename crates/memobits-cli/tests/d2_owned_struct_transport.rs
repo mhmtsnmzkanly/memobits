@@ -269,16 +269,6 @@ fn owned_string_struct_transport_keeps_neighbouring_shapes_rejected() {
             "unavailable after a move",
         ),
         (
-            r#"fn main() { let t := "a".concat("b"); take(Label { text: t, n: 1 }); }"#,
-            "LE900",
-            "must move directly from a named local",
-        ),
-        (
-            r#"fn main() { take(Label { text: "a", n: 1 }); }"#,
-            "LE900",
-            "must move directly from a named local",
-        ),
-        (
             r#"fn main() { let t := "a".concat("b"); let l := Label { text: t, n: 1 }; let s := l.text; }"#,
             "TE022",
             "cannot be moved out by field access",
@@ -565,11 +555,6 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
             "fn main() { let n := make().text.len(); }",
             "TE017",
             "bind the struct to a local first",
-        ),
-        (
-            "fn main() { take(make()); }",
-            "LE900",
-            "must move directly from a named local",
         ),
         (
             "fn main() { make(); }",

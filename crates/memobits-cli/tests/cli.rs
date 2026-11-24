@@ -2578,12 +2578,6 @@ fn wasm_gates_unsupported_string_struct_uses() {
             "can only move directly into a new local",
         ),
         (
-            r#"fn take(label: Label) {}
-                fn main() { let text := "a".concat("b"); take(Label { text: text }); }"#,
-            "LE900",
-            "must move directly from a named local",
-        ),
-        (
             r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
             "TE017",
             "concat requires",

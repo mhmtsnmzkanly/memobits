@@ -30,9 +30,6 @@ pub struct Resolution {
     pub warnings: Vec<Diagnostic>,
     /// Explicit direct module imports, kept separate from symbol imports and preludes.
     pub module_imports: BTreeMap<String, BTreeSet<String>>,
-    /// Number of `test fn` items left out of an application or library
-    /// resolution (tests never take part in normal builds or reachability).
-    pub ignored_tests: usize,
 }
 /// One extension declaration visible to a module under IFACE-04.
 #[derive(Clone, Debug)]
@@ -288,7 +285,6 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         diagnostics: vec![],
         warnings: vec![],
         module_imports: BTreeMap::new(),
-        ignored_tests: 0,
     };
     if project
         .modules
@@ -433,12 +429,11 @@ pub fn resolve(project: &Project, target: Target) -> Resolution {
         result.diagnostics.extend(parsed.diagnostics);
         result.warnings.extend(parsed.warnings);
         if !matches!(target, Target::Test) {
-            let before = parsed.module.items.len();
+            // Tests never take part in normal builds or reachability.
             parsed
                 .module
                 .items
                 .retain(|item| !matches!(item.kind, ItemKind::Function { test: true, .. }));
-            result.ignored_tests += before - parsed.module.items.len();
         }
         let mut names = BTreeSet::new();
         for item in &parsed.module.items {

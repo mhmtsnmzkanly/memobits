@@ -97,6 +97,16 @@ owned temporary on a normal early exit from a later argument, and the callee
 owns it once invoked. A direct internal List return moves a named
 callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.
+A String-owning struct, record, tuple or array temporary (a literal
+or a direct call result) can be passed straight to an owned parameter: it is
+staged in a hidden local, so the callee receives a named owner and an early
+exit from a later argument releases it. `replace(place, value)` accepts an `if`
+or `match` expression of owners as `value`: each branch moves its value into the
+replacement slot. A struct literal may mix a String field with owner and
+owner-array fields. A type derived from `Error` cannot own heap Strings, directly or through a nested owner (LE900:
+"Error-derived type 'T' cannot own heap Strings yet"). A BE005 overlap
+reported for `swap(a, b)` notes that swap needs two disjoint places and that
+dynamic indices into one collection are not provably disjoint.
 A direct share parameter or a stored `var` share handle can also replace
 the owner's List. A standalone direct internal call statement releases its
 unused List result. Use `make_list().len()` or `make_list().get(index)` to

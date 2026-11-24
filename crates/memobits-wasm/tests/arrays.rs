@@ -524,6 +524,7 @@ fn array_function(name: &str, len: u32, zeroed: bool, index: i32) -> Function {
             name: "a".into(),
             ty: array,
             mutable: false,
+            kind: memobits_ir::LocalKind::Ordinary,
             span: span(),
         }],
         values,

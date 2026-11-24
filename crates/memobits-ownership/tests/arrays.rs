@@ -110,6 +110,7 @@ fn function(mutable: bool, extra_values: Vec<Type>, instructions: Vec<Instructio
         name: name.into(),
         ty: array_ty(),
         mutable,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(1),
     };
     let mut prelude = vec![

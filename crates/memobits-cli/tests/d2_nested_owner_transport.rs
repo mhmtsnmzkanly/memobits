@@ -415,12 +415,6 @@ fn make() { let t := "a".concat("b"); let l := Label { text: t, n: 1 }; let o :=
             "TE018",
             "can only move directly into a new local",
         ),
-        // Direct temporaries as owned call arguments.
-        (
-            format!("{bind} take(Outer {{ inner: Label {{ text: \"a\", n: 1 }}, k: 1 }}); }} fn main() {{}}"),
-            "LE900",
-            "must move directly from a named local",
-        ),
         // Recursive by-value types and Error ancestry.
         (
             "type Rec { next: Rec, s: string } fn main() {}".to_string(),
@@ -435,7 +429,7 @@ fn make() { let t := "a".concat("b"); let l := Label { text: t, n: 1 }; let o :=
         (
             "type Label { text: string } type Failure: Error { l: Label } fn main() {}".to_string(),
             "LE900",
-            "nesting structs with String fields",
+            "Error-derived type 'Failure' cannot own heap Strings yet",
         ),
         // A struct with a plain (non-owner) aggregate next to an owner stays rejected.
         (

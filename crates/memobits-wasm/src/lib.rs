@@ -862,10 +862,17 @@ fn construction_aliases(function: &Function, uses: &[u32]) -> BTreeMap<u32, u32>
             let mut after = block.instructions[position + 1..].iter();
             let has_staged_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
                 if fields.iter().any(|operand| matches!(operand.source, Source::Local(id)
-                    if function.locals[id.0 as usize].ty == Type::String)));
+                    if matches!(function.locals[id.0 as usize].ty,
+                        Type::String | Type::Struct(_) | Type::Array { .. }))));
             let consumer = if has_staged_string {
                 // Initializer slots end after the constructor has moved from them.
-                after.find(|inst| !matches!(inst.kind, InstructionKind::EndStringLocal { .. }))
+                after.find(|inst| {
+                    !matches!(
+                        inst.kind,
+                        InstructionKind::EndStringLocal { .. }
+                            | InstructionKind::EndStructLocal { .. }
+                    )
+                })
             } else {
                 after.next()
             };
@@ -4967,6 +4974,7 @@ mod frame_layout_tests {
                 name: format!("owner_{index}"),
                 ty: ty.clone(),
                 mutable: true,
+                kind: memobits_ir::LocalKind::Ordinary,
                 span,
             })
             .collect::<Vec<_>>();

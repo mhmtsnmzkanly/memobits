@@ -63,7 +63,8 @@ test fn local_heap_string_fields() {
 // Such a struct can also be a tuple element or a fixed-array element when it
 // moves in from a named local (see `string_struct_elements`), a field of another
 // String-owning struct, or an enum payload (see `nested_string_owners`).
-// Temporaries as arguments or call results, `[l; N]` repeats, recursive
+// A struct literal or call result can be passed directly to an owned parameter
+// (see `owner_temporaries_as_arguments`). `[l; N]` repeats, recursive
 // by-value types, exported signatures, and moving a field, element or payload
 // out of a live owner stay rejected.
 fn label_total(label: TextLabel, early: bool) -> u32 {
@@ -271,4 +272,47 @@ test fn overwrite_releases_the_old_value() {
     let extra := "x".concat("");
     words[1] = extra;
     assert(words[1].len() == 1);
+}
+// An owner temporary can be passed straight to an owned parameter: a struct
+// literal or a call result is staged in a hidden local, so the callee still
+// receives a named owner and cleanup stays exact.
+test fn owner_temporaries_as_arguments() {
+    let text := "ab".concat("c");
+    assert(label_total(TextLabel { text: text, number: 4 }, false) == 7);
+    assert(label_total(make_label(2), false) == 5);
+    assert(label_total(TextLabel { text: "lit", number: 1 }, false) == 4);
+}
+// `replace` takes an `if` or `match` value for an owner place: each branch
+// moves its value into the replacement slot, and the other branch's locals are
+// released as usual.
+type Pick [Left, Right]
+test fn replace_with_branch_values() {
+    var current := "ab".concat("");
+    let first := "xyz".concat("");
+    let second := "p".concat("");
+    let old := replace(current, if first.len() > 5 { first } else { second });
+    assert(old.len() == 2);
+    assert(current.len() == 1);
+    let third := "mm".concat("");
+    let pick := Pick::Left;
+    let fourth := "q".concat("");
+    let again := replace(current, match pick { Left => third, Right => fourth });
+    assert(again.len() == 1);
+    assert(current.len() == 2);
+}
+// A struct literal can mix a String field with an owner field and an array of
+// owners; every field moves in and is released with the struct.
+type Mixed {
+    name: string,
+    first: TextLabel,
+    rows: array<TextLabel, 2>,
+}
+test fn mixed_owner_struct_literal() {
+    let name := "mix".concat("");
+    let first := make_label(1);
+    let a := make_label(2);
+    let b := make_label(3);
+    let mixed := Mixed { name: name, first: first, rows: [a, b] };
+    assert(mixed.name.len() == 3);
+    assert(mixed.rows[1].number == 3);
 }

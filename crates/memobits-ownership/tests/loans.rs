@@ -85,6 +85,7 @@ fn local_slot(name: &str, ty: Type, mutable: bool) -> Local {
         name: name.into(),
         ty,
         mutable,
+        kind: memobits_ir::LocalKind::Ordinary,
         span: span(1),
     }
 }

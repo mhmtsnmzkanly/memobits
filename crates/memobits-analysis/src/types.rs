@@ -1409,38 +1409,13 @@ impl Checker {
                     || (matches!(field.ty, Ty::Struct(..) | Ty::Array(..))
                         && self.contains_string_owner(&field.ty, &mut HashSet::new()))
             })
-            && !self.admitted_string_owner_struct(*id, &mut HashSet::new())
+            && !self.admitted_string_owner_struct(*id)
     }
 
-    /// Shared-rule classification of a nominal struct id; the recursion and
-    /// visited set live here because `Ty` is the analysis type model.
-    fn admitted_string_owner_struct(&self, id: u32, visited: &mut HashSet<u32>) -> bool {
-        use memobits_ir::OwnerFieldShape as Shape;
-        let info = self.table.info(id);
-        if info.module == "\0tuple" || !visited.insert(id) {
-            return false;
-        }
-        fn shape(this: &Checker, ty: &Ty, visited: &mut HashSet<u32>) -> Shape {
-            match ty {
-                Ty::String => Shape::String,
-                Ty::Primitive(_) => Shape::Primitive,
-                Ty::Struct(child, _) if this.admitted_string_owner_struct(*child, visited) => {
-                    Shape::Owner
-                }
-                Ty::Array(element, len) if *len != 0 => match shape(this, element, visited) {
-                    Shape::Owner => Shape::Owner,
-                    _ => Shape::Other,
-                },
-                _ => Shape::Other,
-            }
-        }
-        let fields: Vec<Shape> = info
-            .fields
-            .iter()
-            .map(|field| shape(self, &field.ty, visited))
-            .collect();
-        visited.remove(&id);
-        memobits_ir::is_string_owner_struct(self.table.error_ancestry(id).is_some(), fields)
+    /// Shared-rule classification of a nominal struct id (see
+    /// `memobits_ir::is_nominal_string_owner`).
+    fn admitted_string_owner_struct(&self, id: u32) -> bool {
+        memobits_ir::is_nominal_string_owner(&TyOwnerModel(&self.table), id)
     }
 
     fn supported_nested_string_tuple(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
@@ -7554,5 +7529,36 @@ mod access_tests {
             "fn f(var owner: i32) -> i32 { let view := owner.borrow(); view + 1 }",
         );
         assert!(check_typed_module(&parsed.module).is_ok());
+    }
+}
+
+/// Adapter feeding the analysis type table to the shared `memobits_ir`
+/// transport rule.
+struct TyOwnerModel<'t>(&'t TypeTable);
+
+impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
+    type Ty = Ty;
+    fn view<'a>(&self, ty: &'a Ty) -> memobits_ir::OwnerTyView<'a, Ty> {
+        use memobits_ir::OwnerTyView as View;
+        match ty {
+            Ty::String => View::String,
+            Ty::Primitive(_) => View::Primitive,
+            Ty::Struct(id, _) => View::Struct(*id),
+            Ty::Array(element, len) => View::Array {
+                element,
+                nonempty: *len != 0,
+            },
+            _ => View::Other,
+        }
+    }
+    fn nominal_struct(&self, id: u32) -> Option<memobits_ir::OwnerStructDef<Ty>> {
+        let info = self.0.info(id);
+        if info.module == "\0tuple" {
+            return None;
+        }
+        Some(memobits_ir::OwnerStructDef {
+            has_error_ancestry: self.0.error_ancestry(id).is_some(),
+            fields: info.fields.iter().map(|field| field.ty.clone()).collect(),
+        })
     }
 }

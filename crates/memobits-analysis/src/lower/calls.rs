@@ -65,12 +65,11 @@ impl Builder<'_> {
                     reference
                 } else if direct_string || direct_list || direct_owned_string_aggregate {
                     let owned = self.owned_to(value, &parameter.ty)?;
-                    // Nominal String structs are admitted only from named
-                    // locals, so their temporaries are left unstaged and the
-                    // call-site gate rejects them.
-                    let must_stage_owned_aggregate_temporary = direct_owned_string_aggregate
-                        && !is_flat_string_owner_struct_type(self.types, &parameter.ty)
-                        && matches!(owned.source, Source::Value(_));
+                    // An owner temporary (literal or call result) is staged in
+                    // a hidden local first, like tuple and array elements, so
+                    // the callee receives a named, exactly-cleaned owner.
+                    let must_stage_owned_aggregate_temporary =
+                        direct_owned_string_aggregate && matches!(owned.source, Source::Value(_));
                     let must_stage_before_later_argument = index + 1 < arguments.len()
                         && temporary_receiver.is_none()
                         && matches!(owned.source, Source::Local(_));

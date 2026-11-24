@@ -5,7 +5,8 @@ use std::collections::HashSet;
 
 mod scoped_string;
 pub use scoped_string::{
-    is_string_owner_struct, is_string_owner_transport, HeapStrings, OwnerFieldShape,
+    is_nominal_string_owner, is_string_owner_transport, HeapStrings, OwnerStructDef, OwnerTyView,
+    OwnerTypeModel,
 };
 
 /// Reserved canonical module prefix used for imported host functions.
@@ -222,11 +223,23 @@ pub struct Operand {
     pub span: Option<Span>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LocalKind {
+    /// A source binding, parameter or ordinary compiler temporary.
+    #[default]
+    Ordinary,
+    /// Compiler-created sink for a match payload that the pattern ignores
+    /// (`_`). Ownership validation does not treat an ignored heap payload as
+    /// an accepted immediate consuming match.
+    DiscardedMatchPayload,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Local {
     pub name: String,
     pub ty: Type,
     pub mutable: bool,
+    pub kind: LocalKind,
     pub span: Span,
 }
 

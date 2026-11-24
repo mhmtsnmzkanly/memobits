@@ -675,7 +675,7 @@ pub(super) fn immediate_result_match(
     if function
         .locals
         .get(target.0 as usize)
-        .is_some_and(|local| local.name == "discarded match payload")
+        .is_some_and(|local| local.kind == super::LocalKind::DiscardedMatchPayload)
     {
         return None;
     }
@@ -916,96 +916,148 @@ fn call_binding_result(
     call_binding(program, function, instructions, result)
 }
 
-/// Field classification used by the shared transport predicate, so crates
-/// that keep their own type representation can reuse the same rule.
+/// Field classification used by the shared transport predicate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OwnerFieldShape {
+enum OwnerFieldShape {
     String,
     Primitive,
-    /// A nominal struct (or fixed array of them) that is itself admitted by
-    /// the predicate. Callers classify it with their own recursion and a
-    /// visited set, so recursive by-value types are never admitted.
+    /// A nominal struct (or non-empty fixed array of them) that is itself
+    /// admitted by the predicate.
     Owner,
     Other,
 }
 
-/// A String-owning nominal struct admitted for transport: no Error ancestry,
-/// every field is `String`, a primitive, or a nested admitted owner, and at
-/// least one field is a `String` or a nested owner.
-pub fn is_string_owner_struct(
-    has_error_ancestry: bool,
-    fields: impl IntoIterator<Item = OwnerFieldShape>,
-) -> bool {
-    if has_error_ancestry {
-        return false;
-    }
-    let mut owns = false;
-    for field in fields {
-        match field {
-            OwnerFieldShape::String | OwnerFieldShape::Owner => owns = true,
-            OwnerFieldShape::Primitive => {}
-            OwnerFieldShape::Other => return false,
-        }
-    }
-    owns
+/// A view of one type for the shared transport predicate. Crates with their
+/// own type representation implement [`OwnerTypeModel`] to classify types;
+/// the rule and its recursion live only here.
+pub enum OwnerTyView<'a, T> {
+    String,
+    Primitive,
+    /// A nominal struct id (never a tuple or enum).
+    Struct(u32),
+    /// A fixed array; `nonempty` is false for zero-length arrays.
+    Array {
+        element: &'a T,
+        nonempty: bool,
+    },
+    Other,
 }
 
-/// The single predicate for "String-owning aggregate admitted for by-value
-/// transport": a String-owning tuple, or a nominal struct whose fields are
-/// Strings, primitives, or nested admitted owners (recursively, including
-/// fixed arrays of owners).
-pub fn is_string_owner_transport(types: &[super::TypeDef], ty: &Type) -> bool {
-    fn admitted(types: &[super::TypeDef], id: u32, visited: &mut HashSet<u32>) -> bool {
-        let Some(definition) = types.get(id as usize) else {
-            return false;
-        };
-        let super::TypeDefKind::Struct { fields } = &definition.kind else {
-            return false;
-        };
-        if definition.path.module.as_slice() == ["\0tuple"] {
-            return tuple_owns_string_in(types, id);
-        }
-        if !visited.insert(id) {
-            return false;
-        }
-        let result = is_string_owner_struct(
-            definition.error_ancestry.is_some(),
-            fields
-                .iter()
-                .map(|field| field_shape(types, &field.ty, visited)),
-        );
-        visited.remove(&id);
-        result
+/// A nominal struct definition as seen by the shared predicate.
+pub struct OwnerStructDef<T> {
+    pub has_error_ancestry: bool,
+    pub fields: Vec<T>,
+}
+
+/// Adapter over a type representation: classifies a type and looks up
+/// nominal struct definitions. Tuples and enums are not nominal structs.
+pub trait OwnerTypeModel {
+    type Ty;
+    fn view<'a>(&self, ty: &'a Self::Ty) -> OwnerTyView<'a, Self::Ty>;
+    fn nominal_struct(&self, id: u32) -> Option<OwnerStructDef<Self::Ty>>;
+}
+
+/// The single shape rule for a String-owning nominal struct admitted for
+/// by-value transport: no Error ancestry, every field is `String`, a
+/// primitive, or a nested admitted owner (recursively, including non-empty
+/// fixed arrays of owners), and at least one field is a `String` or a nested
+/// owner. Recursive by-value types are never admitted.
+pub fn is_nominal_string_owner<M: OwnerTypeModel>(model: &M, id: u32) -> bool {
+    admitted(model, id, &mut HashSet::new())
+}
+
+fn admitted<M: OwnerTypeModel>(model: &M, id: u32, visited: &mut HashSet<u32>) -> bool {
+    let Some(definition) = model.nominal_struct(id) else {
+        return false;
+    };
+    if !visited.insert(id) {
+        return false;
     }
-    fn field_shape(
-        types: &[super::TypeDef],
-        ty: &Type,
-        visited: &mut HashSet<u32>,
-    ) -> OwnerFieldShape {
-        match ty {
-            Type::String => OwnerFieldShape::String,
-            Type::Primitive(_) => OwnerFieldShape::Primitive,
-            Type::Struct(child)
-                if types
-                    .get(child.0 as usize)
-                    .is_some_and(|d| d.path.module.as_slice() != ["\0tuple"])
-                    && admitted(types, child.0, visited) =>
-            {
-                OwnerFieldShape::Owner
-            }
-            Type::Array { element, len } if *len != 0 => {
-                match field_shape(types, element, visited) {
-                    OwnerFieldShape::Owner => OwnerFieldShape::Owner,
-                    _ => OwnerFieldShape::Other,
+    let result = if definition.has_error_ancestry {
+        false
+    } else {
+        let mut owns = false;
+        let mut admitted_fields = true;
+        for field in &definition.fields {
+            match field_shape(model, field, visited) {
+                OwnerFieldShape::String | OwnerFieldShape::Owner => owns = true,
+                OwnerFieldShape::Primitive => {}
+                OwnerFieldShape::Other => {
+                    admitted_fields = false;
+                    break;
                 }
             }
+        }
+        admitted_fields && owns
+    };
+    visited.remove(&id);
+    result
+}
+
+fn field_shape<M: OwnerTypeModel>(
+    model: &M,
+    ty: &M::Ty,
+    visited: &mut HashSet<u32>,
+) -> OwnerFieldShape {
+    match model.view(ty) {
+        OwnerTyView::String => OwnerFieldShape::String,
+        OwnerTyView::Primitive => OwnerFieldShape::Primitive,
+        OwnerTyView::Struct(child) if admitted(model, child, visited) => OwnerFieldShape::Owner,
+        OwnerTyView::Array {
+            element,
+            nonempty: true,
+        } => match field_shape(model, element, visited) {
+            OwnerFieldShape::Owner => OwnerFieldShape::Owner,
             _ => OwnerFieldShape::Other,
+        },
+        _ => OwnerFieldShape::Other,
+    }
+}
+
+/// Adapter for the IR type definitions.
+struct IrOwnerModel<'t>(&'t [super::TypeDef]);
+
+impl OwnerTypeModel for IrOwnerModel<'_> {
+    type Ty = Type;
+    fn view<'a>(&self, ty: &'a Type) -> OwnerTyView<'a, Type> {
+        match ty {
+            Type::String => OwnerTyView::String,
+            Type::Primitive(_) => OwnerTyView::Primitive,
+            Type::Struct(id) => OwnerTyView::Struct(id.0),
+            Type::Array { element, len } => OwnerTyView::Array {
+                element,
+                nonempty: *len != 0,
+            },
+            _ => OwnerTyView::Other,
         }
     }
+    fn nominal_struct(&self, id: u32) -> Option<OwnerStructDef<Type>> {
+        let definition = self.0.get(id as usize)?;
+        let super::TypeDefKind::Struct { fields } = &definition.kind else {
+            return None;
+        };
+        if definition.path.module.as_slice() == ["\0tuple"] {
+            return None;
+        }
+        Some(OwnerStructDef {
+            has_error_ancestry: definition.error_ancestry.is_some(),
+            fields: fields.iter().map(|field| field.ty.clone()).collect(),
+        })
+    }
+}
+
+/// "String-owning aggregate admitted for by-value transport": a String-owning
+/// tuple, or a nominal struct admitted by [`is_nominal_string_owner`].
+pub fn is_string_owner_transport(types: &[super::TypeDef], ty: &Type) -> bool {
     let Type::Struct(id) = ty else {
         return false;
     };
-    admitted(types, id.0, &mut HashSet::new())
+    match types.get(id.0 as usize) {
+        Some(definition) if definition.path.module.as_slice() == ["\0tuple"] => {
+            tuple_owns_string_in(types, id.0)
+        }
+        _ => is_nominal_string_owner(&IrOwnerModel(types), id.0),
+    }
 }
 
 pub(super) fn tuple_owns_string(program: &super::Program, id: u32) -> bool {

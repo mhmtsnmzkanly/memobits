@@ -386,11 +386,6 @@ fn make() { let t := "a".concat("b"); let r: { name: string, n: u32 } = { name: 
             "would copy a String-owning element",
         ),
         (
-            format!("{bind} take({{ name: \"a\", n: 1 }}); }} fn main() {{}}"),
-            "LE900",
-            "must move directly from a named local",
-        ),
-        (
             format!("{bind} let t2 := \"c\".concat(\"d\"); var p: {{ name: string, n: u32 }} = {{ name: t2, n: 1 }}; p = r; }} fn main() {{}}"),
             "TE018",
             "can only move directly into a new local",

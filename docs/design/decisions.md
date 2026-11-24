@@ -639,6 +639,25 @@ Facts about the shipped behavior; no new decisions.
   mismatch, BE005 overlapping or live loans.
 - `loop x in array` over non-copyable array elements binds read-only borrows,
   as for a List; mutating the array inside the loop is BE005.
-- Known limits: an `if`/`match` expression as the replacement value of an owner
-  is rejected by the heap-ownership validator (TE018); evaluate it into a local
-  first. `concat` as a replacement value is accepted for `string` places.
+- Known limits: `concat` as a replacement value is accepted for `string`
+  places. (The earlier limit on `if`/`match` replacement values is lifted by
+  D1, below.)
+- D1 (2026-11-24), facts only: the three mirrored String-owner predicates are
+  one rule in `memobits-ir` (`is_nominal_string_owner` over an
+  `OwnerTypeModel` adapter; analysis `lower.rs` and `types.rs` only classify
+  their own type representation). An ignored match payload is marked by
+  `LocalKind::DiscardedMatchPayload` on the IR local instead of a name.
+  Widened behavior: (a) an owner temporary (struct or record literal, direct
+  call result, array literal) passed to an owned parameter is staged in a
+  hidden local like tuple and array elements; (b) `replace(place, value)`
+  accepts an `if` / `else if` / `match` expression (blocks as branches) of
+  `string`, `List` or String-owning aggregates as `value`: each branch moves
+  its value into the hidden replacement local before the join, so no heap
+  value crosses a join; (c) a struct literal may mix a String field with
+  owner-struct and owner-array fields. Error-derived types that own heap
+  Strings, directly or nested, report LE900 "Error-derived type 'T' cannot own
+  heap Strings yet". A BE005 on `swap(a, b)` between two projected places adds
+  a note that swap needs two disjoint places. `Resolution::ignored_tests` was
+  removed (unread). Not widened: a struct literal as a function's tail
+  expression still needs a named local binding; `if`/`match` owner values
+  outside `replace` still cannot cross a join (TE018).
