@@ -21,6 +21,20 @@ argument and unit result. The CLI profile rejects undeclared, unknown, or
 signature-mismatched imports before guest code starts. Both the source run and the artifact run (with `--project` for the profile) print the output below. Other hosts, reference
 parameters, and source-level multi-module host declarations are not supported.
 
+## Tests
+
+This project has no `test fn` items: its only function is the host-import call, which needs the CLI host profile that `mb run` selects from the manifest. `mb test` still compiles the project and reports zero tests.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/topics/host-capability/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 0 passed; 0 failed; 0 filtered out
+```
+
 ## Expected output
 
 Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).

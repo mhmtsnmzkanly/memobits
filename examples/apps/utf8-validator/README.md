@@ -20,9 +20,10 @@ adds `offset: i32?`. Offsets are zero-based byte positions.
 | 4 | Invalid continuation, including a byte outside the lead-specific range | Offending byte |
 
 A present invalid continuation is reported before a later missing byte.
-The validator ignores bytes beyond the logical length. `main` checks valid
-and invalid fixtures, including é, scalar boundaries, and error offsets.
-It returns a fixture-group code if a check fails.
+The validator ignores bytes beyond the logical length. `main` validates a
+sample (é, NUL and DEL) and returns `Ok(0)`, or the validator's error code.
+The `test fn` items check valid and invalid fixtures, including é, scalar
+boundaries, and error offsets.
 
 From the repository root, run the source and build the standalone artifact
 in a temporary directory.
@@ -32,6 +33,20 @@ cargo run -p memobits-cli -- run --project examples/apps/utf8-validator/project.
 artifact_dir=$(mktemp -d)
 cargo run -p memobits-cli -- build --project examples/apps/utf8-validator/project.toml --output "$artifact_dir/utf8.wasm"
 cargo run -p memobits-cli -- run "$artifact_dir/utf8.wasm"
+```
+
+## Tests
+
+`test fn` items check this project. `mb test` runs each one in a fresh instance; `mb build` and `mb run` leave them out of the artifact.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/apps/utf8-validator/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 8 passed; 0 failed; 0 filtered out
 ```
 
 ## Expected output

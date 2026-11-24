@@ -44,6 +44,20 @@ cargo run -p memobits-cli -- build --project examples/topics/structs/project.tom
 cargo run -p memobits-cli -- run examples/topics/structs/target/memobits/app.wasm
 ```
 
+## Tests
+
+`test fn` items check this project. `mb test` runs each one in a fresh instance; `mb build` and `mb run` leave them out of the artifact.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/topics/structs/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 2 passed; 0 failed; 0 filtered out
+```
+
 ## Expected output
 
 Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).

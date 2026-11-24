@@ -82,3 +82,16 @@ fn main() -> i32 ! Error {
     // `s` is borrowed for the call and stays usable afterwards.
     Ok(area(s.borrow()) + offset + reach + extra + flat + spread)
 }
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn grow_is_visible_to_the_caller() {
+    var size := make_size(3, 4);
+    grow(size.share(), 2);
+    assert(size.width == 5);
+    assert(size.height == 6);
+}
+
+test fn area_includes_the_scale_bonus() {
+    let size := make_size(3, 4);
+    assert(area(size.borrow()) == 13);
+}

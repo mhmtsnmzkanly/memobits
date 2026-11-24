@@ -12,10 +12,11 @@ fn add_question(value: share string) {
     value.push_str("?");
 }
 
-pub fn check() -> i32 ! Error {
+// Builds "hello world!?!" (14 bytes) and a label "hi there" (8 bytes), and
+// returns their combined length: 22.
+pub fn combined_length() -> i32 {
     let text := "hello";
     let joined := text.concat(" world");
-    let moved := text;
     var suffixed := add_bang(joined.borrow());
     add_question(suffixed.share());
     suffixed.push_str("!");
@@ -24,14 +25,32 @@ pub fn check() -> i32 ! Error {
     label.text = label.text.concat(" there");
     let label_moved := label;
     let label_length := label_moved.text.len();
-    if moved.len() != 5 {
-        return Err(Error { code: 4 });
-    }
-    if suffix_length != 14 {
-        return Err(Error { code: 5 });
-    }
-    if label_length != 8 {
-        return Err(Error { code: 6 });
-    }
-    Ok((suffix_length + label_length) as i32)
+    (suffix_length + label_length) as i32
+}
+
+test fn moving_a_string_keeps_its_length() {
+    let text := "hello";
+    let joined := text.concat(" world");
+    let moved := text;
+    assert(moved.len() == 5);
+    assert(joined.len() == 11);
+}
+
+test fn suffixes_are_appended_in_place() {
+    let joined := "hello".concat(" world");
+    var suffixed := add_bang(joined.borrow());
+    add_question(suffixed.share());
+    suffixed.push_str("!");
+    assert(suffixed.len() == 14);
+}
+
+test fn a_struct_field_can_be_replaced() {
+    var label := TextLabel { text: "hi", number: 1 };
+    label.text = label.text.concat(" there");
+    let label_moved := label;
+    assert(label_moved.text.len() == 8);
+}
+
+test fn combined_length_is_22() {
+    assert(combined_length() == 22);
 }

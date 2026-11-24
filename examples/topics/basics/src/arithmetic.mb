@@ -3,15 +3,23 @@ pub fn subtract(left: i32, right: i32) -> i32 { left - right }
 pub fn multiply(left: i32, right: i32) -> i32 { left * right }
 pub fn divide(left: i32, right: i32) -> i32 { left / right }
 
-pub fn check() -> i32 ! Error {
+// A small price calculation built from the four operations: 265.
+pub fn order_total() -> i32 {
     let base := add(120, 15);
     let quantity := 4;
     let subtotal := multiply(base, quantity);
     let discount := subtract(subtotal, 30);
     let taxable := divide(discount, 2);
-    let total := add(taxable, 10);
-    if total != 265 {
-        return Err(Error { code: 1 });
-    }
-    Ok(total)
+    add(taxable, 10)
+}
+
+test fn order_total_is_265() {
+    assert(order_total() == 265);
+}
+
+test fn each_operation() {
+    assert(add(2, 3) == 5);
+    assert(subtract(2, 3) == -1);
+    assert(multiply(4, 5) == 20);
+    assert(divide(9, 2) == 4);
 }

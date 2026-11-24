@@ -45,23 +45,31 @@ fn combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
 
 fn main() -> i32 ! Error {
     let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
-    if sum.x != 11 || sum.y != 22 {
-        return Err(Error { code: 1 });
-    }
     let diff := sum - Vec2 { x: 1, y: 2 };
-    if diff != (Vec2 { x: 10, y: 20 }) {
-        return Err(Error { code: 2 });
-    }
-    if diff == (Vec2 { x: 0, y: 0 }) {
-        return Err(Error { code: 3 });
-    }
     let merged := combine(diff, Vec2 { x: 5, y: 5 });
-    if merged.x != 15 || merged.y != 25 {
-        return Err(Error { code: 4 });
-    }
-    let weight := weigh_twice(merged);
-    if weight != 41 {
-        return Err(Error { code: 5 });
-    }
-    Ok(weight)
+    Ok(weigh_twice(merged))
+}
+
+// The checks are `test fn` items: `mb check` and `mb test` compile them and
+// `mb test` runs them; `mb build` and `mb run` leave them out.
+test fn addition_adds_each_component() {
+    let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
+    assert(sum.x == 11);
+    assert(sum.y == 22);
+}
+
+test fn subtraction_and_equality() {
+    let diff := Vec2 { x: 11, y: 22 } - Vec2 { x: 1, y: 2 };
+    assert(diff == (Vec2 { x: 10, y: 20 }));
+    assert(diff != (Vec2 { x: 0, y: 0 }));
+}
+
+test fn combine_uses_the_selected_add_evidence() {
+    let merged := combine(Vec2 { x: 10, y: 20 }, Vec2 { x: 5, y: 5 });
+    assert(merged.x == 15);
+    assert(merged.y == 25);
+}
+
+test fn weigh_twice_adds_one_to_the_weight() {
+    assert(weigh_twice(Vec2 { x: 15, y: 25 }) == 41);
 }

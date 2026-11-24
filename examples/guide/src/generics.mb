@@ -38,23 +38,24 @@ fn identity<T>(value: T) -> T { value }
 fn select<T>(value: T, enabled: bool, fallback: T) -> T {
     if enabled { value } else { fallback }
 }
-pub fn generic_functions() -> bool {
+test fn generic_functions() {
     let number := 40;
     let selected: i32 = select(number, true, 0);
     let flag: bool = identity(true);
     let again: i32 = identity(selected);
-    flag && again + identity(2) == 42
+    assert(flag);
+    assert(again + identity(2) == 42);
 }
 fn echo_array<T, const N: u32>(value: array<T, N>) -> array<T, N> { value }
 fn relay_array<T, const N: u32>(value: array<T, N>) -> array<T, N> {
     echo_array(value)
 }
-pub fn generic_array_forwarding() -> bool {
+test fn generic_array_forwarding() {
     let one: array<i32, 1> = [40];
     let two: array<i32, 2> = [1, 1];
     let first := relay_array(one);
     let second := relay_array(two);
-    first[0] + second[0] + second[1] == 42
+    assert(first[0] + second[0] + second[1] == 42);
 }
 // A generic bound uses the caller-visible interface implementation. A nested
 // generic call forwards that selected evidence to the constrained function.
@@ -69,11 +70,11 @@ fn render_value<T>(value: T) -> i32 where T: Render {
 fn relay_render<T>(value: T) -> i32 where T: Render {
     render_value(value)
 }
-pub fn generic_interface_forwarding() -> bool {
+test fn generic_interface_forwarding() {
     let point := RenderPoint { value: 42 };
-    relay_render(point) == 42
+    assert(relay_render(point) == 42);
 }
-pub fn nested_generic_methods() -> bool {
+test fn nested_generic_methods() {
     let signed := Nest<i32> { value: 40 };
     let unsigned := Nest<u32> { value: 2 };
     let pair := signed.twin();
@@ -82,13 +83,15 @@ pub fn nested_generic_methods() -> bool {
     var pair_lanes := GaugePair { first: Lane<2> { width: 1 }, second: gauge };
     let first_view := pair_lanes.first.borrow();
     pair_lanes.second.widen();
-    pair.first.value + pair.second.value == 80 && other.second.value == 2
-        && first_view.span() == 1 && pair_lanes.second.span() == 41
+    assert(pair.first.value + pair.second.value == 80);
+    assert(other.second.value == 2);
+    assert(first_view.span() == 1);
+    assert(pair_lanes.second.span() == 41);
 }
 // Generic nominal structs and enums specialize by type arguments. Const
 // arguments substitute into admitted fixed-array fields. Enum construction
 // uses the expected concrete enum type.
-pub fn generic_structs() -> bool {
+test fn generic_structs() {
     let signed := Box<i32> { value: 41 };
     let unsigned := Box<u32> { value: 42 };
     let bytes := Buffer<u8, 2> { data: [0, 42] };
@@ -109,6 +112,10 @@ pub fn generic_structs() -> bool {
     } + match packet_two {
         Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32,
     };
-    signed.read_value() + 1 == 42 && unsigned.read_value() == 42 && bytes.data[1] == 42
-        && unwrapped == 42 && empty && packet_values == 42
+    assert(signed.read_value() + 1 == 42);
+    assert(unsigned.read_value() == 42);
+    assert(bytes.data[1] == 42);
+    assert(unwrapped == 42);
+    assert(empty);
+    assert(packet_values == 42);
 }

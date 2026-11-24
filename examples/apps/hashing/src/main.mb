@@ -13,19 +13,25 @@ use self::fnv::fnv1a_3;
 use self::fnv::fnv1a_8;
 use self::fnv::fnv1a_slice;
 
-fn test_primitives() -> bool {
-    let xor_ok := bit_xor(5, 3) == 6;
-    let and_ok := bit_and(6, 3) == 2;
-    let or_ok := bit_or(4, 2) == 6;
-    let shl_ok := shl(1, 4) == 16;
-    let shr_ok := shr(16, 2) == 4;
-    let add_ok := wrapping_add(4_294_967_295, 1) == 0;
-    let mul_ok := wrapping_mul(4_294_967_295, 2) == 4_294_967_294;
-
-    xor_ok && and_ok && or_ok && shl_ok && shr_ok && add_ok && mul_ok
+pub fn run() -> u32 ! Error {
+    // The verified FNV-1a hash of "Memobits"; the hash functions are checked
+    // by the tests below.
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+    let hash := fnv1a_8(memobits.borrow());
+    Ok(hash)
 }
 
-fn test_fnv1a() -> bool {
+test fn bit_primitives() {
+    assert(bit_xor(5, 3) == 6);
+    assert(bit_and(6, 3) == 2);
+    assert(bit_or(4, 2) == 6);
+    assert(shl(1, 4) == 16);
+    assert(shr(16, 2) == 4);
+    assert(wrapping_add(4_294_967_295, 1) == 0);
+    assert(wrapping_mul(4_294_967_295, 2) == 4_294_967_294);
+}
+
+test fn fnv1a_known_values() {
     let empty: array<u8, 8> = [0; 8];
     let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
     let abc_3: array<u8, 3> = [97, 98, 99];
@@ -41,16 +47,16 @@ fn test_fnv1a() -> bool {
     let v_memo_slice := fnv1a_slice(memobits.borrow(), 8);
     let v_memo_fixed := fnv1a_8(memobits.borrow());
 
-    v_empty == 2_166_136_261
-        && v_a == 3_826_002_220
-        && v_abc_slice == 440_920_331
-        && v_abc_fixed == 440_920_331
-        && v_hello == 1_335_831_723
-        && v_memo_slice == 1_774_777_415
-        && v_memo_fixed == 1_774_777_415
+    assert(v_empty == 2_166_136_261);
+    assert(v_a == 3_826_002_220);
+    assert(v_abc_slice == 440_920_331);
+    assert(v_abc_fixed == 440_920_331);
+    assert(v_hello == 1_335_831_723);
+    assert(v_memo_slice == 1_774_777_415);
+    assert(v_memo_fixed == 1_774_777_415);
 }
 
-fn test_djb2() -> bool {
+test fn djb2_known_values() {
     let empty: array<u8, 8> = [0; 8];
     let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
     let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
@@ -64,15 +70,15 @@ fn test_djb2() -> bool {
     let v_memo_slice := djb2_slice(memobits.borrow(), 8);
     let v_memo_fixed := djb2_8(memobits.borrow());
 
-    v_empty == 5_381
-        && v_a == 177_670
-        && v_abc == 193_485_963
-        && v_hello == 261_238_937
-        && v_memo_slice == 4_035_756_421
-        && v_memo_fixed == 4_035_756_421
+    assert(v_empty == 5_381);
+    assert(v_a == 177_670);
+    assert(v_abc == 193_485_963);
+    assert(v_hello == 261_238_937);
+    assert(v_memo_slice == 4_035_756_421);
+    assert(v_memo_fixed == 4_035_756_421);
 }
 
-fn test_adler32() -> bool {
+test fn adler32_known_values() {
     let empty: array<u8, 8> = [0; 8];
     let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
     let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
@@ -86,30 +92,10 @@ fn test_adler32() -> bool {
     let v_memo_slice := adler32_slice(memobits.borrow(), 8);
     let v_memo_fixed := adler32_8(memobits.borrow());
 
-    v_empty == 1
-        && v_a == 6_422_626
-        && v_abc == 38_600_999
-        && v_hello == 103_547_413
-        && v_memo_slice == 235_537_217
-        && v_memo_fixed == 235_537_217
-}
-
-pub fn run() -> u32 ! Error {
-    if !test_primitives() {
-        return Err(Error { code: 1 });
-    }
-    if !test_fnv1a() {
-        return Err(Error { code: 2 });
-    }
-    if !test_djb2() {
-        return Err(Error { code: 3 });
-    }
-    if !test_adler32() {
-        return Err(Error { code: 4 });
-    }
-
-    // Return the verified FNV-1a hash of "Memobits"
-    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
-    let hash := fnv1a_8(memobits.borrow());
-    Ok(hash)
+    assert(v_empty == 1);
+    assert(v_a == 6_422_626);
+    assert(v_abc == 38_600_999);
+    assert(v_hello == 103_547_413);
+    assert(v_memo_slice == 235_537_217);
+    assert(v_memo_fixed == 235_537_217);
 }

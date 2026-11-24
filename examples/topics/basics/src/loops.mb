@@ -20,14 +20,15 @@ fn sum_to(count: i32) -> i32 {
     total
 }
 
-pub fn check() -> i32 ! Error {
-    let value := factorial(5);
-    let total := sum_to(10);
-    if value != 120 {
-        return Err(Error { code: 2 });
-    }
-    if total != 55 {
-        return Err(Error { code: 3 });
-    }
-    Ok(value + total)
+// The factorial of 5 plus the sum of 1 to 10: 120 + 55 = 175.
+pub fn combined() -> i32 {
+    factorial(5) + sum_to(10)
+}
+
+test fn factorial_of_five() {
+    assert(factorial(5) == 120);
+}
+
+test fn sum_to_ten() {
+    assert(sum_to(10) == 55);
 }

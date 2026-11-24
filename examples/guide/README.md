@@ -3,10 +3,10 @@
 The guide walks through the executable language with small checked examples,
 split into topic modules under [`src/`](src/): `numbers`, `text`, `tuples`,
 `aggregates`, `ownership`, `collections`, `enums_outcomes`, `generics` and
-`operators`. [`src/main.mb`](src/main.mb) holds `main`, which runs every check,
-returns `Ok(42)` when all pass, and returns a distinct `Err` code for each failed
-check. It is the reference for
-current syntax, together with the accepted rules in
+`operators`. Each topic documents its feature in comments and checks it with
+`test fn` items that use `assert`. [`src/main.mb`](src/main.mb) holds `main`, a
+small program that combines a few guide features and returns `Ok(42)`. The
+guide is the reference for current syntax, together with the accepted rules in
 [decisions](../../docs/design/decisions.md).
 
 From the repository root, run the source and build the standalone artifact in
@@ -26,100 +26,29 @@ A top-level `test fn name() { ... }` is a test: no parameters, no result, never
 module's private items). Tests are excluded from the application artifact.
 `assert(condition)` takes a `bool` and traps with `assertion failed` and its
 source location when the condition is false; it works in ordinary code too, and
-a function, import or value named `assert` takes precedence. The guide's first
-test is `text_length_and_concat` in [`src/text.mb`](src/text.mb):
+a function, import or value named `assert` takes precedence. Each guide fact is
+a separate `assert`, so a failure points at the specific line, for example
+`test text::text_concat ... FAILED` with the failing `assert` highlighted.
+
+## Running the guide's tests
 
 ```sh
 cargo run -p memobits-cli -- test --project examples/guide/project.toml
 ```
 
-```text
-running 1 test
-test text::text_length_and_concat ... ok
+The report lists every test as `test <module>::<name> ... ok` and ends with the
+summary line below (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
-test result: ok. 1 passed; 0 failed; 0 filtered out
+```text
+test result: ok. 76 passed; 0 failed; 0 filtered out
 ```
 
 `mb test` runs each test in a fresh instance and exits 1 if any fails. Add a
-substring filter to select tests by qualified name. `mb build --tests --output
+substring filter to select tests by qualified name (`... test --project
+examples/guide/project.toml text::`). `mb build --tests --output
 guide-tests.wasm` writes the test artifact and `mb test guide-tests.wasm` runs
-it with the same report. The numbered checks below are not converted to tests
-yet.
-
-## Check codes
-
-`main` runs every topic check in order. A failing check returns
-`Err(Error { code })`; the hundreds digit names the module that defines the
-check (1xx `numbers`, 2xx `text`, 3xx `tuples`, 4xx `aggregates`,
-5xx `ownership`, 6xx `collections`, 7xx `enums_outcomes`, 8xx `generics`,
-9xx `operators`). New checks take the next free code in their module's range.
-
-| Code | Module | Check |
-| --- | --- | --- |
-| 101 | `numbers` | `numbers` |
-| 102 | `numbers` | `widenings` |
-| 103 | `numbers` | `numeric_casts` |
-| 104 | `numbers` | `wrapping_arithmetic` |
-| 105 | `numbers` | `bit_operations` |
-| 201 | `text` | `character_literals` |
-| 202 | `text` | `fixed_text` |
-| 203 | `text` | `text_boundaries` |
-| 204 | `text` | `text_bytes` |
-| 205 | `text` | `text_scalars` |
-| 206 | `text` | `walk_text` |
-| 207 | `text` | `text_loop` |
-| 208 | `text` | `text_concat` |
-| 209 | `text` | `static_text_result, heap_text_result` |
-| 301 | `tuples` | `tuple_values` |
-| 401 | `aggregates` | `anonymous_shapes` |
-| 402 | `aggregates` | `shared_string_field_replacement` |
-| 501 | `ownership` | `explicit_drop` |
-| 502 | `ownership` | `local_string_fields, local_heap_string_fields` |
-| 503 | `ownership` | `borrow_string_struct` |
-| 504 | `ownership` | `owned_string_struct_argument` |
-| 505 | `ownership` | `temporary_string_fields` |
-| 506 | `ownership` | `replace_local_string_field` |
-| 601 | `collections` | `stations` |
-| 602 | `collections` | `fixed_bytes` |
-| 603 | `collections` | `primitive_lists` |
-| 604 | `collections` | `fixed_iteration` |
-| 605 | `collections` | `list_iteration` |
-| 701 | `enums_outcomes` | `trailing_enum_extension` |
-| 702 | `enums_outcomes` | `optional_sugar` |
-| 703 | `enums_outcomes` | `enums` |
-| 704 | `enums_outcomes` | `optional_borrow` |
-| 705 | `enums_outcomes` | `outcomes` |
-| 706 | `enums_outcomes` | `nested_result_storage` |
-| 707 | `enums_outcomes` | `nested_patterns` |
-| 801 | `generics` | `generic_structs` |
-| 802 | `generics` | `nested_generic_methods` |
-| 803 | `generics` | `generic_functions` |
-| 804 | `generics` | `generic_array_forwarding` |
-| 805 | `generics` | `generic_interface_forwarding` |
-| 901 | `operators` | `user_defined_add` |
-| 902 | `operators` | `user_defined_sub` |
-| 903 | `operators` | `user_defined_mul` |
-| 904 | `operators` | `user_defined_div` |
-| 905 | `operators` | `user_defined_rem` |
-| 906 | `operators` | `user_defined_bitand` |
-| 907 | `operators` | `user_defined_bitor` |
-| 908 | `operators` | `user_defined_bitxor` |
-| 909 | `operators` | `user_defined_negation` |
-| 910 | `operators` | `user_defined_equality` |
-| 911 | `operators` | `user_defined_ordering` |
-| 912 | `operators` | `user_defined_add_assign` |
-| 913 | `operators` | `user_defined_sub_assign` |
-| 914 | `operators` | `user_defined_mul_assign` |
-| 915 | `operators` | `user_defined_div_assign` |
-| 916 | `operators` | `user_defined_rem_assign` |
-| 917 | `operators` | `user_defined_bitand_assign` |
-| 918 | `operators` | `user_defined_bitor_assign` |
-| 919 | `operators` | `user_defined_bitxor_assign` |
-| 920 | `operators` | `user_defined_shl` |
-| 921 | `operators` | `user_defined_shl_assign` |
-| 922 | `operators` | `user_defined_shr_assign` |
-| 923 | `operators` | `generic_compound_assignments` |
-| 924 | `operators` | `user_defined_shr` |
+it with the same report. `mb check` type-checks every module and every test;
+`mb build` and `mb run` ignore tests.
 
 ## Expected output
 

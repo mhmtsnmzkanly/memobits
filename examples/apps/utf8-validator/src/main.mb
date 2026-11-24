@@ -1,4 +1,5 @@
-// Check strict UTF-8 validation over the logical prefix of fixed byte arrays.
+// Strict UTF-8 validation over the logical prefix of fixed byte arrays. The
+// `test fn` items below check each rule; `main` validates a sample.
 fn count_is(bytes: array<u8, 8>, length: i32, expected: i32) -> bool {
     match bytes.validate_utf8(length) {
         Ok(count) => count == expected,
@@ -23,54 +24,74 @@ fn error_is(bytes: array<u8, 8>, length: i32, code: u32, expected: i32?) -> bool
     }
 }
 
+// Validates a sample of U+00E9, NUL and ASCII DEL. Returns Ok(0) for valid
+// UTF-8, or the validator's error code otherwise.
 fn main() -> i32 ! Error {
-    // é, NUL and ASCII DEL. The invalid byte after the logical end is padding.
-    if !count_is([195, 169, 0, 127, 255, 0, 0, 0], 4, 3)
-        || !count_is([255; 8], 0, 0) {
-        return Err(Error { code: 1 });
+    let sample: array<u8, 8> = [195, 169, 0, 127, 255, 0, 0, 0];
+    match sample.validate_utf8(4) {
+        Ok(_) => Ok(0),
+        Err(error) => {
+            let Utf8Error { code: code, offset: _ } := error;
+            Err(Error { code: code })
+        },
     }
-    // Valid boundaries: U+0080/U+07FF, U+0800/U+D7FF, U+E000/U+FFFF,
-    // and U+10000/U+10FFFF. Noncharacters are still Unicode scalar values.
-    if !count_is([194, 128, 223, 191, 0, 0, 0, 0], 4, 2)
-        || !count_is([224, 160, 128, 237, 159, 191, 0, 0], 6, 2)
-        || !count_is([238, 128, 128, 239, 191, 191, 0, 0], 6, 2)
-        || !count_is([240, 144, 128, 128, 244, 143, 191, 191], 8, 2) {
-        return Err(Error { code: 2 });
-    }
-    // Truncation reports the first missing byte, even if the buffer holds it.
-    if !error_is([195, 169, 0, 0, 0, 0, 0, 0], 1, 3, Some(1))
-        || !error_is([65, 240, 144, 128, 128, 0, 0, 0], 4, 3, Some(4))
-        || !error_is([226, 130, 172, 0, 0, 0, 0, 0], 2, 3, Some(2)) {
-        return Err(Error { code: 3 });
-    }
-    // A present invalid continuation is reported before any missing byte.
-    if !error_is([65, 226, 65, 0, 0, 0, 0, 0], 3, 4, Some(2))
-        || !error_is([240, 144, 128, 192, 0, 0, 0, 0], 4, 4, Some(3))
-        || !error_is([195, 65, 0, 0, 0, 0, 0, 0], 2, 4, Some(1)) {
-        return Err(Error { code: 4 });
-    }
-    // Stray continuation, two-byte overlong lead, and leads above F4.
-    if !error_is([65, 128, 0, 0, 0, 0, 0, 0], 2, 2, Some(1))
-        || !error_is([192, 175, 0, 0, 0, 0, 0, 0], 2, 2, Some(0))
-        || !error_is([245, 128, 128, 128, 0, 0, 0, 0], 4, 2, Some(0))
-        || !error_is([255; 8], 8, 2, Some(0)) {
-        return Err(Error { code: 5 });
-    }
-    // A disallowed second byte makes the sequence invalid at byte 1.
-    if !error_is([224, 159, 191, 0, 0, 0, 0, 0], 3, 4, Some(1))
-        || !error_is([237, 160, 128, 0, 0, 0, 0, 0], 3, 4, Some(1))
-        || !error_is([240, 143, 191, 191, 0, 0, 0, 0], 4, 4, Some(1))
-        || !error_is([244, 144, 128, 128, 0, 0, 0, 0], 4, 4, Some(1)) {
-        return Err(Error { code: 6 });
-    }
-    if !error_is([0; 8], -1, 1, None) || !error_is([0; 8], 9, 1, None) {
-        return Err(Error { code: 7 });
-    }
+}
+
+// é, NUL and ASCII DEL. The invalid byte after the logical end is padding.
+test fn valid_prefixes() {
+    assert(count_is([195, 169, 0, 127, 255, 0, 0, 0], 4, 3));
+    assert(count_is([255; 8], 0, 0));
+}
+
+// Valid boundaries: U+0080/U+07FF, U+0800/U+D7FF, U+E000/U+FFFF,
+// and U+10000/U+10FFFF. Noncharacters are still Unicode scalar values.
+test fn valid_scalar_boundaries() {
+    assert(count_is([194, 128, 223, 191, 0, 0, 0, 0], 4, 2));
+    assert(count_is([224, 160, 128, 237, 159, 191, 0, 0], 6, 2));
+    assert(count_is([238, 128, 128, 239, 191, 191, 0, 0], 6, 2));
+    assert(count_is([240, 144, 128, 128, 244, 143, 191, 191], 8, 2));
+}
+
+// Truncation reports the first missing byte, even if the buffer holds it.
+test fn truncation_reports_the_first_missing_byte() {
+    assert(error_is([195, 169, 0, 0, 0, 0, 0, 0], 1, 3, Some(1)));
+    assert(error_is([65, 240, 144, 128, 128, 0, 0, 0], 4, 3, Some(4)));
+    assert(error_is([226, 130, 172, 0, 0, 0, 0, 0], 2, 3, Some(2)));
+}
+
+// A present invalid continuation is reported before any missing byte.
+test fn invalid_continuation_before_missing_byte() {
+    assert(error_is([65, 226, 65, 0, 0, 0, 0, 0], 3, 4, Some(2)));
+    assert(error_is([240, 144, 128, 192, 0, 0, 0, 0], 4, 4, Some(3)));
+    assert(error_is([195, 65, 0, 0, 0, 0, 0, 0], 2, 4, Some(1)));
+}
+
+// Stray continuation, two-byte overlong lead, and leads above F4.
+test fn stray_continuations_overlongs_and_high_leads() {
+    assert(error_is([65, 128, 0, 0, 0, 0, 0, 0], 2, 2, Some(1)));
+    assert(error_is([192, 175, 0, 0, 0, 0, 0, 0], 2, 2, Some(0)));
+    assert(error_is([245, 128, 128, 128, 0, 0, 0, 0], 4, 2, Some(0)));
+    assert(error_is([255; 8], 8, 2, Some(0)));
+}
+
+// A disallowed second byte makes the sequence invalid at byte 1.
+test fn disallowed_second_bytes() {
+    assert(error_is([224, 159, 191, 0, 0, 0, 0, 0], 3, 4, Some(1)));
+    assert(error_is([237, 160, 128, 0, 0, 0, 0, 0], 3, 4, Some(1)));
+    assert(error_is([240, 143, 191, 191, 0, 0, 0, 0], 4, 4, Some(1)));
+    assert(error_is([244, 144, 128, 128, 0, 0, 0, 0], 4, 4, Some(1)));
+}
+
+test fn invalid_lengths() {
+    assert(error_is([0; 8], -1, 1, None));
+    assert(error_is([0; 8], 9, 1, None));
+}
+
+test fn array_size_is_inferred() {
     let short: array<u8, 2> = [195, 169];
     let inferred_size := match short.borrow().validate_utf8(2) {
         Ok(count) => count == 1,
         Err(_) => false
     };
-    if !inferred_size { return Err(Error { code: 8 }); }
-    Ok(0)
+    assert(inferred_size);
 }

@@ -24,10 +24,11 @@ fn replace_record_text(record: share TextRecord) {
     record.text = "updated";
 }
 fn accept_opaque_handle(handle: OpaqueHandle) {}
-pub fn shared_string_field_replacement() -> bool {
+test fn shared_string_field_replacement() {
     var record := TextRecord { text: "before", tag: 7 };
     replace_record_text(record.share());
-    record.text.len() == 7 && record.tag == 7
+    assert(record.text.len() == 7);
+    assert(record.tag == 7);
 }
 // Anonymous records use exact field-name/type shapes. Reordering fields does
 // not change the shape, while initializer effects still run in written order.
@@ -55,7 +56,7 @@ fn record_slot_total(slot: RecordSlot) -> u32 {
         RecordSlot::NoRecord => 0,
     }
 }
-fn string_owning_records() -> bool {
+test fn string_owning_records() {
     let heap := "é".concat("!");
     let named: { name: string, size: u32 } = { name: heap, size: 9 };
     let spare_heap := "é".concat("!");
@@ -64,12 +65,14 @@ fn string_owning_records() -> bool {
     let slot_heap := "é".concat("!");
     let slot_value: { name: string, size: u32 } = { name: slot_heap, size: 2 };
     let slot := RecordSlot::HasRecord(slot_value);
-    record_name_total(named, false) == 12 && record_name_total(spare, true) == 1
-        && record_name_total(made, false) == 7 && record_slot_total(slot) == 5
+    assert(record_name_total(named, false) == 12);
+    assert(record_name_total(spare, true) == 1);
+    assert(record_name_total(made, false) == 7);
+    assert(record_slot_total(slot) == 5);
 }
 fn guide_phase() -> GuidePhase { Ready }
 fn other_guide_phase() -> OtherGuidePhase { Ready }
-pub fn anonymous_shapes() -> bool {
+test fn anonymous_shapes() {
     var order: u32 = 0;
     let first := {
         right: { order += 1; order },
@@ -94,8 +97,11 @@ pub fn anonymous_shapes() -> bool {
         Ready => match other { Ready => true, Waiting => false },
         Waiting => false,
     };
-    selected.right == 1 && selected.left == 2 && order == 4
-        && record_total({ left: 40, right: 2 }) == 42 && matching
-        && counter.doubled() == 42 && payload_value == 40
-        && string_owning_records()
+    assert(selected.right == 1);
+    assert(selected.left == 2);
+    assert(order == 4);
+    assert(record_total({ left: 40, right: 2 }) == 42);
+    assert(matching);
+    assert(counter.doubled() == 42);
+    assert(payload_value == 40);
 }

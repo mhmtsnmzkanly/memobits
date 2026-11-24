@@ -8,9 +8,9 @@ type Signal [Start, Stop] extend {
         }
     }
 }
-pub fn trailing_enum_extension() -> bool {
+test fn trailing_enum_extension() {
     let signal := Signal::Start;
-    signal.is_active()
+    assert(signal.is_active());
 }
 // Postfix `T?` is the preferred spelling of an optional type. The legacy
 // `T?` spelling is still accepted silently with identical meaning;
@@ -18,16 +18,19 @@ pub fn trailing_enum_extension() -> bool {
 // references: `(borrow T)?` is an optional borrow, while `borrow T?` borrows
 // an optional value. Contextual Some and None construction keeps the existing
 // Option representation and match behavior.
-pub fn optional_sugar() -> bool {
+test fn optional_sugar() {
     let present: i32? = Some(40);
     let absent: i32? = None;
-    (match present {
+    let present_value := match present {
         Some(value) => value == 40,
         None => false,
-    }) && (match absent {
+    };
+    let absent_value := match absent {
         Some(_) => false,
         None => true,
-    })
+    };
+    assert(present_value);
+    assert(absent_value);
 }
 // A `string ! E` may be stored in a struct field or a fixed-array element
 // while its Ok payload is a String literal. Heap Ok payloads are rejected
@@ -36,7 +39,7 @@ type Outcome { text: string ! Error, tag: u32 }
 fn failure_code(items: array<string ! Error, 2>) -> u32 {
     match items[1] { Ok(_) => 0 as u32, Err(error) => error.code }
 }
-pub fn nested_result_storage() -> bool {
+test fn nested_result_storage() {
     let ok: string ! Error = Ok("é");
     let stored := Outcome { text: ok, tag: 3 };
     let failed: string ! Error = Err(Error { code: 8 });
@@ -45,7 +48,9 @@ pub fn nested_result_storage() -> bool {
     let first: string ! Error = Ok("x");
     let second: string ! Error = Err(Error { code: 9 });
     let items := [first, second];
-    stored.tag == 3 && from_field == 8 && failure_code(items) == 9
+    assert(stored.tag == 3);
+    assert(from_field == 8);
+    assert(failure_code(items) == 9);
 }
 // Nested patterns. A variant or tuple pattern may hold further patterns at any
 // depth, with `_` and bindings in any position. The compiler checks the whole
@@ -78,15 +83,19 @@ fn join(first: i32?, second: i32?) -> i32 {
         (None, other) => match other { Some(b) => b, None => 0 },
     }
 }
-pub fn nested_patterns() -> bool {
+test fn nested_patterns() {
     let found: u32? ! Error = Ok(Some(5));
     let absent: u32? ! Error = Ok(None);
     let failed: u32? ! Error = Err(Error { code: 3 });
     let direct := Link::Direct(Spot::At(2, 3));
     let via := Link::Via(Spot::Empty, Spot::At(7, 8));
-    probe(found) == 5 && probe(absent) == 100 && probe(failed) == 203
-        && route(direct.borrow()) == 5 && route(via.borrow()) == 7
-        && join(Some(1), Some(2)) == 3 && join(None, Some(4)) == 4
+    assert(probe(found) == 5);
+    assert(probe(absent) == 100);
+    assert(probe(failed) == 203);
+    assert(route(direct.borrow()) == 5);
+    assert(route(via.borrow()) == 7);
+    assert(join(Some(1), Some(2)) == 3);
+    assert(join(None, Some(4)) == 4);
 }
 // Enums and exhaustive matching. An alias can also qualify variants.
 type Reading [ Missing, Single(i32), Batch(Row, bool) ]
@@ -108,19 +117,21 @@ fn take(sample: Reading) -> i32 {
         _ => 0, // A wildcard covers the remaining variants.
     }
 }
-pub fn enums() -> bool {
+test fn enums() {
     let readings := [Reading::Missing, Sample::Single(6)];
     // Matching an array element also borrows in place.
     let single := match readings[1] { Sample::Single(value) => value, _ => 0 };
     let batch := Reading::Batch([2, 3, 4], true);
-    inspect(readings[0].borrow()) == 0 && single == 6
-        && inspect(batch.borrow()) == 9 && take(batch) == 9
+    assert(inspect(readings[0].borrow()) == 0);
+    assert(single == 6);
+    assert(inspect(batch.borrow()) == 9);
+    assert(take(batch) == 9);
 }
 // References and a function-local `(borrow T)?`.
 fn read(value: borrow i32) -> i32 {
     value.copy()
 }
-pub fn optional_borrow() -> bool {
+test fn optional_borrow() {
     var owner := 7;
     var editor := owner.share(); // A stored mutable handle uses var.
     editor += 1;
@@ -134,7 +145,9 @@ pub fn optional_borrow() -> bool {
 
     let empty: (borrow i32)? = None;
     let fallback := match empty { Some(view) => view.copy(), None => owner };
-    saved == 8 && snapshot == 8 && fallback == 9
+    assert(saved == 8);
+    assert(snapshot == 8);
+    assert(fallback == 9);
 }
 // Borrow optionals support direct annotations on immutable locals and consuming
 // matches. Aliases, fields, nesting, signatures and branch results are gated.
@@ -183,7 +196,7 @@ fn poll(enabled: bool, value: i32) -> Poll {
         Err(error) => Err(error),
     }
 }
-pub fn outcomes() -> bool {
+test fn outcomes() {
     // Nested patterns match through all three layers.
     let done := match poll(true, 2) {
         Ok(Some(Some(value))) => value == 9,
@@ -204,7 +217,10 @@ pub fn outcomes() -> bool {
         },
         _ => false,
     };
-    done && empty && skipped && failed
+    assert(done);
+    assert(empty);
+    assert(skipped);
+    assert(failed);
 }
 // Ancestor reference conversion works at direct internal calls. Owned
 // conversion to an ancestor is unavailable. `T ! E` and `T ?! E` require Error

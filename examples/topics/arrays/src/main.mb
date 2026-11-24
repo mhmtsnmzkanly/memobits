@@ -76,3 +76,16 @@ fn main() -> i32 ! Error {
 
     Ok(first + through_calls + nested)
 }
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn sum_reads_through_a_borrow() {
+    let values := [1, 2, 3];
+    assert(sum(values.borrow()) == 6);
+}
+
+test fn scale_writes_through_a_share() {
+    var values := make(1);
+    scale(values.share(), 3);
+    assert(values[0] == 6);
+    assert(values[2] == 12);
+}

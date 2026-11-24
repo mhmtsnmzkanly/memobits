@@ -99,56 +99,87 @@ fn error_is(scan_result: Scan, code: u32, offset: i32?) -> bool {
     }
 }
 
+// Lexes " 007\t429" to the end of input. Returns Ok(0) when every token scans
+// cleanly, or the lexer's error code otherwise. `test fn` items below check
+// the scan table from the design note.
 fn main() -> i32 ! Error {
-    // The table in the design note defines the expected scans. Bytes after
-    // the supplied length are padding; the extra digit in spaced is ignored.
-    let spaces: Bytes = [9, 13, 10, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let spaced: Bytes = [32, 48, 48, 55, 9, 52, 50, 57, 0, 0, 0, 0, 0, 0, 0, 0];
-    let maximum: Bytes = [52, 50, 57, 52, 57, 54, 55, 50, 57, 53, 0, 0, 0, 0, 0, 0];
-    let overflow: Bytes = [52, 50, 57, 52, 57, 54, 55, 50, 57, 54, 0, 0, 0, 0, 0, 0];
-    let comma: Bytes = [49, 50, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let utf8: Bytes = [195, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
+    let input: Bytes = [32, 48, 48, 55, 9, 52, 50, 57, 0, 0, 0, 0, 0, 0, 0, 0];
     var cursor := 0;
-    if !at_end(scan(spaces.borrow(), 0, cursor.share())) { return Err(Error { code: 1 }); }
-    if !at_end(scan(spaces.borrow(), 4, cursor.share())) || cursor != 4 {
-        return Err(Error { code: 2 });
-    }
-    cursor = 0;
-    if !token_is(scan(spaced.borrow(), 7, cursor.share()), 7, 1, 4)
-        || !token_is(scan(spaced.borrow(), 7, cursor.share()), 42, 5, 7)
-        || !at_end(scan(spaced.borrow(), 7, cursor.share())) || cursor != 7 {
-        return Err(Error { code: 3 });
-    }
-    cursor = 0;
-    if !token_is(scan(maximum.borrow(), 10, cursor.share()), 4294967295, 0, 10)
-        || !at_end(scan(maximum.borrow(), 10, cursor.share())) {
-        return Err(Error { code: 4 });
-    }
-    cursor = 0;
-    if !error_is(scan(overflow.borrow(), 10, cursor.share()), 3, Some(9)) {
-        return Err(Error { code: 5 });
-    }
-    cursor = 0;
-    if !token_is(scan(comma.borrow(), 3, cursor.share()), 12, 0, 2)
-        || !error_is(scan(comma.borrow(), 3, cursor.share()), 2, Some(2)) {
-        return Err(Error { code: 6 });
-    }
-    cursor = 0;
-    if !error_is(scan(utf8.borrow(), 2, cursor.share()), 2, Some(0)) {
-        return Err(Error { code: 7 });
-    }
-    cursor = 0;
-    if !error_is(scan(utf8.borrow(), 1, cursor.share()), 2, Some(0)) {
-        return Err(Error { code: 8 });
-    }
-    cursor = 0;
-    if !error_is(scan(spaces.borrow(), -1, cursor.share()), 1, None) {
-        return Err(Error { code: 9 });
-    }
-    cursor = 0;
-    if !error_is(scan(spaces.borrow(), 17, cursor.share()), 1, None) {
-        return Err(Error { code: 10 });
+    loop {
+        match scan(input.borrow(), 8, cursor.share()) {
+            Ok(token) => match token {
+                Some(_) => { continue; },
+                None => { break; },
+            },
+            Err(error) => { return Err(Error { code: error.code }); },
+        }
     }
     Ok(0)
+}
+
+// The table in the design note defines the expected scans. Bytes after
+// the supplied length are padding; the extra digit in `spaced` is ignored.
+fn spaces() -> Bytes { [9, 13, 10, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+fn spaced() -> Bytes { [32, 48, 48, 55, 9, 52, 50, 57, 0, 0, 0, 0, 0, 0, 0, 0] }
+fn maximum() -> Bytes { [52, 50, 57, 52, 57, 54, 55, 50, 57, 53, 0, 0, 0, 0, 0, 0] }
+fn overflow() -> Bytes { [52, 50, 57, 52, 57, 54, 55, 50, 57, 54, 0, 0, 0, 0, 0, 0] }
+fn comma() -> Bytes { [49, 50, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+fn utf8() -> Bytes { [195, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+
+test fn empty_input_is_at_end() {
+    let spaces := spaces();
+    var cursor := 0;
+    assert(at_end(scan(spaces.borrow(), 0, cursor.share())));
+}
+
+test fn whitespace_is_skipped() {
+    let spaces := spaces();
+    var cursor := 0;
+    assert(at_end(scan(spaces.borrow(), 4, cursor.share())));
+    assert(cursor == 4);
+}
+
+test fn integers_are_separated_by_whitespace() {
+    let spaced := spaced();
+    var cursor := 0;
+    assert(token_is(scan(spaced.borrow(), 7, cursor.share()), 7, 1, 4));
+    assert(token_is(scan(spaced.borrow(), 7, cursor.share()), 42, 5, 7));
+    assert(at_end(scan(spaced.borrow(), 7, cursor.share())));
+    assert(cursor == 7);
+}
+
+test fn the_largest_u32_scans() {
+    let maximum := maximum();
+    var cursor := 0;
+    assert(token_is(scan(maximum.borrow(), 10, cursor.share()), 4294967295, 0, 10));
+    assert(at_end(scan(maximum.borrow(), 10, cursor.share())));
+}
+
+test fn overflow_reports_its_offset() {
+    let overflow := overflow();
+    var cursor := 0;
+    assert(error_is(scan(overflow.borrow(), 10, cursor.share()), 3, Some(9)));
+}
+
+test fn a_comma_is_rejected_after_a_token() {
+    let comma := comma();
+    var cursor := 0;
+    assert(token_is(scan(comma.borrow(), 3, cursor.share()), 12, 0, 2));
+    assert(error_is(scan(comma.borrow(), 3, cursor.share()), 2, Some(2)));
+}
+
+test fn utf8_bytes_are_rejected() {
+    let utf8 := utf8();
+    var cursor := 0;
+    assert(error_is(scan(utf8.borrow(), 2, cursor.share()), 2, Some(0)));
+    cursor = 0;
+    assert(error_is(scan(utf8.borrow(), 1, cursor.share()), 2, Some(0)));
+}
+
+test fn invalid_lengths_are_rejected() {
+    let spaces := spaces();
+    var cursor := 0;
+    assert(error_is(scan(spaces.borrow(), -1, cursor.share()), 1, None));
+    cursor = 0;
+    assert(error_is(scan(spaces.borrow(), 17, cursor.share()), 1, None));
 }

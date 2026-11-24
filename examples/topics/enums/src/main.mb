@@ -92,3 +92,21 @@ fn main() -> i32 ! Error {
     let borrowed := count_corners(tiles.borrow()) + wide * 100;
     Ok(total(job) + shapes * 1000 + corners(Shape::Empty) + borrowed * 10000)
 }
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn corners_of_each_shape() {
+    assert(corners(Shape::Empty) == 0);
+    assert(corners(Shape::Circle(1.0)) == 1);
+    assert(corners(Shape::Rect(1.0, 2.0)) == 4);
+}
+
+test fn a_job_runs_to_completion() {
+    var job := Job::Waiting;
+    var steps := 0;
+    loop {
+        job = advance(job);
+        steps += 1;
+        if steps == 5 { break; }
+    }
+    assert(total(job) == 300);
+}

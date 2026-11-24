@@ -313,12 +313,12 @@ fn test_function_declaration_diagnostics() {
 }
 
 #[test]
-fn check_and_build_type_check_tests_but_run_ignores_them() {
+fn check_and_test_fail_on_a_broken_test_but_build_and_run_ignore_tests() {
     let f = Fixture::new(&[(
         "main",
         &format!("{MAIN}test fn broken() {{\n    let x: bool = 1;\n}}\n"),
     )]);
-    for args in [&["check"][..], &["build"], &["test"], &["check", "--tests"]] {
+    for args in [&["check"][..], &["test"], &["check", "--tests"]] {
         let output = f.run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
         assert!(
@@ -327,8 +327,28 @@ fn check_and_build_type_check_tests_but_run_ignores_them() {
             stderr(&output)
         );
     }
+    let build = f.run(&["build"]);
+    assert_eq!(build.status.code(), Some(0), "{build:?}");
     let run = f.run(&["run"]);
     assert_eq!(stdout(&run), "Result: i32(42)\n", "{run:?}");
+}
+
+#[test]
+fn check_covers_unreachable_modules_but_build_and_run_do_not() {
+    let f = Fixture::new(&[("main", MAIN), ("orphan", "fn broken() -> bool { 1 }\n")]);
+    let check = f.run(&["check"]);
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert!(
+        stderr(&check).contains("expected bool, found i32"),
+        "{}",
+        stderr(&check)
+    );
+    let build = f.run(&["build"]);
+    assert_eq!(build.status.code(), Some(0), "{build:?}");
+    let run = f.run(&["run"]);
+    assert_eq!(stdout(&run), "Result: i32(42)\n", "{run:?}");
+    let clean = Fixture::new(&[("main", MAIN), ("orphan", "fn fine() -> bool { true }\n")]);
+    assert_eq!(clean.run(&["check"]).status.code(), Some(0));
 }
 
 #[test]

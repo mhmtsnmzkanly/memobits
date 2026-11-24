@@ -1,13 +1,14 @@
-// Start at main, then follow the checks. Both source and Wasm runs should
-// print Result: Ok(i32(42)). Each error code identifies a failed check.
+// Start at main, then read the topic modules. `mb run` prints
+// Result: Ok(i32(42)) and `mb test` runs the checks described below.
 // For a source declaration that calls a typed host import, see
 // ../topics/host-capability/README.md. It requires the CLI profile in project.toml;
 // the current source ABI supports only write_i32(i32) -> unit.
 //
-// The guide is split into topic modules next to this file. Each exports check
-// functions that return bool; main calls them in topic order and reports a
-// distinct Err code for each failed check. The hundreds digit names the
-// defining module (1xx numbers ... 9xx operators); see ../README.md.
+// The guide is split into topic modules next to this file. Each topic module
+// documents its feature with comments and checks it with `test fn` items that
+// use `assert`. Tests are type-checked by `mb check` and run by `mb test`;
+// `mb build` and `mb run` leave them out of the artifact. This `main` is a
+// small program that uses a few guide features and returns Ok(42).
 //   numbers.mb         integers, floats, casts, wrapping and bit operations
 //   text.mb            char, string literals, bytes, scalars, loops, concat
 //   tuples.mb          tuple values, destructuring, tuples with owned strings
@@ -18,15 +19,8 @@
 //   generics.mb        generic functions, structs, methods, interface bounds
 //   operators.mb       user-defined core::ops operators and compound assignment
 
-use numbers::{numbers, widenings, numeric_casts, wrapping_arithmetic, bit_operations};
-use text::{character_literals, fixed_text, text_boundaries, text_bytes, text_scalars, walk_text, text_loop, text_concat, static_text_result, heap_text_result};
-use tuples::{tuple_values};
-use aggregates::{anonymous_shapes, shared_string_field_replacement};
-use ownership::{explicit_drop, local_string_fields, local_heap_string_fields, borrow_string_struct, owned_string_struct_argument, temporary_string_fields, replace_local_string_field};
-use collections::{stations, fixed_bytes, primitive_lists, fixed_iteration, list_iteration};
-use enums_outcomes::{trailing_enum_extension, optional_sugar, enums, optional_borrow, outcomes, nested_result_storage, nested_patterns};
-use generics::{generic_structs, nested_generic_methods, generic_functions, generic_array_forwarding, generic_interface_forwarding};
-use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defined_div, user_defined_rem, user_defined_bitand, user_defined_bitor, user_defined_bitxor, user_defined_negation, user_defined_equality, user_defined_ordering, user_defined_add_assign, user_defined_sub_assign, user_defined_mul_assign, user_defined_div_assign, user_defined_rem_assign, user_defined_bitand_assign, user_defined_bitor_assign, user_defined_bitxor_assign, user_defined_shl, user_defined_shl_assign, user_defined_shr_assign, generic_compound_assignments, user_defined_shr};
+use collections::{Row, total, make_words};
+use text::byte_length;
 
 // Project features to try from the repository root:
 // - examples/topics/module-imports is the runnable multi-module setup for
@@ -63,80 +57,19 @@ use operators::{user_defined_add, user_defined_sub, user_defined_mul, user_defin
 // A zero-argument application entry can return `T ! E` or `T ?! E` with a
 // primitive success payload. Both runners show the variant and typed value
 // or the concrete error type and code.
+//
+// This main combines three guide features: a fixed array summed through a
+// borrow (collections), the UTF-8 byte length of a string (text), and the
+// first element of a List built by a helper (collections).
 fn main() -> i32 ! Error {
-    // Numbers, casts and bit operations.
-    if !numbers() { return Err(Error { code: 101 }); }
-    if !widenings() { return Err(Error { code: 102 }); }
-    if !numeric_casts() { return Err(Error { code: 103 }); }
-    if !wrapping_arithmetic() { return Err(Error { code: 104 }); }
-    if !bit_operations() { return Err(Error { code: 105 }); }
-    // Characters and text.
-    if !character_literals() { return Err(Error { code: 201 }); }
-    if !fixed_text() { return Err(Error { code: 202 }); }
-    if !text_boundaries() { return Err(Error { code: 203 }); }
-    if !text_bytes() { return Err(Error { code: 204 }); }
-    if !text_scalars() { return Err(Error { code: 205 }); }
-    let sample := "aé€😀";
-    if !walk_text(sample.borrow()) { return Err(Error { code: 206 }); }
-    if !text_loop() { return Err(Error { code: 207 }); }
-    if !text_concat() { return Err(Error { code: 208 }); }
-    if !static_text_result() || !heap_text_result() { return Err(Error { code: 209 }); }
-    // Tuples.
-    if !tuple_values() { return Err(Error { code: 301 }); }
-    // Records, anonymous shapes and opaque types.
-    if !anonymous_shapes() { return Err(Error { code: 401 }); }
-    if !shared_string_field_replacement() { return Err(Error { code: 402 }); }
-    // Owned strings in structs and explicit drop.
-    if !explicit_drop() { return Err(Error { code: 501 }); }
-    if !local_string_fields() || !local_heap_string_fields() { return Err(Error { code: 502 }); }
-    if !borrow_string_struct() { return Err(Error { code: 503 }); }
-    if !owned_string_struct_argument() { return Err(Error { code: 504 }); }
-    if !temporary_string_fields() { return Err(Error { code: 505 }); }
-    if !replace_local_string_field() { return Err(Error { code: 506 }); }
-    // Fixed arrays and lists.
-    if !stations() { return Err(Error { code: 601 }); }
-    if !fixed_bytes() { return Err(Error { code: 602 }); }
-    if !primitive_lists() { return Err(Error { code: 603 }); }
-    if !fixed_iteration() { return Err(Error { code: 604 }); }
-    if !list_iteration() { return Err(Error { code: 605 }); }
-    // Enums, optionals and outcomes.
-    if !trailing_enum_extension() { return Err(Error { code: 701 }); }
-    if !optional_sugar() { return Err(Error { code: 702 }); }
-    if !enums() { return Err(Error { code: 703 }); }
-    if !optional_borrow() { return Err(Error { code: 704 }); }
-    if !outcomes() { return Err(Error { code: 705 }); }
-    if !nested_result_storage() { return Err(Error { code: 706 }); }
-    if !nested_patterns() { return Err(Error { code: 707 }); }
-    // Generic functions, structs and interface bounds.
-    if !generic_structs() { return Err(Error { code: 801 }); }
-    if !nested_generic_methods() { return Err(Error { code: 802 }); }
-    if !generic_functions() { return Err(Error { code: 803 }); }
-    if !generic_array_forwarding() { return Err(Error { code: 804 }); }
-    if !generic_interface_forwarding() { return Err(Error { code: 805 }); }
-    // User-defined operators (core::ops).
-    if !user_defined_add() { return Err(Error { code: 901 }); }
-    if !user_defined_sub() { return Err(Error { code: 902 }); }
-    if !user_defined_mul() { return Err(Error { code: 903 }); }
-    if !user_defined_div() { return Err(Error { code: 904 }); }
-    if !user_defined_rem() { return Err(Error { code: 905 }); }
-    if !user_defined_bitand() { return Err(Error { code: 906 }); }
-    if !user_defined_bitor() { return Err(Error { code: 907 }); }
-    if !user_defined_bitxor() { return Err(Error { code: 908 }); }
-    if !user_defined_negation() { return Err(Error { code: 909 }); }
-    if !user_defined_equality() { return Err(Error { code: 910 }); }
-    if !user_defined_ordering() { return Err(Error { code: 911 }); }
-    if !user_defined_add_assign() { return Err(Error { code: 912 }); }
-    if !user_defined_sub_assign() { return Err(Error { code: 913 }); }
-    if !user_defined_mul_assign() { return Err(Error { code: 914 }); }
-    if !user_defined_div_assign() { return Err(Error { code: 915 }); }
-    if !user_defined_rem_assign() { return Err(Error { code: 916 }); }
-    if !user_defined_bitand_assign() { return Err(Error { code: 917 }); }
-    if !user_defined_bitor_assign() { return Err(Error { code: 918 }); }
-    if !user_defined_bitxor_assign() { return Err(Error { code: 919 }); }
-    if !user_defined_shl() { return Err(Error { code: 920 }); }
-    if !user_defined_shl_assign() { return Err(Error { code: 921 }); }
-    if !user_defined_shr_assign() { return Err(Error { code: 922 }); }
-    if !generic_compound_assignments() { return Err(Error { code: 923 }); }
-    if !user_defined_shr() { return Err(Error { code: 924 }); }
-    Ok(42)
+    let row: Row = [10, 12, 8];
+    let readings := total(row.borrow()); // 30
+    let label := "aé€";
+    let label_bytes := byte_length(label.borrow()); // 1 + 2 + 3 = 6
+    let words := make_words(6);
+    let first := match words.get(0) {
+        Some(word) => word,
+        None => return Err(Error { code: 1 }),
+    };
+    Ok(readings + label_bytes as i32 + first as i32)
 }

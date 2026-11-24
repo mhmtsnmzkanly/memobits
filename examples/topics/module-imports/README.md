@@ -27,6 +27,20 @@ those symbols. `math` can refer to the local extension declaration, while
 do not activate extensions. The current project loader handles modules in one
 project; loading another package is outside this feature slice.
 
+## Tests
+
+`test fn` items check this project. `mb test` runs each one in a fresh instance; `mb build` and `mb run` leave them out of the artifact.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/topics/module-imports/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 1 passed; 0 failed; 0 filtered out
+```
+
 ## Expected output
 
 Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).

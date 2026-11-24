@@ -215,9 +215,12 @@ TE010 and a non-`bool` argument is TE002.
 
 - Tests are excluded from `mb build` and `mb run` artifacts and from
   reachability: a normal artifact is byte-identical with or without tests, and
-  modules used only by tests are not loaded. `mb check` and `mb build` still
-  type-check, lower and compile the tests (when a loaded module has any) and
-  report their errors; `mb run` ignores them.
+  modules used only by tests are not loaded. `mb build` and `mb run` check only
+  the modules reachable from the application or library roots and ignore tests
+  (a broken test or an unreachable broken module does not fail them).
+  `mb check` is the whole-project check: it always checks the roots and then
+  every project module and every test, reporting errors in unreachable modules
+  and in tests (it never writes an artifact).
 - `mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]` compiles the
   test artifact from every module of the project (including modules the
   application does not import), runs each test in a fresh instance under the

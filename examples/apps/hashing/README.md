@@ -57,7 +57,21 @@ cargo run -p memobits-cli -- build --project examples/apps/hashing/project.toml
 cargo run -p memobits-cli -- run examples/apps/hashing/target/memobits/app.wasm
 ```
 
-Both runs verify all test vectors against known reference values (including empty inputs, single-character, and multi-byte inputs such as `"Memobits"`) and print the result below.
+Both runs print the FNV-1a hash of `"Memobits"`. The `test fn` items verify all test vectors against known reference values (including empty inputs, single-character, and multi-byte inputs such as `"Memobits"`).
+
+## Tests
+
+`test fn` items check this project. `mb test` runs each one in a fresh instance; `mb build` and `mb run` leave them out of the artifact.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/apps/hashing/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 4 passed; 0 failed; 0 filtered out
+```
 
 ## Expected output
 

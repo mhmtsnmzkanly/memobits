@@ -1,7 +1,10 @@
 //! Every `examples/{guide,topics/*,apps/*}` project documents its exact stdout in its
 //! README under `## Expected output`, in the first ```text block after that
 //! heading. This test runs each project from source and as a standalone Wasm
-//! artifact and compares stdout to that block.
+//! artifact and compares stdout to that block. The README's `## Tests` heading
+//! is followed by a ```text block holding the exact `mb test` summary line,
+//! which must appear in the report; every project except those listed in
+//! `WITHOUT_TESTS` must also run at least one test.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -15,11 +18,19 @@ fn mb(args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// Projects with no `test fn` items: the host import needs a host profile.
+const WITHOUT_TESTS: &[&str] = &["host-capability"];
+
 /// Returns the first ```text fenced block after the `## Expected output`
 /// heading, or `None` when either part is missing.
 fn expected_output(readme: &str) -> Option<String> {
+    text_block_after(readme, "## Expected output")
+}
+
+/// Returns the first ```text fenced block after `heading`.
+fn text_block_after(readme: &str, heading: &str) -> Option<String> {
     let mut lines = readme.lines();
-    lines.find(|line| line.trim_end() == "## Expected output")?;
+    lines.find(|line| line.trim_end() == heading)?;
     lines.find(|line| line.trim_end() == "```text")?;
     let mut block = String::new();
     for line in lines {
@@ -50,6 +61,21 @@ fn expected_output_convention_is_parsed_strictly() {
     assert_eq!(expected_output("# T\n```text\nA\n```\n"), None);
     assert_eq!(expected_output("## Expected output\nno block\n"), None);
     assert_eq!(expected_output("## Expected output\n```text\nA\n"), None);
+    let tests = "## Tests\n\n```text\ntest result: ok. 2 passed; 0 failed; 0 filtered out\n```\n";
+    assert_eq!(
+        text_block_after(tests, "## Tests").as_deref(),
+        Some("test result: ok. 2 passed; 0 failed; 0 filtered out\n")
+    );
+}
+
+/// The number in `test result: ok. N passed; ...`.
+fn passed_count(summary: &str) -> usize {
+    summary
+        .trim_start_matches("test result: ok. ")
+        .split(' ')
+        .next()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("not a passing summary line: {summary:?}"))
 }
 
 #[test]
@@ -73,10 +99,16 @@ fn every_example_project_documents_and_matches_its_output() {
     for manifest in &manifests {
         let dir = manifest.parent().unwrap();
         let name = dir.file_name().unwrap().to_str().unwrap();
-        let Some(expected) = fs::read_to_string(dir.join("README.md"))
-            .ok()
-            .and_then(|readme| expected_output(&readme))
+        let readme = fs::read_to_string(dir.join("README.md")).unwrap_or_default();
+        let Some(summary) = text_block_after(&readme, "## Tests")
+            .or_else(|| text_block_after(&readme, "## Running the guide's tests"))
         else {
+            failures.push(format!(
+                "{name}: README.md lacks a `## Tests` (guide: `## Running the guide's tests`) heading followed by a ```text block with the `mb test` summary line"
+            ));
+            continue;
+        };
+        let Some(expected) = expected_output(&readme) else {
             failures.push(format!(
                 "{name}: README.md lacks a `## Expected output` heading followed by a ```text block"
             ));
@@ -96,11 +128,19 @@ fn every_example_project_documents_and_matches_its_output() {
             check_clean_success(&format!("{name} check"), &check);
             check_clean_success(&format!("{name} build"), &build);
             let tests = artifact_stdout(&format!("{name} test"), &tests);
-            assert!(tests.contains("test result: ok."), "{name}: {tests}");
+            let summary = summary.trim_end();
             assert!(
-                tests.contains(" tests\n") || tests.contains("running 1 test\n"),
-                "{name}: {tests}"
+                tests.lines().any(|line| line == summary),
+                "{name}: documented summary `{summary}` not in the report:\n{tests}"
             );
+            if WITHOUT_TESTS.contains(&name) {
+                assert_eq!(passed_count(summary), 0, "{name}: documented count");
+            } else {
+                assert!(
+                    passed_count(summary) >= 1,
+                    "{name}: needs at least one test"
+                );
+            }
             let source = artifact_stdout(&format!("{name} source run"), &source);
             let artifact = artifact_stdout(&format!("{name} wasm run"), &artifact);
             assert_eq!(source, expected, "{name}: source stdout");

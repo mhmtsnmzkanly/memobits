@@ -1,5 +1,5 @@
 /* Numbers and control flow. Block comments can /* nest */. */
-pub fn numbers() -> bool {
+test fn numbers() {
     // An annotation supplies the literal type. Without context, integers
     // default to i32 and floats to f64.
     let a: i8 = -8;
@@ -25,17 +25,21 @@ pub fn numbers() -> bool {
     }
     // A new binding can shadow the old one. A tail expression yields a value.
     let sum := { let offset := 1; sum + offset };
-    if !(sum == 10) { return false; }
+    assert(sum == 10);
     let divisor := step - 6;
     // Short-circuit evaluation skips the division when divisor is zero.
-    if divisor == 0 || sum / divisor > 0 {
-        a < 0 && b <= -160 && c >= 3_200 && d != 0
-            && e * 2 == 16 && f - 10 == 150 && g / 2 == 160 && h % 3 == 1
-            && half + 0.5 == 1.0 && negative_half == -0.5
-            && quarter * 4.0 == 1.0
-    } else {
-        false
-    }
+    assert(divisor == 0 || sum / divisor > 0);
+    assert(a < 0);
+    assert(b <= -160);
+    assert(c >= 3_200);
+    assert(d != 0);
+    assert(e * 2 == 16);
+    assert(f - 10 == 150);
+    assert(g / 2 == 160);
+    assert(h % 3 == 1);
+    assert(half + 0.5 == 1.0);
+    assert(negative_half == -0.5);
+    assert(quarter * 4.0 == 1.0);
 }
 // Numeric `as` casts are explicit across supported integer and float types.
 // Integer casts keep low bits; float-to-int truncates and saturates, with NaN
@@ -46,35 +50,44 @@ fn widen_byte(value: u8) -> u32 {
 fn widen_byte_method(value: u8) -> u32 {
     value.to_u32()
 }
-pub fn widenings() -> bool {
+test fn widenings() {
     let bytes: array<u8, 4> = [0, 127, 128, 255];
-    widen_byte(bytes[0]) == 0 && widen_byte_method(bytes[1]) == 127
-        && bytes[2] as u32 == 128 && bytes[3].to_u32() == 255
+    assert(widen_byte(bytes[0]) == 0);
+    assert(widen_byte_method(bytes[1]) == 127);
+    assert(bytes[2] as u32 == 128);
+    assert(bytes[3].to_u32() == 255);
 }
-pub fn numeric_casts() -> bool {
+test fn numeric_casts() {
     let all_bits: u32 = 4294967295;
     let signed: i32 = all_bits as i32;
     let fraction: i32 = (-1.9) as i32;
     let nan: u32 = (0.0 / 0.0) as u32;
     let saturated: u64 = 1e300 as u64;
     let rounded: u64 = 16777217 as f32 as u64;
-    signed == -1 && fraction == -1 && nan == 0
-        && saturated == 18446744073709551615 && rounded == 16777216
+    assert(signed == -1);
+    assert(fraction == -1);
+    assert(nan == 0);
+    assert(saturated == 18446744073709551615);
+    assert(rounded == 16777216);
 }
 // Explicit u32 wrapping methods perform arithmetic modulo 2^32. Plain `+`
 // and `*` keep their checked behavior.
-pub fn wrapping_arithmetic() -> bool {
+test fn wrapping_arithmetic() {
     let max: u32 = 4294967295;
-    max.wrapping_add(1) == 0 && max.wrapping_mul(2) == 4294967294
+    assert(max.wrapping_add(1) == 0);
+    assert(max.wrapping_mul(2) == 4294967294);
 }
 // u32 bitwise operations preserve the bit pattern. Shift counts must be below
 // 32; left shift discards high bits and right shift fills with zeroes.
-pub fn bit_operations() -> bool {
+test fn bit_operations() {
     let high: u32 = 2147483648;
     let pattern: u32 = 2863311530;
-    1 | 2 ^ 3 & 7 == 1 && pattern.bit_xor(1431655765) == 4294967295
-        && pattern.bit_and(15) == 10 && pattern.bit_or(5) == 2863311535
-        && 1 << 31 == high && high >> 31 == 1
+    assert(1 | 2 ^ 3 & 7 == 1);
+    assert(pattern.bit_xor(1431655765) == 4294967295);
+    assert(pattern.bit_and(15) == 10);
+    assert(pattern.bit_or(5) == 2863311535);
+    assert(1 << 31 == high);
+    assert(high >> 31 == 1);
 }
 // Integer arithmetic and array indexing are checked. Proven invalid cases
 // can fail compilation. Dynamic overflow, zero divisors and invalid indices

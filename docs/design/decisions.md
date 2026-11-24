@@ -427,8 +427,8 @@ only where explicitly stated; unresolved API spellings remain proposals.
   failed `assert` traps (discarding the instance, per the trap contract) or
   returns a reported failure, test discovery and filtering, and whether test
   functions are excluded from normal builds.
-- Until then, the runnable guide uses module-ranged check codes (1xx–9xx)
-  documented in examples/guide/README.md.
+- Shipped (T1/T2): the runnable guide and the examples now check their facts
+  with `test fn` and `assert`; the old module-ranged check codes are gone.
 
 ## Built-in type spelling (2026-11-23, user decision)
 
@@ -531,9 +531,10 @@ This section supersedes earlier spelling statements in this file, including
   module namespace (a clash is ME005) and are never callable.
 - Reachability: normal `resolve` targets drop test items, so tests never load
   modules, change artifacts, or appear in exports. `Target::Test` loads every
-  project module with its tests. `mb check` and `mb build` additionally
-  compile the test target (when a loaded module has tests) and report its
-  errors; `mb run` ignores tests.
+  project module with its tests. Check scope (architect rule, shipped T2):
+  `mb check` always checks every project module and every test (the
+  whole-project check); `mb build` and `mb run` check only the modules
+  reachable from the application or library roots and ignore tests.
 - `assert(condition)` lowers to the IR instruction `Assert`; the Wasm backend
   traps with reason code 12 ("assertion failed") at the call's source
   location (`memobits.traps` metadata).

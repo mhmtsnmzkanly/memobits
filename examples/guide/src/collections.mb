@@ -29,7 +29,7 @@ fn calibrate(var row: Row) -> Row {
     row[2] %= 3;
     row
 }
-pub fn stations() -> bool {
+test fn stations() {
     // Repetition calls station once per element.
     var pair := [station(7); 2];
     pair[0].readings = [4, 5, 8];
@@ -50,8 +50,10 @@ pub fn stations() -> bool {
     // field or element out of its owner is unsupported.
     let adjusted := calibrate(row);
     let grid := [[1, 2, 3], adjusted];
-    id == 8 && recorded == 17 && total(grid[1].borrow()) == 14
-        && pair[1].readings[2] == 9
+    assert(id == 8);
+    assert(recorded == 17);
+    assert(total(grid[1].borrow()) == 14);
+    assert(pair[1].readings[2] == 9);
 }
 // array<u8, N> is the fixed-byte representation.
 fn set_first_byte(buffer: share array<u8, 2>) {
@@ -63,7 +65,7 @@ fn first_byte(buffer: borrow array<u8, 2>) -> u8 {
 fn return_bytes(buffer: array<u8, 2>) -> array<u8, 2> {
     buffer
 }
-pub fn fixed_bytes() -> bool {
+test fn fixed_bytes() {
     var bytes: array<u8, 2> = [0; 2];
     set_first_byte(bytes.share());
     let array: array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
@@ -85,12 +87,16 @@ pub fn fixed_bytes() -> bool {
         Some(index) => index == 1,
         None => false
     };
-    valid && copied && first && array.contains(42) && !array.contains(255)
-        && first_byte(array.borrow()) == 42
+    assert(valid);
+    assert(copied);
+    assert(first);
+    assert(array.contains(42));
+    assert(!array.contains(255));
+    assert(first_byte(array.borrow()) == 42);
 }
 // Fixed arrays iterate in index order. Each iteration binds an immutable
 // primitive copy. The read loan ends when the loop exits.
-pub fn fixed_iteration() -> bool {
+test fn fixed_iteration() {
     var bytes: array<u8, 4> = [1, 0, 3, 9];
     var digits: u8 = 0;
     loop byte in bytes {
@@ -101,8 +107,9 @@ pub fn fixed_iteration() -> bool {
     bytes[0] = 7;
 
     let empty: array<bool, 0> = [];
-    loop flag in empty { return flag; }
-    digits == 13 && bytes[0] == 7
+    loop flag in empty { assert(false); }
+    assert(digits == 13);
+    assert(bytes[0] == 7);
 }
 fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
     items.get(index)
@@ -127,9 +134,9 @@ fn replace_words(items: share List<u32>, value: u32) {
 // List iteration visits immutable copies in insertion order. An empty List
 // skips the body. A direct call result stays alive until the loop exits.
 // The read loan prevents writes and moves of the receiver during the body.
-pub fn list_iteration() -> bool {
+test fn list_iteration() {
     var bytes: List<u8> = [];
-    loop value in bytes { return false; }
+    loop value in bytes { assert(false); }
     bytes.push(9);
     bytes.push(4);
     bytes.push(2);
@@ -145,11 +152,13 @@ pub fn list_iteration() -> bool {
         first = value;
         break;
     }
-    digits == 42 && bytes.len() == 0 && first == 1000
+    assert(digits == 42);
+    assert(bytes.len() == 0);
+    assert(first == 1000);
 }
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
-pub fn primitive_lists() -> bool {
+test fn primitive_lists() {
     var bytes: List<u8> = [];
     let before := bytes.len();
     let empty := !bytes.contains(42);
@@ -219,8 +228,23 @@ pub fn primitive_lists() -> bool {
     moved.push(7000);
     // An owned parameter takes the whole List and releases it at scope exit.
     let final_length := owned_list_length(moved);
-    before == 0 && bytes.len() == 1 && old_length == 2 && final_length == 1 && word && replacement && popped && cleared
-        && temporary_length == 1 && temporary_word && borrowed_word && owned_temporary_length == 1
-        && empty && temporary_contains && borrowed_contains && missing_index && bytes.contains(42)
-        && byte_is(bytes.get(0), 42) && no_byte(bytes.get(1))
+    assert(before == 0);
+    assert(bytes.len() == 1);
+    assert(old_length == 2);
+    assert(final_length == 1);
+    assert(word);
+    assert(replacement);
+    assert(popped);
+    assert(cleared);
+    assert(temporary_length == 1);
+    assert(temporary_word);
+    assert(borrowed_word);
+    assert(owned_temporary_length == 1);
+    assert(empty);
+    assert(temporary_contains);
+    assert(borrowed_contains);
+    assert(missing_index);
+    assert(bytes.contains(42));
+    assert(byte_is(bytes.get(0), 42));
+    assert(no_byte(bytes.get(1)));
 }

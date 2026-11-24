@@ -10,14 +10,28 @@ bound:
 - `weigh_twice<T>(value: T) -> i32 where T: Weigh`
 - `combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add`
 
-`main` checks each step with a distinct `Err` code (1 to 5) and returns the final
-weight, `Ok(41)`. For the full operator set and generic limits see the
+`main` combines the pieces and returns the final weight, `Ok(41)`; `test fn`
+items check each step. For the full operator set and generic limits see the
 [language guide](../../guide/README.md).
 
 ```sh
 cargo run -p memobits-cli -- run --project examples/topics/generics-operators/project.toml
 cargo run -p memobits-cli -- build --project examples/topics/generics-operators/project.toml
 cargo run -p memobits-cli -- run examples/topics/generics-operators/target/memobits/app.wasm
+```
+
+## Tests
+
+`test fn` items check this project. `mb test` runs each one in a fresh instance; `mb build` and `mb run` leave them out of the artifact.
+
+```sh
+cargo run -p memobits-cli -- test --project examples/topics/generics-operators/project.toml
+```
+
+The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
+
+```text
+test result: ok. 4 passed; 0 failed; 0 filtered out
 ```
 
 ## Expected output
