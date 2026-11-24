@@ -387,6 +387,30 @@ impl super::Program {
                                     .push(Slot::ShareWrite(index, parameter));
                             }
                         }
+                        InstructionKind::ClosureNew {
+                            function: closure,
+                            captures,
+                        } => {
+                            // A closure writes through its capture parameters
+                            // (the trailing parameters of the lifted function).
+                            let declared = self.functions[closure.0 as usize]
+                                .signature
+                                .parameters
+                                .len()
+                                - captures.len();
+                            for (offset, capture) in captures.iter().enumerate() {
+                                if let Some(owner) = direct_share_owner(function, &shares, capture)
+                                {
+                                    moves
+                                        .entry(Slot::ShareWrite(
+                                            closure.0 as usize,
+                                            declared + offset,
+                                        ))
+                                        .or_default()
+                                        .push(Slot::Local(index, owner));
+                                }
+                            }
+                        }
                         InstructionKind::Call { callee, arguments } => {
                             let targets = call_targets(self, function, callee, &taken);
                             for (position, argument) in arguments.iter().enumerate() {
@@ -398,12 +422,11 @@ impl super::Program {
                                         .or_default()
                                         .push(Slot::Local(target, parameter));
                                 }
-                                if let Source::Function(callee) = callee.source {
-                                    if let Some(owner) =
-                                        direct_share_owner(function, &shares, argument)
-                                    {
+                                if let Some(owner) = direct_share_owner(function, &shares, argument)
+                                {
+                                    for callee in &targets {
                                         moves
-                                            .entry(Slot::ShareWrite(callee.0 as usize, position))
+                                            .entry(Slot::ShareWrite(*callee, position))
                                             .or_default()
                                             .push(Slot::Local(index, owner));
                                     }
@@ -913,16 +936,25 @@ fn operand_type_in(function: &Function, source: Source) -> Option<&Type> {
 }
 
 impl super::Program {
-    /// Functions whose value is taken (`Constant::Function`) anywhere.
-    pub(super) fn address_taken(&self) -> Vec<usize> {
+    /// Functions whose value is taken (`Constant::Function`, or a closure
+    /// created by `ClosureNew`) anywhere, with the number of trailing capture
+    /// parameters of each (0 for a plain function).
+    pub(super) fn address_taken(&self) -> Vec<(usize, usize)> {
         let mut taken = std::collections::BTreeSet::new();
         for function in &self.functions {
             for block in &function.blocks {
                 for instruction in &block.instructions {
-                    if let InstructionKind::Constant(super::Constant::Function(target)) =
-                        &instruction.kind
-                    {
-                        taken.insert(target.0 as usize);
+                    match &instruction.kind {
+                        InstructionKind::Constant(super::Constant::Function(target)) => {
+                            taken.insert((target.0 as usize, 0));
+                        }
+                        InstructionKind::ClosureNew {
+                            function: target,
+                            captures,
+                        } => {
+                            taken.insert((target.0 as usize, captures.len()));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -937,7 +969,7 @@ pub(super) fn call_targets(
     program: &super::Program,
     function: &Function,
     callee: &Operand,
-    taken: &[usize],
+    taken: &[(usize, usize)],
 ) -> Vec<usize> {
     match callee.source {
         Source::Function(target) => vec![target.0 as usize],
@@ -945,12 +977,14 @@ pub(super) fn call_targets(
             Some(Type::Function(signature)) => taken
                 .iter()
                 .copied()
-                .filter(|target| {
-                    program
-                        .functions
-                        .get(*target)
-                        .is_some_and(|candidate| &candidate.signature == signature)
+                .filter(|(target, captures)| {
+                    program.functions.get(*target).is_some_and(|candidate| {
+                        let declared = candidate.signature.parameters.len() - captures;
+                        candidate.signature.parameters[..declared] == signature.parameters[..]
+                            && candidate.signature.result == signature.result
+                    })
                 })
+                .map(|(target, _)| target)
                 .collect(),
             _ => Vec::new(),
         },
@@ -1328,7 +1362,7 @@ pub(super) fn array_binding(function: &Function, instructions: &[Instruction]) -
 pub(super) fn owned_aggregate_call_argument(
     program: &super::Program,
     function: &Function,
-    taken: &[usize],
+    taken: &[(usize, usize)],
     block: &Block,
     producer_position: usize,
     result: &Type,

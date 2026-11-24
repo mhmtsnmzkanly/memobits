@@ -9,13 +9,26 @@ impl Builder<'_> {
         callee: &Expr,
         arguments: &[Expr],
     ) -> Option<Operand> {
-        let Type::Function(signature) = self.ty(callee).expect("checked callee") else {
-            unreachable!("checked function")
+        let callee_ty = self.ty(callee).expect("checked callee");
+        // A `borrow fn` / `share fn` parameter is called through its reference.
+        let through_reference = matches!(callee_ty, Type::Reference { .. });
+        let signature = match callee_ty {
+            Type::Function(signature) => signature,
+            Type::Reference { inner, .. } => match *inner {
+                Type::Function(signature) => signature,
+                _ => unreachable!("checked function"),
+            },
+            _ => unreachable!("checked function"),
         };
         let callee = match (&callee.kind, self.paths_function(callee)) {
             // A named function is called directly, not through its value.
             (ExprKind::Path(_), Some(id)) => op(Source::Function(id), callee.span),
             _ => self.lower_expr(callee)?,
+        };
+        let callee = if through_reference {
+            self.scalar(callee)?
+        } else {
+            callee
         };
         let callee = self.capture(callee)?;
         let scope_start = self.owned_locals.len();
@@ -112,6 +125,19 @@ impl Builder<'_> {
             self.lower_expr(argument)?
         };
         let value = if parameter.access != Access::Owned {
+            // A function value (a name, a literal, a closure) is lent from a
+            // local: stage a temporary one in a hidden local first.
+            let value = if matches!(self.operand_type(value), Some(Type::Function(_)))
+                && !matches!(value.source, Source::Local(_))
+            {
+                let ty = self.operand_type(value)?;
+                let staged = self.hidden_local("function argument", ty, argument.span);
+                let owned = self.owned(value)?;
+                self.initialize_local(staged, owned, argument.span);
+                op(Source::Local(staged), argument.span)
+            } else {
+                value
+            };
             // Keep the original pointee and loan.
             let mut reference = self.borrow(value, parameter.access)?;
             reference.mode = access_mode(parameter.access);

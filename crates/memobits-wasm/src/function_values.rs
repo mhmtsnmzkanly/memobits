@@ -1,9 +1,20 @@
 //! Function values. A function value is two 32-bit words packed in one `i64`:
 //! the low word is the slot in the module's function table (slot 0 is never
 //! filled, so a zero or stale value traps), the high word is the environment
-//! pointer, always 0 for a function without captures. Packing keeps the value a
+//! pointer: 0 for a function without captures, else the address of the
+//! closure's environment record in its creator's frame (one 32-bit capture
+//! address per captured place, in capture order). Packing keeps the value a
 //! plain scalar everywhere (locals, struct fields, array and List elements,
-//! enum payloads) and leaves room for environments without a layout change.
+//! enum payloads).
+//!
+//! Calling convention (every indirect call, one convention): the callee's
+//! Wasm type is the declared parameters, then one `i32` environment pointer,
+//! then (for an array/struct result) the hidden result pointer. Table entries
+//! are thunks with that type: the thunk of a plain function drops the
+//! environment and calls the function; the thunk of a closure loads one
+//! capture address per capture from the environment and calls the lifted
+//! closure function, whose own parameters are the declared ones followed by
+//! one borrow/share reference per capture. Direct calls never see any of it.
 //!
 //! Before encoding, every function type in the program is erased to `u64`;
 //! the signature of each indirect call is recorded on the side, keyed by the
@@ -120,20 +131,61 @@ pub(super) fn erase(program: &Program) -> Erased {
     }
 }
 
-/// Table slot of each function used as a value (slot 0 stays empty).
-pub(super) fn function_slots(program: &Program, reachable: &BTreeSet<u32>) -> BTreeMap<u32, u32> {
-    let mut targets = BTreeSet::new();
+/// The signature of an indirect call or thunk: the declared signature plus the
+/// trailing environment pointer.
+pub(super) fn with_environment(signature: &Signature) -> Signature {
+    let mut parameters = signature.parameters.clone();
+    parameters.push(memobits_ir::ParameterType {
+        access: memobits_ir::Access::Owned,
+        ty: Type::Primitive(Primitive::U32),
+    });
+    Signature {
+        parameters,
+        result: signature.result.clone(),
+    }
+}
+
+/// The declared (value) signature of a function whose last `captures`
+/// parameters are closure captures.
+pub(super) fn value_signature(function: &Function, captures: usize) -> Signature {
+    let declared = function.signature.parameters.len() - captures;
+    Signature {
+        parameters: function.signature.parameters[..declared].to_vec(),
+        result: function.signature.result.clone(),
+    }
+}
+
+/// Capture count of each function used as a value (0 for a plain function).
+pub(super) fn function_captures(
+    program: &Program,
+    reachable: &BTreeSet<u32>,
+) -> BTreeMap<u32, usize> {
+    let mut targets = BTreeMap::new();
     for id in reachable {
         for block in &program.functions[*id as usize].blocks {
             for instruction in &block.instructions {
-                if let InstructionKind::Constant(Constant::Function(target)) = &instruction.kind {
-                    targets.insert(target.0);
+                match &instruction.kind {
+                    InstructionKind::Constant(Constant::Function(target)) => {
+                        targets.insert(target.0, 0);
+                    }
+                    InstructionKind::ClosureNew {
+                        function: target,
+                        captures,
+                    } => {
+                        targets.insert(target.0, captures.len());
+                    }
+                    _ => {}
                 }
             }
         }
     }
     targets
-        .into_iter()
+}
+
+/// Table slot of each function used as a value (slot 0 stays empty).
+pub(super) fn function_slots(program: &Program, reachable: &BTreeSet<u32>) -> BTreeMap<u32, u32> {
+    function_captures(program, reachable)
+        .into_keys()
         .enumerate()
         .map(|(index, id)| (id, index as u32 + 1))
         .collect()

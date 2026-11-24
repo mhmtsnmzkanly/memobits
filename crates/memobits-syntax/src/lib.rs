@@ -1308,9 +1308,36 @@ impl Parser {
         })
     }
     /// `=> expr` after a function head: a block that is only its tail value.
+    /// `=> place = expr` (or any compound assignment, `=> total += x`) is a
+    /// block that is only that assignment statement, so its value is Unit.
     fn expression_body(&mut self) -> PResult<Block> {
         let start = self.current().span.start;
         let tail = self.nested(|p| p.expr(0))?;
+        if [
+            "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+        ]
+        .iter()
+        .any(|symbol| self.at(symbol))
+        {
+            let operator = match self.bump().kind {
+                TokenKind::Symbol(symbol) => symbol,
+                _ => unreachable!(),
+            };
+            let value = self.nested(|p| p.expr(0))?;
+            let span = self.span(start);
+            return Ok(Block {
+                span,
+                statements: vec![Node {
+                    span,
+                    kind: StatementKind::Assign {
+                        target: tail,
+                        operator,
+                        value,
+                    },
+                }],
+                tail: None,
+            });
+        }
         Ok(Block {
             span: self.span(start),
             statements: Vec::new(),

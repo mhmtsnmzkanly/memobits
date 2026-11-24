@@ -923,32 +923,18 @@ fn main() -> u32 {
 // Negative cases
 
 #[test]
-fn captures_are_rejected_until_the_next_step() {
-    rejects(
-        "fn main() -> i32 { let n := 5; let f := fn(x: i32) -> i32 => x + n; f(1) }\n",
-        "TE017",
-        "closures that capture variables arrive in the next step",
-    );
+fn owned_function_values_cannot_capture() {
+    // Capturing closures arrived with H2 (`h2_closures.rs`); an owned `fn`
+    // value still cannot capture, because it could escape.
     rejects(
         "fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }\nfn outer(k: i32) -> i32 { apply(fn(x) => x + k, 1) }\nfn main() -> i32 { outer(1) }\n",
         "TE017",
-        "uses 'k' from the enclosing function",
+        "second-class",
     );
     rejects(
-        "fn main() -> i32 { var n := 1; let f := fn() { n = 2; }; f(); n }\n",
+        "fn main() -> i32 { let n := 5; let f := fn(x: i32) -> i32 => x + n; let g: fn(i32) -> i32 = f; g(1) }\n",
         "TE017",
-        "uses 'n' from the enclosing function",
-    );
-    rejects(
-        "fn main() -> i32 { let a := 1; let f := fn(x: i32) -> i32 { let g := fn(y: i32) -> i32 => y + a; g(x) }; f(1) }\n",
-        "TE017",
-        "uses 'a' from the enclosing function",
-    );
-    // Borrow and share function parameters belong to the closure step.
-    rejects(
-        "fn call(f: borrow fn(i32) -> i32) -> i32 { f(1) }\nfn main() -> i32 { 0 }\n",
-        "TE017",
-        "borrow or share function parameter",
+        "second-class",
     );
 }
 

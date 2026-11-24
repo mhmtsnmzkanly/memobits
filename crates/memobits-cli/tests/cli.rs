@@ -1329,16 +1329,6 @@ fn list_returns_keep_temporary_and_abi_gates() {
             "direct internal List call",
         ),
         ("make().borrow();", "TE017", "named local owner"),
-        (
-            "let indirect := make; let result := indirect();",
-            "TE018",
-            "direct internal call",
-        ),
-        (
-            "let indirect := make; indirect();",
-            "TE018",
-            "direct internal call",
-        ),
     ] {
         f.write(
             "list.mb",
@@ -1444,11 +1434,9 @@ fn owned_list_arguments_keep_move_loan_and_abi_gates() {
             "BE005",
         ),
         ("take(items, items.len());", "BE001"),
-        ("let indirect := take; indirect(items, 0);", "TE017"),
         ("take([], 0);", "TE017"),
         ("take({ items }, 0);", "TE017"),
         ("take({ make() }, 0);", "TE017"),
-        ("let indirect := take; indirect(make(), 0);", "TE017"),
         ("let indirect := make; take(indirect(), 0);", "TE017"),
         ("take(make_words(), 0);", "TE002"),
     ] {
@@ -1918,11 +1906,6 @@ fn list_borrow_conflicts_and_call_boundaries_are_checked() {
             "while it is borrowed",
         ),
         ("inspect(items);", "TE017", "explicit .borrow()"),
-        (
-            "let indirect := inspect; indirect(items.borrow());",
-            "TE017",
-            "direct internal call",
-        ),
         (
             "let fixed: List<u8> = []; fixed.share();",
             "TE017",

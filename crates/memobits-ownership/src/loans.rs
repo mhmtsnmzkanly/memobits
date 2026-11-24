@@ -616,6 +616,13 @@ fn is_reference(ty: &Type) -> bool {
     matches!(ty, Type::Reference { .. })
 }
 
+/// A function value may be a closure that holds loans on its captures. Its
+/// provenance travels with it like a reference's, but it stays a scalar
+/// (copied by reading), so the reference transport rules do not apply.
+fn is_function(ty: &Type) -> bool {
+    matches!(ty, Type::Function(_))
+}
+
 fn mark_operand(live: &mut [bool], function: &Function, operand: &Operand) {
     mark_source(live, function, operand.source);
 }
@@ -712,6 +719,7 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         InstructionKind::Call { callee, arguments } => {
             std::iter::once(callee).chain(arguments).collect()
         }
+        InstructionKind::ClosureNew { captures, .. } => captures.iter().collect(),
     }
 }
 
@@ -1122,9 +1130,24 @@ fn transfer_provenance(
                 origin: instruction.span,
             };
             let info_changed = merge_info(infos, key, info);
+            // Borrowing a closure value (to pass it to a `borrow fn`/`share fn`
+            // parameter) keeps the closure's own capture loans alive with it.
+            let held = match &instruction.kind {
+                InstructionKind::Borrow { owner, .. }
+                    if type_at(function, owner.source).is_some_and(is_function) =>
+                {
+                    Some(operand_provenance(function, state, owner))
+                }
+                _ => None,
+            };
             let mut new = owner_provenance;
             new.loans.insert(key);
             new.own = BTreeSet::from([key]);
+            if let Some(held) = held {
+                new.roots.extend(held.roots);
+                new.loans.extend(held.loans);
+                new.own.extend(held.own);
+            }
             if let Some(slot) = state.get_mut(output_index) {
                 let state_changed = *slot != new;
                 *slot = new;
@@ -1133,6 +1156,20 @@ fn transfer_provenance(
             return info_changed;
         }
         InstructionKind::Capture(operand) => operand_provenance(function, state, operand),
+        InstructionKind::Copy { source } if is_function(&function.values[output.0 as usize]) => {
+            operand_provenance(function, state, source)
+        }
+        // A closure holds the loans of everything it captures.
+        InstructionKind::ClosureNew { captures, .. } => {
+            let mut held = Provenance::default();
+            for capture in captures {
+                let provenance = operand_provenance(function, state, capture);
+                held.roots.extend(provenance.roots);
+                held.loans.extend(provenance.loans);
+                held.own.extend(provenance.own);
+            }
+            held
+        }
         // A local borrow Option is the only validated enum with a reference
         // payload. Its Some variant transports one handle; None carries none.
         InstructionKind::EnumNew { payload, .. } => payload
@@ -1216,7 +1253,9 @@ fn provenance(
                 let mut edge_state = state.clone();
                 for (argument, parameter) in edge.arguments.iter().zip(&target.parameters) {
                     let index = function.locals.len() + parameter.0 as usize;
-                    edge_state[index] = if is_reference(&function.values[parameter.0 as usize]) {
+                    edge_state[index] = if is_reference(&function.values[parameter.0 as usize])
+                        || is_function(&function.values[parameter.0 as usize])
+                    {
                         operand_provenance(function, &state, argument)
                     } else {
                         Provenance::default()

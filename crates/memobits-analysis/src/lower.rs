@@ -1702,6 +1702,11 @@ impl<'a> Builder<'a> {
             .find_map(|(address, id)| (*address == node).then_some(*id))
             .expect("checked anonymous function");
         let fact = self.anonymous.facts[&id];
+        let captures = fact
+            .anonymous
+            .as_ref()
+            .map(|info| info.captures.clone())
+            .unwrap_or_default();
         let lowered = Function {
             path: CanonicalFunction {
                 package: self.function.path.package.clone(),
@@ -1713,7 +1718,7 @@ impl<'a> Builder<'a> {
             parameter_locals: fact
                 .locals
                 .iter()
-                .take(function.parameters.len())
+                .take(function.parameters.len() + captures.len())
                 .map(|local| local.id)
                 .collect(),
             locals: fact
@@ -1751,7 +1756,26 @@ impl<'a> Builder<'a> {
             .borrow_mut()
             .insert(id.0, builder.function);
         let ty = self.ty(expr).expect("checked anonymous function type");
-        self.constant(expr.span, Constant::Function(id), ty)
+        if captures.is_empty() {
+            return self.constant(expr.span, Constant::Function(id), ty);
+        }
+        // A closure: reference every captured variable of this function with
+        // the access the closure holds, then create the function value.
+        let mut references = Vec::new();
+        for capture in &captures {
+            let owner = op(Source::Local(capture.local), expr.span);
+            let mut reference = self.borrow(owner, capture.access)?;
+            reference.mode = access_mode(capture.access);
+            references.push(reference);
+        }
+        self.emit(
+            expr.span,
+            InstructionKind::ClosureNew {
+                function: id,
+                captures: references,
+            },
+            Some(ty),
+        )
     }
 
     fn lower_body(&mut self, body: &Block) {
@@ -3021,7 +3045,10 @@ impl<'a> Builder<'a> {
             ExprKind::Cast { value, .. } => {
                 let source = self.lower_expr(value)?;
                 let source = self.scalar(source)?;
-                let source_ty = self.ty(value).expect("checked cast source type");
+                let source_ty = match self.ty(value).expect("checked cast source type") {
+                    Type::Reference { inner, .. } => *inner,
+                    other => other,
+                };
                 let target_ty = self.ty(expr).expect("checked cast target type");
                 self.emit(
                     expr.span,

@@ -592,6 +592,19 @@ pub enum InstructionKind {
         callee: Operand,
         arguments: Vec<Operand>,
     },
+    /// Create the function value of a capturing closure. `function` is the
+    /// lifted closure: its parameters are the declared parameters of the
+    /// value's signature followed by one `Borrow`/`Share` parameter per
+    /// capture. `captures` are the references to the captured places, one per
+    /// capture parameter, used with the matching `Borrow`/`Share` mode. The
+    /// output is a `Function` value of the declared signature that holds the
+    /// capture loans until its last use; it is second-class (never stored,
+    /// returned or moved), so the backend keeps the environment (the capture
+    /// addresses) in the creator's frame.
+    ClosureNew {
+        function: FunctionId,
+        captures: Vec<Operand>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2112,7 +2125,9 @@ fn validate_instruction(
                 {
                     Some(actual)
                 }
+                // A function value is lent like a primitive (it is a scalar).
                 Type::Primitive(_)
+                | Type::Function(_)
                 | Type::String
                 | Type::Array { .. }
                 | Type::Struct(_)
@@ -3318,6 +3333,93 @@ fn validate_instruction(
                 _ => {}
             }
         }
+        InstructionKind::ClosureNew {
+            function: target,
+            captures,
+        } => {
+            let argument_types = captures
+                .iter()
+                .map(|capture| operand_type(program, function, capture, errors, id, block))
+                .collect::<Vec<_>>();
+            match program.functions.get(target.0 as usize) {
+                None => push(errors, id, Some(block), "closure function is out of range"),
+                Some(lifted) => {
+                    let parameters = &lifted.signature.parameters;
+                    if captures.is_empty() || captures.len() > parameters.len() {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "closure capture count differs from the closure function's parameters",
+                        );
+                    } else {
+                        let declared = parameters.len() - captures.len();
+                        let value_signature = Signature {
+                            parameters: parameters[..declared].to_vec(),
+                            result: lifted.signature.result.clone(),
+                        };
+                        if out != Some(&Type::Function(value_signature)) {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "closure value type differs from the closure function's declared signature",
+                            );
+                        }
+                        for ((capture, actual), parameter) in captures
+                            .iter()
+                            .zip(argument_types)
+                            .zip(&parameters[declared..])
+                        {
+                            let type_matches = actual.as_ref().is_some_and(|actual| {
+                                match (parameter.access, actual) {
+                                    (Access::Borrow, Type::Reference { access, inner }) => {
+                                        matches!(access, Access::Borrow | Access::Share)
+                                            && inner.as_ref() == &parameter.ty
+                                    }
+                                    (
+                                        Access::Share,
+                                        Type::Reference {
+                                            access: Access::Share,
+                                            inner,
+                                        },
+                                    ) => inner.as_ref() == &parameter.ty,
+                                    _ => false,
+                                }
+                            });
+                            if !type_matches {
+                                push(
+                                    errors,
+                                    id,
+                                    Some(block),
+                                    "closure capture type or reference access differs from the capture parameter",
+                                );
+                            }
+                            let expected_mode = match parameter.access {
+                                Access::Share => UseMode::Share,
+                                _ => UseMode::Borrow,
+                            };
+                            if capture.mode != expected_mode {
+                                push(
+                                    errors,
+                                    id,
+                                    Some(block),
+                                    "closure capture use mode differs from the capture parameter access",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if out.is_none() {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "closure creation requires an output value",
+                );
+            }
+        }
         InstructionKind::Call { callee, arguments } => {
             let callee_type = operand_type(program, function, callee, errors, id, block);
             let argument_types = arguments
@@ -3334,17 +3436,6 @@ fn validate_instruction(
             }
             match callee_type {
                 Some(Type::Function(signature)) => {
-                    if matches!(signature.result.as_ref(), Type::List(_))
-                        && !matches!(callee.source, Source::Function(_))
-                    {
-                        push(
-                            errors,
-                            id,
-                            Some(block),
-                            "List results require a direct internal call",
-                        );
-                    }
-
                     if signature.parameters.len() != arguments.len() {
                         push(
                             errors,
@@ -3358,16 +3449,6 @@ fn validate_instruction(
                         .zip(argument_types)
                         .zip(&signature.parameters)
                     {
-                        if matches!(parameter.ty, Type::List(_))
-                            && !matches!(callee.source, Source::Function(_))
-                        {
-                            push(
-                                errors,
-                                id,
-                                Some(block),
-                                "List arguments require a direct internal call",
-                            );
-                        }
                         if matches!(parameter.ty, Type::List(_))
                             && parameter.access == Access::Owned
                             && !matches!(arg.source, Source::Local(_))
@@ -3579,6 +3660,32 @@ fn validate_operand_escapes(
                 push(errors, id, Some(BlockId(index as u32)),
                     "UTF-8 String result must be returned directly or immediately matched with explicit Ok(value) and Err arms");
             }
+            if let InstructionKind::ClosureNew {
+                function: closure,
+                captures,
+            } = &instruction.kind
+            {
+                // The closure's String writes go through shares of whole
+                // mutable locals of its creator, like a direct call's.
+                let declared = program.functions[closure.0 as usize]
+                    .signature
+                    .parameters
+                    .len()
+                    - captures.len();
+                for parameter in &heap_strings[closure.0 as usize].writes_heap {
+                    if parameter
+                        .checked_sub(declared)
+                        .and_then(|offset| captures.get(offset))
+                        .and_then(|capture| {
+                            scoped_string::direct_share_owner(function, &shares, capture)
+                        })
+                        .is_none()
+                    {
+                        push(errors, id, block_id,
+                            "heap String replacement requires a direct share of a whole mutable caller local");
+                    }
+                }
+            }
             if let InstructionKind::Call { callee, arguments } = &instruction.kind {
                 // A call through a function value can reach every address-taken
                 // function of its signature; their facts combine.
@@ -3596,9 +3703,12 @@ fn validate_operand_escapes(
                 if let (Some(result), false) = (result, targets.is_empty()) {
                     let facts = &HeapStrings {
                         returns_heap: targets.iter().any(|t| heap_strings[*t].returns_heap),
+                        // A closure's capture parameters are written through
+                        // its environment, not through the call's arguments.
                         writes_heap: targets
                             .iter()
                             .flat_map(|t| heap_strings[*t].writes_heap.iter().copied())
+                            .filter(|parameter| *parameter < arguments.len())
                             .collect(),
                         ..HeapStrings::default()
                     };
@@ -4241,6 +4351,11 @@ fn validate_operand_escapes(
                         {
                             report(block_id, argument, true, false);
                         }
+                    }
+                }
+                InstructionKind::ClosureNew { captures, .. } => {
+                    for capture in captures {
+                        report(block_id, capture, false, false);
                     }
                 }
                 InstructionKind::EmptyList

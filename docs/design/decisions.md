@@ -1336,3 +1336,53 @@ decision above is unchanged.
   trap, exact owner cleanup through function values (memory capped to
   initial + 1 page, 4,096 iterations x 1,024-byte strings, plus source and
   Wasm runs), and the negatives. Guide: `functions.mb` (6 tests, 129 total).
+
+### Shipped H2 details (2026-11-25)
+
+Facts about the shipped non-escaping closures; the Stage 4 decision is unchanged.
+
+- Parameters `borrow fn(..)` / `share fn(..)` (also in function types) take a
+  function value bare. In IR a `share fn` is a `Borrow` of the function cell (the
+  share effect lives in the closure's loans on its captures). They are references:
+  callable (`Load` then `Call`), passable to another `borrow fn`/`share fn`
+  parameter (a `share fn` never to a `borrow fn`), never stored, returned or put
+  in fields/collections (`read_type` keeps function references, so `ensure` and
+  `push` reject them: "reference values cannot escape").
+- Captures are inferred in the checker (`closure_body`): the body is first checked
+  without facts while enclosing locals are viewed as read-only references
+  (`Probe`); an error that names a captured variable (`'x'`) promotes it to a share
+  capture and the probe repeats; then the real check binds the captures as
+  trailing hidden `borrow`/`share` parameters of the lifted function. Names of
+  grandparent functions are captured transitively. A function-typed capture takes
+  the access of its effect (`share fn` parameter or mutating closure = share).
+  Mutation-denial diagnostics therefore quote the variable name.
+- A capturing literal is valid only as a direct argument of a `borrow fn`/`share fn`
+  parameter or as the initializer of an immutable `let` (`ClosureContext`); the
+  `let` local is second-class (`Binding::closure`): usable only as a callee or as
+  an argument to such a parameter. The mode needed (read = Borrow, any share =
+  Share) is checked against the parameter (TE017).
+- IR: `InstructionKind::ClosureNew { function, captures }` (captures are
+  `Borrow`/`Share` references of the creator's places, one per trailing capture
+  parameter); output is a `Function` value of the declared signature. Loans:
+  the closure value's provenance is the union of its captures' provenance (also
+  through `Assign`/`Capture`/`Copy`/edges), and borrowing a closure local to pass
+  it keeps those loans; hence BE005 while live and access after the last use.
+  `address_taken` carries capture counts so an indirect call reaches closures of
+  the declared signature; String writes through a closure link to the creator's
+  owner (`ShareWrite`).
+- Wasm convention (one for all indirect calls): type = declared parameters, an i32
+  environment pointer, then the hidden aggregate-result pointer. Table entries are
+  thunks: a plain function's thunk drops the environment; a closure's loads one
+  capture address per capture from the environment and calls the lifted function.
+  The environment is a frame cell of 4 bytes per capture in the creator's frame
+  (`FrameLayout::closures`), pointer in the high word of the i64 value. No heap.
+- List parameters/results in function types are allowed; calls through function
+  values follow direct-call rules (IR gates removed, checker `value_call`).
+- Syntax: `=> place op= expr` is a Unit assignment body.
+- Casts read through a reference (`captured as i32`).
+- Not done: built-in `each` methods on arrays/Lists (users write helpers such as
+  `visit(f: share fn(i32), n)`); explicit `.borrow()`/`.share()` on a function
+  argument; owned (escaping) closures stay H5.
+- Tests: `crates/memobits-cli/tests/h2_closures.rs` (18); guide `functions.mb`
+  (+5 tests, 134 total). H1 negatives for captures, borrow/share fn parameters
+  and List function types were replaced or removed.

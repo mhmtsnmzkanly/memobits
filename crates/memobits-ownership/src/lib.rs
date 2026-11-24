@@ -356,6 +356,12 @@ fn transfer_instruction(
             transfer_operand(value, state, diagnostics, function);
             state[target.0 as usize] = Availability::Available;
         }
+        InstructionKind::ClosureNew { captures, .. } => {
+            let mut diagnostics = diagnostics;
+            for capture in captures {
+                transfer_operand(capture, state, diagnostics.as_deref_mut(), function);
+            }
+        }
         InstructionKind::Call { callee, arguments } => {
             let mut diagnostics = diagnostics;
             transfer_operand(callee, state, diagnostics.as_deref_mut(), function);

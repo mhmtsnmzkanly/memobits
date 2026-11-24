@@ -314,7 +314,8 @@ fn is_scalar(ty: &Ty) -> bool {
 }
 fn read_type(ty: Ty) -> Ty {
     match ty {
-        Ty::Reference { inner, .. } => *inner,
+        // A `borrow fn` / `share fn` parameter is never read out as a value.
+        Ty::Reference { inner, .. } if !matches!(*inner, Ty::Function(..)) => *inner,
         other => other,
     }
 }
@@ -490,6 +491,15 @@ fn name(ty: &Ty) -> String {
 }
 /// The named local at the root of a projection chain: any mix of indexing and
 /// field access such as `a[i].pts[j].x`.
+/// ` ('name' is not writable here)` for the root binding of a place, so an
+/// error about a missing write permission names the variable (a closure
+/// capture that hits it becomes a share capture).
+fn root_note(expr: &Expr) -> String {
+    match place_root(expr) {
+        Some(path) if path.len() == 1 => format!(" ('{}' is not writable here)", path[0]),
+        _ => String::new(),
+    }
+}
 fn place_root(expr: &Expr) -> Option<&Vec<String>> {
     match &expr.kind {
         ExprKind::Path(path) => Some(path),
@@ -927,9 +937,22 @@ pub struct FunctionFacts {
 }
 
 /// Where an anonymous function was written.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AnonymousInfo {
     pub(crate) parent: FunctionId,
+    /// The variables of the enclosing function the closure uses, in the order
+    /// of its trailing capture parameters.
+    pub(crate) captures: Vec<CaptureFact>,
+}
+
+/// One captured variable of a closure: the local of the enclosing function and
+/// the access the closure holds on it (`Borrow` for read-only use, `Share` when
+/// the closure mutates it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CaptureFact {
+    pub(crate) name: String,
+    pub(crate) local: LocalId,
+    pub(crate) access: IrAccess,
 }
 
 /// One declared struct field with its IR type.
@@ -1030,18 +1053,22 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             parameters: parameters
                 .iter()
                 .map(|p| {
+                    let ty = ir_type(&p.ty)?;
                     Some(ParameterType {
-                        access: p.access,
-                        ty: ir_type(&p.ty)?,
+                        access: ir_parameter_access(p.access, &ty),
+                        ty,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?,
             result: Box::new(ir_type(result)?),
         }),
-        Ty::Reference { access, inner, .. } => IrType::Reference {
-            access: *access,
-            inner: Box::new(ir_type(inner)?),
-        },
+        Ty::Reference { access, inner, .. } => {
+            let inner = ir_type(inner)?;
+            IrType::Reference {
+                access: ir_parameter_access(*access, &inner),
+                inner: Box::new(inner),
+            }
+        }
         Ty::List(element) => IrType::List(Box::new(ir_type(element)?)),
         Ty::Array(element, len) => IrType::Array {
             element: Box::new(ir_type(element)?),
@@ -1054,8 +1081,97 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
     })
 }
 
+/// One captured variable of the closure being checked.
+struct CapturePlan {
+    name: String,
+    /// `Borrow` or `Share`.
+    access: IrAccess,
+    /// The captured variable's type (not a reference).
+    inner: Ty,
+    /// The variable's local in the enclosing function.
+    local: Option<LocalId>,
+}
+
+enum BodyMode<'a> {
+    /// Find the captures: no facts, diagnostics returned. `shared` names the
+    /// enclosing variables viewed as share references.
+    Probe { shared: &'a HashSet<String> },
+    /// The real check with the captures bound as trailing parameters.
+    Final { captures: &'a [CapturePlan] },
+}
+
+struct ClosureBodyResult {
+    result: Ty,
+    own_facts: Option<FunctionFacts>,
+    /// Enclosing names the body used: name and index of the outer scope.
+    captured: Vec<(String, usize)>,
+    /// Diagnostics of a probe (removed from the checker).
+    errors: Vec<Diagnostic>,
+}
+
+/// The access a function value needs when it is only called: `Share` for a
+/// `share fn` parameter or a closure that mutates its captures.
+fn function_effect(binding: &Binding) -> IrAccess {
+    if let Some(access) = binding.closure {
+        return access;
+    }
+    match &binding.ty {
+        Ty::Reference {
+            access: IrAccess::Share,
+            ..
+        } => IrAccess::Share,
+        _ => IrAccess::Borrow,
+    }
+}
+
+/// How the body of a closure sees one enclosing variable while captures are
+/// being found: as an immutable reference (read-only borrow, or a share
+/// reference for the names already known to be mutated).
+fn capture_view(name: &str, binding: &Binding, shared: &HashSet<String>, expr: &Expr) -> Binding {
+    let inner = match &binding.ty {
+        Ty::Reference { inner, .. } => inner.as_ref().clone(),
+        other => other.clone(),
+    };
+    let access = if matches!(inner, Ty::Function(..)) {
+        function_effect(binding)
+    } else if shared.contains(name) {
+        IrAccess::Share
+    } else {
+        IrAccess::Borrow
+    };
+    let origin = expr as *const Expr as usize;
+    Binding {
+        closure: None,
+        ty: Ty::Reference {
+            access,
+            inner: Box::new(inner),
+            origin: ReferenceOrigin::Binding(origin),
+        },
+        mutable: false,
+        access,
+        id: None,
+        origin,
+    }
+}
+
+/// The access recorded in IR for a parameter of this type: a `share fn`
+/// parameter is a borrow in IR (the function value itself is never written;
+/// the share effect lives in the closure's loans on its captures).
+fn ir_parameter_access(access: IrAccess, ty: &IrType) -> IrAccess {
+    if access == IrAccess::Share && matches!(ty, IrType::Function(_)) {
+        IrAccess::Borrow
+    } else {
+        access
+    }
+}
+
 #[derive(Clone)]
 struct Binding {
+    /// Set for a local bound to a closure that captures variables: the access
+    /// the closure needs (`Borrow`: read captures only, `Share`: it mutates).
+    /// Such a local is second-class: it can only be called or passed to a
+    /// `borrow fn` / `share fn` parameter.
+    closure: Option<IrAccess>,
     ty: Ty,
     /// Rebinding mutability, independent of parameter access.
     mutable: bool,
@@ -1106,9 +1222,34 @@ struct Checker {
     /// Scopes of the functions that enclose the anonymous function being
     /// checked. A use of one of their names is a capture.
     outer_scopes: Vec<HashMap<String, Binding>>,
-    /// The first enclosing name the current anonymous function used.
-    captured: RefCell<Option<String>>,
+    /// Number of leading `outer_scopes` entries that belong to functions
+    /// enclosing the immediate parent (the rest are the parent's own scopes).
+    outer_boundary: usize,
+    /// The enclosing names the current anonymous function used, with the
+    /// index of the outer scope that holds each, in order of first use.
+    captured: RefCell<Vec<(String, usize)>>,
+    /// Set by the caller right before a function literal is checked: where the
+    /// literal stands (a capturing closure is only valid in two positions).
+    closure_context: Option<ClosureContext>,
+    /// Function literals that capture variables, by node address, with the
+    /// access they need.
+    closure_exprs: HashMap<usize, IrAccess>,
+    /// Path expressions that may name a closure local (callee and argument
+    /// positions).
+    closure_uses: HashSet<usize>,
+    /// Set while the arguments of a call through a function value are checked.
+    value_call: bool,
     result: Ty,
+}
+
+/// Where a function literal stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClosureContext {
+    /// A direct argument of a `borrow fn` (`Borrow`) or `share fn` (`Share`)
+    /// parameter.
+    Argument(IrAccess),
+    /// The initializer of an immutable `let`.
+    Binding,
 }
 impl Checker {
     fn specialize_inherent_candidate(
@@ -1971,6 +2112,10 @@ impl Checker {
         node_addr: usize,
     ) -> Option<LocalId> {
         let ty = ir_type(ty)?;
+        let access = match &ty {
+            IrType::Reference { inner, .. } => ir_parameter_access(access, inner),
+            _ => access,
+        };
         let facts = self.facts.as_mut()?;
         let id = LocalId(facts.locals.len() as u32);
         facts.locals.push(LocalFact {
@@ -1990,14 +2135,15 @@ impl Checker {
         }
         // A name of an enclosing function is found (so it has a type) and
         // remembered: the anonymous function that used it is a capture.
-        let binding = self
+        let (index, binding) = self
             .outer_scopes
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|scope| scope.get(key))?;
+            .find_map(|(index, scope)| scope.get(key).map(|binding| (index, binding)))?;
         let mut captured = self.captured.borrow_mut();
-        if captured.is_none() {
-            *captured = Some(key.to_owned());
+        if !captured.iter().any(|(name, _)| name == key) {
+            captured.push((key.to_owned(), index));
         }
         Some(binding)
     }
@@ -2117,6 +2263,7 @@ impl Checker {
             self.scopes.last_mut().unwrap().insert(
                 pattern.binding.clone(),
                 Binding {
+                    closure: None,
                     ty,
                     mutable,
                     access: IrAccess::Owned,
@@ -2267,6 +2414,7 @@ impl Checker {
             self.scopes.last_mut().unwrap().insert(
                 element.binding.clone(),
                 Binding {
+                    closure: None,
                     ty,
                     mutable,
                     access: IrAccess::Owned,
@@ -2300,12 +2448,21 @@ impl Checker {
                     self.allow_array_value(value);
                     let previous = self.concat_destination;
                     self.concat_destination = Some(value as *const Expr as usize);
+                    if matches!(value.kind, ExprKind::Function(_)) && !*mutable {
+                        self.closure_context = Some(ClosureContext::Binding);
+                    }
                     let inferred = self.expr(value, annotation.as_ref());
+                    self.closure_context = None;
                     self.concat_destination = previous;
                     self.reject_extraction(value, &inferred);
                     if let Some(ann) = &annotation {
                         self.ensure(&inferred, ann, value.span);
                     }
+                    let closure = self
+                        .closure_exprs
+                        .get(&(value as *const Expr as usize))
+                        .copied()
+                        .filter(|_| matches!(value.kind, ExprKind::Function(_)));
                     let ty = annotation.unwrap_or(inferred);
                     if *mutable && self.table.is_borrow_option(&ty) {
                         self.error(
@@ -2325,6 +2482,7 @@ impl Checker {
                     self.scopes.last_mut().unwrap().insert(
                         name.clone(),
                         Binding {
+                            closure,
                             ty,
                             mutable: *mutable,
                             access: IrAccess::Owned,
@@ -2841,6 +2999,7 @@ impl Checker {
                     self.scopes.push(HashMap::from([(
                         binding.clone(),
                         Binding {
+                            closure: None,
                             ty,
                             mutable: false,
                             access: IrAccess::Owned,
@@ -2871,6 +3030,7 @@ impl Checker {
                     self.scopes.push(HashMap::from([(
                         binding.clone(),
                         Binding {
+                            closure: None,
                             ty,
                             mutable: false,
                             access: IrAccess::Owned,
@@ -2913,9 +3073,11 @@ impl Checker {
         ty
     }
     /// `fn(x: i32) -> i32 => expr` and `fn(x) { ... }`: an anonymous function.
-    /// Its body is checked as a separate function that sees only module-level
-    /// names; a use of an enclosing function's local is a capture, which is
-    /// not supported yet.
+    /// Its body is checked as a separate function. A use of a local of an
+    /// enclosing function is a capture: the closure receives one hidden
+    /// borrow/share reference parameter per captured variable (read-only use
+    /// borrows, mutation shares); see `closure_body` for how the captures
+    /// and their access are found.
     fn anonymous_function(
         &mut self,
         expr: &Expr,
@@ -2974,17 +3136,214 @@ impl Checker {
         }
         let infer_result =
             function.result.is_none() && expected_signature.is_none() && function.expression;
-        let mut result = match (&function.result, &expected_signature) {
+        let result = match (&function.result, &expected_signature) {
             (Some(ty), _) => self.type_path(ty),
             (None, Some((_, result))) => result.clone(),
             (None, None) if infer_result => Ty::Error,
             (None, None) => UNIT,
         };
+        let context = self.closure_context.take();
+        let node_addr = expr as *const Expr as usize;
+        let enclosed = !self.scopes.is_empty() || !self.outer_scopes.is_empty();
+        // Find the captures. The body is checked without facts as many times
+        // as it takes for the set of shared captures to settle: a capture is
+        // first viewed as a read-only borrow, and a mutation attempt is an
+        // error that names the variable, which then becomes a share capture.
+        let mut shared: HashSet<String> = HashSet::new();
+        let mut discovered: Vec<(String, usize)> = Vec::new();
+        if enclosed {
+            for _ in 0..=64 {
+                let probe = self.closure_body(
+                    expr,
+                    function,
+                    &parameters,
+                    &result,
+                    infer_result,
+                    BodyMode::Probe { shared: &shared },
+                );
+                discovered = probe.captured;
+                let promoted = discovered
+                    .iter()
+                    .filter(|(name, _)| !shared.contains(name))
+                    .filter(|(name, _)| {
+                        let quoted = format!("'{name}'");
+                        probe
+                            .errors
+                            .iter()
+                            .any(|diagnostic| diagnostic.message.contains(&quoted))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                if promoted.is_empty() {
+                    break;
+                }
+                shared.extend(promoted);
+            }
+        }
+        // The enclosing bindings the captures come from (the parent's view).
+        let chain = self
+            .outer_scopes
+            .iter()
+            .chain(self.scopes.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let boundary = self.outer_scopes.len();
+        let mut plan: Vec<CapturePlan> = Vec::new();
+        let mut share_effect = false;
+        for (name, index) in &discovered {
+            let Some(source) = chain.get(*index).and_then(|scope| scope.get(name)).cloned() else {
+                continue;
+            };
+            let inner = match &source.ty {
+                Ty::Reference { inner, .. } => inner.as_ref().clone(),
+                other => other.clone(),
+            };
+            let is_function = matches!(inner, Ty::Function(..));
+            let access = if is_function {
+                // A function value is only called: it needs the access its
+                // own effect has (a closure that mutates is a share effect).
+                function_effect(&source)
+            } else if shared.contains(name) {
+                IrAccess::Share
+            } else {
+                IrAccess::Borrow
+            };
+            if access == IrAccess::Share {
+                share_effect = true;
+                if !is_function && !(source.mutable || source.access == IrAccess::Share) {
+                    self.error(
+                        4,
+                        expr.span,
+                        format!(
+                            "cannot capture '{name}' by share because it is not mutable; declare it with var"
+                        ),
+                    );
+                }
+            }
+            plan.push(CapturePlan {
+                name: name.clone(),
+                access,
+                inner,
+                local: source.id,
+            });
+            if *index < boundary {
+                // The name belongs to a function that encloses the parent:
+                // the parent has to capture it too.
+                let mut log = self.captured.borrow_mut();
+                if !log.iter().any(|(logged, _)| logged == name) {
+                    log.push((name.clone(), *index));
+                }
+            }
+        }
+        let body = self.closure_body(
+            expr,
+            function,
+            &parameters,
+            &result,
+            infer_result,
+            BodyMode::Final { captures: &plan },
+        );
+        let result = body.result;
+        if failed || result == Ty::Error {
+            return Ty::Error;
+        }
+        let function_ty = Ty::Function(parameters, Box::new(result));
+        let mode = if share_effect {
+            IrAccess::Share
+        } else {
+            IrAccess::Borrow
+        };
+        if !plan.is_empty() {
+            match context {
+                Some(ClosureContext::Argument(IrAccess::Borrow)) if mode == IrAccess::Share => {
+                    let names = plan
+                        .iter()
+                        .filter(|capture| capture.access == IrAccess::Share)
+                        .map(|capture| format!("'{}'", capture.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.error(
+                        17,
+                        expr.span,
+                        format!(
+                            "this closure mutates {names}, so it needs a `share fn` parameter; a `borrow fn` parameter only accepts closures that read their captures"
+                        ),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    self.error(
+                        17,
+                        expr.span,
+                        "a closure that captures variables is second-class: pass it directly to a `borrow fn` or `share fn` parameter, or bind it with `let` and only call it or pass it on; it cannot be returned, stored or moved",
+                    );
+                }
+            }
+            self.closure_exprs.insert(node_addr, mode);
+        }
+        if let Some(mut own) = body.own_facts {
+            let Some(IrType::Function(mut signature)) = ir_type(&function_ty) else {
+                self.error(
+                    7,
+                    expr.span,
+                    "anonymous function signature is outside the executable type subset",
+                );
+                return Ty::Error;
+            };
+            let mut captures = Vec::new();
+            for capture in &plan {
+                let (Some(inner), Some(local)) = (ir_type(&capture.inner), capture.local) else {
+                    self.error(
+                        7,
+                        expr.span,
+                        format!("cannot capture '{}' here", capture.name),
+                    );
+                    return Ty::Error;
+                };
+                let access = ir_parameter_access(capture.access, &inner);
+                signature
+                    .parameters
+                    .push(memobits_ir::ParameterType { access, ty: inner });
+                captures.push(CaptureFact {
+                    name: capture.name.clone(),
+                    local,
+                    access,
+                });
+            }
+            own.signature = signature;
+            if let Some(info) = own.anonymous.as_mut() {
+                info.captures = captures;
+            }
+            if let Some(outer) = self.facts.as_mut() {
+                outer.anonymous_functions.push((node_addr, own.id));
+            }
+            if let Some(registry) = &self.specialization_registry {
+                registry.borrow_mut().anonymous.push(own);
+            }
+        }
+        function_ty
+    }
+
+    /// Check the body of an anonymous function as a function of its own and
+    /// return what it needs. `Probe` runs without facts or diagnostics and
+    /// reports which enclosing names the body uses (viewed as read-only
+    /// borrows, or as shares for the names in `shared`); `Final` binds the
+    /// planned captures as trailing reference parameters and records facts.
+    fn closure_body(
+        &mut self,
+        expr: &Expr,
+        function: &memobits_syntax::AnonymousFunction,
+        parameters: &[FunctionParameter],
+        result: &Ty,
+        infer_result: bool,
+        mode: BodyMode,
+    ) -> ClosureBodyResult {
+        let mut result = result.clone();
+        let probing = matches!(mode, BodyMode::Probe { .. });
         // Switch to the anonymous function's own context.
         let outer_facts = self.facts.take();
-        let node_addr = expr as *const Expr as usize;
         let mut own_facts = None;
-        if let Some(outer) = &outer_facts {
+        if let (Some(outer), false) = (&outer_facts, probing) {
             if let Some(registry) = &self.specialization_registry {
                 let id = {
                     let mut registry = registry.borrow_mut();
@@ -3016,25 +3375,41 @@ impl Checker {
                     matches: Vec::new(),
                     tuple_projections: Vec::new(),
                     tuple_initializers: Vec::new(),
-                    anonymous: Some(AnonymousInfo { parent: outer.id }),
+                    anonymous: Some(AnonymousInfo {
+                        parent: outer.id,
+                        captures: Vec::new(),
+                    }),
                     anonymous_functions: Vec::new(),
                     next_expr: 0,
                 });
             }
         }
         self.facts = own_facts;
+        let diagnostics_mark = self.diagnostics.len();
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_outer = std::mem::take(&mut self.outer_scopes);
-        self.outer_scopes = saved_outer
-            .iter()
-            .chain(saved_scopes.iter())
-            .cloned()
-            .collect();
-        let saved_captured = self.captured.borrow_mut().take();
+        let saved_boundary = std::mem::replace(&mut self.outer_boundary, saved_outer.len());
+        let chain = saved_outer.iter().chain(saved_scopes.iter());
+        self.outer_scopes = match &mode {
+            // Everything the body can reach outside is seen as a reference.
+            BodyMode::Probe { shared } => chain
+                .map(|scope| {
+                    scope
+                        .iter()
+                        .map(|(name, binding)| {
+                            (name.clone(), capture_view(name, binding, shared, expr))
+                        })
+                        .collect()
+                })
+                .collect(),
+            BodyMode::Final { .. } => chain.cloned().collect(),
+        };
+        let saved_captured = std::mem::take(&mut *self.captured.borrow_mut());
         let saved_result = std::mem::replace(&mut self.result, result.clone());
         let saved_origins = std::mem::take(&mut self.parameter_origins);
+        let saved_context = self.closure_context.take();
         self.scopes.push(HashMap::new());
-        for (parameter, resolved) in function.parameters.iter().zip(&parameters) {
+        for (parameter, resolved) in function.parameters.iter().zip(parameters) {
             bind_named_parameter(
                 self,
                 &parameter.name,
@@ -3044,6 +3419,19 @@ impl Checker {
                 parameter as *const _ as usize,
                 resolved.ty.clone(),
             );
+        }
+        if let BodyMode::Final { captures } = &mode {
+            for (index, capture) in captures.iter().enumerate() {
+                bind_named_parameter(
+                    self,
+                    &capture.name,
+                    false,
+                    capture.access,
+                    expr.span,
+                    expr as *const Expr as usize + 1 + index,
+                    capture.inner.clone(),
+                );
+            }
         }
         if let Some(tail) = &function.body.tail {
             self.allow_array_value(tail);
@@ -3086,40 +3474,21 @@ impl Checker {
         self.result = saved_result;
         self.scopes = saved_scopes;
         self.outer_scopes = saved_outer;
+        self.outer_boundary = saved_boundary;
+        self.closure_context = saved_context;
         let captured = std::mem::replace(&mut *self.captured.borrow_mut(), saved_captured);
         let own_facts = std::mem::replace(&mut self.facts, outer_facts);
-        if let Some(name) = captured {
-            self.error(
-                17,
-                expr.span,
-                format!(
-                    "closures that capture variables arrive in the next step; this function uses '{name}' from the enclosing function"
-                ),
-            );
-            return Ty::Error;
+        let errors = if probing {
+            self.diagnostics.drain(diagnostics_mark..).collect()
+        } else {
+            Vec::new()
+        };
+        ClosureBodyResult {
+            result,
+            own_facts,
+            captured,
+            errors,
         }
-        if failed || result == Ty::Error {
-            return Ty::Error;
-        }
-        let function_ty = Ty::Function(parameters, Box::new(result));
-        if let Some(mut own) = own_facts {
-            let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
-                self.error(
-                    7,
-                    expr.span,
-                    "anonymous function signature is outside the executable type subset",
-                );
-                return Ty::Error;
-            };
-            own.signature = signature;
-            if let Some(outer) = self.facts.as_mut() {
-                outer.anonymous_functions.push((node_addr, own.id));
-            }
-            if let Some(registry) = &self.specialization_registry {
-                registry.borrow_mut().anonymous.push(own);
-            }
-        }
-        function_ty
     }
 
     /// A generic function named as a value. Only an expected function type
@@ -3700,7 +4069,46 @@ impl Checker {
                 _ => {}
             }
         }
+        // A `borrow fn` / `share fn` parameter takes a function value as it
+        // is: a function name, a function-typed local, a function literal, a
+        // closure local or a `borrow fn` / `share fn` parameter passed on.
+        let function_parameter = param.filter(|parameter| {
+            parameter.access != IrAccess::Owned && matches!(parameter.ty, Ty::Function(..))
+        });
+        let mut closure_access = None;
+        if let Some(parameter) = function_parameter {
+            match &arg.kind {
+                ExprKind::Function(_) => {
+                    self.closure_context = Some(ClosureContext::Argument(parameter.access));
+                }
+                ExprKind::Path(path) if path.len() == 1 => {
+                    closure_access = self.lookup(&path[0]).and_then(|binding| binding.closure);
+                    self.closure_uses.insert(arg as *const Expr as usize);
+                }
+                _ => {}
+            }
+        }
         let actual = self.expr(arg, param.map(|parameter| &parameter.ty));
+        self.closure_context = None;
+        // A `share fn` parameter may mutate through its closure, so it cannot
+        // be passed on where only read-only closures are accepted.
+        let passes_share_parameter = matches!(&actual, Ty::Reference {
+            access: IrAccess::Share,
+            inner,
+            ..
+        } if matches!(**inner, Ty::Function(..)));
+        if let (Some(parameter), Some(IrAccess::Share)) = (
+            function_parameter,
+            closure_access.or(passes_share_parameter.then_some(IrAccess::Share)),
+        ) {
+            if parameter.access == IrAccess::Borrow {
+                self.error(
+                    17,
+                    arg.span,
+                    "this closure mutates its captures, so it needs a `share fn` parameter; a `borrow fn` parameter only accepts closures that read their captures",
+                );
+            }
+        }
         self.concat_destination = previous_concat;
         self.temporary_borrow_argument = previous_borrow;
         if param.is_some_and(|parameter| {
@@ -3724,7 +4132,9 @@ impl Checker {
             );
         }
         if let Some(parameter) = param.filter(|parameter| matches!(parameter.ty, Ty::List(_))) {
-            if !direct {
+            // A function value always names an internal function, so a call
+            // through one passes Lists like a direct call.
+            if !direct && !self.value_call {
                 self.error(
                     17,
                     arg.span,
@@ -3746,6 +4156,8 @@ impl Checker {
         }
         if let Some(param) = param {
             if param.access == IrAccess::Owned {
+                self.ensure(&actual, &param.ty, arg.span);
+            } else if function_parameter.is_some() && matches!(actual, Ty::Function(..)) {
                 self.ensure(&actual, &param.ty, arg.span);
             } else if matches!(&actual, Ty::Reference { inner, .. }
                 if !(compatible(inner, &param.ty)
@@ -4065,7 +4477,7 @@ impl Checker {
             self.error(
                 17,
                 base.span,
-                "push_str() requires a mutable whole String local or a direct share String parameter",
+                format!("push_str() requires a mutable whole String local or a direct share String parameter{}", root_note(base)),
             );
         }
         if arguments.len() != 1 {
@@ -4276,7 +4688,10 @@ impl Checker {
                 self.error(
                     17,
                     expression.span,
-                    "cannot create a share conversion from a borrow reference",
+                    format!(
+                        "cannot create a share conversion from a borrow reference{}",
+                        root_note(base)
+                    ),
                 );
                 return Ty::Error;
             }
@@ -4284,7 +4699,10 @@ impl Checker {
                 self.error(
                     17,
                     expression.span,
-                    "share conversion requires a mutable local owner",
+                    format!(
+                        "share conversion requires a mutable local owner{}",
+                        root_note(base)
+                    ),
                 );
                 return Ty::Error;
             }
@@ -5200,6 +5618,7 @@ impl Checker {
                 scope.insert(
                     name,
                     Binding {
+                        closure: None,
                         ty,
                         mutable: false,
                         access: IrAccess::Owned,
@@ -5409,6 +5828,7 @@ impl Checker {
                 self.scopes.last_mut().unwrap().insert(
                     binding.clone(),
                     Binding {
+                        closure: None,
                         ty: bound_ty,
                         mutable: false,
                         access: IrAccess::Owned,
@@ -6272,6 +6692,18 @@ impl Checker {
                         });
                 }
                 if let Some(binding) = self.lookup(&path[0]).cloned() {
+                    if binding.closure.is_some()
+                        && !self.closure_uses.contains(&(expr as *const Expr as usize))
+                    {
+                        self.error(
+                            17,
+                            expr.span,
+                            format!(
+                                "'{}' is a closure that captures variables and is second-class: it can only be called or passed to a `borrow fn` / `share fn` parameter",
+                                path[0]
+                            ),
+                        );
+                    }
                     if let Some((facts, expression, local)) =
                         self.facts.as_mut().zip(id).and_then(|(facts, expression)| {
                             binding.id.map(|local| (facts, expression, local))
@@ -6514,7 +6946,12 @@ impl Checker {
                 }
             }
             ExprKind::Cast { value, target } => {
-                let source = self.expr(value, None);
+                // A primitive read through a reference (a borrow parameter or a
+                // captured variable) is cast by value.
+                let source = match self.expr(value, None) {
+                    Ty::Reference { inner, .. } if matches!(*inner, Ty::Primitive(_)) => *inner,
+                    other => other,
+                };
                 let target = self.type_path(target);
                 if numeric(&source) && numeric(&target) {
                     target
@@ -7239,7 +7676,16 @@ impl Checker {
                         return result;
                     }
                 }
+                if matches!(&callee.kind, ExprKind::Path(path) if path.len() == 1) {
+                    self.closure_uses.insert(&**callee as *const Expr as usize);
+                }
                 let ty = self.expr(callee, None);
+                // A `borrow fn` / `share fn` parameter (or a capture of a
+                // function value) is called through its reference.
+                let ty = match ty {
+                    Ty::Reference { inner, .. } if matches!(*inner, Ty::Function(..)) => *inner,
+                    other => other,
+                };
                 if let Ty::Function(params, result) = ty {
                     let direct = self.direct_callee(callee);
                     if params.len() != arguments.len() {
@@ -7254,10 +7700,12 @@ impl Checker {
                         );
                     }
                     let mut diverges = false;
+                    let previous_value_call = std::mem::replace(&mut self.value_call, !direct);
                     for (i, arg) in arguments.iter().enumerate() {
                         let actual = self.check_call_argument(arg, params.get(i), direct);
                         diverges |= actual == Ty::Never;
                     }
+                    self.value_call = previous_value_call;
                     if diverges {
                         Ty::Never
                     } else {
@@ -7725,7 +8173,12 @@ fn check_standalone(
         extension_candidates: Vec::new(),
         scopes: Vec::new(),
         outer_scopes: Vec::new(),
-        captured: RefCell::new(None),
+        outer_boundary: 0,
+        captured: RefCell::new(Vec::new()),
+        closure_context: None,
+        closure_exprs: HashMap::new(),
+        closure_uses: HashSet::new(),
+        value_call: false,
         result: UNIT,
     };
     let mut next_function = 0u32;
@@ -8631,7 +9084,12 @@ fn checker() -> Checker {
         extension_candidates: Vec::new(),
         scopes: Vec::new(),
         outer_scopes: Vec::new(),
-        captured: RefCell::new(None),
+        outer_boundary: 0,
+        captured: RefCell::new(Vec::new()),
+        closure_context: None,
+        closure_exprs: HashMap::new(),
+        closure_uses: HashSet::new(),
+        value_call: false,
         result: UNIT,
     }
 }
@@ -8690,13 +9148,6 @@ fn bind_named_parameter(
             "borrow/share parameters cannot be rebound; remove the var modifier",
         );
     }
-    if access != IrAccess::Owned && matches!(ty, Ty::Function(..)) {
-        c.error(
-            17,
-            span,
-            "a borrow or share function parameter arrives with closures that capture variables (the next step); declare the parameter as an owned `fn(...)`",
-        );
-    }
     c.parameter_origins.insert(origin);
     let local_ty = match access {
         IrAccess::Owned => ty.clone(),
@@ -8714,6 +9165,7 @@ fn bind_named_parameter(
         .insert(
             name.to_owned(),
             Binding {
+                closure: None,
                 ty: local_ty,
                 mutable,
                 access,
@@ -8822,6 +9274,7 @@ mod access_tests {
         checker.scopes.push(HashMap::from([(
             "owner".to_owned(),
             Binding {
+                closure: None,
                 ty: I32,
                 mutable: true,
                 access: IrAccess::Owned,

@@ -1523,16 +1523,6 @@ impl TypeTable {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let result = self.resolve(module, result)?;
-            if parameters
-                .iter()
-                .any(|parameter| matches!(parameter.ty, Ty::List(_)))
-                || matches!(result, Ty::List(_))
-            {
-                return Err(failure(
-                    17,
-                    "List parameters and results are not supported in function types yet; a List argument needs a direct internal call".into(),
-                ));
-            }
             return Ok(Ty::Function(parameters, Box::new(result)));
         }
         if ty.path.as_slice() == ["\0record"] {

@@ -101,11 +101,13 @@ impl Checker {
             _ => false,
         };
         let Ty::List(element) = read_type(receiver) else {
-            self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter"));
+            let root = super::root_note(base);
+            self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter{root}"));
             return Ty::Error;
         };
         if !writable {
-            self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter"));
+            let root = super::root_note(base);
+            self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter{root}"));
         }
         let pop = method == "pop";
         if arguments.len() != usize::from(method == "push") {

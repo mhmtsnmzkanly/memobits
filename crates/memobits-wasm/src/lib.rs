@@ -534,6 +534,9 @@ struct FrameLayout {
     arrays: BTreeMap<Slot, ArrayCell>,
     /// Layout of each struct type, indexed by `TypeId`.
     structs: Vec<StructLayout>,
+    /// Environment record of each closure value (by output value): one 32-bit
+    /// capture address per capture.
+    closures: BTreeMap<u32, u32>,
     size: u32,
 }
 
@@ -722,7 +725,34 @@ impl FrameLayout {
                 arrays.insert(Slot::Value(value), cell);
             }
         }
-        let size = if slots.is_empty() && arrays.is_empty() {
+        let mut closures = BTreeMap::new();
+        for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+            let (InstructionKind::ClosureNew { captures, .. }, Some(output)) =
+                (&instruction.kind, instruction.output)
+            else {
+                continue;
+            };
+            offset = align_up(offset, 4).ok_or_else(|| FrameLayoutError {
+                message: stack_exceeded(
+                    "closure environment",
+                    "more than 4 GiB".into(),
+                    stack_size,
+                ),
+                span: Some(function.span),
+            })?;
+            closures.insert(output.0, offset);
+            offset = offset
+                .checked_add(4 * captures.len() as u32)
+                .ok_or_else(|| FrameLayoutError {
+                    message: stack_exceeded(
+                        "closure environment",
+                        "more than 4 GiB".into(),
+                        stack_size,
+                    ),
+                    span: Some(function.span),
+                })?;
+        }
+        let size = if slots.is_empty() && arrays.is_empty() && closures.is_empty() {
             0
         } else {
             align_up(offset, 16)
@@ -742,6 +772,7 @@ impl FrameLayout {
             slots,
             arrays,
             structs: structs.to_vec(),
+            closures,
             size,
         })
     }
@@ -852,6 +883,9 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 InstructionKind::Call { callee, arguments } => {
                     count(callee);
                     arguments.iter().for_each(&mut count);
+                }
+                InstructionKind::ClosureNew { captures, .. } => {
+                    captures.iter().for_each(&mut count)
                 }
             }
         }
@@ -1473,10 +1507,17 @@ fn encode_frames_traced(
                 if let InstructionKind::Constant(Constant::Function(target)) = &instruction.kind {
                     pending.push(*target);
                 }
+                if let InstructionKind::ClosureNew {
+                    function: target, ..
+                } = &instruction.kind
+                {
+                    pending.push(*target);
+                }
             }
         }
     }
     let slots = function_values::function_slots(program, &reachable);
+    let value_captures = function_values::function_captures(program, &reachable);
     let selected = reachable
         .iter()
         .map(|id| &program.functions[*id as usize])
@@ -1528,15 +1569,32 @@ fn encode_frames_traced(
     let mut call_types: Vec<HashMap<u32, u32>> = vec![HashMap::new(); program.functions.len()];
     for id in &reachable {
         for (value, signature) in calls.get(*id as usize).into_iter().flatten() {
+            let signature = function_values::with_environment(signature);
             let index = signatures
                 .iter()
-                .position(|known| known == signature)
+                .position(|known| known == &signature)
                 .unwrap_or_else(|| {
                     signatures.push(signature.clone());
                     signatures.len() - 1
                 });
             call_types[*id as usize].insert(*value, index as u32);
         }
+    }
+    // Every table entry is a thunk of the indirect-call type of its value.
+    let mut thunk_types: BTreeMap<u32, u32> = BTreeMap::new();
+    for (target, captures) in &value_captures {
+        let signature = function_values::with_environment(&function_values::value_signature(
+            &program.functions[*target as usize],
+            *captures,
+        ));
+        let index = signatures
+            .iter()
+            .position(|known| known == &signature)
+            .unwrap_or_else(|| {
+                signatures.push(signature.clone());
+                signatures.len() - 1
+            });
+        thunk_types.insert(*target, index as u32);
     }
     let mut types = TypeSection::new();
     for signature in &signatures {
@@ -1719,6 +1777,12 @@ fn encode_frames_traced(
         );
     }
     let structs = struct_layouts(&program.types)?;
+    // Thunks come last in the function index space (after every helper).
+    let mut thunk_indices: BTreeMap<u32, u32> = BTreeMap::new();
+    for (target, type_index) in &thunk_types {
+        thunk_indices.insert(*target, import_count + functions.len());
+        functions.function(*type_index);
+    }
     let mut code = CodeSection::new();
     let mut traps = Traps {
         global: if has_frames { TRAP_GLOBAL } else { 0 },
@@ -1780,6 +1844,30 @@ fn encode_frames_traced(
                 code.function(&function);
             }
         }
+    }
+    for (target, captures) in &value_captures {
+        let function = &program.functions[*target as usize];
+        let declared = function.signature.parameters.len() - captures;
+        let hidden = is_aggregate(function.signature.result.as_ref());
+        let mut thunk = WasmFunction::new([]);
+        for index in 0..declared as u32 {
+            thunk.instruction(&WasmInstruction::LocalGet(index));
+        }
+        for capture in 0..*captures as u32 {
+            thunk.instruction(&WasmInstruction::LocalGet(declared as u32));
+            thunk.instruction(&WasmInstruction::I32Load(MemArg {
+                offset: u64::from(capture * 4),
+                align: 2,
+                target: wasm_encoder::MemArgTarget::Memory(0),
+                ordering: None,
+            }));
+        }
+        if hidden {
+            thunk.instruction(&WasmInstruction::LocalGet(declared as u32 + 1));
+        }
+        thunk.instruction(&WasmInstruction::Call(indices[target]));
+        thunk.instruction(&WasmInstruction::End);
+        code.function(&thunk);
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
@@ -1878,7 +1966,7 @@ fn encode_frames_traced(
         by_slot.sort_by_key(|(_, slot)| **slot);
         let indices = by_slot
             .iter()
-            .map(|(id, _)| indices[id])
+            .map(|(id, _)| thunk_indices[id])
             .collect::<Vec<_>>();
         let mut elements = ElementSection::new();
         elements.active(
@@ -4522,6 +4610,42 @@ fn compile_instruction(
                 output.ok_or("borrow lacks output")?,
             ));
         }
+        InstructionKind::ClosureNew {
+            function: target,
+            captures,
+        } => {
+            let output_id = instruction.output.ok_or("closure lacks an output")?;
+            let offset = *layout
+                .closures
+                .get(&output_id.0)
+                .ok_or("closure has no environment cell")?;
+            let frame = frame.ok_or("closure environment requires a frame")?;
+            for (index, capture) in captures.iter().enumerate() {
+                emit_address(body, frame, offset + 4 * index as u32);
+                emit_operand(body, function, param_count, capture, layout, Some(frame))?;
+                body.instruction(&WasmInstruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    target: wasm_encoder::MemArgTarget::Memory(0),
+                    ordering: None,
+                }));
+            }
+            // (environment address << 32) | table slot
+            emit_address(body, frame, offset);
+            body.instruction(&WasmInstruction::I64ExtendI32U);
+            body.instruction(&WasmInstruction::I64Const(32));
+            body.instruction(&WasmInstruction::I64Shl);
+            body.instruction(&WasmInstruction::I64Const(i64::from(
+                *values
+                    .slots
+                    .get(&target.0)
+                    .ok_or("closure function has no table slot")?,
+            )));
+            body.instruction(&WasmInstruction::I64Or);
+            body.instruction(&WasmInstruction::LocalSet(
+                output.ok_or("closure lacks output")?,
+            ));
+        }
         InstructionKind::Load { reference } => {
             emit_operand(body, function, param_count, reference, layout, frame)?;
             emit_load(body, reference_primitive(function, reference)?);
@@ -4816,6 +4940,13 @@ fn compile_instruction(
             };
             for argument in arguments {
                 emit_operand(body, function, param_count, argument, layout, frame)?;
+            }
+            if indirect_type.is_some() {
+                // The environment pointer is the high word of the function value.
+                emit_operand(body, function, param_count, callee, layout, frame)?;
+                body.instruction(&WasmInstruction::I64Const(32));
+                body.instruction(&WasmInstruction::I64ShrU);
+                body.instruction(&WasmInstruction::I32WrapI64);
             }
             let value = output.ok_or("call lacks an output")?;
             let id = instruction.output.unwrap();

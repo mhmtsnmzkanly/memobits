@@ -422,16 +422,18 @@ pub(super) fn validate_string_struct_borrows(
     }
     let mut forwarded_parameter = false;
     for instruction in instructions() {
-        let InstructionKind::Call {
-            callee:
-                Operand {
-                    source: Source::Function(_),
-                    ..
-                },
-            arguments,
-        } = &instruction.kind
-        else {
-            continue;
+        // A closure's captures are passed to its lifted function like call arguments.
+        let arguments = match &instruction.kind {
+            InstructionKind::Call {
+                callee:
+                    Operand {
+                        source: Source::Function(_),
+                        ..
+                    },
+                arguments,
+            } => arguments,
+            InstructionKind::ClosureNew { captures, .. } => captures,
+            _ => continue,
         };
         for argument in arguments {
             let value = match argument.source {
@@ -515,6 +517,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         | InstructionKind::VariantExtract { .. } => None,
         // Calls through function values are erased to `call_indirect`.
         InstructionKind::Call { .. } => None,
+        InstructionKind::ClosureNew { .. } => None,
         InstructionKind::Unary { .. } => None,
         InstructionKind::Binary {
             op: BinaryOp::And | BinaryOp::Or,

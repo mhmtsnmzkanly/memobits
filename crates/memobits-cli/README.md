@@ -174,8 +174,8 @@ elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level functi
 value only where an expected function type fixes its type argument; a `test fn` is never
 a value. Anonymous functions are `fn(x: i32) -> i32 => expr`, `fn(x: i32) -> i32 { .. }`
 and `fn(x) => expr` (types from the expected function type); one that names a local of
-its enclosing function is TE017 ("closures that capture variables arrive in the next
-step"), while constants, top-level functions and imports are fine. Named functions,
+its enclosing function is a closure (H2, below); constants, top-level functions and
+imports are not captures. Named functions,
 `extend` methods and `test fn`s may use `=> expr` bodies. Calls go through a local,
 parameter, function-valued field (a method of the same name wins), element or result,
 `f(x)`, `s.callback(x)`, `xs[i](x)`, `make()(x)`, and pass arguments by the target's
@@ -183,6 +183,20 @@ access modes. A function value is a 64-bit scalar (table slot, environment word 
 like a primitive, stored without heap (works with `alloc = false`), called with
 `call_indirect` through a function table (a bad slot traps with reason 13); it has no
 equality and cannot be exported or returned by `main` (LE900).
+Closures (H2): `borrow fn(..)` / `share fn(..)` parameters (also inside function types)
+take any function value, written bare (no `.borrow()`). An anonymous function captures
+the enclosing locals it uses: read-only use borrows, mutation (assignment, compound
+assignment, `push`, `push_str`, a share call, ...) shares (the variable must be `var` or
+a share parameter; TE004 otherwise). `=> total += x` is a valid body (a Unit assignment).
+A capturing closure is second-class (TE017 "second-class"): only a direct argument of a
+`borrow fn`/`share fn` parameter, or an immutable `let` that is only called or passed on
+(no return, storage, move, copy or `var`; an owned `fn` parameter rejects it). Passing a
+mutating closure, or a `share fn` parameter, to a `borrow fn` parameter is TE017. A live
+closure holds borrow/share loans on its captures (BE005 on conflicting access, free after
+its last use). Environment: addresses of the captured places in the creator's frame, in
+the high word of the function value; every indirect call passes it as a trailing hidden
+i32 and table entries are thunks (no heap, `alloc = false` works). List parameters and
+results are allowed in function types with direct-call rules.
 Follow-ups (F1): the non-receiver arguments of inherent, interface-selected (`of I`)
 and generic nominal methods follow the function-argument rules (owned structs, tuples,
 records, arrays, enums, Lists and Strings move in with staged temporaries; `.borrow()` /
