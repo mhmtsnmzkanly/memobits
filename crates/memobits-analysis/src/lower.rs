@@ -1365,6 +1365,41 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The List a mutating method acts on: a named local, or an element of
+    /// an outer List (`outer[i].push(x)`) whose path is evaluated now.
+    fn list_place(&mut self, base: &Expr) -> Option<ListPlace> {
+        if let ExprKind::Index { .. } = base.kind {
+            let (root, positions) = self.lower_place(base)?;
+            return Some(ListPlace::Element(root, positions));
+        }
+        let PathTarget::Local(local) = self.path(base) else {
+            unreachable!("checked List receiver")
+        };
+        Some(ListPlace::Local(local))
+    }
+    /// The local the List instructions target. An element of an outer List is
+    /// reached through a checked share address held in a hidden local.
+    fn list_target(&mut self, place: ListPlace, span: Span) -> Option<LocalId> {
+        match place {
+            ListPlace::Local(local) => Some(local),
+            ListPlace::Element(root, positions) => {
+                let reference = self.address_chain(root, &positions, Access::Share, span)?;
+                let ty = self.operand_type(reference)?;
+                let local = self.hidden_local("list element", ty, span);
+                self.emit(
+                    span,
+                    InstructionKind::Assign {
+                        target: local,
+                        value: consume(reference),
+                        initialize: true,
+                    },
+                    None,
+                );
+                Some(local)
+            }
+        }
+    }
+
     fn lower_collection_read(
         &mut self,
         expr: &Expr,
@@ -1376,7 +1411,7 @@ impl<'a> Builder<'a> {
         let result = (|| {
             let search = matches!(method, "contains" | "index_of");
             let string_field = matches!(base.kind, ExprKind::Field { .. } | ExprKind::Index { .. })
-                && self.ty(base) == Some(Type::String);
+                && matches!(self.ty(base), Some(Type::String | Type::List(_)));
             let receiver = if search || string_field {
                 // Keep the receiver loan live across value evaluation.
                 self.lower_read_receiver(base)?
@@ -1404,6 +1439,23 @@ impl<'a> Builder<'a> {
                     }
                 }
             } else if method == "get" {
+                let receiver = if matches!(receiver.source, Source::Local(_)) {
+                    receiver
+                } else {
+                    // An element of an outer List: hold the loan in a local.
+                    let ty = self.operand_type(receiver)?;
+                    let local = self.hidden_local("list element", ty, expr.span);
+                    self.emit(
+                        expr.span,
+                        InstructionKind::Assign {
+                            target: local,
+                            value: consume(receiver),
+                            initialize: true,
+                        },
+                        None,
+                    );
+                    op(Source::Local(local), expr.span)
+                };
                 let index = self.lower_expr(&arguments[0])?;
                 InstructionKind::ListGet {
                     source: read(receiver),
@@ -1480,9 +1532,40 @@ impl<'a> Builder<'a> {
         let returned = if result == Type::Primitive(Primitive::Unit) {
             None
         } else {
-            value.and_then(|value| self.owned_to(value, &result))
+            value.and_then(|value| self.owned_result(value, &result))
         };
         self.return_from_body(returned, body.span);
+    }
+
+    /// Whether `value` is the output of a `StructNew` in the current block
+    /// (a literal, not a captured or called value).
+    fn is_struct_literal_value(&self, value: Operand) -> bool {
+        let (Source::Value(id), Some(current)) = (value.source, self.current) else {
+            return false;
+        };
+        self.function.blocks[current.0 as usize]
+            .instructions
+            .iter()
+            .rev()
+            .find(|instruction| instruction.output == Some(id))
+            .is_some_and(|instruction| {
+                matches!(instruction.kind, InstructionKind::StructNew { .. })
+            })
+    }
+    /// `owned_to` for a function result. A freshly built String-owning
+    /// aggregate (a struct or record literal, a call result) is staged in a
+    /// hidden local first so its construction has a direct binding.
+    fn owned_result(&mut self, value: Operand, result: &Type) -> Option<Operand> {
+        let value = self.owned_to(value, result)?;
+        if matches!(result, Type::Struct(_))
+            && self.is_string_owner_struct(result)
+            && self.is_struct_literal_value(value)
+        {
+            let staged = self.hidden_local("result value", result.clone(), self.function.span);
+            self.initialize_local(staged, value, self.function.span);
+            return Some(consume(op(Source::Local(staged), self.function.span)));
+        }
+        Some(value)
     }
 
     fn lower_block(&mut self, block: &Block) -> Option<Operand> {
@@ -1625,7 +1708,7 @@ impl<'a> Builder<'a> {
                         Some(expr) => {
                             let result = self.function.signature.result.as_ref().clone();
                             self.lower_expr(expr)
-                                .and_then(|value| self.owned_to(value, &result))
+                                .and_then(|value| self.owned_result(value, &result))
                         }
                         None => None,
                     };
@@ -2681,16 +2764,14 @@ impl<'a> Builder<'a> {
                         );
                     }
                     if name == "clear" {
-                        let PathTarget::Local(target) = self.path(base) else {
-                            unreachable!("checked List clear receiver")
-                        };
+                        let place = self.list_place(base)?;
+                        let target = self.list_target(place, base.span)?;
                         self.emit(expr.span, InstructionKind::ListClear { target }, None);
                         return self.unit(expr.span);
                     }
                     if name == "pop" {
-                        let PathTarget::Local(target) = self.path(base) else {
-                            unreachable!("checked List pop receiver")
-                        };
+                        let place = self.list_place(base)?;
+                        let target = self.list_target(place, base.span)?;
                         return self.emit(
                             expr.span,
                             InstructionKind::ListPop { target },
@@ -2698,13 +2779,13 @@ impl<'a> Builder<'a> {
                         );
                     }
                     if name == "push" {
-                        let PathTarget::Local(target) = self.path(base) else {
-                            unreachable!("checked List push receiver")
-                        };
-                        let element_ty = match &self.function.locals[target.0 as usize].ty {
-                            Type::List(element) => element.as_ref().clone(),
-                            Type::Reference { inner, .. } => match inner.as_ref() {
-                                Type::List(element) => element.as_ref().clone(),
+                        // The place path (indices) is evaluated first, then the
+                        // element, then the checked address of the target list.
+                        let place = self.list_place(base)?;
+                        let element_ty = match self.ty(base) {
+                            Some(Type::List(element)) => *element,
+                            Some(Type::Reference { inner, .. }) => match *inner {
+                                Type::List(element) => *element,
                                 _ => unreachable!("checked List push receiver"),
                             },
                             _ => unreachable!("checked List push receiver"),
@@ -2715,6 +2796,7 @@ impl<'a> Builder<'a> {
                         } else {
                             self.owned_element(&arguments[0], &element_ty)?
                         };
+                        let target = self.list_target(place, base.span)?;
                         self.emit(expr.span, InstructionKind::ListPush { target, value }, None);
                         return self.unit(expr.span);
                     }
@@ -2854,7 +2936,7 @@ impl<'a> Builder<'a> {
     /// consumes it) and releases every unbound owned part exactly once; an
     /// in-place match copies primitive payloads and lends aggregates.
     fn lower_match(&mut self, expr: &Expr, scrutinee: &Expr, arms: &[MatchArm]) -> Option<Operand> {
-        let sink = self.value_sink.take();
+        let (sink, own_sink) = self.take_value_sink(expr);
         let fact = self.matches[&self.id(expr)];
         let span = scrutinee.span;
         // `owner` is the hidden owner of a consuming match; `root` is the
@@ -2977,7 +3059,7 @@ impl<'a> Builder<'a> {
         }
         self.current = reaches.then_some(join_id);
         if sink.is_some() {
-            return if reaches { self.unit(expr.span) } else { None };
+            return self.finish_value_sink(expr, own_sink, reaches);
         }
         parameter.map(|id| op(Source::Value(id), expr.span))
     }
@@ -3556,6 +3638,43 @@ impl<'a> Builder<'a> {
             }
         }
     }
+    /// The value sink for an `if`/`match`: the one a caller installed, or, for
+    /// an owner-typed result, a fresh hidden local that this expression owns
+    /// (the second element). Each branch moves its value into the sink, so no
+    /// heap value crosses the join.
+    fn take_value_sink(&mut self, expr: &Expr) -> (Option<(LocalId, Type)>, Option<LocalId>) {
+        if let Some(sink) = self.value_sink.take() {
+            return (Some(sink), None);
+        }
+        let Some(ty) = self.ty(expr) else {
+            return (None, None);
+        };
+        if !(matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(&ty)) {
+            return (None, None);
+        }
+        let local = self.hidden_local("branch value", ty.clone(), expr.span);
+        (Some((local, ty)), Some(local))
+    }
+    /// Result of an `if`/`match` that delivered into a sink: the unit
+    /// placeholder for a caller-owned sink, or the owned hidden local (now
+    /// registered for cleanup) for a sink the expression created.
+    fn finish_value_sink(
+        &mut self,
+        expr: &Expr,
+        own_sink: Option<LocalId>,
+        reaches: bool,
+    ) -> Option<Operand> {
+        if !reaches {
+            return None;
+        }
+        match own_sink {
+            Some(local) => {
+                self.owned_locals.push(local);
+                Some(consume(op(Source::Local(local), expr.span)))
+            }
+            None => self.unit(expr.span),
+        }
+    }
     /// Move one branch value into the hidden local of a value sink.
     fn deliver_to_sink(
         &mut self,
@@ -3588,7 +3707,7 @@ impl<'a> Builder<'a> {
         then_branch: &Block,
         else_branch: Option<&Expr>,
     ) -> Option<Operand> {
-        let sink = self.value_sink.take();
+        let (sink, own_sink) = self.take_value_sink(expr);
         let condition_value = self.lower_expr(condition)?;
         let condition_value = self.scalar(condition_value)?;
         let then_id = self.new_block();
@@ -3648,7 +3767,7 @@ impl<'a> Builder<'a> {
         }
         self.current = reaches.then_some(join_id);
         if sink.is_some() {
-            return if reaches { self.unit(expr.span) } else { None };
+            return self.finish_value_sink(expr, own_sink, reaches);
         }
         parameter.map(|id| op(Source::Value(id), expr.span))
     }
@@ -3731,6 +3850,12 @@ impl<'a> Builder<'a> {
         self.current = Some(join_id);
         Some(op(Source::Value(result), expr.span))
     }
+}
+
+/// Receiver of a List-mutating method.
+enum ListPlace {
+    Local(LocalId),
+    Element(Operand, Vec<Projection>),
 }
 
 fn access_mode(access: Access) -> UseMode {

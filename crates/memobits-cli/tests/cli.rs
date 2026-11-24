@@ -2146,7 +2146,7 @@ fn empty_list_diagnostics_keep_moves_and_boundaries_checked() {
             "BE001",
         ),
         (
-            "use alloc::List; fn main() { let items: List<List<u8>> = []; }",
+            "use alloc::List; fn main() { let items: List<borrow string> = []; }",
             "TE017",
         ),
         ("use alloc::List; fn main() { let items: List<u8> = [true]; }", "TE002"),
@@ -2527,26 +2527,10 @@ fn wasm_gates_unsupported_string_struct_uses() {
     );
     for (source, code, message) in [
         (
-            r#"fn main() { let text := "a".concat("b"); let label := if true { Label { text: text } } else { Label { text: "c" } }; }"#,
-            "LE900",
-            "requires a direct new local binding",
-        ),
-        (
             r#"fn make() -> string { let text := "a".concat("b"); text }
                 fn main() { let label := Label { text: { make() } }; }"#,
             "TE018",
             "heap String call result must be assigned directly",
-        ),
-        (
-            r#"fn main() { let label := if true { Label { text: "a".concat("b") } } else { Label { text: "c" } }; }"#,
-            "LE900",
-            "requires a direct new local binding",
-        ),
-        (
-            r#"fn make() -> string { "a" }
-                fn main() { let label := if true { Label { text: make() } } else { Label { text: "c" } }; }"#,
-            "LE900",
-            "requires a direct new local binding",
         ),
         (
             r#"fn make() -> string { "a" }
@@ -2581,11 +2565,6 @@ fn wasm_gates_unsupported_string_struct_uses() {
             r#"fn replace(var label: Label) { label.text = label.text.concat("!"); } fn main() {}"#,
             "TE017",
             "concat requires",
-        ),
-        (
-            r#"fn make() -> Label { let text := "a".concat("b"); Label { text: text } } fn main() {}"#,
-            "LE900",
-            "requires a direct new local binding",
         ),
         (
             r#"fn main() { let label := Label { text: "a" }; let view := label.borrow(); }"#,

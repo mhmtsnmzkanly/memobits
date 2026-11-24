@@ -567,11 +567,6 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
             "requires a new local binding",
         ),
         (
-            "fn main() { let x := if true { make() } else { make() }; }",
-            "TE018",
-            "must be assigned directly",
-        ),
-        (
             "fn forward() -> Label { make() } fn main() {}",
             "TE018",
             "must be assigned directly",

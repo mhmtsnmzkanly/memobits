@@ -433,3 +433,38 @@ test fn replace_and_swap_list_elements() {
     words[1] = "yy".concat("");
     assert(words[1].len() == 2);
 }
+// `List<List<T>>`: an outer List owns inner Lists. `outer.push(inner)` moves
+// the inner List in, `outer[i]` is a List place (`outer[i][j]` reads, and
+// `push`, `pop`, `clear`, `len`, `replace`, `swap` and `outer[i] = v` work on
+// it), and `outer.pop()` moves an inner List out. Every inner List is released
+// exactly once with the outer List. Arrays of Lists and Lists inside structs
+// stay unsupported.
+test fn nested_lists() {
+    var outer: List<List<u32>> = [];
+    var first: List<u32> = [];
+    first.push(5);
+    first.push(6);
+    outer.push(first);
+    outer.push([9]);
+    outer[0].push(7);
+    assert(outer.len() == 2);
+    assert(outer[0].len() == 3);
+    assert(outer[0][2] == 7);
+    outer[1][0] = 8;
+    assert(outer[1][0] == 8);
+    let old := replace(outer[1], [1, 2]);
+    assert(old.len() == 1);
+    assert(outer[1].len() == 2);
+    match outer.pop() {
+        Some(last) => { assert(last.len() == 2); }
+        None => { assert(false); }
+    }
+    assert(outer.len() == 1);
+    outer[0].clear();
+    assert(outer[0].len() == 0);
+    var words: List<List<string>> = [];
+    var row: List<string> = [];
+    row.push("hello");
+    words.push(row);
+    assert(words[0][0].len() == 5);
+}

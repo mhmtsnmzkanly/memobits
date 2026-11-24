@@ -316,3 +316,53 @@ test fn mixed_owner_struct_literal() {
     assert(mixed.name.len() == 3);
     assert(mixed.rows[1].number == 3);
 }
+// An `if` or `match` can produce an owner value (a `string`, a List or a
+// String-owning struct, tuple or enum) anywhere a value is accepted: a binding,
+// an argument, an assignment or a function result. Each branch moves its value
+// into one destination before the branches join, so the branch that is not
+// chosen keeps (and later releases) its own locals.
+fn pick_text(first: bool) -> string {
+    let a := "abc".concat("");
+    let b := "xy".concat("");
+    if first { a } else { b }
+}
+fn pick_label(first: bool) -> TextLabel {
+    let a := "abc".concat("");
+    let b := "xy".concat("");
+    if first {
+        TextLabel { number: 1, text: a }
+    } else {
+        TextLabel { number: 2, text: b }
+    }
+}
+test fn if_and_match_produce_owner_values() {
+    let a := "abc".concat("");
+    let b := "xy".concat("");
+    let chosen := if a.len() > 5 { a } else { b };
+    assert(chosen.len() == 2);
+    assert(pick_text(true).len() == 3);
+    let label := pick_label(false);
+    assert(label.number == 2);
+    assert(label.text.len() == 2);
+    let c := "q".concat("");
+    let d := "rrrr".concat("");
+    let pick := Pick::Right;
+    var current := "z".concat("");
+    current = match pick { Left => c, Right => d };
+    assert(current.len() == 4);
+}
+// A struct literal can be a function's last expression or a `return` operand.
+fn label_tail(number: u32, text: string) -> TextLabel {
+    if number == 0 { return TextLabel { number: 9, text: text }; }
+    TextLabel { number: number, text: text }
+}
+test fn struct_literal_as_function_result() {
+    let first := "ab".concat("");
+    let second := "cde".concat("");
+    let one := label_tail(0, first);
+    let two := label_tail(4, second);
+    assert(one.number == 9);
+    assert(one.text.len() == 2);
+    assert(two.number == 4);
+    assert(two.text.len() == 3);
+}

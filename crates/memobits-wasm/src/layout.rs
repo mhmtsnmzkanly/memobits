@@ -275,6 +275,13 @@ pub(super) fn struct_layout_at(
                             string_descriptor::ALIGN,
                             FieldStorage::Aggregate(string_descriptor::SIZE),
                         ))
+                    } else if matches!(ty, Type::List(_)) {
+                        // `List<T>?` from `pop()`: the payload is the List descriptor.
+                        Some((
+                            list_descriptor::SIZE,
+                            list_descriptor::ALIGN,
+                            FieldStorage::Aggregate(list_descriptor::SIZE),
+                        ))
                     } else {
                         member_layout(types, ty, done, active, true, true)?
                     };

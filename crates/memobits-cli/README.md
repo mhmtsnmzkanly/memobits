@@ -67,8 +67,18 @@ application entry or library exports to WebAssembly. The implemented subset
 includes primitives, fixed arrays, structs, enums, internal calls, and internal
 primitive/aggregate references. `List<T>` (after `use alloc::List;`) holds any
 admitted element type (primitives of every width, `bool`, `char`, `string`,
-structs, tuples, enums and arrays). Nested lists (`List<List<T>>`) are rejected
-with TE017 ("nested lists are not supported yet").
+structs, tuples, enums and arrays). Nested lists (`List<List<T>>`) work:
+`outer.push(inner)` moves a List in, `outer[i]` is a List place (`outer[i][j]`
+reads, `outer[i].push(x)`, `.pop()`, `.clear()`, `.len()`, `.get()`,
+`.borrow()` / `.share()`, `replace`, `swap` and `outer[i] = v` all work through
+the element place), `outer.pop()` moves an inner List out, and the outer List
+releases every inner List exactly once. Arrays of Lists, Lists inside structs
+or user enums, and `Some(list)` stay gated.
+An `if`/`match` expression may produce a `string`, List or String-owning
+aggregate anywhere a value is accepted (binding, argument, assignment, tail
+result): each branch moves its value into one hidden destination before the
+join, and the unchosen branch's inputs are released with their own scopes. A
+struct literal may be a function's tail expression.
 Contextual empty `[]` and non-empty `[a, b, c]` literals build a List (elements
 run once in written order and move in). `items[i]` is a bounds-checked element
 place: primitives are copied, other elements are used in place (borrow/share

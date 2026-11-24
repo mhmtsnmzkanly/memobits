@@ -3235,6 +3235,7 @@ impl Checker {
                 base_ty,
                 Ty::String
                     | Ty::Array(..)
+                    | Ty::List(..)
                     | Ty::Struct(..)
                     | Ty::Tuple(..)
                     | Ty::Enum(..)

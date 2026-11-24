@@ -7,6 +7,10 @@ impl Checker {
         match &base.kind {
             ExprKind::Path(path) => path.len() == 1,
             ExprKind::Call { callee, .. } => self.direct_callee(callee),
+            // An element of an outer List or array: a place rooted at a local.
+            ExprKind::Index { .. } => {
+                matches!(super::place_root(base), Some(path) if path.len() == 1)
+            }
             _ => false,
         }
     }
@@ -70,8 +74,31 @@ impl Checker {
                     ..
                 }
         );
-        let writable = matches!(&base.kind, ExprKind::Path(path) if path.len() == 1
-            && self.lookup(&path[0]).is_some_and(|binding| mutable_receiver && (binding.mutable || binding.access == IrAccess::Share)));
+        let writable = match &base.kind {
+            ExprKind::Path(path) => {
+                path.len() == 1
+                    && self.lookup(&path[0]).is_some_and(|binding| {
+                        mutable_receiver && (binding.mutable || binding.access == IrAccess::Share)
+                    })
+            }
+            // `outer[i].push(x)` writes the element, so the root owner must be
+            // a `var` or a `share` parameter.
+            ExprKind::Index { .. } => match super::place_root(base) {
+                Some(path) if path.len() == 1 => self.lookup(&path[0]).is_some_and(|binding| {
+                    mutable_receiver
+                        && (binding.mutable || binding.access == IrAccess::Share)
+                        && !matches!(
+                            &binding.ty,
+                            Ty::Reference {
+                                access: IrAccess::Borrow,
+                                ..
+                            }
+                        )
+                }),
+                _ => false,
+            },
+            _ => false,
+        };
         let Ty::List(element) = read_type(receiver) else {
             self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter"));
             return Ty::Error;
@@ -120,6 +147,11 @@ impl Checker {
         element: &Ty,
         span: memobits_diagnostics::Span,
     ) {
+        if matches!(element, Ty::List(_)) {
+            // Nested lists: the inner List owns its block and is released with
+            // the outer element cleanup.
+            return;
+        }
         self.check_element_support(element, span);
     }
 }

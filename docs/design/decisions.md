@@ -614,8 +614,8 @@ Facts about the shipped behavior; no new decisions.
   List grows by doubling and moves elements bitwise; `pop` moves an owner into
   the `T?` payload. `get`, `contains` and `index_of` stay primitive-only
   (`get` on other elements is TE022 pointing at `items[i]`, the searches are
-  TE017). Nested `List<List<T>>` is TE017 ("nested lists are not supported
-  yet"), as are reference elements. Live element loans block `push`, `pop`,
+  TE017). Nested `List<List<T>>` was TE017 here and is lifted by G1 (below);
+  reference elements stay TE017. Live element loans block `push`, `pop`,
   `clear`, moves and reassignment (BE005).
 - R1 `replace(place, value) -> T`: a built-in; an in-scope function, import or
   value named `replace` (or `swap`) takes precedence. The first argument is a
@@ -658,6 +658,64 @@ Facts about the shipped behavior; no new decisions.
   Strings, directly or nested, report LE900 "Error-derived type 'T' cannot own
   heap Strings yet". A BE005 on `swap(a, b)` between two projected places adds
   a note that swap needs two disjoint places. `Resolution::ignored_tests` was
-  removed (unread). Not widened: a struct literal as a function's tail
-  expression still needs a named local binding; `if`/`match` owner values
-  outside `replace` still cannot cross a join (TE018).
+  removed (unread). (The two limits left open here, a struct literal as a
+  function's tail expression and `if`/`match` owner values outside `replace`,
+  are lifted by G1, below.)
+- G1 (2026-11-24), facts only:
+  - `if` / `else if` / `match` expressions (blocks as branches) of `string`,
+    `List` or String-owning aggregates (structs, tuples, enums, arrays) work
+    in every value position: binding, call argument, assignment RHS, function
+    tail and `return` operand. `Builder::value_sink` is installed by the
+    expression itself when no caller did (`take_value_sink` /
+    `finish_value_sink` in analysis `lower.rs`): each branch moves its value
+    into one hidden destination local before the join, so no heap value
+    crosses a join. Branch inputs that were not chosen stay owned by their own
+    locals and are released at their scopes; a moved-from source is cleared at
+    run time, so release stays exact on both paths. A `return` inside a branch
+    releases everything in scope, including the not-yet-initialized sink
+    (which is registered for cleanup only after the join). Results of other
+    types (primitives, borrows) still join through block parameters.
+  - A struct literal (named or anonymous record) of a String-owning type may
+    be a function's tail expression or `return` operand: `owned_result`
+    stages the `StructNew` output in a hidden local first.
+  - `List<List<T>>` (any admitted inner element type, e.g. `List<List<string>>`):
+    `outer.push(inner)` moves the inner List in (bitwise descriptor); `outer[i]`
+    is a List place, so `outer[i][j]` reads, `outer[i][j] = v`, and the List
+    methods `push`, `pop`, `clear`, `len`, `get`, `contains`, `index_of`,
+    `loop x in outer[i]`, `outer[i].borrow()` / `.share()`, `replace`, `swap`
+    and `outer[i] = v` work through the element place. A mutating method on
+    `outer[i]` evaluates the index path, then the pushed element, then forms a
+    checked share address held in a hidden local that the List instruction
+    targets; the root must be a `var` or `share` parameter (TE017 otherwise).
+    `outer.pop()` yields `List<T>?` (the only Option with a List payload;
+    `Some(list)` and user enums with List payloads stay gated by the List-move
+    rule). Cleanup is type-directed: scope exit, `clear`, overwrite, `drop` and
+    early returns release each inner List (elements, then block) exactly once;
+    growth moves inner descriptors bitwise. Still gated: arrays of Lists (TE017),
+    List fields in structs/tuples, moving an inner List out of `outer[i]`
+    (TE022; use `pop`, `replace` or `swap`).
+
+## Stage 3 ergonomics (2026-11-24, user approved architect defaults)
+
+- `try … else` (direction LANG-07): `let n := try parse(s) else e { return Err(e); };`
+  binds the `Err` payload to `e` in the handler, which must produce a value of
+  the success type or exit. Without `else`, an `Err` is discarded (assignment
+  context leaves the target unchanged). On `T?`, `try x else { … }` handles
+  `None`. `try` is matching sugar: it does not catch traps.
+- Ranges in loops: `loop i in 0..n` (half-open) and `loop i in 0..=n`
+  (inclusive) over integer types, bounds evaluated once in written order.
+  Ranges are not first-class values in this step.
+- String interpolation (direction STR-06): `"x = {x}"` with identifiers only,
+  read without moving, basic types (integers, floats, bool, char, string);
+  `{{` and `}}` escape braces. It produces a heap string, so it belongs to the
+  alloc layer.
+- `const NAME: T = expr;` at module level, evaluated at compile time from
+  literals, other constants and pure built-in operators; primitives and
+  `string` literals only in this step.
+- Numerics: `checked_*` arithmetic returns `T?`; `saturating_*` added;
+  bitwise operators and shifts for all integer widths; signed `>>` is an
+  arithmetic shift; shift counts keep the bounded-count rule.
+- Patterns: literal patterns, or-patterns `A | B` (bindings must agree), and
+  `if` guards; exhaustiveness treats guarded arms as non-covering.
+- `~` bitwise complement for integers; `Self` names the extended type inside
+  `extend` blocks.

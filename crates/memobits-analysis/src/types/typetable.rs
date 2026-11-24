@@ -1651,19 +1651,10 @@ impl TypeTable {
                     };
                     match element {
                         Ty::Reference { .. } => {
-                            return Err(failure(
-                                17,
-                                "List elements cannot be references".into(),
-                            ))
+                            return Err(failure(17, "List elements cannot be references".into()))
                         }
                         Ty::Primitive("Unit") => {
                             return Err(failure(17, "List elements cannot be Unit".into()))
-                        }
-                        Ty::List(_) => {
-                            return Err(failure(
-                                17,
-                                "nested lists are not supported yet; use a struct that wraps a List only after struct List fields land, or flatten the storage".into(),
-                            ))
                         }
                         _ => {}
                     }

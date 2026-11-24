@@ -1035,7 +1035,14 @@ impl Program {
                         let valid = if let Some(inner) = definition.borrow_option_referent() {
                             self.valid_field_type(inner)
                         } else {
-                            variant.payload.iter().all(|ty| self.valid_field_type(ty))
+                            // `List<T>?` from `pop()` carries a List payload.
+                            variant.payload.iter().all(|ty| match ty {
+                                Type::List(element) => {
+                                    self.valid_field_type(element)
+                                        || matches!(element.as_ref(), Type::List(_))
+                                }
+                                ty => self.valid_field_type(ty),
+                            })
                         };
                         if !valid {
                             report(format!(
@@ -1189,7 +1196,7 @@ fn validate_type_shape(
         Type::List(element) => match element.as_ref() {
             Type::Primitive(kind) if *kind != Primitive::Unit => {}
             Type::String => {}
-            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
+            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
             _ => push(errors, id, None, "unsupported List element type"),
@@ -3372,6 +3379,14 @@ fn validate_operand_escapes(
                     output_type(function, instruction.output),
                     Some(Type::List(_))
                 ) && !list_return.is_some_and(|(returned, _)| returned == position)
+                    && !instruction.output.is_some_and(|output| {
+                        // A List moved into an outer List element.
+                        block.instructions[position + 1..].iter().any(|candidate| {
+                            matches!(&candidate.kind, InstructionKind::ListPush { value, .. }
+                                if value.source == Source::Value(output)
+                                    && value.mode == UseMode::Consume)
+                        })
+                    })
                 {
                     push(
                         errors,
