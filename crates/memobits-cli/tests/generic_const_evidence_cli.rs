@@ -649,13 +649,21 @@ fn short_circuit_skips_rhs_effects_in_source_and_wasm() {
 }
 
 #[test]
-fn primitive_signed_shifts_are_rejected() {
+fn primitive_shifts_accept_signed_values_and_require_u32_counts() {
     let f = Fixture::new();
     for shift in ["<<", ">>"] {
         f.write(
             "src/app.mb",
             &format!(
                 "fn main() -> i32 {{ let value: i32 = 1; let count: u32 = 1; value {shift} count }}"
+            ),
+        );
+        let output = f.run(&["build"]);
+        assert!(output.status.success(), "{shift}: {output:?}");
+        f.write(
+            "src/app.mb",
+            &format!(
+                "fn main() -> i32 {{ let value: i32 = 1; let count: i32 = 1; value {shift} count }}"
             ),
         );
         let output = f.run(&["build"]);

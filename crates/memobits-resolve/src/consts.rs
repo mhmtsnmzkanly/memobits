@@ -8,6 +8,7 @@
 //! zero, `LE003` shift count). This pass runs after names and imports have
 //! been validated, over every loaded module.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
+use memobits_syntax::numeric::{self, IntKind};
 use memobits_syntax::{
     Block, Expr, ExprKind, InterfaceMethod, InterpolationPart, ItemKind, Module, Pattern,
     PatternKind, StatementKind, TupleBinding, Type, TypeArgument, TypeDefinition,
@@ -91,6 +92,9 @@ impl CTy {
             Self::U64 => (0, u64::MAX as i128),
             _ => return None,
         })
+    }
+    fn int_kind(self) -> Option<IntKind> {
+        IntKind::from_name(self.name())
     }
     fn bits(self) -> u32 {
         match self {
@@ -673,35 +677,67 @@ impl Folder<'_> {
             ));
         }
         if bit_op {
-            let l = self.eval(left, Some(CTy::U32), module);
-            let r = self.eval(right, Some(CTy::U32), module);
-            let (l, r) = (l?, r?);
-            if l.0 != CTy::U32 {
-                return self.mismatch(left.span, CTy::U32, l.0);
+            let shifting = matches!(operator, "<<" | ">>");
+            let literal_left = matches!(left.kind, ExprKind::Number(_))
+                || matches!(&left.kind, ExprKind::Unary { operator, operand }
+                    if (operator == "+" || operator == "-")
+                        && matches!(operand.kind, ExprKind::Number(_)));
+            let int_hint = hint.filter(|ty| ty.is_int());
+            let mut early_right = None;
+            let l = if !shifting && int_hint.is_none() && literal_left {
+                let right_hint = numeric::is_literal_tree(right).then_some(CTy::U32);
+                let r = self.eval(right, right_hint, module)?;
+                let l = self.eval(left, Some(r.0), module)?;
+                early_right = Some(r);
+                l
+            } else {
+                let fallback = numeric::is_literal_tree(left).then_some(CTy::U32);
+                self.eval(left, int_hint.or(fallback), module)?
+            };
+            if !l.0.is_int() {
+                return self.fail(
+                    Category::Type,
+                    7,
+                    left.span,
+                    if shifting {
+                        "shift requires integers"
+                    } else {
+                        "bitwise operators require integers"
+                    },
+                );
             }
-            if r.0 != CTy::U32 {
-                return self.mismatch(right.span, CTy::U32, r.0);
+            let right_expected = if shifting { CTy::U32 } else { l.0 };
+            let r = match early_right {
+                Some(r) => r,
+                None => self.eval(right, Some(right_expected), module)?,
+            };
+            if r.0 != right_expected {
+                return self.mismatch(right.span, right_expected, r.0);
             }
-            let (CVal::Int(l), CVal::Int(r)) = (l.1, r.1) else {
+            let (CVal::Int(lv), CVal::Int(rv)) = (l.1, r.1) else {
                 return None;
             };
-            let (l, r) = (l as u32, r as u32);
-            let value = match operator {
-                "&" => l & r,
-                "^" => l ^ r,
-                "|" => l | r,
-                _ if r >= 32 => {
-                    return self.fail(
-                        Category::StaticOperation,
-                        3,
-                        expr.span,
-                        "u32 shift count must be less than 32",
-                    );
+            let kind = l.0.int_kind()?;
+            let value = if shifting {
+                match numeric::shift(kind, operator == "<<", lv, rv as u128) {
+                    Some(value) => value,
+                    None => {
+                        return self.fail(
+                            Category::StaticOperation,
+                            3,
+                            expr.span,
+                            &format!(
+                                "{} shift count must be less than {}",
+                                kind.name(),
+                                kind.bits
+                            ),
+                        );
+                    }
                 }
-                "<<" => l << r,
-                _ => l >> r,
+            } else {
+                numeric::bitwise(operator.chars().next().expect("operator"), lv, rv)
             };
-            return Some((CTy::U32, CVal::Int(value as i128)));
+            return Some((l.0, CVal::Int(value)));
         }
         let expected_num = hint.filter(|ty| ty.is_numeric());
         let is_literal = |e: &Expr| {

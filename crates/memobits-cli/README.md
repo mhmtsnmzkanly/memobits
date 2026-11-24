@@ -109,10 +109,10 @@ Module constants: `const NAME: T = expr;` and `pub const NAME: T = expr;` at mod
 level. `T` is required (SE002 without it) and must be an integer type, `f32`, `f64`,
 `bool`, `char` or `string` (TE017). The value is computed at compile time from
 literals, other constants (same or imported modules, any order) and the built-in
-operators (arithmetic, casts, `u32` bit and shift operators, comparisons, `&&`,
+operators (arithmetic, casts, bit and shift operators on every integer width, comparisons, `&&`,
 `||`, `!`, unary `-`; string constants are a literal or another string constant)
 with the checked semantics of other static expressions: LE001 overflow, LE002 zero
-divisor, LE003 shift count, TE008 literal does not fit, TE002 initializer type is not
+divisor, LE003 shift count at or above the width, TE008 literal does not fit, TE002 initializer type is not
 the declared type, TE007 operand types. LE004 is a cycle and names it
 (`constant cycle: A -> B -> A`; constants of different modules are shown as
 `module::NAME`). LE005 is a non-constant initializer (a call, a function or type

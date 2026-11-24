@@ -265,6 +265,25 @@ pub enum BinaryOp {
     Multiply,
     WrappingAdd,
     WrappingMultiply,
+    /// Modular subtraction at the operand width.
+    WrappingSubtract,
+    /// Left shift with the count masked to the operand width.
+    WrappingShiftLeft,
+    /// Right shift with the count masked to the operand width.
+    WrappingShiftRight,
+    /// Addition that clamps to the operand type's minimum or maximum.
+    SaturatingAdd,
+    SaturatingSubtract,
+    SaturatingMultiply,
+    /// Checked operations produce the scalar option `T?` (`None` on overflow,
+    /// division by zero, or a shift count at or above the width).
+    CheckedAdd,
+    CheckedSubtract,
+    CheckedMultiply,
+    CheckedDivide,
+    CheckedRemainder,
+    CheckedShiftLeft,
+    CheckedShiftRight,
     BitwiseAnd,
     BitwiseXor,
     BitwiseOr,
@@ -3141,15 +3160,32 @@ fn validate_instruction(
                     BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
                         both && is_numeric(&lhs) && output == &lhs
                     }
-                    BinaryOp::WrappingAdd | BinaryOp::WrappingMultiply => {
-                        both && lhs == Type::Primitive(Primitive::U32) && output == &lhs
-                    }
-                    BinaryOp::BitwiseAnd
+                    BinaryOp::WrappingAdd
+                    | BinaryOp::WrappingMultiply
+                    | BinaryOp::WrappingSubtract
+                    | BinaryOp::SaturatingAdd
+                    | BinaryOp::SaturatingSubtract
+                    | BinaryOp::SaturatingMultiply
+                    | BinaryOp::BitwiseAnd
                     | BinaryOp::BitwiseXor
-                    | BinaryOp::BitwiseOr
-                    | BinaryOp::ShiftLeft
-                    | BinaryOp::ShiftRight => {
-                        both && lhs == Type::Primitive(Primitive::U32) && output == &lhs
+                    | BinaryOp::BitwiseOr => both && is_integer(&lhs) && output == &lhs,
+                    BinaryOp::ShiftLeft
+                    | BinaryOp::ShiftRight
+                    | BinaryOp::WrappingShiftLeft
+                    | BinaryOp::WrappingShiftRight => {
+                        is_integer(&lhs) && rhs == Type::Primitive(Primitive::U32) && output == &lhs
+                    }
+                    BinaryOp::CheckedShiftLeft | BinaryOp::CheckedShiftRight => {
+                        is_integer(&lhs)
+                            && rhs == Type::Primitive(Primitive::U32)
+                            && is_checked_option(program, &lhs, output)
+                    }
+                    BinaryOp::CheckedAdd
+                    | BinaryOp::CheckedSubtract
+                    | BinaryOp::CheckedMultiply
+                    | BinaryOp::CheckedDivide
+                    | BinaryOp::CheckedRemainder => {
+                        both && is_integer(&lhs) && is_checked_option(program, &lhs, output)
                     }
                     BinaryOp::Remainder => both && is_integer(&lhs) && output == &lhs,
                     BinaryOp::Less
@@ -4371,6 +4407,32 @@ fn is_numeric(ty: &Type) -> bool {
         )
     )
 }
+/// Whether `output` is the scalar option type `T?` of the integer type `lhs`.
+fn is_checked_option(program: &Program, lhs: &Type, output: &Type) -> bool {
+    let (Type::Primitive(payload), Type::Enum(id)) = (lhs, output) else {
+        return false;
+    };
+    let name = format!("{}?", primitive_name(*payload));
+    program
+        .types
+        .get(id.0 as usize)
+        .is_some_and(|ty| ty.is_scalar_option(&name, *payload))
+}
+
+fn primitive_name(primitive: Primitive) -> &'static str {
+    match primitive {
+        Primitive::I8 => "i8",
+        Primitive::I16 => "i16",
+        Primitive::I32 => "i32",
+        Primitive::I64 => "i64",
+        Primitive::U8 => "u8",
+        Primitive::U16 => "u16",
+        Primitive::U32 => "u32",
+        Primitive::U64 => "u64",
+        _ => "?",
+    }
+}
+
 fn is_integer(ty: &Type) -> bool {
     matches!(
         ty,

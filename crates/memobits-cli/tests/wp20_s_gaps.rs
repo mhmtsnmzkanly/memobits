@@ -225,17 +225,23 @@ fn mixed_type_primitive_arithmetic_is_not_coerced() {
 }
 
 #[test]
-fn signed_shifts_of_every_width_are_rejected() {
+fn signed_shifts_and_compound_bit_operations_accept_every_width_but_need_u32_counts() {
     let f = Fixture::new();
-    for ty in ["i8", "i16", "i64"] {
+    for ty in ["i8", "i16", "i64", "u8", "u16", "u64"] {
         for shift in ["<<", ">>"] {
             f.write(
                 "src/main.mb",
                 &format!("fn main() -> {ty} {{ let a: {ty} = 1; a {shift} 1 }}"),
             );
+            let output = f.run(&["analyze-project"]);
+            assert!(output.status.success(), "{ty} {shift}: {output:?}");
+            f.write(
+                "src/main.mb",
+                &format!("fn main() -> {ty} {{ let a: {ty} = 1; let n: i32 = 1; a {shift} n }}"),
+            );
             let stderr = f.rejects("TE002");
             assert!(
-                stderr.contains(&format!("expected u32, found {ty}")),
+                stderr.contains("expected u32, found i32"),
                 "{ty} {shift}: {stderr}"
             );
         }
@@ -244,13 +250,19 @@ fn signed_shifts_of_every_width_are_rejected() {
                 "src/main.mb",
                 &format!("fn main() -> {ty} {{ var a: {ty} = 1; a {compound} 1; a }}"),
             );
-            let stderr = f.rejects("TE007");
-            assert!(
-                stderr.contains("primitive bitwise compound assignment currently requires u32"),
-                "{ty} {compound}: {stderr}"
-            );
+            let output = f.run(&["analyze-project"]);
+            assert!(output.status.success(), "{ty} {compound}: {output:?}");
         }
     }
+    f.write(
+        "src/main.mb",
+        "fn main() -> f64 { var a: f64 = 1.0; a <<= 1; a }",
+    );
+    let stderr = f.rejects("TE007");
+    assert!(
+        stderr.contains("bitwise compound assignment requires an integer binding"),
+        "{stderr}"
+    );
 }
 
 #[test]

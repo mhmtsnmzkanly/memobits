@@ -149,6 +149,40 @@ const I32: Ty = Ty::Primitive("i32");
 const F64: Ty = Ty::Primitive("f64");
 const U8: Ty = Ty::Primitive("u8");
 const U32: Ty = Ty::Primitive("u32");
+
+/// The integer method names (see `integer_method`).
+pub(crate) fn is_integer_method(name: &str) -> bool {
+    matches!(
+        name,
+        "bit_and"
+            | "bit_xor"
+            | "bit_or"
+            | "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "wrapping_neg"
+            | "wrapping_shl"
+            | "wrapping_shr"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "checked_add"
+            | "checked_sub"
+            | "checked_mul"
+            | "checked_div"
+            | "checked_rem"
+            | "checked_neg"
+            | "checked_shl"
+            | "checked_shr"
+    )
+}
+
+fn target_name(ty: &Ty) -> Option<&'static str> {
+    match ty {
+        Ty::Primitive(name) => Some(*name),
+        _ => None,
+    }
+}
 fn ir_access(access: Access) -> IrAccess {
     match access {
         Access::Owned => IrAccess::Owned,
@@ -2326,6 +2360,8 @@ impl Checker {
                             .and_then(|candidate| candidate.associated_types.get("Rhs"))
                             .cloned()
                             .unwrap_or_else(|| target_ty.clone())
+                    } else if matches!(operator.as_str(), "<<=" | ">>=") {
+                        U32
                     } else {
                         target_ty.clone()
                     };
@@ -2461,37 +2497,42 @@ impl Checker {
                                 );
                             }
                         } else {
-                            if matches!(operator.as_str(), "<<=" | ">>=")
-                                && target_ty == U32
-                                && crate::constants::shift_assignment_count_out_of_range(value)
-                            {
-                                self.diagnostics.push(
-                                    crate::constants::shift_assignment_count_error(value.span),
-                                );
-                            }
-                            if matches!(operator.as_str(), "&=" | "|=" | "^=" | "<<=" | ">>=")
-                                && target_ty != U32
-                            {
+                            let bitwise =
+                                matches!(operator.as_str(), "&=" | "|=" | "^=" | "<<=" | ">>=");
+                            let shifting = matches!(operator.as_str(), "<<=" | ">>=");
+                            if bitwise && !integer(&target_ty) && target_ty != Ty::Error {
                                 self.error(
                                     7,
                                     target.span,
-                                    "primitive bitwise compound assignment currently requires u32",
+                                    "bitwise compound assignment requires an integer binding",
                                 );
-                            } else if !matches!(operator.as_str(), "&=" | "|=" | "^=")
-                                && !numeric(&target_ty)
-                            {
+                            } else if !bitwise && !numeric(&target_ty) {
                                 self.error(
                                     7,
                                     target.span,
                                     "compound assignment requires a numeric binding",
                                 );
                             }
-                            self.ensure(&value_ty, &target_ty, value.span);
+                            if shifting {
+                                if let Some(kind) = target_name(&target_ty)
+                                    .and_then(memobits_syntax::numeric::IntKind::from_name)
+                                {
+                                    if crate::constants::shift_assignment_count_out_of_range(
+                                        value, kind.bits,
+                                    ) {
+                                        self.diagnostics.push(
+                                            crate::constants::shift_assignment_count_error(
+                                                value.span, kind,
+                                            ),
+                                        );
+                                    }
+                                }
+                                self.ensure(&value_ty, &U32, value.span);
+                            } else {
+                                self.ensure(&value_ty, &target_ty, value.span);
+                            }
                             if operator == "%=" && !integer(&target_ty) {
                                 self.error(7, statement.span, "remainder requires integers");
-                            }
-                            if matches!(operator.as_str(), "<<=" | ">>=") && !integer(&target_ty) {
-                                self.error(7, statement.span, "shift requires integers");
                             }
                         }
                     }
@@ -3077,6 +3118,66 @@ impl Checker {
                 );
                 Ty::Error
             }
+        }
+    }
+
+    /// Typing for the integer methods: `bit_*`, `wrapping_*`, `saturating_*`
+    /// and `checked_*`. The receiver is any integer type; the argument has the
+    /// receiver's type (a `u32` count for the shift methods).
+    fn integer_method(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        name: &str,
+        arguments: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let unary = matches!(name, "wrapping_neg" | "checked_neg");
+        let shift = name.ends_with("_shl") || name.ends_with("_shr");
+        if arguments.len() != usize::from(!unary) {
+            self.error(
+                10,
+                expr.span,
+                format!(
+                    "{name}() expects {} argument{}",
+                    usize::from(!unary),
+                    if unary { "s" } else { "" }
+                ),
+            );
+            return Ty::Error;
+        }
+        let hint = if name.starts_with("checked_") {
+            None
+        } else {
+            expected.filter(|ty| integer(ty))
+        };
+        let receiver = read_type(self.expr(base, hint));
+        if receiver == Ty::Never {
+            return Ty::Never;
+        }
+        if !integer(&receiver) {
+            if receiver != Ty::Error {
+                self.error(
+                    7,
+                    base.span,
+                    format!("{name}() requires an integer receiver"),
+                );
+            }
+            return Ty::Error;
+        }
+        if let Some(argument) = arguments.first() {
+            let want = if shift { U32 } else { receiver.clone() };
+            let actual = read_type(self.expr(argument, Some(&want)));
+            self.ensure(&actual, &want, argument.span);
+        }
+        if name.starts_with("checked_") {
+            self.table.instantiate_enum(
+                registry::by_id(registry::TemplateId::Option),
+                vec![ResolvedArgument::Type(receiver)],
+                expr.span,
+            )
+        } else {
+            receiver
         }
     }
 
@@ -5320,8 +5421,13 @@ impl Checker {
                     }
                 }
                 let bool_op = matches!(operator.as_str(), "&&" | "||");
-                let expected_num = if matches!(operator.as_str(), "&" | "^" | "|" | "<<" | ">>") {
-                    Some(&U32)
+                let shift_op = matches!(operator.as_str(), "<<" | ">>");
+                let bit_op = matches!(operator.as_str(), "&" | "^" | "|" | "<<" | ">>");
+                let int_expected = expected.filter(|t| integer(t));
+                let expected_num = if bit_op {
+                    // Untyped literal expressions keep the hashing default.
+                    int_expected
+                        .or_else(|| memobits_syntax::numeric::is_literal_tree(left).then_some(&U32))
                 } else {
                     expected.filter(|t| numeric(t))
                 };
@@ -5329,10 +5435,16 @@ impl Checker {
                     || matches!(&left.kind, ExprKind::Unary { operator, operand }
                         if (operator == "+" || operator == "-")
                             && matches!(operand.kind, ExprKind::Number(_)));
-                let (left_ty, right_ty) = if !bool_op && expected_num.is_none() && left_is_literal {
+                let (left_ty, right_ty) = if !bool_op
+                    && !shift_op
+                    && (if bit_op { int_expected } else { expected_num }).is_none()
+                    && left_is_literal
+                {
                     // Resolve the right operand once, then use its numeric type
                     // to constrain a literal on the left.
-                    let right_ty = read_type(self.expr(right, None));
+                    let right_hint = (bit_op && memobits_syntax::numeric::is_literal_tree(right))
+                        .then_some(&U32);
+                    let right_ty = read_type(self.expr(right, right_hint));
                     let left_ty = read_type(self.expr(left, Some(&right_ty)));
                     (left_ty, right_ty)
                 } else {
@@ -5352,6 +5464,8 @@ impl Checker {
                             Some(&BOOL)
                         } else if overloaded_arithmetic || overloaded_equality {
                             None
+                        } else if shift_op {
+                            Some(&U32)
                         } else {
                             Some(&left_ty)
                         },
@@ -5710,10 +5824,27 @@ impl Checker {
                         self.ensure(&right_ty, &BOOL, right.span);
                         BOOL
                     }
-                    "&" | "^" | "|" | "<<" | ">>" => {
-                        self.ensure(&left_ty, &U32, left.span);
+                    "&" | "^" | "|" => {
+                        if !integer(&left_ty) && left_ty != Ty::Error {
+                            self.error(7, left.span, "bitwise operators require integers");
+                        }
+                        self.ensure(&right_ty, &left_ty, right.span);
+                        if integer(&left_ty) {
+                            left_ty
+                        } else {
+                            Ty::Error
+                        }
+                    }
+                    "<<" | ">>" => {
+                        if !integer(&left_ty) && left_ty != Ty::Error {
+                            self.error(7, left.span, "shift requires integers");
+                        }
                         self.ensure(&right_ty, &U32, right.span);
-                        U32
+                        if integer(&left_ty) {
+                            left_ty
+                        } else {
+                            Ty::Error
+                        }
                     }
                     "+" | "-" | "*" | "/" | "%" => {
                         if !numeric(&left_ty) && left_ty != Ty::Error {
@@ -5820,31 +5951,12 @@ impl Checker {
                         let source = self.expr(base, None);
                         return self.cast_u8_to_u32(source, expr.span);
                     }
-                    if matches!(name.as_str(), "wrapping_add" | "wrapping_mul") {
-                        if arguments.len() != 1 {
-                            self.error(7, expr.span, "wrapping arithmetic takes one u32 argument");
-                            return Ty::Error;
-                        }
-                        let receiver = self.expr(base, Some(&U32));
-                        let argument = self.expr(&arguments[0], Some(&U32));
-                        if read_type(receiver) == U32 && read_type(argument) == U32 {
-                            return U32;
-                        }
-                        self.error(7, expr.span, "wrapping arithmetic requires u32 operands");
-                        return Ty::Error;
-                    }
-                    if matches!(name.as_str(), "bit_and" | "bit_xor" | "bit_or") {
-                        if arguments.len() != 1 {
-                            self.error(7, expr.span, "bitwise methods take one u32 argument");
-                            return Ty::Error;
-                        }
-                        let receiver = self.expr(base, Some(&U32));
-                        let argument = self.expr(&arguments[0], Some(&U32));
-                        if read_type(receiver) == U32 && read_type(argument) == U32 {
-                            return U32;
-                        }
-                        self.error(7, expr.span, "bitwise methods require u32 operands");
-                        return Ty::Error;
+                    if is_integer_method(name)
+                        && !self.extension_candidates.iter().any(|candidate| {
+                            candidate.interface.is_none() && candidate.methods.contains_key(name)
+                        })
+                    {
+                        return self.integer_method(expr, base, name, arguments, expected);
                     }
                     let access = match name.as_str() {
                         "borrow" => Some(IrAccess::Borrow),

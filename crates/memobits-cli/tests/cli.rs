@@ -8490,12 +8490,18 @@ fn u32_wrapping_methods_reject_wrong_types_and_arity() {
         "project.toml",
         "[package]\nname='u32-wrapping-errors'\nentry='main::main'\n",
     );
-    for source in [
-        "fn main() -> u32 { let value: i32 = 1; value.wrapping_add(1) }",
-        "fn main() -> u32 { let value: u32 = 1; value.wrapping_mul(1, 2) }",
+    for (source, code) in [
+        (
+            "fn main() -> u32 { let value: f64 = 1.0; value.wrapping_add(1); 0 }",
+            "TE007",
+        ),
+        (
+            "fn main() -> u32 { let value: u32 = 1; value.wrapping_mul(1, 2) }",
+            "TE010",
+        ),
     ] {
         f.write("src/main.mb", source);
-        let diagnostic = err(f.run(&["build"]), "TE007");
+        let diagnostic = err(f.run(&["build"]), code);
         assert!(diagnostic.contains("wrapping"), "{diagnostic}");
     }
 }
@@ -8556,21 +8562,21 @@ fn u32_bitwise_and_shifts_match_source_and_standalone_wasm() {
         );
         let dynamic_shift = err(f.run(&["run"]), "RE007");
         assert!(
-            dynamic_shift.contains("shift count must be less than 32"),
+            dynamic_shift.contains("shift count must be less than the bit width"),
             "{dynamic_shift}"
         );
     }
 
     for (source, diagnostic_code, message) in [
         (
-            "fn main() -> u32 { let value: i32 = 1; value.bit_and(1) }",
+            "fn main() -> u32 { let value: f64 = 1.0; value.bit_and(1); 0 }",
             "TE007",
-            "bitwise methods require u32 operands",
+            "bit_and() requires an integer receiver",
         ),
         (
             "fn main() -> u32 { let value: u32 = 1; value.bit_xor(1, 2) }",
-            "TE007",
-            "bitwise methods take one u32 argument",
+            "TE010",
+            "bit_xor() expects 1 argument",
         ),
         (
             "fn main() -> u32 { let count: i32 = 1; let value: u32 = 1; value << count }",

@@ -1,6 +1,7 @@
 //! Source-spanned syntax for the initial Memobits language subset.
 //! Parsing does not perform name, type, ownership, or control-flow checks.
 mod items;
+pub mod numeric;
 pub mod templates;
 
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, SourceId, Span};

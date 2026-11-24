@@ -1,6 +1,7 @@
 //! Static checks for integer operations whose operands are numeric literals.
 use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity};
 use memobits_ir::{Primitive, Type};
+use memobits_syntax::numeric::{self, Arith, IntKind};
 use memobits_syntax::{Block, Expr, ExprKind, ItemKind, Module, StatementKind};
 use std::collections::HashMap;
 
@@ -12,7 +13,7 @@ enum Value {
     Float(f64),
     Overflow,
     DivisionByZero,
-    ShiftCountOutOfRange,
+    ShiftCountOutOfRange(IntKind),
     Unknown,
 }
 
@@ -29,6 +30,23 @@ fn integer_type(ty: &Type) -> Option<(i128, i128)> {
         Primitive::U16 => (0, u16::MAX as i128),
         Primitive::U32 => (0, u32::MAX as i128),
         Primitive::U64 => (0, u64::MAX as i128),
+        _ => return None,
+    })
+}
+
+pub(crate) fn int_kind(ty: &Type) -> Option<IntKind> {
+    let Type::Primitive(primitive) = ty else {
+        return None;
+    };
+    IntKind::from_name(match primitive {
+        Primitive::I8 => "i8",
+        Primitive::I16 => "i16",
+        Primitive::I32 => "i32",
+        Primitive::I64 => "i64",
+        Primitive::U8 => "u8",
+        Primitive::U16 => "u16",
+        Primitive::U32 => "u32",
+        Primitive::U64 => "u64",
         _ => return None,
     })
 }
@@ -176,29 +194,48 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             let ExprKind::Field { base, name } = &callee.kind else {
                 return Value::Unknown;
             };
-            if arguments.len() != 1
-                || !matches!(
-                    name.as_str(),
-                    "wrapping_add" | "wrapping_mul" | "bit_and" | "bit_xor" | "bit_or"
-                )
-            {
+            let Some(kind) = types
+                .get(&(expr as *const Expr as usize))
+                .and_then(Option::as_ref)
+                .and_then(int_kind)
+            else {
+                // `checked_*` results are options; they never fold.
+                return Value::Unknown;
+            };
+            let name = name.as_str();
+            let arity = usize::from(!matches!(name, "wrapping_neg"));
+            if arguments.len() != arity {
                 return Value::Unknown;
             }
-            let (Value::Integer(left), Value::Integer(right)) =
-                (evaluate(base, types), evaluate(&arguments[0], types))
-            else {
+            let Value::Integer(left) = evaluate(base, types) else {
                 return Value::Unknown;
             };
-            let (Ok(left), Ok(right)) = (u32::try_from(left), u32::try_from(right)) else {
+            if name == "wrapping_neg" {
+                return Value::Integer(numeric::wrapping_neg(kind, left));
+            }
+            let Value::Integer(right) = evaluate(&arguments[0], types) else {
                 return Value::Unknown;
             };
-            Value::Integer(match name.as_str() {
-                "wrapping_add" => left.wrapping_add(right) as i128,
-                "wrapping_mul" => left.wrapping_mul(right) as i128,
-                "bit_and" => (left & right) as i128,
-                "bit_xor" => (left ^ right) as i128,
-                "bit_or" => (left | right) as i128,
-                _ => unreachable!(),
+            let arith = |name: &str| match name.rsplit('_').next() {
+                Some("add") => Some(Arith::Add),
+                Some("sub") => Some(Arith::Sub),
+                Some("mul") => Some(Arith::Mul),
+                _ => None,
+            };
+            Value::Integer(match name {
+                "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                    numeric::wrapping(kind, arith(name).expect("arith"), left, right)
+                }
+                "saturating_add" | "saturating_sub" | "saturating_mul" => {
+                    numeric::saturating(kind, arith(name).expect("arith"), left, right)
+                }
+                "wrapping_shl" | "wrapping_shr" => {
+                    numeric::wrapping_shift(kind, name == "wrapping_shl", left, right as u128)
+                }
+                "bit_and" => numeric::bitwise('&', left, right),
+                "bit_xor" => numeric::bitwise('^', left, right),
+                "bit_or" => numeric::bitwise('|', left, right),
+                _ => return Value::Unknown,
             })
         }
         ExprKind::Binary {
@@ -210,10 +247,10 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             "+" | "-" | "*" | "/" | "%" | "&" | "^" | "|" | "<<" | ">>"
         ) =>
         {
-            let Some((min, max)) = types
+            let Some(kind) = types
                 .get(&(expr as *const Expr as usize))
                 .and_then(Option::as_ref)
-                .and_then(integer_type)
+                .and_then(int_kind)
             else {
                 return Value::Unknown;
             };
@@ -222,10 +259,11 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
             {
                 return Value::DivisionByZero;
             }
-            if matches!(operator.as_str(), "<<" | ">>") {
+            let shifting = matches!(operator.as_str(), "<<" | ">>");
+            if shifting {
                 if let Value::Integer(count) = evaluate(right, types) {
-                    if !(0..32).contains(&count) {
-                        return Value::ShiftCountOutOfRange;
+                    if !(0..i128::from(kind.bits)).contains(&count) {
+                        return Value::ShiftCountOutOfRange(kind);
                     }
                 }
             }
@@ -235,42 +273,23 @@ fn evaluate(expr: &Expr, types: &HashMap<usize, Option<Type>>) -> Value {
                 return Value::Unknown;
             };
             let result = match operator.as_str() {
-                "+" => left.checked_add(right),
-                "-" => left.checked_sub(right),
-                "*" => left.checked_mul(right),
+                "+" => numeric::checked(kind, Arith::Add, left, right),
+                "-" => numeric::checked(kind, Arith::Sub, left, right),
+                "*" => numeric::checked(kind, Arith::Mul, left, right),
                 "/" if right == 0 => return Value::DivisionByZero,
                 "%" if right == 0 => return Value::DivisionByZero,
-                "/" => left.checked_div(right),
-                "%" => left.checked_rem(right),
-                "<<" => u32::try_from(left)
-                    .ok()
-                    .zip(u32::try_from(right).ok())
-                    .map(|(value, count)| value.wrapping_shl(count) as i128),
-                ">>" => u32::try_from(left)
-                    .ok()
-                    .zip(u32::try_from(right).ok())
-                    .map(|(value, count)| value.wrapping_shr(count) as i128),
-                "&" => u32::try_from(left)
-                    .ok()
-                    .zip(u32::try_from(right).ok())
-                    .map(|(left, right)| (left & right) as i128),
-                "^" => u32::try_from(left)
-                    .ok()
-                    .zip(u32::try_from(right).ok())
-                    .map(|(left, right)| (left ^ right) as i128),
-                "|" => u32::try_from(left)
-                    .ok()
-                    .zip(u32::try_from(right).ok())
-                    .map(|(left, right)| (left | right) as i128),
-                _ => unreachable!(),
+                "/" => numeric::checked(kind, Arith::Div, left, right),
+                "%" => numeric::checked(kind, Arith::Rem, left, right),
+                "<<" | ">>" => numeric::shift(kind, operator == "<<", left, right as u128),
+                op => Some(numeric::bitwise(
+                    op.chars().next().expect("operator"),
+                    left,
+                    right,
+                )),
             };
-            let Some(result) = result else {
-                return Value::Overflow;
-            };
-            if !(min..=max).contains(&result) {
-                Value::Overflow
-            } else {
-                Value::Integer(result)
+            match result {
+                Some(result) if kind.contains(result) => Value::Integer(result),
+                _ => Value::Overflow,
             }
         }
         _ => Value::Unknown,
@@ -355,11 +374,9 @@ fn check_expr(
             expr.span,
             "division or remainder by zero in statically known expression",
         )),
-        Value::ShiftCountOutOfRange => diagnostics.push(diagnostic(
-            3,
-            expr.span,
-            "u32 shift count must be less than 32",
-        )),
+        Value::ShiftCountOutOfRange(kind) => {
+            diagnostics.push(diagnostic(3, expr.span, &shift_message(kind)))
+        }
         Value::Integer(_) | Value::Float(_) | Value::Unknown => {}
     }
 }
@@ -410,11 +427,22 @@ fn diagnostic(number: u16, span: memobits_diagnostics::Span, message: &str) -> D
     diagnostic
 }
 
-pub(crate) fn shift_assignment_count_error(span: memobits_diagnostics::Span) -> Diagnostic {
-    diagnostic(3, span, "u32 shift count must be less than 32")
+fn shift_message(kind: IntKind) -> String {
+    format!(
+        "{} shift count must be less than {}",
+        kind.name(),
+        kind.bits
+    )
 }
 
-pub(crate) fn shift_assignment_count_out_of_range(expr: &Expr) -> bool {
+pub(crate) fn shift_assignment_count_error(
+    span: memobits_diagnostics::Span,
+    kind: IntKind,
+) -> Diagnostic {
+    diagnostic(3, span, &shift_message(kind))
+}
+
+pub(crate) fn shift_assignment_count_out_of_range(expr: &Expr, bits: u32) -> bool {
     fn integer(expr: &Expr) -> Option<i128> {
         match &expr.kind {
             ExprKind::Number(raw)
@@ -452,7 +480,7 @@ pub(crate) fn shift_assignment_count_out_of_range(expr: &Expr) -> bool {
             _ => None,
         }
     }
-    integer(expr).is_some_and(|count| count >= 32)
+    integer(expr).is_some_and(|count| count >= i128::from(bits))
 }
 
 /// Check one syntax module against facts already captured by its type pass.

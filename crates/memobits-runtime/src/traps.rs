@@ -67,7 +67,7 @@ impl TrapReason {
             Self::IndexOutOfBounds => "array index out of bounds",
             Self::ArgumentRange => "argument out of range for its parameter type",
             Self::HeapAllocation => "guest heap allocation failed",
-            Self::ShiftCount => "shift count must be less than 32",
+            Self::ShiftCount => "shift count must be less than the bit width",
             Self::AssertionFailed => "assertion failed",
         }
     }

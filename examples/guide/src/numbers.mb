@@ -70,15 +70,62 @@ test fn numeric_casts() {
     assert(saturated == 18446744073709551615);
     assert(rounded == 16777216);
 }
-// Explicit u32 wrapping methods perform arithmetic modulo 2^32. Plain `+`
-// and `*` keep their checked behavior.
+// Explicit arithmetic methods exist for every integer width (i8..i64, u8..u64).
+// `wrapping_*` computes modulo 2^width, `saturating_*` clamps to the type's
+// minimum or maximum, and `checked_*` returns `T?` (`None` on overflow, on a
+// zero divisor, and for `MIN / -1`; `MIN % -1` is `Some(0)`). Plain `+` and `*`
+// keep their checked behavior (a trap on overflow).
 test fn wrapping_arithmetic() {
     let max: u32 = 4294967295;
     assert(max.wrapping_add(1) == 0);
     assert(max.wrapping_mul(2) == 4294967294);
+    assert(max.wrapping_sub(max).wrapping_sub(1) == max);
+    let byte: u8 = 200;
+    assert(byte.wrapping_add(100) == 44);
+    assert(byte.wrapping_mul(2) == 144);
+    let low: i8 = -128;
+    assert(low.wrapping_neg() == -128);
+    assert(low.wrapping_sub(1) == 127);
+    let wide: i64 = -9223372036854775808;
+    assert(wide.wrapping_sub(1) == 9223372036854775807);
 }
-// u32 bitwise operations preserve the bit pattern. Shift counts must be below
-// 32; left shift discards high bits and right shift fills with zeroes.
+test fn saturating_arithmetic() {
+    let byte: u8 = 200;
+    assert(byte.saturating_add(100) == 255);
+    assert(byte.saturating_sub(250) == 0);
+    assert(byte.saturating_mul(2) == 255);
+    let low: i16 = -32768;
+    assert(low.saturating_sub(1) == -32768);
+    assert(low.saturating_add(-1) == -32768);
+    let high: i64 = 9223372036854775807;
+    assert(high.saturating_add(1) == high);
+    assert(high.saturating_mul(-2) == -9223372036854775808);
+}
+test fn checked_arithmetic() {
+    let byte: u8 = 200;
+    assert(match byte.checked_add(55) { Some(v) => v == 255, None => false });
+    assert(match byte.checked_add(56) { Some(_) => false, None => true });
+    assert(match byte.checked_sub(201) { Some(_) => false, None => true });
+    let low: i32 = -2147483648;
+    assert(match low.checked_div(-1) { Some(_) => false, None => true });
+    assert(match low.checked_rem(-1) { Some(v) => v == 0, None => false });
+    assert(match low.checked_neg() { Some(_) => false, None => true });
+    let zero: i32 = 0;
+    assert(match low.checked_div(zero) { Some(_) => false, None => true });
+    let wide: u64 = 18446744073709551615;
+    assert(match wide.checked_mul(2) { Some(_) => false, None => true });
+    // Shifts return None when the count is not below the bit width.
+    let one: u16 = 1;
+    assert(match one.checked_shl(15) { Some(v) => v == 32768, None => false });
+    assert(match one.checked_shl(16) { Some(_) => false, None => true });
+    assert(one.wrapping_shl(17) == 2);
+}
+// Bitwise operators `& | ^` and shifts `<< >>` work on every integer width
+// (operands share one type; the shift count is always u32), and so do the
+// compound forms `&= |= ^= <<= >>=` and the methods `bit_and`, `bit_or`,
+// `bit_xor`. A shift count at or above the bit width is a compile error when
+// constant and a trap otherwise. `<<` discards high bits; `>>` fills with
+// zeroes for unsigned types and copies the sign bit for signed types.
 test fn bit_operations() {
     let high: u32 = 2147483648;
     let pattern: u32 = 2863311530;
@@ -88,6 +135,30 @@ test fn bit_operations() {
     assert(pattern.bit_or(5) == 2863311535);
     assert(1 << 31 == high);
     assert(high >> 31 == 1);
+}
+test fn bit_operations_on_every_width() {
+    let negative: i8 = -128;
+    assert(negative >> 7 == -1);
+    assert(negative >> 1 == -64);
+    assert(negative & 127 == 0);
+    assert(negative | 1 == -127);
+    assert(negative ^ -1 == 127);
+    let narrow: u8 = 255;
+    assert(narrow << 4 == 240);
+    assert(narrow >> 4 == 15);
+    let wide: i64 = -9223372036854775808;
+    assert(wide >> 63 == -1);
+    assert(wide << 1 == 0);
+    assert(wide.bit_xor(-1) == 9223372036854775807);
+    var flags: u16 = 1;
+    flags <<= 15;
+    flags |= 1;
+    flags ^= 32768;
+    assert(flags == 1);
+    var signed: i32 = -16;
+    signed >>= 2;
+    signed &= -2;
+    assert(signed == -4);
 }
 // `loop i in a..b` counts from `a` up to but not including `b`; `a..=b`
 // includes `b`. Both bounds are evaluated once, left to right, before the

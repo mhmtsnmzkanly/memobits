@@ -25,6 +25,7 @@ mod interpolation;
 mod layout;
 mod list_descriptor;
 mod memory;
+mod numerics;
 mod operations;
 mod string_descriptor;
 mod string_heap;
@@ -2740,52 +2741,11 @@ fn emit_binary(
     scratch64: u32,
     site: Site,
 ) -> Result<(), String> {
-    if matches!(op, BinaryOp::WrappingAdd | BinaryOp::WrappingMultiply) {
-        if *ty != Type::Primitive(Primitive::U32) {
-            return Err("wrapping arithmetic requires u32 operands".into());
-        }
-        body.instruction(&WasmInstruction::LocalGet(left));
-        body.instruction(&WasmInstruction::LocalGet(right));
-        body.instruction(if op == BinaryOp::WrappingAdd {
-            &WasmInstruction::I32Add
-        } else {
-            &WasmInstruction::I32Mul
-        });
-        body.instruction(&WasmInstruction::LocalSet(output));
-        return Ok(());
-    }
-    if matches!(
-        op,
-        BinaryOp::BitwiseAnd
-            | BinaryOp::BitwiseXor
-            | BinaryOp::BitwiseOr
-            | BinaryOp::ShiftLeft
-            | BinaryOp::ShiftRight
-    ) {
-        if *ty != Type::Primitive(Primitive::U32) {
-            return Err("bitwise operations require u32 operands".into());
-        }
-        if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
-            body.instruction(&WasmInstruction::LocalGet(right));
-            body.instruction(&WasmInstruction::I32Const(32));
-            body.instruction(&WasmInstruction::I32GeU);
-            trap_if(body, site, TrapReason::ShiftCount);
-            body.instruction(&WasmInstruction::LocalGet(left));
-            body.instruction(&WasmInstruction::LocalGet(right));
-        } else {
-            body.instruction(&WasmInstruction::LocalGet(left));
-            body.instruction(&WasmInstruction::LocalGet(right));
-        }
-        body.instruction(match op {
-            BinaryOp::BitwiseAnd => &WasmInstruction::I32And,
-            BinaryOp::BitwiseXor => &WasmInstruction::I32Xor,
-            BinaryOp::BitwiseOr => &WasmInstruction::I32Or,
-            BinaryOp::ShiftLeft => &WasmInstruction::I32Shl,
-            BinaryOp::ShiftRight => &WasmInstruction::I32ShrU,
-            _ => unreachable!(),
-        });
-        body.instruction(&WasmInstruction::LocalSet(output));
-        return Ok(());
+    if numerics::handles(op) {
+        let Type::Primitive(kind) = ty else {
+            return Err("integer operations require primitive operands".into());
+        };
+        return numerics::emit(body, op, left, right, *kind, output, scratch64, site);
     }
     if matches!(
         op,
@@ -4697,6 +4657,27 @@ fn compile_instruction(
             let ty = value_type(function, left)?;
             refresh_operand(body, function, param_count, left, layout, frame)?;
             refresh_operand(body, function, param_count, right, layout, frame)?;
+            if numerics::is_checked(*op) {
+                let Type::Primitive(kind) = &ty else {
+                    return Err("checked integer operations require primitive operands".into());
+                };
+                numerics::emit_checked(
+                    body,
+                    *op,
+                    operand_local(function, param_count, left)?,
+                    operand_local(function, param_count, right)?,
+                    *kind,
+                    output,
+                    scratch64,
+                    function,
+                    instruction
+                        .output
+                        .ok_or("checked operation lacks an output")?,
+                    layout,
+                    frame,
+                )?;
+                return Ok(());
+            }
             let checked = matches!(
                 op,
                 BinaryOp::Add

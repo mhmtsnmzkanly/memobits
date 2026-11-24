@@ -65,7 +65,7 @@ program order, starting at 1 (at most 2^23 - 1).
 | 8 | IndexOutOfBounds | array index out of bounds |
 | 9 | ArgumentRange | argument out of range for its parameter type |
 | 10 | HeapAllocation | guest heap allocation failed |
-| 11 | ShiftCount | shift count must be less than 32 |
+| 11 | ShiftCount | shift count must be less than the bit width |
 | 12 | AssertionFailed | assertion failed (`assert(false)`) |
 
 Codes 5 and 6 are stored *before* a native Wasm division, which traps by itself.
@@ -149,11 +149,23 @@ runtime rules. Generated modules must execute with assertions on results and
 error paths. Indirect calls and unsupported types require explicit diagnostics
 until implemented.
 
-`u32.wrapping_add` and `u32.wrapping_mul` are explicit modulo-2^32 operations.
-They emit Wasm i32 add and multiply directly, while ordinary `+` and `*` retain
-the checked numeric path.
+Integer widths keep their value in a normalized Wasm local: `i8`, `i16`, `i32`
+as sign-extended `i32`, `u8`, `u16`, `u32` as zero-extended `i32`, and `i64`,
+`u64` as `i64`. The `wrapping_*`, `saturating_*` and `checked_*` methods, the
+bitwise operators (and `bit_and`, `bit_xor`, `bit_or`) and the shifts exist for
+all eight widths (`memobits-wasm/src/numerics.rs`):
 
-`u32` bitwise operators and `bit_and`, `bit_xor`, and `bit_or` use Wasm i32
-operations. Unsigned shifts accept `u32` counts below 32; constant invalid
-counts fail analysis, and dynamic invalid counts trap with their source site.
-The right-shift instruction is unsigned, so it fills high bits with zero.
+- Wrapping `add`, `sub`, `mul` use the native instruction and re-normalize the
+  8- and 16-bit results (mask or sign-extend). `wrapping_neg` is `0 - x`.
+- Saturating `add`, `sub`, `mul` compute the exact result in `i64` for the
+  narrow widths and clamp it; the 64-bit widths use the same overflow tests as
+  the trapping operators and select the minimum or maximum.
+- Checked operations produce the scalar option `T?` in a frame cell. The
+  overflow flag is the option tag (Some = 0, None = 1); a zero divisor, the
+  signed `MIN / -1`, and a shift count at or above the width are `None`.
+  `MIN % -1` is `Some(0)`. `checked_neg` is `0 - x`.
+- Shifts take a `u32` count. `<<` and `>>` trap when the count is at or above
+  the width (a constant count is a compile error); `wrapping_shl`/`wrapping_shr`
+  mask the count with `width - 1`; `checked_shl`/`checked_shr` return `None`.
+  `<<` discards the high bits (re-normalized for narrow widths) and `>>` is
+  arithmetic for signed types (`shr_s`) and zero-filling for unsigned types.

@@ -2911,38 +2911,25 @@ impl<'a> Builder<'a> {
                             self.ty(expr),
                         );
                     }
-                    if matches!(name.as_str(), "wrapping_add" | "wrapping_mul") {
+                    if let Some(op) = integer_method_op(name) {
                         let left = self.lower_expr(base)?;
                         let left = self.scalar(left)?;
-                        let right = self.lower_expr(&arguments[0])?;
-                        let right = self.scalar(right)?;
+                        let (left, right) = if arguments.is_empty() {
+                            // `wrapping_neg` and `checked_neg` compute `0 - value`.
+                            let ty = self.operand_type(left)?;
+                            let zero =
+                                self.constant(expr.span, Constant::Integer("0".into()), ty)?;
+                            let right = self.capture(left)?;
+                            (zero, right)
+                        } else {
+                            let left = self.capture(left)?;
+                            let right = self.lower_expr(&arguments[0])?;
+                            (left, self.scalar(right)?)
+                        };
                         return self.emit(
                             expr.span,
                             InstructionKind::Binary {
-                                op: if name == "wrapping_add" {
-                                    BinaryOp::WrappingAdd
-                                } else {
-                                    BinaryOp::WrappingMultiply
-                                },
-                                left: read(left),
-                                right: read(right),
-                            },
-                            self.ty(expr),
-                        );
-                    }
-                    if matches!(name.as_str(), "bit_and" | "bit_xor" | "bit_or") {
-                        let left = self.lower_expr(base)?;
-                        let left = self.scalar(left)?;
-                        let right = self.lower_expr(&arguments[0])?;
-                        let right = self.scalar(right)?;
-                        return self.emit(
-                            expr.span,
-                            InstructionKind::Binary {
-                                op: match name.as_str() {
-                                    "bit_and" => BinaryOp::BitwiseAnd,
-                                    "bit_xor" => BinaryOp::BitwiseXor,
-                                    _ => BinaryOp::BitwiseOr,
-                                },
+                                op,
                                 left: read(left),
                                 right: read(right),
                             },
@@ -4078,4 +4065,30 @@ fn access_mode(access: Access) -> UseMode {
         Access::Borrow => UseMode::Borrow,
         Access::Share => UseMode::Share,
     }
+}
+
+/// The IR operation behind an integer method (`bit_*`, `wrapping_*`,
+/// `saturating_*`, `checked_*`).
+fn integer_method_op(name: &str) -> Option<BinaryOp> {
+    Some(match name {
+        "bit_and" => BinaryOp::BitwiseAnd,
+        "bit_xor" => BinaryOp::BitwiseXor,
+        "bit_or" => BinaryOp::BitwiseOr,
+        "wrapping_add" => BinaryOp::WrappingAdd,
+        "wrapping_sub" | "wrapping_neg" => BinaryOp::WrappingSubtract,
+        "wrapping_mul" => BinaryOp::WrappingMultiply,
+        "wrapping_shl" => BinaryOp::WrappingShiftLeft,
+        "wrapping_shr" => BinaryOp::WrappingShiftRight,
+        "saturating_add" => BinaryOp::SaturatingAdd,
+        "saturating_sub" => BinaryOp::SaturatingSubtract,
+        "saturating_mul" => BinaryOp::SaturatingMultiply,
+        "checked_add" => BinaryOp::CheckedAdd,
+        "checked_sub" | "checked_neg" => BinaryOp::CheckedSubtract,
+        "checked_mul" => BinaryOp::CheckedMultiply,
+        "checked_div" => BinaryOp::CheckedDivide,
+        "checked_rem" => BinaryOp::CheckedRemainder,
+        "checked_shl" => BinaryOp::CheckedShiftLeft,
+        "checked_shr" => BinaryOp::CheckedShiftRight,
+        _ => return None,
+    })
 }
