@@ -1459,7 +1459,8 @@ Facts about the shipped generics step; the Stage 4 decision is unchanged.
 - Types and methods: several type and const parameters on nominal types work
   (`P<A, B, const N: u32>` and its `extend` methods). Methods with their own
   type parameters are SE002; `type X<T> where T: I` is still "not implemented
-  yet"; a const parameter is not a value expression (`[x; N]`, `0..N`).
+  yet"; a const parameter is not a value expression (`[x; N]`, `0..N`). (All three are
+  lifted by F4, see "Shipped F4 details".)
 - Body checking is unchanged: each specialization is checked with the concrete
   types, so there are no generic-body diagnostics beyond the concrete ones.
 - Argument checking against a still-open parameter type skips only the type
@@ -1686,7 +1687,8 @@ Facts about the shipped owned (escaping) closures; the Stage 4 decision is uncha
   by whole-program discovery, so writing the first capturing closure of `fn(i32) -> i32`
   changes the copy rules of every value of that type (plain function parameters used
   twice need a plain `let`, `get` becomes TE022). Assigning to a whole owner local
-  (`f = make()`) is the general struct-owner limitation (TE018); use `replace(f, make())`.
+  (`f = make()`) was the general struct-owner limitation (TE018; superseded by F4, which
+  assigns whole owners, see "Shipped F4 details").
 - **Lending.** Passing an owned closure to a `borrow fn` or `share fn` parameter lends
   it without moving (the argument is written bare); the closure is still usable
   afterwards. Second-class closures cannot become owned values (TE017).
@@ -1762,8 +1764,8 @@ as written.
   (`List::get` and a field read are TE022 like any owner). Calling through a place and
   lending to `borrow fn`/`share fn` borrow, they do not move. Each mention of a function
   name or a non-capturing literal is a fresh value, so `apply(inc, 1)` twice needs no
-  copy. Assigning a whole function value (`f = g;`) is TE018 with a note to use
-  `replace(f, g)` (the general whole-owner-local gate, now with a message).
+  copy. Assigning a whole function value (`f = g;`) was TE018 with a note to use
+  `replace(f, g)`; F4 makes `f = g;` work (see "Shipped F4 details").
 - **`var fn`.** `var fn(T, ..) -> R` parses in every type position (parentheses as for
   `fn`: `(var fn() -> i32)?`, `List<var fn() -> i32>`, fields, payloads, generics,
   results) as the AST path `\0fn`, `var`. An owned closure that mutates a capture
@@ -1793,3 +1795,75 @@ as written.
   4,096 rounds with heap environments and its mutation check); `h1_function_values.rs`,
   `h5_owned_closures.rs` and the guide `functions.mb` updated to the move-only rule
   (lending through `borrow fn`, `replace`, in-place calls). Guide: 149 tests.
+
+### Shipped F4 details (2026-11-25)
+
+Facts about the shipped follow-ups; no new decisions (they implement the accepted rules
+"assignments finish evaluating the RHS before replacing an owner", S2 field replacement,
+R1 owning overwrite and the H3 generics step).
+
+- **Whole-owner local reassignment.** `x = value` on a `var` local, or on a `share`
+  parameter, of a String-owning struct, record, tuple or enum (including enums with heap
+  payloads, `Box` payloads and function values) and of a function value (`fn` / `var fn`,
+  with or without a captured environment) is accepted. `String`, `List`, `Box` and array
+  locals keep their existing paths (unchanged output). Order: the right-hand side is
+  evaluated completely into a hidden owner local first (staged exactly as for
+  `replace(place, value)`), then the old value is released exactly once and the staged
+  value is moved in. The RHS may read the old value through a borrow whose loan ends
+  first, or move it (`acc = combine(acc, x)`; the assignment initializes the moved-from
+  local again). An early exit (`return`, `break`, `continue`) while the RHS is evaluated
+  leaves the local untouched and releases the staged value. `x = x` is accepted. A local
+  with a live loan is BE005 ("cannot assign to `x` while it is borrowed/shared"). The target
+  must be mutable (TE004 for `let` and for an owned non-`var` parameter) and the value of
+  the same type (TE002).
+- **Lowering.** For a non-parameter local the staged value is installed with the IR
+  `Assign { initialize: false }`: the ownership pass makes the local available again, and
+  the Wasm backend releases whatever the local still owns (a moved-out value is cleared, so
+  this is a no-op), copies the staged descriptor in and clears the source. For a `share`
+  parameter the exchange form of R1 is used (`SwapPlaces`, then the staged old value is
+  released at the end of the statement). IR validation (`scoped_string.rs`) now accepts a
+  struct or enum `Assign` with `initialize: false` on a mutable non-parameter local. A stored
+  `var h := owner.share()` handle keeps its store-through-reference path.
+- **Still rejected.** A `share fn(...)` parameter cannot be reassigned as a whole (it lends
+  the caller's function value): TE018 "a `share fn` parameter lends the caller's function
+  value and cannot be reassigned as a whole yet". Pre-existing limits found while testing,
+  unchanged: a struct with an `array<string, N>` field built from a named array local, and
+  a struct with an array-of-String field read through `shelf.items[i]`, fail IR validation
+  (TE018) with or without reassignment.
+- **Const generic parameters as values.** Inside a generic function, type or method with
+  `const N: u32`, a name `N` that no local shadows is a `u32` value of the specialization
+  being checked: arithmetic, comparisons, casts, `loop i in 0..N` and `0..=N`, interpolation
+  (`"{N}"`), closure bodies, call arguments and `[x; N]` repeat counts. The parameter
+  shadows a module constant of the same name; a local of the same name shadows the
+  parameter; `N = ..` is TE004 "cannot assign to const generic parameter"; outside any
+  generic item `N` is NE001. Implemented by `PathTarget::Const(value)` (a path use with the
+  specialization's value) and `Checker::generic_consts` for the repeat count.
+- **Method-level type and const parameters.** An inherent method (including methods in a
+  trailing `extend { .. }` of a generic type) may declare `fn m<U, const K: u32>(self, ..)
+  where U: B`. Interface declarations and `extend T of I` methods still reject them (SE002).
+  Calls infer the method's own parameters exactly like a generic function (argument
+  matching in written order with function literals last, the expected result, one evidence
+  per bound; the shared `Checker::infer_call` in `types/generics.rs`) starting from the
+  receiver type's arguments, which stay fixed. A method parameter may not repeat a parameter
+  of its type (TE007). The method is specialized per call: the key is the receiver type, the
+  specialized function type, the type and const arguments of both lists and the evidence of
+  every bound (the existing 256-method cap applies, TE007). Generic methods get no eager
+  function id; unused ones are not checked until called.
+- **`where` bounds on type declarations.** `type Pair<T> where T: A + B { .. }`: each bound
+  must name a declared type parameter, without type arguments (TE007 at the declaration).
+  Every written instantiation is checked: let annotations, parameter and result types,
+  struct fields, enum payloads, struct literals, nested generic instances and the
+  specializations of generic functions. A missing or ambiguous implementation is TE007
+  "no visible implementation of 'I' for X satisfies bound 'T: I' of type 'Pair'". The
+  evidence selected at instantiation (the one visible implementation, or the evidence the
+  enclosing specialization forwards) is carried by the specialization of the type's methods,
+  so methods may use `T::Rhs` / `T::Output` and operators on `T`. Evidence follows the
+  function rule: primitives have no interface implementations, so `Pair<u32>` with
+  `T: Add` is the "missing implementation" error.
+- Tests: `crates/memobits-cli/tests/f4_followups.rs` (8: every owner kind, loops and early
+  exits, edge cases, a capped-memory run of 4,096 iterations with 4,096-byte strings, loan
+  and type negatives, const values, method parameters, type bounds). Its mutation check
+  (skipping the old-value release in the Wasm `Assign` makes the capped run fail with
+  RE007) is in `.local-design/logs/f4-mutation.log`. Stale negatives updated: `cli.rs`,
+  `d2_owned_struct_transport.rs`, `d2_nested_owner_transport.rs`,
+  `d2_record_owner_transport.rs`, `h5b_function_ownership.rs`. Guide: 154 tests.

@@ -294,8 +294,7 @@ fn main() -> i32 {
             "var fs: List<fn(i32) -> i32> = []; fs.push(inc); match fs.get(0) { Some(f) => f(1), None => 0 }",
             "TE022",
         ),
-        // A whole function value is replaced, not assigned.
-        ("var f := inc; f = dbl; f(1)", "TE018"),
+        // (A whole function value is assignable since F4; see `f4_followups.rs`.)
     ] {
         let source = format!("{prelude}fn main() -> i32 {{ {body} }}\n");
         let stderr = failure(&Fixture::new(&source), &source);

@@ -274,6 +274,70 @@ test fn overwrite_releases_the_old_value() {
     words[1] = extra;
     assert(words[1].len() == 1);
 }
+// `x = value` on a whole `var` local, or on a `share` parameter, of any owner
+// type (a String-owning struct, tuple, enum or array, a List, a Box or a
+// function value) is an RHS-first replacement: the right-hand side is evaluated
+// completely first (it may move or read the old value; an early exit leaves
+// the old value in place), then what the local still owns is released exactly
+// once and the new value is installed. A live loan of the local blocks the
+// assignment (BE005).
+fn extend_label(label: TextLabel, extra: u32) -> TextLabel {
+    let text := label.text.concat("+");
+    TextLabel { number: label.number + extra, text: text }
+}
+fn reset_label(label: share TextLabel, replacement: TextLabel) -> u32 {
+    label = replacement;
+    label.number
+}
+fn reassign_unless(early: bool) -> u32 {
+    var label := make_label(1);
+    let next := make_label(2);
+    label = { if early { return 99; } next };
+    label.number
+}
+type Reading [Pending, Done(string)]
+test fn whole_owner_reassignment() {
+    var label := make_label(1);
+    label = make_label(2);
+    assert(label.number == 2);
+    // The right-hand side may consume the old value ...
+    label = extend_label(label, 10);
+    assert(label.number == 12);
+    assert(label.text.len() == 4);
+    // ... in a loop, each round releasing the previous value once.
+    loop round in 0..3 { label = extend_label(label, 1); }
+    assert(label.number == 15);
+    assert(label.text.len() == 7);
+    // A moved-out local is initialized again by the assignment.
+    let total := label_total(label, false);
+    label = make_label(5);
+    assert(total == 22 && label.number == 5);
+    var numbers := make_words(1);
+    numbers = make_words(2);
+    assert(numbers.len() == 1 && numbers[0] == 2);
+    let heap := "ab".concat("c");
+    var pair := (heap, 1);
+    let other := "d".concat("e");
+    pair = (other, 2);
+    assert(pair.1 == 2 && pair.0.len() == 2);
+    let word := "xy".concat("z");
+    var reading := Reading::Done(word);
+    reading = Reading::Pending;
+    assert(match reading { Reading::Done(text) => text.len(), Reading::Pending => 0 } == 0);
+    let first := "p".concat("q");
+    let second := "r".concat("s");
+    var pairs: array<string, 2> = [first, second];
+    let third := "t".concat("uv");
+    let fourth := "w".concat("x");
+    pairs = [third, fourth];
+    assert(pairs[0].len() == 3);
+    var target := make_label(7);
+    assert(reset_label(target.share(), make_label(8)) == 8);
+    assert(target.number == 8);
+    // An early exit in the right-hand side keeps the old value.
+    assert(reassign_unless(true) == 99);
+    assert(reassign_unless(false) == 2);
+}
 // An owner temporary can be passed straight to an owned parameter: a struct
 // literal or a call result is staged in a hidden local, so the callee still
 // receives a named owner and cleanup stays exact.

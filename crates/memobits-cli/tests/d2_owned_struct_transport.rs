@@ -274,11 +274,7 @@ fn owned_string_struct_transport_keeps_neighbouring_shapes_rejected() {
             "cannot be moved out by field access",
         ),
         // Tuple elements are admitted in d2_owner_placement.rs (slice 3).
-        (
-            r#"fn main() { let t := "a".concat("b"); let l := Label { text: t, n: 1 }; var k := Label { text: "z", n: 1 }; k = l; }"#,
-            "TE018",
-            "can only move directly into a new local",
-        ),
+        // `k = l` (whole-owner reassignment) works since F4; see `f4_followups.rs`.
     ] {
         f.write(
             "src/main.mb",
@@ -558,11 +554,8 @@ fn owned_string_struct_results_keep_neighbouring_shapes_rejected() {
         ),
         // `fn main() { make(); }` is accepted since F2: a discarded owner call
         // result is staged in a hidden local and released (see f2_payloads.rs).
-        (
-            "fn main() { var x := make(); x = make(); }",
-            "TE018",
-            "requires a new local binding",
-        ),
+        // `var x := make(); x = make();` is accepted since F4 (whole-owner
+        // reassignment); see `f4_followups.rs`.
         // `fn forward() -> Label { make() }` is accepted since F1 (the call
         // result is staged in a hidden owner); see `f1_followups.rs`.
         (

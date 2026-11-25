@@ -94,7 +94,7 @@ impl Builder<'_> {
                 .copied()?,
         )? {
             PathTarget::Function(id) => Some(*id),
-            PathTarget::Local(_) => None,
+            PathTarget::Local(_) | PathTarget::Const(_) => None,
         }
     }
 

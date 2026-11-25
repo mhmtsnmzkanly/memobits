@@ -2531,15 +2531,6 @@ fn wasm_gates_unsupported_string_struct_uses() {
         (
             r#"fn main() {
                 let text := "a".concat("b");
-                var label := Label { text: text };
-                label = Label { text: "c" };
-            }"#,
-            "TE018",
-            "requires a new local binding",
-        ),
-        (
-            r#"fn main() {
-                let text := "a".concat("b");
                 let label := Label { text: text };
                 let Label { text: field } := label;
             }"#,

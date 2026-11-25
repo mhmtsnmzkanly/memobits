@@ -100,6 +100,12 @@ struct ExtensionCandidate {
     generic_parameters: Vec<GenericParameter>,
     generic_methods: Vec<memobits_syntax::InterfaceMethod>,
     declaration_imports: HashMap<String, String>,
+    /// The type and const arguments of a specialized generic receiver; the
+    /// methods' own parameters are added to these.
+    substitution: HashMap<String, Ty>,
+    const_substitution: HashMap<String, u32>,
+    /// Evidence for the bounds of the receiver type's parameters.
+    evidence: Vec<GenericEvidence>,
 }
 
 #[derive(Clone)]
@@ -133,6 +139,7 @@ struct GenericMethodSpecialization {
     target: Ty,
     substitution: HashMap<String, Ty>,
     const_substitution: HashMap<String, u32>,
+    evidence: Vec<GenericEvidence>,
     id: FunctionId,
     key: String,
 }
@@ -629,6 +636,9 @@ pub struct LocalFact {
 pub enum PathTarget {
     Local(LocalId),
     Function(FunctionId),
+    /// A const generic parameter used as a `u32` value; the number is the
+    /// argument of the specialization being checked.
+    Const(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1363,12 +1373,14 @@ impl Checker {
                 _ => return None,
             }
         }
+        let type_evidence = self.type_bound_evidence(receiver, candidate.span, false)?;
         let mut type_checker = Checker {
             alloc: self.alloc,
             module: candidate.module.clone(),
             table: Rc::clone(&self.table),
             generic_types: substitution.clone(),
             generic_consts: const_substitution.clone(),
+            generic_evidence: type_evidence.clone(),
             imports: candidate.declaration_imports.clone(),
             ..checker()
         };
@@ -1376,7 +1388,19 @@ impl Checker {
         specialized.target = receiver.clone();
         specialized.generic_target = None;
         specialized.methods.clear();
+        specialized.substitution = substitution.clone();
+        specialized.const_substitution = const_substitution.clone();
+        specialized.evidence = type_evidence.clone();
         for method in &candidate.generic_methods {
+            if !method.generic_parameters.is_empty() {
+                // Specialized per call, once its own parameters are inferred.
+                let base_id = candidate.methods.get(&method.name).map(|entry| entry.4)?;
+                specialized.methods.insert(
+                    method.name.clone(),
+                    (method.receiver, Vec::new(), Ty::Error, method.span, base_id),
+                );
+                continue;
+            }
             let parameters: Vec<_> = method
                 .parameters
                 .iter()
@@ -1410,6 +1434,7 @@ impl Checker {
                         target: receiver.clone(),
                         substitution: substitution.clone(),
                         const_substitution: const_substitution.clone(),
+                        evidence: type_evidence.clone(),
                         id,
                         key: identity,
                     });
@@ -1671,7 +1696,17 @@ impl Checker {
             }
         }
         let ty = &self.substitute_generic_arguments(ty);
-        self.report_type_resolution(ty, self.table.resolve(&self.module, ty))
+        let resolved = self.report_type_resolution(ty, self.table.resolve(&self.module, ty));
+        if self.specialization_registry.is_some() && !ty.arguments.is_empty() {
+            self.check_type_bounds(&resolved, ty.span);
+        }
+        resolved
+    }
+    /// Checks the `where` bounds of the generic types a declared type names.
+    fn validate_declared_type(&mut self, ty: &Type) {
+        if let Ok(resolved) = self.table.resolve(&self.module, ty) {
+            self.check_type_bounds(&resolved, ty.span);
+        }
     }
     /// Splices the active generic substitution into the arguments of a written
     /// nominal type, so `Pair<Wrap<T>>` inside a specialized body names the
@@ -2227,10 +2262,14 @@ impl Checker {
                             self.type_path(ty)
                         } else {
                             let ty = &self.substitute_generic_arguments(ty);
-                            self.report_type_resolution(
+                            let resolved = self.report_type_resolution(
                                 ty,
                                 self.table.resolve_local(&self.module, ty),
-                            )
+                            );
+                            if self.specialization_registry.is_some() && !ty.arguments.is_empty() {
+                                self.check_type_bounds(&resolved, ty.span);
+                            }
+                            resolved
                         }
                     });
                     self.allow_array_value(value);
@@ -2363,6 +2402,17 @@ impl Checker {
                                         _ => binding.ty,
                                     }
                                 }
+                                None if self.generic_consts.contains_key(&path[0]) => {
+                                    self.error(
+                                        4,
+                                        target.span,
+                                        format!(
+                                            "cannot assign to const generic parameter '{}'",
+                                            path[0]
+                                        ),
+                                    );
+                                    Ty::Error
+                                }
                                 None => {
                                     self.error(
                                         5,
@@ -2399,15 +2449,19 @@ impl Checker {
                     };
                     if operator == "="
                         && matches!(target.kind, ExprKind::Path(_))
-                        && matches!(target_ty, Ty::Function(..))
+                        && matches!(&target.kind, ExprKind::Path(path) if path.len() == 1
+                        && self.lookup(&path[0]).is_some_and(|binding| {
+                            matches!(&binding.ty, Ty::Reference { access: IrAccess::Share, inner, .. }
+                                if matches!(**inner, Ty::Function(..)))
+                        }))
                     {
                         let mut diagnostic = diagnostic(
                             18,
                             target.span,
-                            "a function value is an owner and cannot be assigned as a whole",
+                            "a `share fn` parameter lends the caller's function value and cannot be reassigned as a whole yet",
                         );
                         diagnostic.help = Some(
-                            "use `replace(name, value)` to put a new function value in its place"
+                            "take the function as an owned `var` parameter, or call it in place"
                                 .into(),
                         );
                         self.diagnostics.push(diagnostic);
@@ -6679,6 +6733,18 @@ impl Checker {
                 if let Some((template, variant)) = self.prelude_variant(path) {
                     return self.infer_variant(expr, id, template, variant, None, expected);
                 }
+                if path.len() == 1 && self.lookup(&path[0]).is_none() {
+                    if let Some(value) = self.generic_consts.get(&path[0]).copied() {
+                        if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
+                            facts.path_uses.push(PathUse {
+                                expression,
+                                target: PathTarget::Const(value),
+                                access: None,
+                            });
+                        }
+                        return Ty::Primitive("u32");
+                    }
+                }
                 let generic = if path.len() == 1 {
                     (self.lookup(&path[0]).is_none() && !self.functions.contains_key(&path[0]))
                         .then(|| self.generic_functions.get(&path[0]).cloned())
@@ -7684,8 +7750,15 @@ impl Checker {
                             return Ty::Error;
                         }
                         let candidate = &applicable[0];
-                        let (receiver_access, parameters, result, _, function) =
+                        let (receiver_access, mut parameters, mut result, _, mut function) =
                             candidate.methods.get(name).cloned().unwrap();
+                        let own_generics = candidate
+                            .generic_methods
+                            .iter()
+                            .find(|method| {
+                                method.name == *name && !method.generic_parameters.is_empty()
+                            })
+                            .cloned();
                         if boxed && receiver_access == Access::Owned {
                             // A by-value method consumes the box and moves its
                             // value into the call.
@@ -7714,19 +7787,31 @@ impl Checker {
                         if receiver_access == Access::Share {
                             self.note_write_root(base);
                         }
-                        if parameters.len() != arguments.len() {
-                            self.error(
-                                10,
-                                expr.span,
-                                format!(
-                                    "expected {} method arguments, found {}",
-                                    parameters.len(),
-                                    arguments.len()
-                                ),
-                            );
-                        }
-                        for (argument, parameter) in arguments.iter().zip(&parameters) {
-                            self.check_call_argument(argument, Some(parameter), true);
+                        if let Some(method) = &own_generics {
+                            let candidate = candidate.clone();
+                            let Some((inferred, inferred_result, inferred_function)) = self
+                                .generic_method_call(expr, &candidate, method, arguments, expected)
+                            else {
+                                return Ty::Error;
+                            };
+                            parameters = inferred;
+                            result = inferred_result;
+                            function = inferred_function;
+                        } else {
+                            if parameters.len() != arguments.len() {
+                                self.error(
+                                    10,
+                                    expr.span,
+                                    format!(
+                                        "expected {} method arguments, found {}",
+                                        parameters.len(),
+                                        arguments.len()
+                                    ),
+                                );
+                            }
+                            for (argument, parameter) in arguments.iter().zip(&parameters) {
+                                self.check_call_argument(argument, Some(parameter), true);
+                            }
                         }
                         if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
                             let mut function_parameters = vec![FunctionParameter {
@@ -8134,7 +8219,7 @@ fn extension_candidates_for(
         let methods = declaration_methods
             .iter()
             .map(|method| {
-                if generic_target.is_some() {
+                if generic_target.is_some() || !method.generic_parameters.is_empty() {
                     return (
                         method.name.clone(),
                         (
@@ -8208,6 +8293,9 @@ fn extension_candidates_for(
             generic_parameters,
             generic_methods: declaration_methods,
             declaration_imports: imports,
+            substitution: HashMap::new(),
+            const_substitution: HashMap::new(),
+            evidence: Vec::new(),
         });
     }
     candidates
@@ -8677,6 +8765,10 @@ fn check_resolved_mode_once(
             };
             if let Some(methods) = methods {
                 for method in methods {
+                    if !method.generic_parameters.is_empty() {
+                        // Specialized per call (see `generic_method_call`).
+                        continue;
+                    }
                     extension_ids.insert(
                         (module_name.clone(), item.span.start, method.name.clone()),
                         FunctionId(next_id),
@@ -8764,6 +8856,62 @@ fn check_resolved_mode_once(
             &signatures,
             &ids,
         );
+        // Declared types of non-generic items are checked against the `where`
+        // bounds of the generic types they instantiate.
+        for item in &source.syntax.items {
+            match &item.kind {
+                ItemKind::Function {
+                    generic_parameters,
+                    parameters,
+                    result,
+                    ..
+                } if generic_parameters.is_empty() => {
+                    for ty in parameters
+                        .iter()
+                        .map(|parameter| &parameter.ty)
+                        .chain(result)
+                    {
+                        c.validate_declared_type(ty);
+                    }
+                }
+                ItemKind::Type {
+                    generic_parameters,
+                    definition,
+                    ..
+                } if generic_parameters.is_empty() => match definition {
+                    memobits_syntax::TypeDefinition::Struct(fields) => {
+                        for field in fields {
+                            c.validate_declared_type(&field.ty);
+                        }
+                    }
+                    memobits_syntax::TypeDefinition::Enum(variants) => {
+                        for variant in variants {
+                            for ty in &variant.payload {
+                                c.validate_declared_type(ty);
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                ItemKind::InherentExtension {
+                    generic_parameters,
+                    methods,
+                    ..
+                } if generic_parameters.is_empty() => {
+                    for method in methods.iter().filter(|m| m.generic_parameters.is_empty()) {
+                        for ty in method
+                            .parameters
+                            .iter()
+                            .map(|parameter| &parameter.ty)
+                            .chain(&method.result)
+                        {
+                            c.validate_declared_type(ty);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         for item in &source.syntax.items {
             if let ItemKind::Function {
                 name,
@@ -8840,6 +8988,9 @@ fn check_resolved_mode_once(
                 let Some(body) = &method.body else {
                     continue;
                 };
+                if !method.generic_parameters.is_empty() {
+                    continue;
+                }
                 let function =
                     extension_ids[&(module_name.clone(), item.span.start, method.name.clone())];
                 let mut parameters = vec![Parameter {
@@ -9128,6 +9279,7 @@ fn check_resolved_mode_once(
                 table: Rc::clone(&table),
                 generic_types: request.substitution.clone(),
                 generic_consts: request.const_substitution.clone(),
+                generic_evidence: request.evidence.clone(),
                 generic_functions: generic_templates.clone(),
                 specialization_registry: Some(Rc::clone(&specialization_registry)),
                 extension_candidates: extension_candidates_for(

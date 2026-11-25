@@ -2107,6 +2107,9 @@ impl<'a> Builder<'a> {
                     value,
                 } => {
                     if matches!(target.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
+                        || (self.is_whole_owner_overwrite(target, operator)
+                            && matches!(self.path(target), PathTarget::Local(local)
+                                if self.is_parameter_place(local)))
                         || (matches!(
                             operator.as_str(),
                             "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
@@ -2118,6 +2121,29 @@ impl<'a> Builder<'a> {
                     let PathTarget::Local(local) = self.path(target) else {
                         unreachable!("checked assignment")
                     };
+                    if self.is_whole_owner_overwrite(target, operator)
+                        && !self.is_parameter_place(local)
+                    {
+                        // Whole-owner reassignment: the right-hand side is
+                        // staged completely first (it may move or read the
+                        // old value; an early exit leaves the local intact),
+                        // then the assignment releases whatever the local
+                        // still owns exactly once and installs the new value.
+                        let scope_start = self.owned_locals.len();
+                        if let Some(place_ty) = self.ty(target) {
+                            if let Some(staged) = self.stage_replacement(value, &place_ty) {
+                                self.replace_local(
+                                    local,
+                                    consume(op(Source::Local(staged), value.span)),
+                                    target.span,
+                                    statement.span,
+                                );
+                                self.end_owned_locals(scope_start, statement.span);
+                            }
+                        }
+                        self.owned_locals.truncate(scope_start);
+                        continue;
+                    }
                     if let ExprKind::Call {
                         callee, arguments, ..
                     } = &value.kind
@@ -2481,9 +2507,13 @@ impl<'a> Builder<'a> {
             }
         }
         if operator == "=" {
-            if let Some(place_ty) = self.ty(target) {
+            if let Some(place_ty) = self.ty(target).map(|ty| match ty {
+                Type::Reference { inner, .. } if matches!(target.kind, ExprKind::Path(_)) => *inner,
+                ty => ty,
+            }) {
                 if matches!(place_ty, Type::String | Type::List(_) | Type::Box(_))
                     || self.is_string_owner_struct(&place_ty)
+                    || self.closure_wrapper(&place_ty).is_some()
                 {
                     // Owning overwrite: stage the value first (it may read the
                     // old one), exchange it into the place, then release what
@@ -2537,6 +2567,43 @@ impl<'a> Builder<'a> {
             None,
         );
         Some(())
+    }
+    /// A parameter local (a `share` parameter is written through a
+    /// reference; it is exchanged in place instead of re-initialized).
+    fn is_parameter_place(&self, local: LocalId) -> bool {
+        matches!(
+            self.function.locals[local.0 as usize].ty,
+            Type::Reference { .. }
+        ) || self.function.parameter_locals.contains(&local)
+    }
+    /// `x = value` on a whole local (or `share` parameter) of a struct, tuple,
+    /// enum or function value that owns heap data: lowered as the RHS-first
+    /// replacement used for fields and elements. `string`, `List`, `Box` and
+    /// array locals keep their existing paths.
+    fn is_whole_owner_overwrite(&self, target: &Expr, operator: &str) -> bool {
+        if operator != "=" || !matches!(target.kind, ExprKind::Path(_)) {
+            return false;
+        }
+        // A stored `share` handle (`var h := owner.share(); h = ..`) keeps its
+        // own store-through-the-reference path.
+        if let PathTarget::Local(local) = self.path(target) {
+            if matches!(
+                self.function.locals[local.0 as usize].ty,
+                Type::Reference { .. }
+            ) && !self.function.parameter_locals.contains(&local)
+            {
+                return false;
+            }
+        }
+        self.ty(target).is_some_and(|ty| {
+            let ty = match ty {
+                Type::Reference { inner, .. } => *inner,
+                ty => ty,
+            };
+            // Strings, Lists, Boxes and arrays keep their existing paths.
+            (matches!(ty, Type::Struct(_) | Type::Enum(_)) && self.is_string_owner_struct(&ty))
+                || self.closure_wrapper(&ty).is_some()
+        })
     }
     /// Reference to a place: the projection chain's checked address, or a
     /// whole-local borrow when the place is a bare local.
@@ -3243,6 +3310,11 @@ impl<'a> Builder<'a> {
             }
             ExprKind::Path(_) => match self.path(expr) {
                 PathTarget::Local(id) => Some(op(Source::Local(id), expr.span)),
+                PathTarget::Const(value) => self.constant(
+                    expr.span,
+                    Constant::Integer(value.to_string()),
+                    Type::Primitive(Primitive::U32),
+                ),
                 // A function named as a value: its table slot, no environment.
                 // A direct call names its callee through `lower_callee`.
                 PathTarget::Function(id) => {

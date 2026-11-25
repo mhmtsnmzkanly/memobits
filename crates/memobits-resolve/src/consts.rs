@@ -1083,6 +1083,15 @@ impl Rewriter<'_, '_> {
 
     fn methods(&mut self, methods: &mut [InterfaceMethod], generics: &HashSet<String>) {
         for method in methods {
+            let own: HashSet<String> = method
+                .generic_parameters
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            self.generics.push(own.clone());
+            for bound in &mut method.bounds {
+                self.ty(&mut bound.interface);
+            }
             for parameter in &mut method.parameters {
                 self.ty(&mut parameter.ty);
             }
@@ -1091,12 +1100,14 @@ impl Rewriter<'_, '_> {
             }
             if let Some(body) = &mut method.body {
                 let mut scope = generics.clone();
+                scope.extend(own);
                 scope.insert("self".to_owned());
                 scope.extend(method.parameters.iter().map(|p| p.name.clone()));
                 self.scopes.push(scope);
                 self.block(body);
                 self.scopes.pop();
             }
+            self.generics.pop();
         }
     }
 
@@ -1473,6 +1484,8 @@ impl Rewriter<'_, '_> {
                             );
                         }
                         Lookup::Failed => {}
+                        // A generic parameter in scope is read per specialization.
+                        Lookup::NotConst if self.shadowed_by_generic(&name) => {}
                         Lookup::NotConst => {
                             let span = count.span;
                             self.error(

@@ -175,9 +175,13 @@ parameter and result types may use `array<T, N>`, `List<T>`, `T?`, `T ! E`, tupl
 nominal generics and function types, with `borrow`/`share` access. `T::Name` is an
 associated type of `T`'s bounds (`T::Interface::Name` when several bounds define `Name`).
 A call that leaves a parameter unfixed is TE002; missing, ambiguous or per-bound evidence
-and the 256-specialization cap are TE007. Not available: explicit call-site type
-arguments, method-level type parameters, `where` bounds on type declarations, const
-parameters as values, nested projections.
+and the 256-specialization cap are TE007. F4 adds: a const parameter in scope is a `u32` value (arithmetic, comparisons, casts,
+`0..N`, `[x; N]`, interpolation, closures; per specialization); an inherent method may
+declare its own type and const parameters (`fn map<U>(self, f: fn(T) -> U)`, inferred like a
+function's and specialized on both lists); and `type Pair<T> where T: Add { .. }` checks the
+bounds at every instantiation (TE007 naming the bound) and gives the type's methods the
+selected evidence. Not available: explicit call-site type arguments, generic methods in
+interface declarations and `extend T of I` blocks, nested projections.
 `Box<T>` (H4): `use alloc::Box;` (alloc layer; ME012 with `[build] alloc = false`, NE003
 without the import) gives a single-owner heap box. `Box(value)` moves a value in,
 `unbox(b)` consumes the box and moves the value out. Field access, indexing, method calls
@@ -281,6 +285,11 @@ owned temporary on a normal early exit from a later argument, and the callee
 owns it once invoked. A direct internal List return moves a named
 callee local into a new or mutable caller binding. Whole mutable local
 replacement releases the previous block after evaluating the RHS.
+Whole-owner reassignment (F4): `x = value` on a `var` local or `share` parameter of a
+String-owning struct, record, tuple or enum, or of a function value, evaluates the right-hand
+side into a staged value first (it may read or move the old one; an early exit leaves the old
+value), then releases the old value once and installs the new one; a live loan is BE005, and a
+`share fn` parameter cannot be reassigned as a whole yet (TE018).
 A String-owning struct, record, tuple or array temporary (a literal
 or a direct call result) can be passed straight to an owned parameter: it is
 staged in a hidden local, so the callee receives a named owner and an early

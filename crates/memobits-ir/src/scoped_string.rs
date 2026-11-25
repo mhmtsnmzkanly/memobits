@@ -1592,9 +1592,11 @@ pub(super) fn struct_move_source(
         return None;
     };
     let ty = &function.locals.get(target.0 as usize)?.ty;
-    (initialize
-        && value.mode == UseMode::Consume
+    // A new binding, or a whole-owner reassignment of a `var` local: the
+    // staged right-hand side moves in and the old value is released once.
+    (value.mode == UseMode::Consume
         && matches!(ty, Type::Struct(_) | Type::Enum(_))
+        && (initialize || function.locals.get(target.0 as usize)?.mutable)
         && function.locals.get(source.0 as usize)?.ty == *ty
         && !function.parameter_locals.contains(&target))
     .then_some(source)
@@ -1788,9 +1790,7 @@ pub(super) fn validate(
                         || (struct_local(*target)
                             && !initialize
                             && !function.locals.get(target.0 as usize).is_some_and(|local| {
-                                matches!(local.ty, Type::Array { .. })
-                                    && local.mutable
-                                    && !function.parameter_locals.contains(target)
+                                local.mutable && !function.parameter_locals.contains(target)
                             }))
                         || source_outside_scope
                         || (!initialize && !in_scope.contains(target))

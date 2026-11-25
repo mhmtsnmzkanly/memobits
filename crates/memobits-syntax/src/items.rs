@@ -232,7 +232,7 @@ impl Parser {
                 }
                 let extension_start = self.current().span.start;
                 self.bump();
-                let (associated_types, methods) = self.interface_methods(true)?;
+                let (associated_types, methods) = self.interface_methods(true, true)?;
                 if !associated_types.is_empty() {
                     return self.fail("associated type bindings require an interface extension");
                 }
@@ -273,7 +273,7 @@ impl Parser {
             }
         } else if self.eat("interface") {
             let name = self.name()?;
-            let (associated_type_items, methods) = self.interface_methods(false)?;
+            let (associated_type_items, methods) = self.interface_methods(false, false)?;
             let associated_types = associated_type_items
                 .into_iter()
                 .map(|binding| binding.name)
@@ -288,7 +288,7 @@ impl Parser {
             let target = self.ty()?;
             if self.eat("of") {
                 let interface = self.ty()?;
-                let (associated_types, methods) = self.interface_methods(true)?;
+                let (associated_types, methods) = self.interface_methods(true, false)?;
                 ItemKind::Extension {
                     public,
                     target,
@@ -297,7 +297,7 @@ impl Parser {
                     methods,
                 }
             } else {
-                let (associated_types, methods) = self.interface_methods(true)?;
+                let (associated_types, methods) = self.interface_methods(true, true)?;
                 if !associated_types.is_empty() {
                     return self.fail("associated type bindings require an interface extension");
                 }
@@ -376,6 +376,7 @@ impl Parser {
     fn interface_methods(
         &mut self,
         implementation: bool,
+        generics: bool,
     ) -> PResult<(Vec<AssociatedTypeBinding>, Vec<InterfaceMethod>)> {
         self.expect("{")?;
         let mut associated_types = Vec::new();
@@ -403,6 +404,12 @@ impl Parser {
             let public = self.eat("pub");
             self.expect("fn")?;
             let name = self.name()?;
+            // Only inherent methods take their own type and const parameters.
+            let generic_parameters = if generics {
+                self.generic_parameters()?
+            } else {
+                Vec::new()
+            };
             self.expect("(")?;
             let receiver = if self.eat("borrow") {
                 Access::Borrow
@@ -434,6 +441,11 @@ impl Parser {
             } else {
                 None
             };
+            let bounds = if generics {
+                self.where_bounds()?
+            } else {
+                Vec::new()
+            };
             let body = if implementation && self.eat("=>") {
                 let body = self.expression_body()?;
                 self.eat(";");
@@ -449,6 +461,8 @@ impl Parser {
                 public,
                 name,
                 receiver,
+                generic_parameters,
+                bounds,
                 parameters,
                 result,
                 body,

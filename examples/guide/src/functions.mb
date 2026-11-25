@@ -44,6 +44,24 @@ test fn named_functions_are_values() {
     assert(inc(5) == 10);
 }
 
+// A whole function value is assigned like any owner: `f = g` evaluates `g`,
+// releases the old environment once and installs the new value, so a `var`
+// binding can be rebuilt in a loop (`f = compose(f, ...)` moves the old value
+// into the call). A `share fn` parameter lends the caller's value and cannot be
+// reassigned as a whole.
+fn plus(n: i32) -> fn(i32) -> i32 { fn(x) => x + n }
+fn after(f: fn(i32) -> i32, n: i32) -> fn(i32) -> i32 { fn(x) => f(x) + n }
+test fn function_values_are_reassigned_whole() {
+    var f := inc;
+    f = dbl;
+    assert(f(4) == 8);
+    var g := plus(1);
+    g = plus(10);
+    assert(g(1) == 11);
+    loop round in 0..3 { g = after(g, 5); }
+    assert(g(1) == 26);
+}
+
 // A stored function value is moved like any owner: calling it and lending it
 // to a `borrow fn` parameter do not move it, but passing it to an owned
 // parameter does (a second use is BE001). Each mention of a function name is

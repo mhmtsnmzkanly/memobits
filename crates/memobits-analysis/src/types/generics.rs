@@ -11,6 +11,15 @@ pub(super) struct ParameterSet {
     consts: HashSet<String>,
 }
 
+/// The outcome of inferring one call of a generic function or method.
+pub(super) struct InferredCall {
+    pub(super) bindings: Bindings,
+    pub(super) parameter_types: Vec<FunctionParameter>,
+    pub(super) result: Ty,
+    pub(super) evidence: Vec<GenericEvidence>,
+    pub(super) diverges: bool,
+}
+
 /// The type and const arguments known so far.
 #[derive(Clone, Default)]
 pub(super) struct Bindings {
@@ -607,21 +616,34 @@ impl Checker {
         if !self.select_evidence(template, bindings, &mut selected, span) {
             return None;
         }
-        // Evidence in bound order, so the key does not depend on discovery order.
-        let ordered = template
-            .bounds
-            .iter()
-            .enumerate()
-            .filter_map(|(index, bound)| {
-                selected
-                    .iter()
-                    .find(|found| {
-                        found.parameter == bound.parameter
-                            && found.interface == template.bound_interfaces[index]
-                    })
-                    .cloned()
+        // Evidence in bound order, so the key does not depend on discovery
+        // order. Evidence the receiver type of a method brought comes first.
+        let own = |found: &GenericEvidence| {
+            template.bounds.iter().enumerate().any(|(index, bound)| {
+                found.parameter == bound.parameter
+                    && found.interface == template.bound_interfaces[index]
             })
+        };
+        let mut ordered = selected
+            .iter()
+            .filter(|found| !own(found))
+            .cloned()
             .collect::<Vec<_>>();
+        ordered.extend(
+            template
+                .bounds
+                .iter()
+                .enumerate()
+                .filter_map(|(index, bound)| {
+                    selected
+                        .iter()
+                        .find(|found| {
+                            found.parameter == bound.parameter
+                                && found.interface == template.bound_interfaces[index]
+                        })
+                        .cloned()
+                }),
+        );
         let mut parameter_types = Vec::new();
         for parameter in &template.parameters {
             let ty = self.resolve_declared(template, &parameter.ty, bindings, &ordered);
@@ -684,11 +706,64 @@ impl Checker {
         let Some(template) = self.generic_template_for(path) else {
             return Ty::Error;
         };
+        let Some(call) = self.infer_call(
+            expr,
+            &template,
+            Bindings::default(),
+            Vec::new(),
+            arguments,
+            expected,
+        ) else {
+            return Ty::Error;
+        };
+        let InferredCall {
+            bindings,
+            parameter_types,
+            result,
+            evidence,
+            diverges,
+        } = call;
+        let Some((specialization_id, function_ty)) = self.register_specialization(
+            &template,
+            &bindings,
+            evidence,
+            parameter_types,
+            result.clone(),
+            expr.span,
+        ) else {
+            return Ty::Error;
+        };
+        self.generic_path_targets.insert(
+            callee as *const Expr as usize,
+            (specialization_id, function_ty),
+        );
+        self.expr(callee, None);
+        if diverges {
+            Ty::Never
+        } else {
+            result
+        }
+    }
+
+    /// Infers every type and const argument of a call of `template` from its
+    /// arguments and the expected result, starting from the arguments already
+    /// known in `base` (the receiver type's own, for a method), and selects the
+    /// evidence of every bound. Arguments are checked here.
+    pub(super) fn infer_call(
+        &mut self,
+        expr: &Expr,
+        template: &GenericFunctionTemplate,
+        base: Bindings,
+        base_evidence: Vec<GenericEvidence>,
+        arguments: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Option<InferredCall> {
+        let template = template.clone();
         let fail = |this: &mut Self, arguments: &[Expr]| {
             for argument in arguments {
                 this.expr(argument, None);
             }
-            Ty::Error
+            None
         };
         if let Err(message) = validate_template(&template) {
             self.error(
@@ -714,8 +789,8 @@ impl Checker {
             return fail(self, arguments);
         }
         let set = parameter_set(&template);
-        let mut bindings = Bindings::default();
-        let mut selected: Vec<GenericEvidence> = Vec::new();
+        let mut bindings = base;
+        let mut selected: Vec<GenericEvidence> = base_evidence;
         let mut actuals: Vec<Option<(Ty, bool)>> = vec![None; arguments.len()];
         let mut diverges = false;
         let mut failed = false;
@@ -754,7 +829,7 @@ impl Checker {
                     continue;
                 }
                 if !self.select_evidence(&template, &bindings, &mut selected, expr.span) {
-                    return Ty::Error;
+                    return None;
                 }
                 let access = ir_access(parameter.access);
                 let hint = (parameter.ty.path.len() == 1 && parameter.ty.arguments.is_empty())
@@ -844,7 +919,7 @@ impl Checker {
             }
         }
         if failed {
-            return Ty::Error;
+            return None;
         }
         if let (Some(result), Some(expected)) = (&template.result, expected) {
             if !matches!(expected, Ty::Error | Ty::Never)
@@ -859,12 +934,12 @@ impl Checker {
             "from its arguments"
         };
         if !self.report_uninferred(&template, &bindings, expr.span, how) {
-            return Ty::Error;
+            return None;
         }
         let Some((parameter_types, result, evidence)) =
             self.finish_specialization(&template, &set, &bindings, selected, expr.span)
         else {
-            return Ty::Error;
+            return None;
         };
         for (index, argument) in arguments.iter().enumerate() {
             let Some((actual, true)) = &actuals[index] else {
@@ -894,26 +969,268 @@ impl Checker {
         if let Some(expected) = expected {
             self.ensure(&result, expected, expr.span);
         }
-        let Some((specialization_id, function_ty)) = self.register_specialization(
-            &template,
-            &bindings,
-            evidence,
+        Some(InferredCall {
+            bindings,
             parameter_types,
-            result.clone(),
-            expr.span,
-        ) else {
-            return Ty::Error;
+            result,
+            evidence,
+            diverges,
+        })
+    }
+
+    /// The evidence for the `where` bounds of the generic nominal type `ty`
+    /// (empty when it has none): the evidence the enclosing specialization
+    /// forwards, else the one visible implementation. A missing or ambiguous
+    /// implementation is reported (when `report`) naming the bound.
+    pub(super) fn type_bound_evidence(
+        &mut self,
+        ty: &Ty,
+        span: Span,
+        report: bool,
+    ) -> Option<Vec<GenericEvidence>> {
+        let (Ty::Struct(id, _) | Ty::Enum(id, _)) = ty else {
+            return Some(Vec::new());
         };
-        self.generic_path_targets.insert(
-            callee as *const Expr as usize,
-            (specialization_id, function_ty),
-        );
-        self.expr(callee, None);
-        if diverges {
-            Ty::Never
-        } else {
-            result
+        let Some(origin) = self.table.generic_origin(*id) else {
+            return Some(Vec::new());
+        };
+        let Some((_, type_name, parameters, bounds)) = self.table.generic_bounds(&origin) else {
+            return Some(Vec::new());
+        };
+        let arguments = self.table.generic_arguments(*id)?;
+        let mut selected: Vec<GenericEvidence> = Vec::new();
+        for (parameter, interface) in &bounds {
+            let target = parameters
+                .iter()
+                .zip(&arguments)
+                .find_map(|(declared, argument)| match argument {
+                    ResolvedArgument::Type(ty) if declared.name == *parameter => Some(ty.clone()),
+                    _ => None,
+                });
+            let Some(target) = target else {
+                continue;
+            };
+            let forwarded = self
+                .generic_evidence
+                .iter()
+                .find(|evidence| {
+                    evidence.interface == *interface && evidence.candidate.target == target
+                })
+                .map(|evidence| evidence.candidate.clone());
+            let candidate = if let Some(candidate) = forwarded {
+                candidate
+            } else {
+                let matching = self
+                    .extension_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.visible
+                            && candidate.target == target
+                            && candidate.interface.as_deref() == Some(interface.as_str())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matching.len() != 1 {
+                    if report {
+                        let found = if matching.is_empty() {
+                            format!(
+                                "no visible implementation of '{interface}' for {} satisfies bound '{parameter}: {interface}' of type '{type_name}'",
+                                name(&target)
+                            )
+                        } else {
+                            format!(
+                                "ambiguous evidence for bound '{parameter}: {interface}' of type '{type_name}' with {}",
+                                name(&target)
+                            )
+                        };
+                        self.error(7, span, found);
+                    }
+                    return None;
+                }
+                matching[0].clone()
+            };
+            selected.push(GenericEvidence {
+                parameter: parameter.clone(),
+                interface: interface.clone(),
+                candidate,
+            });
         }
+        Some(selected)
+    }
+
+    /// Checks the bounds of every generic nominal type `ty` mentions: its own
+    /// and those of its arguments and fields.
+    pub(super) fn check_type_bounds(&mut self, ty: &Ty, span: Span) {
+        let mut seen = HashSet::new();
+        self.check_type_bounds_walk(ty, span, &mut seen);
+    }
+
+    fn check_type_bounds_walk(&mut self, ty: &Ty, span: Span, seen: &mut HashSet<u32>) {
+        match ty {
+            Ty::Array(element, _) | Ty::List(element) | Ty::Box(element) => {
+                self.check_type_bounds_walk(element, span, seen)
+            }
+            Ty::Reference { inner, .. } => self.check_type_bounds_walk(inner, span, seen),
+            Ty::Function(parameters, result, _) => {
+                for parameter in parameters {
+                    self.check_type_bounds_walk(&parameter.ty, span, seen);
+                }
+                self.check_type_bounds_walk(result, span, seen);
+            }
+            Ty::Struct(id, _) | Ty::Enum(id, _) | Ty::Tuple(id, _, _) => {
+                if !seen.insert(*id) {
+                    return;
+                }
+                if matches!(ty, Ty::Struct(..) | Ty::Enum(..)) {
+                    let _ = self.type_bound_evidence(ty, span, true);
+                }
+                let info = self.table.info(*id);
+                for field in &info.fields {
+                    self.check_type_bounds_walk(&field.ty, span, seen);
+                }
+                for variant in &info.variants {
+                    for payload in &variant.payload {
+                        self.check_type_bounds_walk(payload, span, seen);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A call of an inherent method that has type or const parameters of its
+    /// own: they are inferred like a function's (the receiver type's
+    /// arguments are already fixed), and the method is specialized on both.
+    pub(super) fn generic_method_call(
+        &mut self,
+        expr: &Expr,
+        candidate: &ExtensionCandidate,
+        method: &memobits_syntax::InterfaceMethod,
+        arguments: &[Expr],
+        expected: Option<&Ty>,
+    ) -> Option<(Vec<FunctionParameter>, Ty, FunctionId)> {
+        let template = GenericFunctionTemplate {
+            module: candidate.module.clone(),
+            name: method.name.clone(),
+            span: method.span,
+            generic_parameters: method.generic_parameters.clone(),
+            bounds: method.bounds.clone(),
+            bound_interfaces: method
+                .bounds
+                .iter()
+                .map(|bound| {
+                    qualified_interface(
+                        &candidate.module,
+                        &candidate.declaration_imports,
+                        &bound.interface,
+                    )
+                })
+                .collect(),
+            parameters: method.parameters.clone(),
+            result: method.result.clone(),
+        };
+        let fail = |this: &mut Self, message: String| {
+            this.error(7, method.span, message);
+            for argument in arguments {
+                this.expr(argument, None);
+            }
+            None
+        };
+        if let Err(message) = validate_template(&template) {
+            return fail(
+                self,
+                format!("generic method '{}' is invalid: {message}", method.name),
+            );
+        }
+        for parameter in &method.generic_parameters {
+            if candidate.substitution.contains_key(&parameter.name)
+                || candidate.const_substitution.contains_key(&parameter.name)
+            {
+                return fail(
+                    self,
+                    format!(
+                        "generic parameter '{}' of method '{}' repeats a parameter of its type",
+                        parameter.name, method.name
+                    ),
+                );
+            }
+        }
+        let base = Bindings {
+            types: candidate.substitution.clone(),
+            consts: candidate.const_substitution.clone(),
+        };
+        let call = self.infer_call(
+            expr,
+            &template,
+            base,
+            candidate.evidence.clone(),
+            arguments,
+            expected,
+        )?;
+        let InferredCall {
+            bindings,
+            parameter_types,
+            result,
+            evidence,
+            ..
+        } = call;
+        let function_ty = Ty::Function(parameter_types.clone(), Box::new(result.clone()), false);
+        let mut types = bindings
+            .types
+            .iter()
+            .map(|(name, ty)| format!("{name}={ty:?}"))
+            .collect::<Vec<_>>();
+        types.sort();
+        let mut consts = bindings
+            .consts
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>();
+        consts.sort();
+        let evidence_key = evidence
+            .iter()
+            .map(|found| {
+                format!(
+                    "{}:{}@{}..{}",
+                    found.parameter,
+                    found.candidate.module,
+                    found.candidate.span.start,
+                    found.candidate.span.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!(
+            "{}:{}:{}:{:?}<{function_ty:?}>[{evidence_key}]{{{}|{}}}",
+            candidate.module,
+            candidate.span.start,
+            method.name,
+            candidate.target,
+            types.join(","),
+            consts.join(",")
+        );
+        let registry = self.specialization_registry.as_ref()?.clone();
+        let mut registry = registry.borrow_mut();
+        let id = if let Some(id) = registry.method_by_key.get(&key).copied() {
+            id
+        } else {
+            let id = FunctionId(registry.next_id);
+            registry.next_id += 1;
+            registry.method_by_key.insert(key.clone(), id);
+            registry.method_requests.push(GenericMethodSpecialization {
+                module: candidate.module.clone(),
+                extension_span: candidate.span,
+                method: method.clone(),
+                target: candidate.target.clone(),
+                substitution: bindings.types.clone(),
+                const_substitution: bindings.consts.clone(),
+                evidence,
+                id,
+                key,
+            });
+            id
+        };
+        Some((parameter_types, result, id))
     }
 
     /// A generic function named as a value. Only an expected function type

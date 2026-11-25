@@ -409,12 +409,7 @@ fn make() { let t := "a".concat("b"); let l := Label { text: t, n: 1 }; let o :=
             "TE017",
             "would copy a String-owning element",
         ),
-        // Whole-owner reassignment stays rejected.
-        (
-            format!("{bind} let t2 := \"c\".concat(\"d\"); let l2 := Label {{ text: t2, n: 1 }}; var p := Outer {{ inner: l2, k: 1 }}; p = o; }} fn main() {{}}"),
-            "TE018",
-            "can only move directly into a new local",
-        ),
+        // Whole-owner reassignment works since F4 (see `f4_followups.rs`).
         // Recursive by-value types and Error ancestry.
         (
             "type Rec { next: Rec, s: string } fn main() {}".to_string(),

@@ -106,6 +106,10 @@ pub struct InterfaceMethod {
     pub public: bool,
     pub name: String,
     pub receiver: Access,
+    /// The method's own type and const parameters (inherent methods only).
+    pub generic_parameters: Vec<GenericParameter>,
+    /// `where` bounds on the method's own type parameters.
+    pub bounds: Vec<WhereBound>,
     pub parameters: Vec<Parameter>,
     pub result: Option<Type>,
     pub body: Option<Block>,

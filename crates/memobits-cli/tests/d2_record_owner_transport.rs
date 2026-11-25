@@ -385,11 +385,7 @@ fn make() { let t := "a".concat("b"); let r: { name: string, n: u32 } = { name: 
             "TE017",
             "would copy a String-owning element",
         ),
-        (
-            format!("{bind} let t2 := \"c\".concat(\"d\"); var p: {{ name: string, n: u32 }} = {{ name: t2, n: 1 }}; p = r; }} fn main() {{}}"),
-            "TE018",
-            "can only move directly into a new local",
-        ),
+        // `p = r` (whole-owner reassignment) works since F4; see `f4_followups.rs`.
     ] {
         f.write("src/main.mb", &source);
         let output = f.run(&["build"]);

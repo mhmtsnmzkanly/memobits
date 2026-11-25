@@ -5,7 +5,20 @@ use memobits_syntax::{Expr, ExprKind, IntegerLiteral};
 
 impl Checker {
     pub(super) fn array_count(&mut self, count: &IntegerLiteral) -> Option<u32> {
-        let value = count.raw.replace('_', "").parse::<u32>().ok();
+        let raw = count.raw.replace('_', "");
+        if !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            // A const generic parameter of the specialization being checked.
+            let value = self.generic_consts.get(raw.as_str()).copied();
+            if value.is_none() {
+                self.error(
+                    1,
+                    count.span,
+                    format!("unknown constant '{}' in an array repeat count", count.raw),
+                );
+            }
+            return value;
+        }
+        let value = raw.parse::<u32>().ok();
         if value.is_none() {
             self.error(
                 8,

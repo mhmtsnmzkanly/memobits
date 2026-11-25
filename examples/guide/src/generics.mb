@@ -236,3 +236,80 @@ fn flow<T>(valve: T) -> T::Producer::Output where T: Producer + Consumer {
 test fn generic_projection_through_several_bounds() {
     assert(flow(Valve { n: 5 }) == 42);
 }
+
+// A const parameter in scope is a `u32` value: usable in arithmetic,
+// comparisons, `0..N` ranges, `[x; N]` repeat counts, casts, interpolation and
+// closures, with the value of the specialization being checked. A local of the
+// same name shadows it, and it is not assignable.
+fn weigh_all<const N: u32>(items: borrow array<u32, N>) -> u32 {
+    var sum: u32 = 0;
+    loop i in 0..N { sum += items[i]; }
+    sum + N
+}
+fn filled<const N: u32>(value: u32) -> array<u32, N> { [value; N] }
+fn describe<const N: u32>(items: borrow array<u32, N>) -> u32 {
+    let shift := fn(x: u32) -> u32 => x + N;
+    let text := "N={N}";
+    let big: bool = N > 2;
+    shift(text.len()) + (if big { 100 } else { 0 }) + (N as u8) as u32
+}
+type Grid<const W: u32, const H: u32> { cells: array<u32, 4> } extend {
+    fn area(borrow self) -> u32 { W * H }
+}
+test fn const_parameters_are_values() {
+    let three: array<u32, 3> = [1, 2, 3];
+    let five: array<u32, 5> = [1, 1, 1, 1, 1];
+    assert(weigh_all(three.borrow()) == 9);
+    assert(weigh_all(five.borrow()) == 10);
+    let made: array<u32, 4> = filled(7);
+    assert(made[3] == 7);
+    assert(describe(three.borrow()) == 3 + 3 + 100 + 3);
+    assert(describe(five.borrow()) == 3 + 5 + 100 + 5);
+    let grid := Grid<2, 3> { cells: [1, 2, 3, 4] };
+    assert(grid.area() == 6);
+}
+
+// An inherent method may have type and const parameters of its own, in
+// addition to its type's: `fn m<U>(self, x: U) -> (T, U)`. They are inferred at
+// the call like a function's (arguments, then the expected result), may have
+// `where` bounds, and the method is specialized on the receiver's arguments and
+// its own. Methods of interface implementations and interface declarations
+// cannot take their own parameters yet.
+type Cell<T> { value: T } extend {
+    fn with<U>(self, extra: U) -> (T, U) { (self.value, extra) }
+    fn map<U>(self, step: fn(T) -> U) -> Cell<U> { Cell<U> { value: step(self.value) } }
+    fn weight_with<U>(borrow self, other: borrow U) -> i32 where U: Weigh { other.weigh() of Weigh }
+    fn lanes<const K: u32>(borrow self, lane: borrow array<i32, K>) -> u32 { K * 2 }
+}
+test fn methods_with_their_own_parameters() {
+    let cell := Cell<i32> { value: 40 };
+    let pair := cell.with(true);
+    assert(pair.0 == 40 && pair.1);
+    let again := Cell<i32> { value: 5 };
+    let doubled := again.map(fn(x: i32) -> i32 => x * 2);
+    assert(doubled.value == 10);
+    let truth := Cell<i32> { value: 1 };
+    let flag := truth.map(fn(x: i32) -> bool => x == 1);
+    assert(flag.value);
+    let crate := Crate { n: 7 };
+    let holder := Cell<i32> { value: 0 };
+    assert(holder.weight_with(crate.borrow()) == 7);
+    let lane: array<i32, 4> = [0, 0, 0, 0];
+    let lanes := Cell<i32> { value: 0 };
+    assert(lanes.lanes(lane.borrow()) == 8);
+}
+
+// A generic type may carry `where` bounds on its parameters: every
+// instantiation (annotation, signature, field, payload, nested type, or a
+// generic function's specialization) needs a visible implementation of each
+// bound, and the type's methods use that evidence (`T::Output`, operators).
+type Pail<T> where T: Weigh { item: T } extend {
+    fn grams(borrow self) -> i32 {
+        let w := self.item.weigh() of Weigh;
+        w * 10
+    }
+}
+test fn type_declarations_with_where_bounds() {
+    let pail := Pail<Crate> { item: Crate { n: 4 } };
+    assert(pail.grams() == 40);
+}

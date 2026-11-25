@@ -328,6 +328,23 @@ pub(crate) fn check(
                 );
             }
             checker.variant_scopes.push(BTreeSet::new());
+            // The method's own type and const parameters.
+            checker.generic_types.push(
+                method
+                    .generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker
+                .const_parameters
+                .push(const_names(&method.generic_parameters));
+            for bound in &method.bounds {
+                checker.ty(&bound.interface);
+            }
             checker.scopes.push(BTreeSet::from(["self".to_owned()]));
             for parameter in &method.parameters {
                 checker.ty(&parameter.ty);
@@ -351,6 +368,8 @@ pub(crate) fn check(
                 checker.block(body);
             }
             checker.scopes.pop();
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
             checker.variant_scopes.pop();
         }
         checker.variant_scopes.pop();
@@ -756,6 +775,10 @@ impl Checker<'_> {
         match &expr.kind {
             ExprKind::Path(path) if path.len() == 1 => {
                 if !self.scopes.iter().rev().any(|s| s.contains(&path[0]))
+                    && !self
+                        .const_parameters
+                        .iter()
+                        .any(|names| names.contains(&path[0]))
                     && templates::variant(&path[0]).is_none()
                     && !self
                         .variants

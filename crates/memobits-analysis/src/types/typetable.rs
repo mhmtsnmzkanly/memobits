@@ -72,6 +72,7 @@ enum Def {
         name: String,
         parameters: Vec<GenericParameter>,
         definition: TypeDefinition,
+        bounds: Vec<memobits_syntax::WhereBound>,
     },
 }
 
@@ -823,6 +824,45 @@ impl TypeTable {
         matches!(definition, Def::Generic { .. }).then(|| key.clone())
     }
 
+    /// The declaring module, name, type parameters and `where` bounds of a
+    /// generic declaration (the bounded parameter and the qualified interface),
+    /// by its definition key. `None` when the declaration has no bounds.
+    pub fn generic_bounds(
+        &self,
+        key: &str,
+    ) -> Option<(String, String, Vec<GenericParameter>, Vec<(String, String)>)> {
+        match self.defs.get(key)? {
+            Def::Generic {
+                module,
+                name,
+                parameters,
+                bounds,
+                ..
+            } if !bounds.is_empty() => {
+                let imports = self.imports.get(module).cloned().unwrap_or_default();
+                Some((
+                    module.clone(),
+                    name.clone(),
+                    parameters.clone(),
+                    bounds
+                        .iter()
+                        .map(|bound| {
+                            (
+                                bound.parameter.clone(),
+                                super::interfaces::qualified_interface(
+                                    module,
+                                    &imports,
+                                    &bound.interface,
+                                ),
+                            )
+                        })
+                        .collect(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// The generic declaration that produced a concrete nominal instance.
     pub fn generic_origin(&self, id: u32) -> Option<String> {
         let index = id as usize;
@@ -922,12 +962,27 @@ impl TypeTable {
                     ));
                 }
                 if !generic_parameters.is_empty() {
-                    if !bounds.is_empty() {
-                        diagnostics.push(diagnostic(
-                            2,
-                            item.span,
-                            "generic type where-constraints are not implemented yet",
-                        ));
+                    for bound in bounds {
+                        if !generic_parameters.iter().any(|parameter| {
+                            parameter.name == bound.parameter
+                                && matches!(parameter.kind, GenericParameterKind::Type)
+                        }) {
+                            diagnostics.push(diagnostic(
+                                7,
+                                bound.span,
+                                format!(
+                                    "bound '{}: ...' names '{}', which is not a type parameter of '{name}'",
+                                    bound.parameter, bound.parameter
+                                ),
+                            ));
+                        }
+                        if !bound.interface.arguments.is_empty() {
+                            diagnostics.push(diagnostic(
+                                7,
+                                bound.span,
+                                "interface bounds with type arguments are not supported",
+                            ));
+                        }
                     }
                     match definition {
                         TypeDefinition::Bodyless => diagnostics.push(diagnostic(
@@ -969,6 +1024,7 @@ impl TypeTable {
                         name: name.clone(),
                         parameters: generic_parameters.clone(),
                         definition: definition.clone(),
+                        bounds: bounds.clone(),
                     };
                     if table.defs.insert(key(module, name), def).is_some() {
                         diagnostics.push(diagnostic(
@@ -1896,6 +1952,7 @@ impl TypeTable {
                     name,
                     parameters,
                     definition,
+                    ..
                 },
             )) => self.instantiate_generic_type(
                 definition_key,
