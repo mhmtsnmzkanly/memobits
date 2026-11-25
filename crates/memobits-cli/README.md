@@ -167,6 +167,17 @@ literals and destructuring and `Self::Variant` paths (expressions and patterns).
 `extend` blocks it is SE002 ("only available inside an `extend` block"), and in
 `interface` declarations SE002 "not supported yet". `Self<..>`, a bare `Self` value and
 `Self::X` as a type are SE002.
+Generics (H3): a generic function takes any number of type parameters and `const N: u32`
+parameters and bounds `where T: A + B, U: C` (one evidence per bound, selected at the call
+or forwarded by the enclosing generic function; a method call picks the interface with
+`of`). Every argument is inferred from the call arguments and the expected result;
+parameter and result types may use `array<T, N>`, `List<T>`, `T?`, `T ! E`, tuples,
+nominal generics and function types, with `borrow`/`share` access. `T::Name` is an
+associated type of `T`'s bounds (`T::Interface::Name` when several bounds define `Name`).
+A call that leaves a parameter unfixed is TE002; missing, ambiguous or per-bound evidence
+and the 256-specialization cap are TE007. Not available: explicit call-site type
+arguments, method-level type parameters, `where` bounds on type declarations, const
+parameters as values, nested projections.
 Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
 usable in parameters, results, locals, struct, tuple and record fields, array and List
 elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function

@@ -711,6 +711,17 @@ impl TypeTable {
         }
     }
 
+    /// The compiler-known template (`T?`, `T ! E`) and arguments of an instance.
+    pub fn template_arguments(&self, id: u32) -> Option<(TemplateId, Vec<ResolvedArgument>)> {
+        let index = id as usize;
+        let instances = self.instances.borrow();
+        let instance = instances.get(index.checked_sub(self.types.len())?)?;
+        match &instance.0 {
+            InstanceKey::Template(template) => Some((*template, instance.1.clone())),
+            _ => None,
+        }
+    }
+
     /// Concrete arguments of a generic nominal instance, in declaration order.
     pub fn generic_arguments(&self, id: u32) -> Option<Vec<ResolvedArgument>> {
         let index = id as usize;

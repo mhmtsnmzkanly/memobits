@@ -1399,3 +1399,81 @@ Facts about the shipped non-escaping closures; the Stage 4 decision is unchanged
 - Tests: `crates/memobits-cli/tests/h2_closures.rs` (18); guide `functions.mb`
   (+5 tests, 134 total). H1 negatives for captures, borrow/share fn parameters
   and List function types were replaced or removed.
+
+### Shipped H3 details (2026-11-25)
+
+Facts about the shipped generics step; the Stage 4 decision is unchanged.
+
+- Syntax: `where T: A + B, U: C` (the parser emits one `WhereBound` per interface;
+  a repeated parameter name is fine). Declarations are validated once
+  (`validate_template`): every bound names a declared type parameter, bounds take
+  no type arguments, const parameters have type `u32`, no parameter is declared
+  twice (TE007 at the declaration). The old "one parameter, one bound, direct
+  `T`" gate (`supported_generic_function`) is gone.
+- Inference (`types/generics.rs`, shared by calls and function values): the
+  written parameter types are matched against the argument types
+  (`Checker::unify`): a bare parameter, `array<T, N>`, `List<T>`, `T?`,
+  `T ! E`, tuples, nominal generics (`Pair<A, N>`, via the type table's generic
+  origin and arguments) and function types (access modes must agree) bind type
+  and const parameters; `borrow`/`share` references are stripped before binding.
+  Arguments are checked in written order. An argument whose parameter type still
+  mentions an unbound parameter is checked without an expected type; a function
+  literal, a generic function named as an argument, or a parameter type that
+  projects (`T::Rhs`) waits for a second pass. A function literal gets the
+  function type with the still-open result as `Ty::Error` (its body decides
+  the result); an open parameter type is TE002. After the arguments, the
+  expected result type fixes parameters nothing else bound; an expected result
+  also types a literal argument (`let x: u32 = fold(xs, 0, ..)`). A parameter no
+  argument or expected type fixed is TE002 "cannot infer the type argument 'U'
+  of generic function 'f'" (a diverging argument keeps its old message). Explicit
+  type arguments at a call (`f<i32>(x)`) do not exist.
+- Evidence: one `GenericEvidence { parameter, interface, candidate }` per bound,
+  selected per bound at the call: the evidence the enclosing specialization
+  forwards (same interface and target), else the one visible implementation
+  ("no visible implementation of 'I' for X satisfies generic bound 'T: I' of 'f'"
+  or "ambiguous generic evidence for bound 'T: I'; candidates: ..."). Evidence
+  is selected as soon as its parameter is bound, so projections in later
+  parameter types resolve. A method call on a value of a type parameter selects
+  its interface with `of` (unchanged); without `of`, a method provided by one
+  bound says to use `of`, one provided by two bounds names both
+  ("method 'm' is provided by the bounds 'T: A' and 'T: B'; select one with `of
+  Interface`", TE024).
+- Specialization key: template identity + the specialized function type +
+  the sorted type and const arguments + the evidence of every bound in bound
+  order (module and span of each implementation). The existing 256 cap applies
+  (TE007 "generic specialization limit exceeded").
+- Projections: `T::Name` resolves through the evidence of `T`'s own bounds (not
+  by target type). When several bounds define `Name` it is TE008 "associated type
+  'Name' of 'T' is ambiguous: bounds ... both define it"; the qualified form
+  `T::Interface::Name` (interface by its last path segment) selects one.
+  Anything deeper (`T::A::B::C`, or `T::X::Y` where `X` is no bound) stays NE008
+  / TE008 "nested associated type projection ... is not supported".
+- Generic function values: the expected function type is matched against all
+  parameters and the result (several parameters, bounds with evidence); a
+  generic function named as an argument of a generic parameter of function type
+  is specialized after the other arguments fixed its parameter types
+  (`apply2(first_of, 5, true)`).
+- Types and methods: several type and const parameters on nominal types work
+  (`P<A, B, const N: u32>` and its `extend` methods). Methods with their own
+  type parameters are SE002; `type X<T> where T: I` is still "not implemented
+  yet"; a const parameter is not a value expression (`[x; N]`, `0..N`).
+- Body checking is unchanged: each specialization is checked with the concrete
+  types, so there are no generic-body diagnostics beyond the concrete ones.
+- Argument checking against a still-open parameter type skips only the type
+  comparison (done after inference); access rules (`.borrow()`/`.share()`)
+  apply as in direct calls. List argument rules for open parameter types are
+  checked by the IR validation instead of the front end.
+- Changed tests: `cli.rs` (the `nested<T>(T?)`/`unsupported<T, U>` gate checks
+  became a working call and a TE002; five "constrained ...Assign remains gated"
+  checks assert acceptance of the uncalled generic).
+- Tests: `crates/memobits-cli/tests/h3_generics.rs` (16): several type/const
+  parameters with several bounds and forwarding, specialization keys (types,
+  consts, evidence across two modules), borrowed/shared parameters and compound
+  types, higher-order helpers over arrays/Lists (closures capturing, `share fn`),
+  projections through several bounds, generic function values, owners through
+  generic code (String, struct, nested struct, List, `T?`) under capped memory
+  (initial + 1 page, 4,096 iterations x 1,024 bytes; source and Wasm), cross-module
+  evidence, and the negatives (missing and ambiguous evidence, ambiguous method
+  and projection, nested projection, uninferred parameter, conflicting types and
+  consts, invalid declarations, wrong arity/kind of type arguments, the 256 limit).
+  Guide: `generics.mb` (+5 tests, 139 total); example `generics-operators` (6 tests).

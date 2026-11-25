@@ -33,6 +33,8 @@ extend Vec2 of Weigh {
     fn weight(borrow self) -> i32 { self.x + self.y }
 }
 
+interface Scale { fn scale(borrow self) -> i32; }
+
 // One owned T parameter with one interface bound.
 fn weigh_twice<T>(value: T) -> i32 where T: Weigh {
     value.weight() of Weigh + 1
@@ -41,6 +43,22 @@ fn weigh_twice<T>(value: T) -> i32 where T: Weigh {
 // The caller-selected Add evidence projects Rhs and Output.
 fn combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
     left + right
+}
+
+extend Vec2 of Scale {
+    fn scale(borrow self) -> i32 { 2 }
+}
+
+// Two type parameters, two bounds on `T` and one on `U`: the call selects one
+// implementation per bound, and `of Interface` picks the interface per call.
+fn weigh_scaled<T, U>(value: T, factor: U) -> i32 where T: Weigh + Scale, U: Scale {
+    value.weight() of Weigh * factor.scale() of Scale + value.scale() of Scale
+}
+
+// A generic higher-order helper: `T` and the function type are inferred from
+// the arguments, and the anonymous function takes its types from them.
+fn apply_twice<T>(value: T, step: borrow fn(T) -> T) -> T {
+    step(step(value))
 }
 
 fn main() -> i32 ! Error {
@@ -72,4 +90,14 @@ test fn combine_uses_the_selected_add_evidence() {
 
 test fn weigh_twice_adds_one_to_the_weight() {
     assert(weigh_twice(Vec2 { x: 15, y: 25 }) == 41);
+}
+
+test fn weigh_scaled_selects_each_bound() {
+    assert(weigh_scaled(Vec2 { x: 15, y: 25 }, Vec2 { x: 0, y: 0 }) == 82);
+}
+
+test fn apply_twice_infers_types_from_the_arguments() {
+    let moved := apply_twice(Vec2 { x: 1, y: 2 }, fn(v) => v + Vec2 { x: 1, y: 1 });
+    assert(moved.x == 3);
+    assert(moved.y == 4);
 }

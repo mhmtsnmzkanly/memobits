@@ -501,7 +501,8 @@ impl Checker<'_> {
             {
                 // Projection validity is resolved by type analysis against the
                 // unique selected generic interface evidence.
-                if ty.path.len() != 2 {
+                // `T::Name` and the qualified `T::Interface::Name` are allowed.
+                if ty.path.len() > 3 {
                     self.error(
                         8,
                         ty.span,

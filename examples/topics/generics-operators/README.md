@@ -4,11 +4,15 @@ A small program built only from shipped features. It defines
 `type Vec2 { x: i32, y: i32 }` and implements the compiler-provided
 `core::ops` interfaces `Add`, `Sub` and `PartialEq` for it, so `+`, `-`, `==`
 and `!=` work on `Vec2` values. It also declares a user interface `Weigh` and
-two generic functions, each with one owned `T` parameter and one interface
-bound:
+generic functions: two with one owned `T` parameter and one interface bound,
+and two that use several type parameters and a higher-order helper:
 
 - `weigh_twice<T>(value: T) -> i32 where T: Weigh`
 - `combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add`
+- `weigh_scaled<T, U>(value: T, factor: U) -> i32 where T: Weigh + Scale, U: Scale`
+  (two type parameters, two bounds on `T`, one evidence per bound)
+- `apply_twice<T>(value: T, step: borrow fn(T) -> T) -> T` (a generic
+  higher-order helper called with an anonymous function)
 
 `main` combines the pieces and returns the final weight, `Ok(41)`; `test fn`
 items check each step. For the full operator set and generic limits see the
@@ -31,7 +35,7 @@ cargo run -p memobits-cli -- test --project examples/topics/generics-operators/p
 The report ends with this summary line (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
 ```text
-test result: ok. 4 passed; 0 failed; 0 filtered out
+test result: ok. 6 passed; 0 failed; 0 filtered out
 ```
 
 ## Expected output

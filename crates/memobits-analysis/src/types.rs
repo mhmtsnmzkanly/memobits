@@ -21,12 +21,14 @@ use memobits_syntax::{
 };
 
 mod arrays;
+mod generics;
 mod interfaces;
 mod lists;
 mod operations;
 mod patterns;
 mod templates;
 mod typetable;
+use generics::validate_template;
 use interfaces::qualified_interface;
 use memobits_syntax::templates::{self as registry, Template};
 use operations::{floating, int_limit, integer, numeric};
@@ -131,6 +133,8 @@ struct GenericMethodSpecialization {
 
 #[derive(Clone)]
 struct GenericEvidence {
+    /// The generic parameter whose bound this evidence satisfies.
+    parameter: String,
     interface: String,
     candidate: ExtensionCandidate,
 }
@@ -193,114 +197,6 @@ fn ir_access(access: Access) -> IrAccess {
     }
 }
 
-fn is_plain_type_parameter(ty: &Type, name: &str) -> bool {
-    ty.path == [name] && ty.arguments.is_empty()
-}
-
-fn is_associated_projection(ty: &Type, name: &str) -> bool {
-    ty.path.len() == 2 && ty.path[0] == name && ty.arguments.is_empty()
-}
-
-fn supported_generic_function(template: &GenericFunctionTemplate) -> bool {
-    if template.bounds.len() > 1
-        || template.bounds.iter().any(|bound| {
-            bound.parameter
-                != template
-                    .generic_parameters
-                    .first()
-                    .map_or("", |p| p.name.as_str())
-                || !bound.interface.arguments.is_empty()
-        })
-    {
-        return false;
-    }
-    let (type_name, const_name, array_mode) = match template.generic_parameters.as_slice() {
-        [generic] if matches!(generic.kind, GenericParameterKind::Type) => {
-            (&generic.name, None, false)
-        }
-        [generic, constant]
-            if matches!(generic.kind, GenericParameterKind::Type)
-                && matches!(&constant.kind, GenericParameterKind::Const(ty) if ty.path == ["u32"] && ty.arguments.is_empty()) =>
-        {
-            (&generic.name, Some(constant.name.as_str()), true)
-        }
-        _ => return false,
-    };
-    if template.parameters.is_empty() {
-        return false;
-    }
-    if template.parameters.iter().any(|parameter| {
-        parameter.access != Access::Owned
-            || (if array_mode {
-                !is_array_generic_pattern(&parameter.ty, type_name, const_name.unwrap())
-                    && !is_associated_projection(&parameter.ty, type_name)
-                    && (type_mentions_parameter(&parameter.ty, type_name)
-                        || type_mentions_const(&parameter.ty, const_name.unwrap()))
-            } else {
-                type_mentions_parameter(&parameter.ty, type_name)
-                    && !is_plain_type_parameter(&parameter.ty, type_name)
-                    && !is_associated_projection(&parameter.ty, type_name)
-            })
-    }) {
-        return false;
-    }
-    if !template.parameters.iter().any(|parameter| {
-        if array_mode {
-            is_array_generic_pattern(&parameter.ty, type_name, const_name.unwrap())
-        } else {
-            is_plain_type_parameter(&parameter.ty, type_name)
-        }
-    }) {
-        return false;
-    }
-    let Some(result) = &template.result else {
-        return false;
-    };
-    let valid_result = if array_mode {
-        is_array_generic_pattern(result, type_name, const_name.unwrap())
-    } else {
-        is_plain_type_parameter(result, type_name)
-            || is_associated_projection(result, type_name)
-            || !type_mentions_parameter(result, type_name)
-    };
-    if !valid_result {
-        return false;
-    }
-    valid_result
-}
-
-fn is_array_generic_pattern(ty: &Type, type_name: &str, const_name: &str) -> bool {
-    ty.path.as_slice() == ["array"]
-        && matches!(ty.arguments.as_slice(), [memobits_syntax::TypeArgument::Type(element), memobits_syntax::TypeArgument::Const(length)]
-            if is_plain_type_parameter(element, type_name) && length == const_name)
-}
-
-fn type_mentions_const(ty: &Type, name: &str) -> bool {
-    ty.arguments.iter().any(|argument| match argument {
-        memobits_syntax::TypeArgument::Const(found) => found == name,
-        memobits_syntax::TypeArgument::Type(ty) => type_mentions_const(ty, name),
-        memobits_syntax::TypeArgument::TupleField { ty, .. } => type_mentions_const(ty, name),
-        memobits_syntax::TypeArgument::Reference { referent, .. } => {
-            type_mentions_const(referent, name)
-        }
-        memobits_syntax::TypeArgument::Integer(_) => false,
-    })
-}
-
-fn type_mentions_parameter(ty: &Type, name: &str) -> bool {
-    ((ty.path.as_slice() == [name] || ty.path.first().is_some_and(|segment| segment == name))
-        && ty.arguments.is_empty())
-        || ty.arguments.iter().any(|argument| match argument {
-            memobits_syntax::TypeArgument::Type(ty) => type_mentions_parameter(ty, name),
-            memobits_syntax::TypeArgument::TupleField { ty, .. } => {
-                type_mentions_parameter(ty, name)
-            }
-            memobits_syntax::TypeArgument::Reference { referent, .. } => {
-                type_mentions_parameter(referent, name)
-            }
-            _ => false,
-        })
-}
 fn access_name(access: IrAccess) -> &'static str {
     match access {
         IrAccess::Owned => "owned",
@@ -1373,353 +1269,6 @@ impl Checker {
         Some(specialized)
     }
 
-    fn generic_identity_call(
-        &mut self,
-        expr: &Expr,
-        callee: &Expr,
-        arguments: &[Expr],
-        expected: Option<&Ty>,
-    ) -> Ty {
-        let ExprKind::Path(path) = &callee.kind else {
-            unreachable!("guarded generic function path")
-        };
-        let template = if path.len() == 1 {
-            self.generic_functions.get(&path[0]).cloned()
-        } else {
-            let expanded = self.imports.get(&path[0]).map_or_else(
-                || path.join("::"),
-                |target| format!("{}::{}", target, path[1..].join("::")),
-            );
-            self.generic_functions
-                .get(expanded.strip_prefix("self::").unwrap_or(&expanded))
-                .cloned()
-        };
-        let Some(template) = template else {
-            return Ty::Error;
-        };
-        if !supported_generic_function(&template) {
-            self.error(
-                7,
-                template.span,
-                format!(
-                    "generic function '{}::{}' uses a generic form outside the supported unconstrained direct-type-parameter specialization subset",
-                    template.module, template.name
-                ),
-            );
-            for argument in arguments {
-                self.expr(argument, None);
-            }
-            return Ty::Error;
-        }
-        if arguments.len() != template.parameters.len() {
-            self.error(
-                10,
-                expr.span,
-                format!(
-                    "expected {} arguments, found {}",
-                    template.parameters.len(),
-                    arguments.len()
-                ),
-            );
-            for argument in arguments {
-                self.expr(argument, None);
-            }
-            return Ty::Error;
-        }
-        let type_name = &template.generic_parameters[0].name;
-        let const_name = match &template.generic_parameters[1..] {
-            [constant] => Some(constant.name.as_str()),
-            _ => None,
-        };
-        let generic_index = template
-            .parameters
-            .iter()
-            .position(|parameter| {
-                is_plain_type_parameter(&parameter.ty, type_name)
-                    || const_name.is_some_and(|const_name| {
-                        is_array_generic_pattern(&parameter.ty, type_name, const_name)
-                    })
-            })
-            .expect("supported generic template contains an inference parameter");
-        // Check every written argument before the inference argument in source
-        // order. Generic-shaped parameters cannot receive a concrete expected
-        // type yet, so infer their expression type and validate it after the
-        // specialization has been formed.
-        let mut checked_argument_types = vec![None; arguments.len()];
-        let mut diverges = false;
-        for index in 0..generic_index {
-            let argument = &arguments[index];
-            let parameter = &template.parameters[index];
-            let is_generic_shape = type_mentions_parameter(&parameter.ty, type_name)
-                || const_name.is_some_and(|name| type_mentions_const(&parameter.ty, name));
-            if !is_generic_shape {
-                let expected = self.type_path(&parameter.ty);
-                if matches!(
-                    expected,
-                    Ty::String
-                        | Ty::List(_)
-                        | Ty::Array(..)
-                        | Ty::Struct(..)
-                        | Ty::Tuple(..)
-                        | Ty::Enum(..)
-                ) {
-                    self.allow_array_value(argument);
-                }
-                let actual = self.expr(argument, Some(&expected));
-                self.ensure(&actual, &expected, argument.span);
-                diverges |= actual == Ty::Never;
-                checked_argument_types[index] = Some(actual);
-            } else {
-                self.allow_array_value(argument);
-                let actual = self.expr(argument, None);
-                diverges |= actual == Ty::Never;
-                checked_argument_types[index] = Some(actual);
-            }
-        }
-        self.allow_array_value(&arguments[generic_index]);
-        let actual = self.expr(&arguments[generic_index], None);
-        if actual == Ty::Error {
-            return Ty::Error;
-        }
-        let mut substitution = HashMap::new();
-        let mut const_substitution = HashMap::new();
-        let array_pattern = const_name.is_some_and(|const_name| {
-            is_array_generic_pattern(
-                &template.parameters[generic_index].ty,
-                type_name,
-                const_name,
-            )
-        });
-        let inferred = if actual == Ty::Never {
-            // A diverging argument has no value type to infer from. A
-            // surrounding expected result can still select the specialization
-            // (as with an ordinary diverging call); without one, report the
-            // actual unresolved type instead of silently producing Error.
-            match expected.filter(|ty| !matches!(ty, Ty::Error | Ty::Never)) {
-                Some(Ty::Array(element, length)) if array_pattern => {
-                    substitution.insert(type_name.clone(), element.as_ref().clone());
-                    const_substitution.insert(
-                        const_name
-                            .expect("array pattern has a const parameter")
-                            .to_owned(),
-                        *length,
-                    );
-                    true
-                }
-                Some(ty) if !array_pattern => {
-                    substitution.insert(type_name.clone(), ty.clone());
-                    true
-                }
-                _ => false,
-            }
-        } else if array_pattern {
-            let const_name = const_name.expect("array pattern has a const parameter");
-            match &actual {
-                Ty::Array(element, length) => {
-                    substitution.insert(type_name.clone(), element.as_ref().clone());
-                    const_substitution.insert(const_name.to_owned(), *length);
-                    true
-                }
-                _ => false,
-            }
-        } else {
-            infer_direct_type_parameter(
-                &HashSet::from([type_name.clone()]),
-                &template.parameters[generic_index].ty,
-                &actual,
-                &mut substitution,
-            )
-            .is_ok()
-        };
-        if !inferred {
-            self.error(
-                2,
-                arguments[generic_index].span,
-                if actual == Ty::Never {
-                    "cannot infer the generic function type from a diverging argument without an expected result type"
-                } else {
-                    "cannot infer a consistent type for the generic function parameter"
-                },
-            );
-            return Ty::Error;
-        }
-        let mut specialization_evidence = Vec::new();
-        for (bound_index, bound) in template.bounds.iter().enumerate() {
-            let interface = &template.bound_interfaces[bound_index];
-            let target = substitution.get(&bound.parameter).unwrap_or(&actual);
-            let forwarded = self
-                .generic_evidence
-                .iter()
-                .find(|evidence| {
-                    evidence.interface == *interface && evidence.candidate.target == *target
-                })
-                .cloned();
-            let candidate = if let Some(evidence) = forwarded {
-                evidence.candidate
-            } else {
-                let matching = self
-                    .extension_candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.visible
-                            && candidate.target == *target
-                            && candidate.interface.as_deref() == Some(interface.as_str())
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if matching.is_empty() {
-                    self.error(7, expr.span, format!("no visible implementation of '{interface}' for {} satisfies generic bound", name(target)));
-                    return Ty::Error;
-                }
-                if matching.len() > 1 {
-                    let locations = matching
-                        .iter()
-                        .map(|candidate| {
-                            format!(
-                                "{}:{}..{}",
-                                candidate.module, candidate.span.start, candidate.span.end
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.error(
-                        7,
-                        expr.span,
-                        format!(
-                            "ambiguous generic evidence for '{interface}'; candidates: {locations}"
-                        ),
-                    );
-                    return Ty::Error;
-                }
-                matching[0].clone()
-            };
-            specialization_evidence.push(GenericEvidence {
-                interface: interface.clone(),
-                candidate,
-            });
-        }
-        let previous_generic_evidence =
-            std::mem::replace(&mut self.generic_evidence, specialization_evidence.clone());
-        diverges |= actual == Ty::Never;
-        let previous_generic_types =
-            std::mem::replace(&mut self.generic_types, substitution.clone());
-        let previous_generic_consts =
-            std::mem::replace(&mut self.generic_consts, const_substitution.clone());
-        let parameter_types = template
-            .parameters
-            .iter()
-            .map(|parameter| FunctionParameter {
-                access: ir_access(parameter.access),
-                ty: self.type_path(&parameter.ty),
-            })
-            .collect::<Vec<_>>();
-        let result = template
-            .result
-            .as_ref()
-            .map(|result| self.type_path(result))
-            .unwrap_or(UNIT);
-        self.generic_types = previous_generic_types;
-        self.generic_consts = previous_generic_consts;
-        self.generic_evidence = previous_generic_evidence;
-        if result == Ty::Error
-            || parameter_types
-                .iter()
-                .any(|parameter| parameter.ty == Ty::Error)
-        {
-            return Ty::Error;
-        }
-        for (index, (argument, parameter)) in arguments.iter().zip(&parameter_types).enumerate() {
-            if index < generic_index {
-                if let Some(actual) = &checked_argument_types[index] {
-                    self.ensure(actual, &parameter.ty, argument.span);
-                }
-                continue;
-            }
-            if index == generic_index {
-                self.ensure(&actual, &parameter.ty, argument.span);
-                continue;
-            }
-            if matches!(
-                parameter.ty,
-                Ty::String
-                    | Ty::List(_)
-                    | Ty::Array(..)
-                    | Ty::Struct(..)
-                    | Ty::Tuple(..)
-                    | Ty::Enum(..)
-            ) {
-                self.allow_array_value(argument);
-            }
-            let argument_ty = self.expr(argument, Some(&parameter.ty));
-            self.ensure(&argument_ty, &parameter.ty, argument.span);
-            diverges |= argument_ty == Ty::Never;
-        }
-        let function_ty = Ty::Function(parameter_types, Box::new(result.clone()));
-        let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
-            self.error(
-                7,
-                expr.span,
-                "generic specialization has a type outside the executable function subset",
-            );
-            return Ty::Error;
-        };
-        if let Some(expected) = expected {
-            self.ensure(&result, expected, expr.span);
-        }
-        let result = result;
-        let evidence_key = specialization_evidence
-            .iter()
-            .map(|evidence| {
-                format!(
-                    "{}@{}..{}",
-                    evidence.candidate.module,
-                    evidence.candidate.span.start,
-                    evidence.candidate.span.end
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let key = format!(
-            "{}::{}@{}..{}<{function_ty:?}>[{evidence_key}]",
-            template.module, template.name, template.span.start, template.span.end
-        );
-        let registry = self
-            .specialization_registry
-            .as_ref()
-            .expect("generic specialization registry is present")
-            .clone();
-        let specialization_id = {
-            let mut registry = registry.borrow_mut();
-            if let Some(id) = registry.by_key.get(&key).copied() {
-                id
-            } else {
-                let id = FunctionId(registry.next_id);
-                registry.next_id += 1;
-                registry.by_key.insert(key.clone(), id);
-                registry.requests.push(GenericSpecialization {
-                    template: template.clone(),
-                    substitution,
-                    const_substitution,
-                    evidence: specialization_evidence,
-                    signature,
-                    id,
-                    key,
-                });
-                id
-            }
-        };
-        self.generic_path_targets.insert(
-            callee as *const Expr as usize,
-            (specialization_id, function_ty),
-        );
-        self.expr(callee, None);
-        if diverges {
-            Ty::Never
-        } else {
-            result
-        }
-    }
-
     fn contains_reference(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
         match ty {
             Ty::Reference { .. } => true,
@@ -1900,32 +1449,8 @@ impl Checker {
         if ty.path.first().is_some_and(|part| part == "\0enum") {
             return self.inline_enum_type(ty);
         }
-        if ty.path.len() == 2 {
-            if let Some(target) = self.generic_types.get(&ty.path[0]).cloned() {
-                let matches = self
-                    .generic_evidence
-                    .iter()
-                    .filter(|evidence| {
-                        evidence.candidate.target == target
-                            && evidence
-                                .candidate
-                                .associated_types
-                                .contains_key(&ty.path[1])
-                    })
-                    .collect::<Vec<_>>();
-                if matches.len() == 1 {
-                    return matches[0].candidate.associated_types[&ty.path[1]].clone();
-                }
-                self.error(
-                    8,
-                    ty.span,
-                    format!(
-                        "associated type projection '{}' is unresolved in this generic context",
-                        ty.path.join("::")
-                    ),
-                );
-                return Ty::Error;
-            }
+        if ty.path.len() >= 2 && self.generic_types.contains_key(&ty.path[0]) {
+            return self.associated_projection(ty);
         }
         if ty.path.len() == 1 && ty.arguments.is_empty() {
             if let Some(concrete) = self.generic_types.get(&ty.path[0]) {
@@ -3206,13 +2731,18 @@ impl Checker {
             failed |= resolved.ty == Ty::Error;
             parameters.push(resolved);
         }
-        let infer_result =
-            function.result.is_none() && expected_signature.is_none() && function.expression;
+        // A generic call passes the function type with `Ty::Error` as the result
+        // while the result type argument is still open: the body decides it.
+        let open_result = matches!(&expected_signature, Some((_, Ty::Error)));
+        let infer_result = function.result.is_none()
+            && (expected_signature.is_none() || open_result)
+            && function.expression;
         let result = match (&function.result, &expected_signature) {
             (Some(ty), _) => self.type_path(ty),
-            (None, Some((_, result))) => result.clone(),
-            (None, None) if infer_result => Ty::Error,
-            (None, None) => UNIT,
+            (None, Some((_, _))) if open_result && !function.expression => UNIT,
+            (None, Some((_, result))) if !infer_result => result.clone(),
+            (None, _) if infer_result => Ty::Error,
+            (None, _) => UNIT,
         };
         let context = self.closure_context.take();
         let node_addr = expr as *const Expr as usize;
@@ -3597,256 +3127,6 @@ impl Checker {
         }
     }
 
-    /// A generic function named as a value. Only an expected function type
-    /// can fix its type arguments, so the specialization is chosen from it.
-    fn generic_function_value(
-        &mut self,
-        expr: &Expr,
-        id: Option<ExprId>,
-        template: GenericFunctionTemplate,
-        expected: Option<&Ty>,
-    ) -> Ty {
-        let display = format!("{}::{}", template.module, template.name);
-        let Some(Ty::Function(expected_parameters, expected_result)) = expected else {
-            self.error(
-                2,
-                expr.span,
-                format!(
-                    "generic function '{}' cannot be used as a value without an expected function type that fixes its type arguments (for example `let f: fn(i32) -> i32 = {};`)",
-                    template.name, template.name
-                ),
-            );
-            return Ty::Error;
-        };
-        if !supported_generic_function(&template) {
-            self.error(
-                7,
-                template.span,
-                format!(
-                    "generic function '{display}' uses a generic form outside the supported unconstrained direct-type-parameter specialization subset"
-                ),
-            );
-            return Ty::Error;
-        }
-        if expected_parameters.len() != template.parameters.len() {
-            self.error(
-                10,
-                expr.span,
-                format!(
-                    "generic function '{}' takes {} arguments, but the expected function type has {}",
-                    template.name,
-                    template.parameters.len(),
-                    expected_parameters.len()
-                ),
-            );
-            return Ty::Error;
-        }
-        let type_name = &template.generic_parameters[0].name;
-        let const_name = match &template.generic_parameters[1..] {
-            [constant] => Some(constant.name.as_str()),
-            _ => None,
-        };
-        let generic_index = template
-            .parameters
-            .iter()
-            .position(|parameter| {
-                is_plain_type_parameter(&parameter.ty, type_name)
-                    || const_name.is_some_and(|const_name| {
-                        is_array_generic_pattern(&parameter.ty, type_name, const_name)
-                    })
-            })
-            .expect("supported generic template contains an inference parameter");
-        let actual = expected_parameters[generic_index].ty.clone();
-        let mut substitution = HashMap::new();
-        let mut const_substitution = HashMap::new();
-        let array_pattern = const_name.is_some_and(|const_name| {
-            is_array_generic_pattern(
-                &template.parameters[generic_index].ty,
-                type_name,
-                const_name,
-            )
-        });
-        let inferred = if array_pattern {
-            match &actual {
-                Ty::Array(element, length) => {
-                    substitution.insert(type_name.clone(), element.as_ref().clone());
-                    const_substitution.insert(
-                        const_name
-                            .expect("array pattern has a const parameter")
-                            .to_owned(),
-                        *length,
-                    );
-                    true
-                }
-                _ => false,
-            }
-        } else {
-            infer_direct_type_parameter(
-                &HashSet::from([type_name.clone()]),
-                &template.parameters[generic_index].ty,
-                &actual,
-                &mut substitution,
-            )
-            .is_ok()
-        };
-        if !inferred {
-            self.error(
-                2,
-                expr.span,
-                format!(
-                    "the expected function type does not fix the type arguments of generic function '{}'",
-                    template.name
-                ),
-            );
-            return Ty::Error;
-        }
-        let mut specialization_evidence = Vec::new();
-        for (bound_index, bound) in template.bounds.iter().enumerate() {
-            let interface = &template.bound_interfaces[bound_index];
-            let target = substitution.get(&bound.parameter).unwrap_or(&actual);
-            let forwarded = self
-                .generic_evidence
-                .iter()
-                .find(|evidence| {
-                    evidence.interface == *interface && evidence.candidate.target == *target
-                })
-                .cloned();
-            let candidate = if let Some(evidence) = forwarded {
-                evidence.candidate
-            } else {
-                let matching = self
-                    .extension_candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.visible
-                            && candidate.target == *target
-                            && candidate.interface.as_deref() == Some(interface.as_str())
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if matching.len() != 1 {
-                    self.error(
-                        7,
-                        expr.span,
-                        format!(
-                            "no unique visible implementation of '{interface}' for {} satisfies the generic bound",
-                            name(target)
-                        ),
-                    );
-                    return Ty::Error;
-                }
-                matching[0].clone()
-            };
-            specialization_evidence.push(GenericEvidence {
-                interface: interface.clone(),
-                candidate,
-            });
-        }
-        let previous_generic_evidence =
-            std::mem::replace(&mut self.generic_evidence, specialization_evidence.clone());
-        let previous_generic_types =
-            std::mem::replace(&mut self.generic_types, substitution.clone());
-        let previous_generic_consts =
-            std::mem::replace(&mut self.generic_consts, const_substitution.clone());
-        let parameter_types = template
-            .parameters
-            .iter()
-            .map(|parameter| FunctionParameter {
-                access: ir_access(parameter.access),
-                ty: self.type_path(&parameter.ty),
-            })
-            .collect::<Vec<_>>();
-        let result = template
-            .result
-            .as_ref()
-            .map(|result| self.type_path(result))
-            .unwrap_or(UNIT);
-        self.generic_types = previous_generic_types;
-        self.generic_consts = previous_generic_consts;
-        self.generic_evidence = previous_generic_evidence;
-        if result == Ty::Error
-            || parameter_types
-                .iter()
-                .any(|parameter| parameter.ty == Ty::Error)
-        {
-            return Ty::Error;
-        }
-        let function_ty = Ty::Function(parameter_types, Box::new(result));
-        if function_ty != Ty::Function(expected_parameters.clone(), expected_result.clone()) {
-            self.error(
-                2,
-                expr.span,
-                format!(
-                    "expected {}, found {} (generic function '{}')",
-                    name(&Ty::Function(
-                        expected_parameters.clone(),
-                        expected_result.clone()
-                    )),
-                    name(&function_ty),
-                    template.name
-                ),
-            );
-            return Ty::Error;
-        }
-        let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
-            self.error(
-                7,
-                expr.span,
-                "generic specialization has a type outside the executable function subset",
-            );
-            return Ty::Error;
-        };
-        let evidence_key = specialization_evidence
-            .iter()
-            .map(|evidence| {
-                format!(
-                    "{}@{}..{}",
-                    evidence.candidate.module,
-                    evidence.candidate.span.start,
-                    evidence.candidate.span.end
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let key = format!(
-            "{}::{}@{}..{}<{function_ty:?}>[{evidence_key}]",
-            template.module, template.name, template.span.start, template.span.end
-        );
-        let registry = self
-            .specialization_registry
-            .as_ref()
-            .expect("generic specialization registry is present")
-            .clone();
-        let specialization_id = {
-            let mut registry = registry.borrow_mut();
-            if let Some(id) = registry.by_key.get(&key).copied() {
-                id
-            } else {
-                let id = FunctionId(registry.next_id);
-                registry.next_id += 1;
-                registry.by_key.insert(key.clone(), id);
-                registry.requests.push(GenericSpecialization {
-                    template: template.clone(),
-                    substitution,
-                    const_substitution,
-                    evidence: specialization_evidence,
-                    signature,
-                    id,
-                    key,
-                });
-                id
-            }
-        };
-        if let (Some(facts), Some(expression)) = (self.facts.as_mut(), id) {
-            facts.path_uses.push(PathUse {
-                expression,
-                target: PathTarget::Function(specialization_id),
-                access: None,
-            });
-        }
-        function_ty
-    }
-
     /// `assert(condition)`: a `bool` check that traps when it is false.
     fn explicit_assert(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
         let [condition] = arguments else {
@@ -4148,6 +3428,26 @@ impl Checker {
         param: Option<&FunctionParameter>,
         direct: bool,
     ) -> Ty {
+        self.check_call_argument_mode(arg, param, direct, false, None)
+    }
+
+    /// `unknown_type`: the parameter's type still mentions generic arguments
+    /// the call has not inferred (`param.ty` is a partial placeholder). The
+    /// argument is checked without an expected type (a function literal gets
+    /// the partial function type, others an optional `hint` from the expected
+    /// result) and its type is matched by the caller once
+    /// inference has finished; access rules are still enforced here.
+    fn check_call_argument_mode(
+        &mut self,
+        arg: &Expr,
+        param: Option<&FunctionParameter>,
+        direct: bool,
+        unknown_type: bool,
+        hint: Option<&Ty>,
+    ) -> Ty {
+        if unknown_type && param.is_some_and(|parameter| parameter.access == IrAccess::Owned) {
+            self.allow_array_value(arg);
+        }
         if param.is_some_and(|parameter| {
             parameter.access == IrAccess::Owned
                 && matches!(
@@ -4195,7 +3495,15 @@ impl Checker {
                 _ => {}
             }
         }
-        let actual = self.expr(arg, param.map(|parameter| &parameter.ty));
+        let expected_type = if unknown_type
+            && !matches!(arg.kind, ExprKind::Function(_))
+            && !matches!(hint, Some(Ty::Function(..)))
+        {
+            hint
+        } else {
+            param.map(|parameter| &parameter.ty)
+        };
+        let actual = self.expr(arg, expected_type);
         self.closure_context = None;
         if param.is_some_and(|parameter| parameter.access == IrAccess::Share)
             && matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1)
@@ -4267,7 +3575,21 @@ impl Checker {
         if param.is_none_or(|parameter| parameter.access == IrAccess::Owned) {
             self.reject_extraction(arg, &actual);
         }
-        if let Some(param) = param {
+        if let Some(param) = param.filter(|_| unknown_type) {
+            if param.access != IrAccess::Owned
+                && !reference_access_matches(&actual, param.access)
+                && !matches!(actual, Ty::Function(..))
+            {
+                self.error(
+                    17,
+                    arg.span,
+                    format!(
+                        "argument does not match the {} parameter access; use an explicit .borrow() or .share() conversion",
+                        access_name(param.access)
+                    ),
+                );
+            }
+        } else if let Some(param) = param {
             if param.access == IrAccess::Owned {
                 self.ensure(&actual, &param.ty, arg.span);
             } else if function_parameter.is_some() && matches!(actual, Ty::Function(..)) {
@@ -4985,6 +4307,7 @@ impl Checker {
             }
             other => other,
         };
+        let base_ty_for_hint = base_ty.clone();
         match base_ty {
             Ty::Tuple(id, tuple_name, aliases) => {
                 let info = self.table.info(id);
@@ -5031,11 +4354,28 @@ impl Checker {
                     .map(|(_, field)| field)
                 {
                     None => {
-                        self.error(
-                            24,
-                            expr.span,
-                            format!("struct '{struct_name}' has no field '{field_name}'"),
-                        );
+                        let provided = self
+                            .generic_evidence
+                            .iter()
+                            .filter(|evidence| {
+                                evidence.candidate.target == base_ty_for_hint
+                                    && evidence.candidate.methods.contains_key(field_name)
+                            })
+                            .map(|evidence| {
+                                format!("'{}: {}'", evidence.parameter, evidence.interface)
+                            })
+                            .collect::<Vec<_>>();
+                        let message = match provided.as_slice() {
+                            [] => format!("struct '{struct_name}' has no field '{field_name}'"),
+                            [only] => format!(
+                                "method '{field_name}' comes from the bound {only}; select it with `of`"
+                            ),
+                            _ => format!(
+                                "method '{field_name}' is provided by the bounds {}; select one with `of Interface`",
+                                provided.join(" and ")
+                            ),
+                        };
+                        self.error(24, expr.span, message);
                         Ty::Error
                     }
                     Some(field) => {
@@ -8614,12 +7954,12 @@ pub(crate) fn check_resolved_mode(
         }
     }
     for template in generic_templates.values() {
-        if !supported_generic_function(template) {
+        if let Err(message) = validate_template(template) {
             diagnostics.push(diagnostic(
                 7,
                 template.span,
                 format!(
-                    "generic function '{}::{}' is outside the supported unconstrained direct-type-parameter specialization subset",
+                    "generic function '{}::{}' is invalid: {message}",
                     template.module, template.name
                 ),
             ));

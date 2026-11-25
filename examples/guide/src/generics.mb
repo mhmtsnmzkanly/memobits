@@ -26,14 +26,18 @@ type Gauge<const N: u32> { width: i32 } extend {
 type GaugePair { first: Lane<2>, second: Lane<3> }
 type Maybe<T> [Empty, Present(T)]
 type Packet<const N: u32> [Data(array<u8, N>)]
-// Generic functions specialize one unconstrained type parameter inferred from
-// a direct owned argument. Additional parameters may use that same T or fixed
-// concrete types; the result is T. A bounded const form forwards T and N only
-// through direct array<T, N> parameters and results. Each body is checked for
-// its concrete specialization. A single interface bound on direct owned T
-// carries caller-visible evidence through nested generic calls and constrained
-// compound assignment. Other bound shapes, borrowed parameters, and nested
-// generic type patterns remain gated.
+// Generic functions take any number of type parameters and `const N: u32`
+// parameters. Every argument is inferred from the call: from the written
+// arguments (in order, function literals last) and from the expected result.
+// A parameter type may use them anywhere: `array<T, N>`, `List<T>`, `T?`,
+// `T ! E`, tuples, nominal generics (`Pair<A, B>`) and function types
+// (`fn(T) -> U`), with `borrow` / `share` access. `where T: A + B, U: C`
+// gives each bound its own evidence, selected at the call (the evidence the
+// enclosing generic function received is forwarded); a method call selects the
+// interface with `of`. Each body is checked for its concrete specialization;
+// a specialization is keyed by every type, const and evidence. `T::Name` names
+// an associated type of the evidence for one bound; when several bounds
+// define `Name`, write `T::Interface::Name`. Nested projections stay gated.
 fn identity<T>(value: T) -> T { value }
 fn select<T>(value: T, enabled: bool, fallback: T) -> T {
     if enabled { value } else { fallback }
@@ -154,4 +158,81 @@ test fn self_in_extend_blocks() {
     let slot: SelfSlot<i32> = SelfSlot::Vacant;
     let held := slot.or_hold(42);
     assert(match held { SelfSlot::Held(value) => value == 42, SelfSlot::Vacant => false });
+}
+
+// Several type parameters and several bounds: one evidence per bound.
+interface Weigh { fn weigh(borrow self) -> i32; }
+interface Mark { fn mark(borrow self) -> i32; }
+type Crate { n: i32 }
+extend Crate of Weigh { fn weigh(borrow self) -> i32 { self.n } }
+extend Crate of Mark { fn mark(borrow self) -> i32 { self.n * 100 } }
+fn total<T, U, const N: u32>(first: T, rest: borrow array<U, N>) -> i32
+    where T: Weigh + Mark, U: Weigh {
+    first.weigh() of Weigh + first.mark() of Mark + rest[0].borrow().weigh() of Weigh
+}
+fn relay_total<A, B, const N: u32>(first: A, rest: borrow array<B, N>) -> i32
+    where A: Weigh + Mark, B: Weigh {
+    total(first, rest)
+}
+test fn generic_multiple_parameters_and_bounds() {
+    let rest: array<Crate, 2> = [Crate { n: 2 }, Crate { n: 3 }];
+    assert(relay_total(Crate { n: 1 }, rest.borrow()) == 1 + 100 + 2);
+}
+// Generic parameters inside compound types, borrowed and shared parameters.
+fn put<T>(slots: share array<T, 2>, value: T) { slots[0] = value; }
+fn first_of<A, B>(pair: (A, B)) -> A { let (a, _) := pair; a }
+fn wrap<T>(value: T) -> T? { Some(value) }
+fn unwrap_or<T>(value: T?, fallback: T) -> T {
+    match value { Some(found) => found, None => fallback }
+}
+fn pick<T, E>(value: T ! E, fallback: T) -> T {
+    match value { Ok(found) => found, Err(_) => fallback }
+}
+test fn generic_compound_parameter_types() {
+    var slots: array<i32, 2> = [1, 2];
+    put(slots.share(), 40);
+    let made: i32? = wrap(1);
+    let fine: i32 ! Error = Ok(1);
+    assert(slots[0] == 40);
+    assert(first_of((1, true)) == 1);
+    assert(unwrap_or(made, 0) + pick(fine, 0) == 2);
+}
+// Generic higher-order helpers: `U` is fixed by the function's result.
+fn apply<T, U>(value: T, step: borrow fn(T) -> U) -> U { step(value) }
+fn fold3<T, A>(items: array<T, 3>, init: A, step: borrow fn(A, T) -> A) -> A {
+    var acc := init;
+    loop item in items { acc = step(acc, item); }
+    acc
+}
+fn square(x: i32) -> i32 { x * x }
+test fn generic_higher_order_helpers() {
+    let offset := 1;
+    assert(apply(6, square) == 36);
+    assert(apply(20, fn(x) => x * 2 + offset) == 41);
+    assert(fold3([1, 2, 3], 0, fn(sum, x) => sum + x + offset) == 9);
+    assert(fold3([1, 2, 3], false, fn(any, x) => any || x == 2));
+}
+// A generic function named where a function type is expected is specialized
+// from that type (several parameters work the same way).
+fn pair_of<A, B>(a: A, b: B) -> (A, B) { (a, b) }
+fn drop_second<A, B>(a: A, b: B) -> A { a }
+fn apply2<A, B, R>(f: fn(A, B) -> R, a: A, b: B) -> R { f(a, b) }
+test fn generic_function_values_with_several_parameters() {
+    let make: fn(i32, bool) -> (i32, bool) = pair_of;
+    let made := make(1, true);
+    let (one, _) := made;
+    assert(one == 1);
+    assert(apply2(drop_second, 41, false) == 41);
+}
+// Several bounds that define the same associated name: qualify the interface.
+interface Producer { type Output; fn produce(borrow self) -> i32; }
+interface Consumer { type Output; fn consume(borrow self) -> i32; }
+type Valve { n: i32 }
+extend Valve of Producer { type Output = i32; fn produce(borrow self) -> i32 { self.n } }
+extend Valve of Consumer { type Output = bool; fn consume(borrow self) -> i32 { 0 - self.n } }
+fn flow<T>(valve: T) -> T::Producer::Output where T: Producer + Consumer {
+    valve.produce() of Producer + valve.consume() of Consumer + 42
+}
+test fn generic_projection_through_several_bounds() {
+    assert(flow(Valve { n: 5 }) == 42);
 }

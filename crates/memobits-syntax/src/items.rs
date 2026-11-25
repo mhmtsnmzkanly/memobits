@@ -354,12 +354,18 @@ impl Parser {
             let start = self.current().span.start;
             let parameter = self.name()?;
             self.expect(":")?;
-            let interface = self.ty()?;
-            bounds.push(WhereBound {
-                span: self.span(start),
-                parameter,
-                interface,
-            });
+            // `T: A + B` is one bound per interface on the same parameter.
+            loop {
+                let interface = self.ty()?;
+                bounds.push(WhereBound {
+                    span: self.span(start),
+                    parameter: parameter.clone(),
+                    interface,
+                });
+                if !self.eat("+") {
+                    break;
+                }
+            }
             if !self.eat(",") {
                 break;
             }

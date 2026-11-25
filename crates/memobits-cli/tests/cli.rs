@@ -5050,8 +5050,8 @@ fn user_defined_rem_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::RemAssign; fn scale<T>(initial: T, rhs: T::Rhs) where T: RemAssign { var value := initial; value %= rhs; } fn main() -> u32 { 0 }");
     let generic = f.run(&["analyze-project"]);
     assert!(
-        !generic.status.success(),
-        "generic constrained RemAssign remains gated: {generic:?}"
+        generic.status.success(),
+        "generic constrained RemAssign is accepted when never called: {generic:?}"
     );
 
     f.write("src/main.mb", "use core::ops::RemAssign; type Counter { value: u32 } extend Counter of RemAssign { type Rhs = u32; fn rem_assign(share self, rhs: u32) { self.value %= rhs; } } fn main() -> u32 { let counter := Counter { value: 4 }; counter %= 1; counter.value }");
@@ -6310,15 +6310,11 @@ fn generic_array_function_rejects_conflicting_const_arguments() {
 
     f.write(
         "src/main.mb",
-        "fn nested<T>(value: T?) -> T? { value } fn main() -> i32 { 0 }\n",
+        "fn nested<T>(value: T?) -> T? { value } fn main() -> i32 { let o: i32? = Some(3); let r := nested(o); match r { Some(v) => v, None => 0 } }\n",
     );
-    let diagnostic = err(f.run(&["run"]), "TE007");
-    assert!(
-        diagnostic.contains(
-            "outside the supported unconstrained direct-type-parameter specialization subset"
-        ),
-        "{diagnostic}"
-    );
+    let output = f.run(&["run"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"Result: i32(3)\n");
 }
 
 #[test]
@@ -6340,13 +6336,11 @@ fn generic_functions_reject_conflicting_types_and_preserve_owned_moves() {
 
     f.write(
         "src/main.mb",
-        "fn unsupported<T, U>(value: T) -> T { value } fn main() -> i32 { 0 }",
+        "fn unsupported<T, U>(value: T) -> T { value } fn main() -> i32 { unsupported(1) }",
     );
-    let diagnostic = err(f.run(&["run"]), "TE007");
+    let diagnostic = err(f.run(&["run"]), "TE002");
     assert!(
-        diagnostic.contains(
-            "outside the supported unconstrained direct-type-parameter specialization subset"
-        ),
+        diagnostic.contains("cannot infer the type argument 'U'"),
         "{diagnostic}"
     );
 
@@ -9905,8 +9899,8 @@ fn user_defined_bitand_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::BitAndAssign; fn mask<T>(initial: T, rhs: T::Rhs) where T: BitAndAssign { var value := initial; value &= rhs; } fn main() -> u32 { 0 }");
     let generic = f.run(&["analyze-project"]);
     assert!(
-        !generic.status.success(),
-        "generic constrained BitAndAssign remains gated: {generic:?}"
+        generic.status.success(),
+        "generic constrained BitAndAssign is accepted when never called: {generic:?}"
     );
 
     f.write(
@@ -10002,8 +9996,8 @@ fn user_defined_bitor_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::BitOrAssign; fn update<T>(target: T, rhs: T::Rhs) where T: BitOrAssign { var value := target; value |= rhs; } fn main() -> u32 { 0 }");
     let generic = f.run(&["analyze-project"]);
     assert!(
-        !generic.status.success(),
-        "generic constrained BitOrAssign remains gated: {generic:?}"
+        generic.status.success(),
+        "generic constrained BitOrAssign is accepted when never called: {generic:?}"
     );
 
     f.write("src/main.mb", "use other::marker; use core::ops::BitOrAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags |= 2; flags.value }");
@@ -10125,8 +10119,8 @@ fn user_defined_bitxor_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::BitXorAssign; fn update<T>(target: T, rhs: T::Rhs) where T: BitXorAssign { var value := target; value ^= rhs; } fn main() -> u32 { 0 }");
     let generic = f.run(&["analyze-project"]);
     assert!(
-        !generic.status.success(),
-        "generic constrained BitXorAssign remains gated: {generic:?}"
+        generic.status.success(),
+        "generic constrained BitXorAssign is accepted when never called: {generic:?}"
     );
 
     f.write("src/main.mb", "use other::marker; use core::ops::BitXorAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags ^= 2; flags.value }");
@@ -10249,8 +10243,8 @@ fn user_defined_shl_assign_mutates_nominal_target_in_source_and_wasm() {
     f.write("src/main.mb", "use core::ops::ShlAssign; fn update<T>(target: T, rhs: T::Rhs) where T: ShlAssign { var value := target; value <<= rhs; } fn main() -> u32 { 0 }");
     let generic = f.run(&["analyze-project"]);
     assert!(
-        !generic.status.success(),
-        "generic constrained ShlAssign remains gated: {generic:?}"
+        generic.status.success(),
+        "generic constrained ShlAssign is accepted when never called: {generic:?}"
     );
 
     f.write("src/main.mb", "use other::marker; use core::ops::ShlAssign; pub type Flags { pub value: u32 } fn main() -> u32 { var flags := Flags { value: 1 }; flags <<= 2; flags.value }");
