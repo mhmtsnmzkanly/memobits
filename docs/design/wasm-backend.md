@@ -58,11 +58,13 @@ Wasm type of the callee's signature (signatures are deduplicated with the
 functions' own types). Modules without function values have no table or element
 section. Function values cannot be exported or returned by the entry function.
 
-### Owned closures (H5)
+### Owned closures (H5, H5b)
 
-A function type that has an owned closure with captures somewhere in the program
-is represented as a wrapper struct `{ call, env }` (a tuple-like IR struct named
-after the function type): `call` is the function value above, `env` a `Box` of a
+Every function type is represented as a wrapper struct `{ call, env }` (a
+tuple-like IR struct named after the signature; the representation does not
+depend on any other code, and `fn` and `var fn` of one signature share it):
+`call` is the function value above, `env` a `Box` (empty, no heap, for a function
+name, a literal without captures and a frame closure) of a
 compiler-made enum with one variant per closure literal (plus `Plain`). The
 variant holds the captured values. `ClosureOwned` builds `call` for a box: the
 environment word is the address of the enum value inside the heap block (box
@@ -70,11 +72,10 @@ block + content offset). The table thunk of an owned closure computes each
 capture address as `env + payload offset of the variant field` and calls the
 lifted function with those addresses (a frame closure's thunk loads addresses
 from its frame record instead). Release is ordinary struct/enum/box release: no
-special code. A closure that mutates its environment is flagged by bit 31 of the
-slot word (`ClosureOwned { mutating }`); when the program has such a closure,
-every indirect call masks the bit before the table check and `ClosureReadOnly`
-(emitted before calls through immutable places) traps with reason 14 when it is
-set. Modules without owned closures are unchanged.
+special code. Whether a closure may change its environment is a type property
+(`var fn`) checked at compile time, so the slot word carries no flag and
+indirect calls have no extra mask or trap. Modules without function values are
+unchanged.
 
 ## Trap reporting
 
@@ -105,7 +106,6 @@ program order, starting at 1 (at most 2^23 - 1).
 | 11 | ShiftCount | shift count must be less than the bit width |
 | 12 | AssertionFailed | assertion failed (`assert(false)`) |
 | 13 | InvalidFunction | call through an invalid function value (outside the function table) |
-| 14 | MutatingClosure | a closure that mutates its environment was called through an immutable place |
 
 Codes 5 and 6 are stored *before* a native Wasm division, which traps by itself.
 The host refines them by the native trap kind: divide-by-zero gives "division by

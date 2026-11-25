@@ -1115,7 +1115,7 @@ fn canonical_type_inner(
     if ty.path.as_slice() == ["\0unit"] {
         return "Unit".into();
     }
-    if ty.path.as_slice() == ["\0fn"] {
+    if ty.path.first().is_some_and(|part| part == "\0fn") {
         let parts = ty
             .arguments
             .iter()
@@ -1134,7 +1134,8 @@ fn canonical_type_inner(
                 _ => "<invalid-function-type>".into(),
             })
             .collect::<Vec<_>>();
-        return format!("fn({})", parts.join(","));
+        let var = if ty.path.len() > 1 { "var " } else { "" };
+        return format!("{var}fn({})", parts.join(","));
     }
     if ty.path.as_slice() == ["\0record"] {
         let mut fields = ty

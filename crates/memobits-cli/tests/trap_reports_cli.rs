@@ -295,10 +295,11 @@ fn the_trap_reasons_agree_between_backend_and_runtime() {
         (Wasm::ShiftCount, Runtime::ShiftCount),
         (Wasm::AssertionFailed, Runtime::AssertionFailed),
         (Wasm::InvalidFunction, Runtime::InvalidFunction),
-        (Wasm::MutatingClosure, Runtime::MutatingClosure),
     ] {
         assert_eq!(Runtime::from_explicit_code(wasm.code()), Some(runtime));
     }
+    // Code 14 (the removed run-time mutation check) is no longer a reason.
+    assert_eq!(Runtime::from_explicit_code(14), None);
     assert_eq!(Runtime::from_explicit_code(Wasm::Division.code()), None);
     assert_eq!(Runtime::from_explicit_code(Wasm::Remainder.code()), None);
 }

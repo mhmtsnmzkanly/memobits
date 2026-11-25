@@ -202,12 +202,15 @@ a `borrow`/`share` parameter or a second-class closure cannot be captured (TE017
 `[build] alloc = false` rejects it (TE033). The value owns its environment: moving,
 storing, returning, `replace` and scope end release it once; copying a closure with an
 environment is rejected (BE001; `List::get`/a field read are TE022: call in place with
-`xs[i](x)`), while function names and non-capturing literals stay copyable. A closure that
-mutates its environment (`var c := 0; fn() -> i32 { c += 1; c }`) mutates its own copy and
-must be called through a mutable place (`var`, `var` parameter, `share fn` parameter,
-temporary); through an immutable place it traps (reason 14). Owned closures can be lent to
-`borrow fn`/`share fn` parameters. An owned function type is chosen per exact type by
-whole-program discovery, see decisions.md "Shipped H5 details".
+`xs[i](x)`). Every function value (H5b) is a move-only owner with a nullable environment,
+whatever else the program has: `let g := f;` moves `f`, a function name or a
+non-capturing literal is a fresh value at each mention, and calling or lending to a
+`borrow fn`/`share fn` parameter never moves. A closure that mutates its environment is a
+`var fn(...)` value (`fn make() -> var fn() -> i32 { var c := 0; fn() -> i32 { c += 1; c } }`),
+accepted only in `var fn` positions (TE017 with a note otherwise) and called through a
+mutable place (`var` binding or parameter, `share fn` parameter, field or element of a
+mutable owner, temporary; TE004 otherwise, at compile time). `fn` converts to `var fn`, not
+the reverse; `var fn` lends only to `share fn`. See decisions.md "Shipped H5b details".
 Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
 usable in parameters, results, locals, struct, tuple and record fields, array and List
 elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function
@@ -220,8 +223,8 @@ imports are not captures. Named functions,
 `extend` methods and `test fn`s may use `=> expr` bodies. Calls go through a local,
 parameter, function-valued field (a method of the same name wins), element or result,
 `f(x)`, `s.callback(x)`, `xs[i](x)`, `make()(x)`, and pass arguments by the target's
-access modes. A function value is a 64-bit scalar (table slot, environment word 0) copied
-like a primitive, stored without heap (works with `alloc = false`), called with
+access modes. A function value is a table slot plus an environment word inside an owning wrapper (H5b:
+move-only, no heap without captures, works with `alloc = false`), called with
 `call_indirect` through a function table (a bad slot traps with reason 13); it has no
 equality and cannot be exported or returned by `main` (LE900).
 Closures (H2): `borrow fn(..)` / `share fn(..)` parameters (also inside function types)

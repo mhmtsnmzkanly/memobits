@@ -471,7 +471,7 @@ impl Checker<'_> {
         }
         if ty.path.as_slice() == ["\0tuple"]
             || ty.path.as_slice() == ["\0record"]
-            || ty.path.as_slice() == ["\0fn"]
+            || ty.path.first().is_some_and(|part| part == "\0fn")
             || ty.path.as_slice() == ["\0unit"]
         {
             return;

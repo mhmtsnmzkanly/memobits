@@ -34,7 +34,6 @@ pub enum TrapReason {
     ShiftCount,
     AssertionFailed,
     InvalidFunction,
-    MutatingClosure,
 }
 
 impl TrapReason {
@@ -53,7 +52,6 @@ impl TrapReason {
             11 => Self::ShiftCount,
             12 => Self::AssertionFailed,
             13 => Self::InvalidFunction,
-            14 => Self::MutatingClosure,
             _ => return None,
         })
     }
@@ -74,9 +72,6 @@ impl TrapReason {
             Self::ShiftCount => "shift count must be less than the bit width",
             Self::AssertionFailed => "assertion failed",
             Self::InvalidFunction => "call through an invalid function value",
-            Self::MutatingClosure => {
-                "a closure that mutates its environment was called through an immutable place; hold it in a `var` or a `share` parameter"
-            }
         }
     }
 }

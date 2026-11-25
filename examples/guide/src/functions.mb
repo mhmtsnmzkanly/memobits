@@ -5,12 +5,16 @@ use alloc::List;
 // (`fn(borrow string) -> u32`, `fn(share u32)`). The modes are part of the
 // type, so `fn(string) -> u32` and `fn(borrow string) -> u32` are different.
 //
-// A function value is two words: its slot in the module's function table and
-// an environment word (0 for a function that captures nothing, else the address
-// of the closure's environment record, see the closures section below). Calls
-// go through `call_indirect`. A function value that captures nothing is
-// copyable, like a primitive: copying `f` never moves it. Function values have
-// no equality (`==` is rejected), cannot be exported or returned by `main`, and
+// A function value is an owner with a nullable environment: a table slot (the
+// callable word) plus the owner of the closure's environment, which is empty
+// (no heap) for a function name or a literal that captures nothing. Calls go
+// through `call_indirect`. Every function value follows one rule, wherever it
+// is stored and whatever else the program contains: it is move-only. `let g :=
+// f;` moves `f`; to use a value in several places, lend it to a `borrow fn(...)`
+// parameter (calling `f(x)` and lending borrow, they never move). A function
+// name or a non-capturing literal is a fresh value at each mention, so
+// `apply(inc, 1)` twice needs no copy. Function values have no equality (`==`
+// is rejected), cannot be exported or returned by `main`, and capture-free ones
 // need no heap, so they work with `[build] alloc = false`.
 //
 // Anonymous functions that refer to a local of the enclosing function are
@@ -38,6 +42,23 @@ test fn named_functions_are_values() {
     // A local binding shadows a top-level function of the same name.
     let inc := dbl;
     assert(inc(5) == 10);
+}
+
+// A stored function value is moved like any owner: calling it and lending it
+// to a `borrow fn` parameter do not move it, but passing it to an owned
+// parameter does (a second use is BE001). Each mention of a function name is
+// a new value.
+fn probe_twice(f: borrow fn(i32) -> i32) -> i32 { f(1) + f(2) }
+test fn function_values_are_move_only_and_lent() {
+    let f := inc;
+    assert(f(1) == 2);
+    assert(probe_twice(f) == 5);
+    assert(probe_twice(f) == 5);
+    // A fresh value per mention: no copy is needed.
+    assert(apply(inc, 1) == 2);
+    assert(apply(inc, 2) == 3);
+    // Moving `f` into an owned parameter ends its life: `f(1)` after this is BE001.
+    assert(apply(f, 4) == 5);
 }
 
 // Anonymous functions are named functions without a name. Parameter types come
@@ -68,8 +89,8 @@ test fn anonymous_functions() {
 
 // Calls go through a local, a parameter, a struct field, an array or List
 // element, or a call result. `holder.callback(x)` calls the field; if a method
-// of that name exists it wins; read the field itself with `let f := value.run;`
-// and call `f(x)`.
+// of that name exists it wins. The field holds an owner: it leaves only through
+// `replace` (or `swap`), as for any owner.
 type Holder { callback: fn(i32) -> i32, base: i32 }
 type Shadowing { run: fn(i32) -> i32 }
 extend Shadowing {
@@ -89,12 +110,16 @@ test fn calls_through_values() {
     assert((choose(false))(3) == 6);
     let method_wins := Shadowing { run: dbl };
     assert(method_wins.run(1) == 1001);
-    let field_value := method_wins.run;
+    var holder_copy := Shadowing { run: dbl };
+    let field_value := replace(holder_copy.run, inc);
     assert(field_value(4) == 8);
+    assert(holder_copy.run(1) == 1001);
 }
 
-// Function values sit anywhere a copyable value does: struct, tuple and record
-// fields, array and List elements, enum payloads and `T?`.
+// Function values sit anywhere an owner does: struct, tuple and record fields,
+// array and List elements, enum payloads and `T?`. A stored value is called in
+// place (`list[i](x)`, `holder.run(x)`); `List::get` would copy it and is
+// rejected (TE022), so take it out with `pop`, `replace` or `swap`.
 type Op [ Unary(fn(i32) -> i32), Binary(fn(i32, i32) -> i32), Nothing ]
 fn run_op(op: Op, x: i32) -> i32 {
     match op {
@@ -120,11 +145,12 @@ test fn function_values_in_aggregates() {
     fs.push(inc);
     fs.push(fn(x) => x * 100);
     assert(fs.len() == 2);
-    match fs.get(1) { Some(f) => assert(f(2) == 200), None => assert(false) }
+    assert(fs[1](2) == 200);
     match fs.pop() { Some(f) => assert(f(3) == 300), None => assert(false) }
     assert(fs.len() == 1);
     var total := 0;
-    loop f in [inc, dbl, inc] { total += f(10); }
+    let table := [inc, dbl, inc];
+    loop f in table { total += f(10); }
     assert(total == 11 + 20 + 11);
 }
 
@@ -317,38 +343,40 @@ test fn function_types_with_closures_and_lists() {
 //
 // The value owns its environment. Moving it, storing it, returning it,
 // replacing it (`replace`) or letting it go out of scope releases the
-// environment exactly once, including everything the captures own. Copying a
-// closure that has an environment is rejected like copying any owner: `let g :=
-// f;` moves `f`. A function name or a non-capturing literal bound with `let`
-// has no environment and stays copyable. (Because every value of an owned
-// function type may own an environment, `List::get` and a field read, which
-// copy, are rejected for such a type; call in place with `list[i](x)` or
-// `holder.action(x)` instead.) The signatures below are used only by the examples
-// in this section, so the earlier examples keep their copy rules.
+// environment exactly once, including everything the captures own. This is
+// the rule of every function value (see the top of this module): `let g :=
+// f;` moves `f` whether or not `f` has an environment, a function name or a
+// non-capturing literal is a fresh value at each mention, and `List::get` or a
+// field read (which would copy) is rejected for any function type; call in
+// place with `list[i](x)` or `holder.action(x)` instead.
 //
-// Mutation: a closure mutates its own copy of a captured variable. Calling a
-// closure that mutates its environment needs a mutable place: a `var` binding
-// (or a field or element of one), a `var` parameter, a `share fn` parameter, or
-// a temporary. Through an immutable place (`let`, an owned parameter, a `borrow
-// fn` parameter) the call traps with "a closure that mutates its environment
-// was called through an immutable place". Lending an owned closure to a `borrow
-// fn` or `share fn` parameter lends it (nothing is copied or moved); a
-// `share fn` parameter needs a mutable lender for the same reason.
+// Mutation: a closure changes its own copy of a captured variable. Such a
+// closure is only accepted where the type says so: `var fn(...) -> R`. A
+// closure that mutates a capture in a `fn(...)` position is an error that
+// suggests `var fn(...)`. A `var fn` value is called through a mutable place
+// (a `var` binding or a field or element of one, a `share fn` parameter, or a
+// temporary); through a `let`, an owned parameter without `var`, or any other
+// immutable place the call is a compile error. A `fn` value can be used where
+// a `var fn` is expected (it never mutates anything); the reverse is rejected.
+// Lending: `fn` to `borrow fn` or `share fn`, `var fn` only to `share fn`
+// (which needs a mutable lender). Nothing is copied or moved when lending.
 //
 // Representation: `{ call, env }`. `call` is the usual function value (table
 // slot plus environment word); `env` owns a heap block that holds the captures
-// (a variant of a compiler-made enum per function type). `[build] alloc =
-// false` rejects a closure with captures (TE033); a non-capturing function
-// value never allocates.
+// (a variant of a compiler-made enum per function signature), or is empty for a
+// function without captures: releasing it is then a no-op check. `fn` and `var
+// fn` of one signature share the representation. `[build] alloc = false`
+// rejects a closure with captures (TE033); a non-capturing function value
+// never allocates.
 fn make_adder(n: i64) -> fn(i64) -> i64 { fn(x) => x + n }
-fn make_counter() -> fn() -> u64 {
+fn make_counter() -> var fn() -> u64 {
     var c: u64 = 0;
     fn() -> u64 { c += 1; c }
 }
 fn make_length(text: string) -> fn() -> u64 { fn() -> u64 => text.len() as u64 }
 fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 { fn(x) => g(f(x)) }
 type Handler { name: string, action: fn() -> u64 }
-fn run_twice(var f: fn() -> u64) -> u64 { f() + f() }
+fn run_twice(var f: var fn() -> u64) -> u64 { f() + f() }
 fn probe_owned(f: borrow fn(i64) -> i64, x: i64) -> i64 { f(x) }
 fn bump_twice(f: share fn() -> u64) -> u64 { f() + f() }
 test fn owned_closures_capture_by_move_and_copy() {
@@ -411,10 +439,24 @@ test fn owned_closures_are_lent_by_borrow_and_share() {
 }
 fn plus_one(x: i64) -> i64 => x + 1
 fn call_owned(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
-test fn plain_function_values_are_copied_by_let_even_for_owned_types() {
+fn call_var(var f: var fn(i64) -> i64, x: i64) -> i64 { f(x) }
+type Accumulator { total: var fn(i64) -> i64 }
+test fn plain_function_values_follow_the_same_rules() {
+    // Each mention of a name is a new value; a stored one is lent.
+    assert(call_owned(plus_one, 1) == 2);
+    assert(call_owned(plus_one, 2) == 3);
     let p := plus_one;
-    let q := p;
-    assert(call_owned(p, 1) == 2);
-    assert(call_owned(p, 2) == 3);
-    assert(call_owned(q, 3) == 4);
+    assert(probe_owned(p, 3) == 4);
+    assert(probe_owned(p, 4) == 5);
+    // A `fn` value converts to `var fn` where one is expected.
+    assert(call_var(plus_one, 5) == 6);
+    assert(call_var(make_adder(10), 5) == 15);
+    var holder := Accumulator { total: make_adder(1) };
+    assert(holder.total(1) == 2);
+    // A `var fn` closure that mutates its state.
+    var running: i64 = 0;
+    let adder: var fn(i64) -> i64 = fn(x) { running += x; running };
+    assert(call_var(adder, 5) == 5);
+    // `running` was copied into the closure: the outer variable is unchanged.
+    assert(running == 0);
 }

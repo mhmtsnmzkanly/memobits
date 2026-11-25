@@ -625,14 +625,6 @@ pub enum InstructionKind {
         env: Operand,
         enum_ty: TypeId,
         variant: u32,
-        /// The closure mutates its environment: a call through an immutable
-        /// place traps (see `ClosureReadOnly`).
-        mutating: bool,
-    },
-    /// Trap if the function value `value` is a closure that mutates its
-    /// environment. Emitted before a call through a place that is not mutable.
-    ClosureReadOnly {
-        value: Operand,
     },
 }
 
@@ -3473,17 +3465,6 @@ fn validate_instruction(
                 );
             }
         }
-        InstructionKind::ClosureReadOnly { value } => {
-            let value_type = operand_type(program, function, value, errors, id, block);
-            if !matches!(value_type, Some(Type::Function(_))) {
-                push(
-                    errors,
-                    id,
-                    Some(block),
-                    "closure read-only check requires a function value",
-                );
-            }
-        }
         InstructionKind::ClosureOwned {
             function: target,
             env,
@@ -4489,9 +4470,6 @@ fn validate_operand_escapes(
                 }
                 InstructionKind::ClosureOwned { env, .. } => {
                     report(block_id, env, false, false);
-                }
-                InstructionKind::ClosureReadOnly { value } => {
-                    report(block_id, value, false, false);
                 }
                 InstructionKind::EmptyList
                 | InstructionKind::DropLocal { .. }

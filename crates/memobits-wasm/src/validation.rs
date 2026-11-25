@@ -533,7 +533,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         // Calls through function values are erased to `call_indirect`.
         InstructionKind::Call { .. } => None,
         InstructionKind::ClosureNew { .. } => None,
-        InstructionKind::ClosureOwned { .. } | InstructionKind::ClosureReadOnly { .. } => None,
+        InstructionKind::ClosureOwned { .. } => None,
         InstructionKind::Unary { .. } => None,
         InstructionKind::Binary {
             op: BinaryOp::And | BinaryOp::Or,

@@ -721,7 +721,6 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
         }
         InstructionKind::ClosureNew { captures, .. } => captures.iter().collect(),
         InstructionKind::ClosureOwned { env, .. } => vec![env],
-        InstructionKind::ClosureReadOnly { value } => vec![value],
     }
 }
 

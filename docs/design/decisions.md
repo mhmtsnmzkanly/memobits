@@ -1259,7 +1259,10 @@ are allowed once cleanup is proven, and the float text is exactly Rust's).
 ### Shipped H1 details (2026-11-25)
 
 Facts about the shipped behavior of the first Stage 4 step; the Stage 4
-decision above is unchanged.
+decision above is unchanged. (H5b changed one H1 fact: function values are no
+longer copyable scalars; every function value is a move-only owner, see "Shipped
+H5b details". Lending to `borrow fn`/`share fn`, calling in place and fresh
+values per mention of a name cover the old copy uses.)
 
 - Syntax: `fn(T1, borrow T2) -> R` is a type (the `\0fn` path in the AST; the
   last type argument is the result, the `\0unit` marker when `-> R` is
@@ -1628,6 +1631,14 @@ Backend-only change; no language or ABI change. Facts:
 
 Facts about the shipped owned (escaping) closures; the Stage 4 decision is unchanged.
 
+> **Superseded by H5b (see "Shipped H5b details" below).** The interim parts of this
+> section no longer hold: the per-type representation switch and its whole-program
+> discovery, the dynamic mutation rule (trap 14, `ClosureReadOnly`, the bit-31
+> flag), and copying of plain function values (a `let` bound to a function name
+> or a non-capturing literal is now move-only, like every function value). The
+> rest (move captures, heap environment, release, `alloc = false`, positions,
+> lending) is unchanged.
+
 - **Where a closure is owned.** An anonymous function with captures whose expected
   type is an owned `fn(...)` (not a `borrow fn`/`share fn` parameter) is an owned
   closure: a function result or tail, an annotated `let` or `var` (`let f: fn(i32)
@@ -1706,3 +1717,79 @@ Facts about the shipped owned (escaping) closures; the Stage 4 decision is uncha
   the type; copying a closure explicitly (no `clone`); `drop(f)` of a whole
   closure (scope end and `replace` release it, as for every struct owner); unannotated
   `let f := fn(..) captures` becoming owned by later use.
+
+## Owned closure mutation and function value ownership (2026-11-25, user chose option C)
+
+- `var fn(T, …) -> R` is the type of an owned function value whose
+  environment may change when it is called (a closure that mutates its
+  captured state). It can only be called through a mutable place (`var`
+  local, `share` parameter, field or element of a mutable owner).
+- `fn(T, …) -> R` values never mutate their environment: an owned closure
+  whose body mutates a capture is a compile error in a `fn(...)` position,
+  with a note suggesting `var fn(...)`. A `fn(...)` value may be used where
+  a `var fn(...)` is expected; the reverse is rejected.
+- Lending: `fn` values may be lent to `borrow fn` and `share fn` parameters;
+  `var fn` values only to `share fn` parameters.
+- All owned function values (`fn` and `var fn`) follow one rule everywhere:
+  they are move-only owners with a nullable environment (null = no heap,
+  trivial release). Calling through a place and lending borrow the value and
+  do not move it. A function name or a non-capturing literal produces a
+  fresh value at each mention. This replaces the interim per-type switch and
+  the runtime check (trap 14), which are removed.
+
+### Shipped H5b details (2026-11-25)
+
+Facts about the shipped uniform function value ownership and `var fn(...)`; the
+decision above ("Owned closure mutation and function value ownership") is implemented
+as written.
+
+- **Representation.** Every function type is the wrapper struct `{ call, env }` (an IR
+  struct named after the signature, in the tuple module): `call` is the callable word
+  (table slot plus environment word) and `env` a `Box` of a compiler-made enum with a
+  `Plain` variant and one variant per owned closure literal of that signature. It does
+  not depend on any other code: the whole-program discovery passes (`types/owned_fn.rs`)
+  are gone and the wrapper is interned on first use by the checker. A function name,
+  a non-capturing literal and a second-class closure have an empty `env` box (null
+  pointer, no heap); releasing such a value is the ordinary empty-box check.
+  `fn(...)` and `var fn(...)` of one signature share the wrapper and the environment
+  enum (`var` is checker-only), so `fn` to `var fn` needs no conversion code. Plain
+  function values need no allocator code beyond the empty-box release; `[build] alloc =
+  false` still rejects a closure with captures (TE033).
+- **Ownership.** Function values are move-only owners everywhere: `let g := f;` moves
+  `f`, passing to an owned parameter or storing twice is BE001, a field or element is
+  read only in place (`holder.run(x)`, `list[i](x)`, `loop f in array` binds a borrow)
+  and leaves a field only through `replace`/`swap`, a List through `pop`/`replace`/`swap`
+  (`List::get` and a field read are TE022 like any owner). Calling through a place and
+  lending to `borrow fn`/`share fn` borrow, they do not move. Each mention of a function
+  name or a non-capturing literal is a fresh value, so `apply(inc, 1)` twice needs no
+  copy. Assigning a whole function value (`f = g;`) is TE018 with a note to use
+  `replace(f, g)` (the general whole-owner-local gate, now with a message).
+- **`var fn`.** `var fn(T, ..) -> R` parses in every type position (parentheses as for
+  `fn`: `(var fn() -> i32)?`, `List<var fn() -> i32>`, fields, payloads, generics,
+  results) as the AST path `\0fn`, `var`. An owned closure that mutates a capture
+  (assignment, `push`, a `share` call, calling a captured `var fn`, lending it to a
+  `share fn`) is accepted only where the expected type is `var fn`; in a `fn` position it
+  is TE017 "this closure changes its captured state ('x')" with a help suggesting
+  `var fn(...)`. Calling a `var fn` value needs a mutable place (a `var` binding or
+  parameter, a `share fn` parameter, a field or element of a mutable owner, a
+  temporary); anything else is TE004 at compile time. `fn` converts to `var fn` at the
+  top level of a position (not inside `List<..>` or other type arguments, which are
+  invariant); the reverse is TE002 with a help. Lending: `fn` to `borrow fn` and
+  `share fn` (any lender); `var fn` only to `share fn` and then from a mutable lender
+  (TE004), to `borrow fn` is TE017. A `borrow`/`share` parameter is written `borrow fn`
+  / `share fn`; `borrow var fn` is TE017. A `share fn` parameter may call the value it
+  is lent, so passing it on to a `borrow fn` stays an error.
+- **Removed.** The run-time mutation check: IR `ClosureReadOnly`, the `mutating` field of
+  `ClosureOwned`, trap reason 14 (`MutatingClosure`) and bit 31 of the slot word with
+  the per-call mask. Trap codes above 13 are unused again. Wasm output for programs with
+  no function values is unchanged.
+- **Known limits.** A `var fn` held in an enum payload or `T?` is moved and dropped but
+  cannot be called through a `match` binding (bindings are read-only places); take it
+  out into a `var` first (`replace`, `pop`). `var fn` cannot be a `borrow`/`share`
+  parameter type. Unannotated `let f := fn(..) captures` stays second-class (H2).
+- Tests: `crates/memobits-cli/tests/h5b_function_ownership.rs` (8: per-module
+  independence, move-only plain values, `var fn` positions and mutable-place calls,
+  mutating closure in `fn` position, coercion and lending matrix, capped-memory run of
+  4,096 rounds with heap environments and its mutation check); `h1_function_values.rs`,
+  `h5_owned_closures.rs` and the guide `functions.mb` updated to the move-only rule
+  (lending through `borrow fn`, `replace`, in-place calls). Guide: 149 tests.

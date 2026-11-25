@@ -905,7 +905,6 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                     captures.iter().for_each(&mut count)
                 }
                 InstructionKind::ClosureOwned { env, .. } => count(env),
-                InstructionKind::ClosureReadOnly { value } => count(value),
             }
         }
         match &block.terminator.kind {
@@ -1172,8 +1171,6 @@ pub enum TrapReason {
     AssertionFailed = 12,
     /// A function value that is not a slot of the function table.
     InvalidFunction = 13,
-    /// A closure that mutates its environment, called through an immutable place.
-    MutatingClosure = 14,
 }
 
 impl TrapReason {
@@ -1558,18 +1555,6 @@ fn encode_frames_traced(
     let slots = function_values::function_slots(program, &reachable);
     let value_captures = function_values::function_captures(program, &reachable);
     let owned_environments = function_values::owned_environments(program, &reachable);
-    let flagged = reachable.iter().any(|id| {
-        program.functions[*id as usize]
-            .blocks
-            .iter()
-            .flat_map(|block| &block.instructions)
-            .any(|instruction| {
-                matches!(
-                    instruction.kind,
-                    InstructionKind::ClosureOwned { mutating: true, .. }
-                )
-            })
-    });
     let selected = reachable
         .iter()
         .map(|id| &program.functions[*id as usize])
@@ -1878,7 +1863,6 @@ fn encode_frames_traced(
             &FunctionValues {
                 slots: &slots,
                 calls: &call_types[*id as usize],
-                flagged,
             },
             sizes[*id as usize],
             observe,
@@ -2113,14 +2097,7 @@ fn encode_frames_traced(
 struct FunctionValues<'a> {
     slots: &'a BTreeMap<u32, u32>,
     calls: &'a HashMap<u32, u32>,
-    /// Some owned closure mutates its environment: bit 31 of the slot word
-    /// flags it, and every indirect call masks the flag off.
-    flagged: bool,
 }
-
-/// Bit of a function value's slot word that marks a closure that mutates its
-/// environment.
-const MUTATING_FLAG: u32 = 1 << 31;
 
 fn compile_function(
     program: &Program,
@@ -4974,7 +4951,6 @@ fn compile_instruction(
         InstructionKind::ClosureOwned {
             function: target,
             env,
-            mutating,
             ..
         } => {
             // ((box block + content offset) << 32) | table slot
@@ -4989,29 +4965,11 @@ fn compile_instruction(
                 .slots
                 .get(&target.0)
                 .ok_or("closure function has no table slot")?;
-            let slot = if *mutating {
-                slot | MUTATING_FLAG
-            } else {
-                slot
-            };
             body.instruction(&WasmInstruction::I64Const(i64::from(slot)));
             body.instruction(&WasmInstruction::I64Or);
             body.instruction(&WasmInstruction::LocalSet(
                 output.ok_or("closure lacks output")?,
             ));
-        }
-        InstructionKind::ClosureReadOnly { value } => {
-            if values.flagged {
-                emit_operand(body, function, param_count, value, layout, frame)?;
-                body.instruction(&WasmInstruction::I32WrapI64);
-                body.instruction(&WasmInstruction::I32Const(MUTATING_FLAG as i32));
-                body.instruction(&WasmInstruction::I32And);
-                trap_if(
-                    body,
-                    traps.site(instruction.span),
-                    TrapReason::MutatingClosure,
-                );
-            }
         }
         InstructionKind::Load { reference } => {
             emit_operand(body, function, param_count, reference, layout, frame)?;
@@ -5298,10 +5256,6 @@ fn compile_instruction(
                 // Reject a function value outside the table before calling.
                 emit_operand(body, function, param_count, callee, layout, frame)?;
                 body.instruction(&WasmInstruction::I32WrapI64);
-                if values.flagged {
-                    body.instruction(&WasmInstruction::I32Const(!MUTATING_FLAG as i32));
-                    body.instruction(&WasmInstruction::I32And);
-                }
                 body.instruction(&WasmInstruction::I32Const(1));
                 body.instruction(&WasmInstruction::I32Sub);
                 body.instruction(&WasmInstruction::I32Const(values.slots.len() as i32));
@@ -5342,10 +5296,6 @@ fn compile_instruction(
                 (None, Some(type_index)) => {
                     emit_operand(body, function, param_count, callee, layout, frame)?;
                     body.instruction(&WasmInstruction::I32WrapI64);
-                    if values.flagged {
-                        body.instruction(&WasmInstruction::I32Const(!MUTATING_FLAG as i32));
-                        body.instruction(&WasmInstruction::I32And);
-                    }
                     body.instruction(&WasmInstruction::CallIndirect {
                         type_index,
                         table_index: 0,

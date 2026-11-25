@@ -1038,6 +1038,18 @@ impl Parser {
             self.bump();
             return self.function_type(start);
         }
+        if self.at("var") && self.next_at("fn") {
+            // `var fn(...) -> R`: an owned function value whose environment
+            // may change when it is called. The path is `\0fn`, `var`.
+            self.bump();
+            self.bump();
+            if !self.at("(") {
+                return self.fail("expected `(` after `var fn`");
+            }
+            let mut ty = self.function_type(start)?;
+            ty.path.push("var".into());
+            return Ok(ty);
+        }
         if self.at("{") {
             self.expect("{")?;
             if self.at("}") {
@@ -1270,7 +1282,8 @@ impl Parser {
     }
     /// `fn(T1, borrow T2) -> R` after the `fn` keyword. Parameters are
     /// `Type` (owned) or `Reference` arguments; the result is always the last
-    /// argument (`Unit` when omitted). The path is `\0fn`.
+    /// argument (`Unit` when omitted). The path is `\0fn` (`\0fn`, `var` for
+    /// `var fn`).
     fn function_type(&mut self, start: usize) -> PResult<Type> {
         self.expect("(")?;
         let mut arguments = Vec::new();

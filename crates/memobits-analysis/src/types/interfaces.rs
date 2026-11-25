@@ -127,6 +127,7 @@ impl Checker {
             let signature = match ir_scalar_function(&Ty::Function(
                 function_parameters,
                 Box::new(result.clone()),
+                false,
             )) {
                 Some(IrType::Function(signature)) => signature,
                 _ => {

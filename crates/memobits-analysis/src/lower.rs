@@ -720,11 +720,6 @@ struct Builder<'a> {
     /// Values produced by `Load`: read-only provenance that must be copied
     /// before it can be used as an owned value.
     loaded: HashSet<u32>,
-    /// Values that are a plain function in an owned-function wrapper (no
-    /// environment), and the immutable locals bound to one: both can be
-    /// copied by building a new wrapper.
-    plain_values: HashSet<u32>,
-    plain_locals: HashSet<u32>,
 }
 
 fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
@@ -945,8 +940,6 @@ impl<'a> Builder<'a> {
             loops: Vec::new(),
             next_loan: 0,
             loaded: HashSet::new(),
-            plain_values: HashSet::new(),
-            plain_locals: HashSet::new(),
         }
     }
     /// How many boxes the value of `expr` sits in (zero for a non-box).
@@ -1167,13 +1160,8 @@ impl<'a> Builder<'a> {
             return self.emit(span, kind, Some(ty));
         };
         let scalar = self.types[wrapper.0 as usize].fields[0].ty.clone();
-        let plain = matches!(kind, InstructionKind::Constant(_));
         let call = self.emit(span, kind, Some(scalar))?;
-        let value = self.wrap_function(call, wrapper, None, span)?;
-        if let (true, Source::Value(id)) = (plain, value.source) {
-            self.plain_values.insert(id.0);
-        }
-        Some(value)
+        self.wrap_function(call, wrapper, None, span)
     }
     /// Build the wrapper `{ call, env }` around a scalar callable. Without an
     /// environment the `env` box is empty.
@@ -1200,20 +1188,6 @@ impl<'a> Builder<'a> {
             },
             Some(Type::Struct(wrapper)),
         )
-    }
-    /// A new wrapper around the plain function an immutable local holds.
-    fn copy_plain_function(&mut self, local: LocalId, span: Span) -> Option<Operand> {
-        let ty = self.function.locals[local.0 as usize].ty.clone();
-        let wrapper = self.closure_wrapper(&ty)?;
-        let place = self.borrow(op(Source::Local(local), span), Access::Borrow)?;
-        let word = self.field_addr_index(place, 0, Access::Borrow, span)?;
-        let call = self.scalar(word)?;
-        let call = self.owned(call)?;
-        let value = self.wrap_function(call, wrapper, None, span)?;
-        if let Source::Value(id) = value.source {
-            self.plain_values.insert(id.0);
-        }
-        Some(value)
     }
     fn unit(&mut self, span: Span) -> Option<Operand> {
         self.constant(span, Constant::Unit, Type::Primitive(Primitive::Unit))
@@ -2016,7 +1990,6 @@ impl<'a> Builder<'a> {
                 env: read(op(Source::Local(environment), span)),
                 enum_ty: enum_id,
                 variant: owned.variant,
-                mutating: owned.mutating,
             },
             Some(scalar),
         )?;
@@ -2110,14 +2083,6 @@ impl<'a> Builder<'a> {
                     if let Some(rhs) = rhs {
                         let target = self.local(statement);
                         let ty = self.function.locals[target.0 as usize].ty.clone();
-                        if let (false, Source::Value(id)) = (
-                            matches!(statement.kind, StatementKind::Binding { mutable: true, .. }),
-                            rhs.source,
-                        ) {
-                            if self.plain_values.contains(&id.0) {
-                                self.plain_locals.insert(target.0);
-                            }
-                        }
                         if matches!(value.kind, ExprKind::Function(_))
                             && self.closure_wrapper(&ty).is_some()
                         {
@@ -3277,9 +3242,6 @@ impl<'a> Builder<'a> {
                 self.lower_variant(expr, &[])
             }
             ExprKind::Path(_) => match self.path(expr) {
-                PathTarget::Local(id) if self.plain_locals.contains(&id.0) => {
-                    self.copy_plain_function(id, expr.span)
-                }
                 PathTarget::Local(id) => Some(op(Source::Local(id), expr.span)),
                 // A function named as a value: its table slot, no environment.
                 // A direct call names its callee through `lower_callee`.

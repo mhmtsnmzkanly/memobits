@@ -233,7 +233,8 @@ test fn arrays_and_lists() {
     fs.push(inc);
     fs.push(fn(x: i32) -> i32 => x * 100);
     assert(fs.len() == 2);
-    match fs.get(1) { Some(f) => assert(f(2) == 200), None => assert(false) }
+    // A stored function value is called in place; `get` would copy it.
+    assert(fs[1](2) == 200);
     match fs.pop() { Some(f) => assert(f(3) == 300), None => assert(false) }
     assert(fs.len() == 1);
 }
@@ -257,23 +258,19 @@ fn main() -> i32 {
 }
 
 #[test]
-fn function_values_are_copyable() {
+fn function_values_are_lent_and_each_mention_is_fresh() {
     single(
         r#"fn inc(x: i32) -> i32 { x + 1 }
-fn use_twice(f: fn(i32) -> i32) -> i32 {
-    let a := f;
-    let b := f;
-    a(1) + b(2) + f(3)
-}
+fn use_twice(f: borrow fn(i32) -> i32) -> i32 { f(1) + f(2) + f(3) }
 fn main() -> i32 {
     let f := inc;
-    let g := f;
-    use_twice(f) + use_twice(g) + f(0)
+    let g := inc;
+    use_twice(f) + use_twice(g) + f(0) + use_twice(inc) + use_twice(inc)
 }
 "#,
         0,
-        (2 + 3 + 4) * 2 + 1,
-        "copyable",
+        (2 + 3 + 4) * 4 + 1,
+        "lent",
     );
 }
 
@@ -418,7 +415,7 @@ test fn positions() {
     assert(table[1](4) == 8);
     var fs: List<fn(i32) -> i32> = [];
     fs.push(fn(x) => x + 7);
-    match fs.get(0) { Some(f) => assert(f(1) == 8), None => assert(false) }
+    assert(fs[0](1) == 8);
     let maybe: (fn(i32) -> i32)? = Some(fn(x) => x * 9);
     match maybe { Some(f) => assert(f(2) == 18), None => assert(false) }
     let pair: (fn(i32) -> i32, i32) = (fn(x) => x + 1, 1);
@@ -433,7 +430,9 @@ test fn positions() {
     // Reassigned.
     var current: fn(i32) -> i32 = fn(x) => x;
     assert(current(1) == 1);
-    current = fn(x) => x + 10;
+    // A whole function value is replaced, not assigned.
+    let previous := replace(current, fn(x) => x + 10);
+    assert(previous(1) == 1);
     assert(current(1) == 11);
 }
 test fn shapes() {
@@ -517,8 +516,11 @@ test fn field_calls() {
 test fn method_wins() {
     let b := Both { run: dbl };
     assert(b.run(1) == 1001);
-    let field_value := b.run;
+    // A stored value leaves its field only through `replace`.
+    var c := Both { run: dbl };
+    let field_value := replace(c.run, inc);
     assert(field_value(4) == 8);
+    assert(c.run(1) == 1001);
 }
 test fn element_group_and_result_calls() {
     let table := [inc, dbl];

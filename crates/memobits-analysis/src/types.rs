@@ -64,7 +64,9 @@ enum Ty {
         inner: Box<Ty>,
         origin: ReferenceOrigin,
     },
-    Function(Vec<FunctionParameter>, Box<Ty>),
+    /// `fn(..) -> R`, or `var fn(..) -> R` when the flag is set: a value whose
+    /// environment may change when it is called.
+    Function(Vec<FunctionParameter>, Box<Ty>, bool),
     Never,
     Error,
 }
@@ -208,13 +210,19 @@ fn access_name(access: IrAccess) -> &'static str {
         IrAccess::Share => "share",
     }
 }
-/// A value copied implicitly: a primitive or a function value.
+/// A value copied implicitly: a primitive. A function value is an owner (see
+/// `owned_fn`) and is never copied.
 fn is_scalar(ty: &Ty) -> bool {
+    matches!(ty, Ty::Primitive(_))
+}
+/// A function type with the `var` marker cleared: lending to a `borrow fn` or
+/// `share fn` parameter compares signatures only.
+fn without_var(ty: &Ty) -> Ty {
     match ty {
-        Ty::Primitive(_) => true,
-        // An owned function type is a wrapper that owns its environment.
-        Ty::Function(..) => owned_fn::wrapper_id(ty).is_none(),
-        _ => false,
+        Ty::Function(parameters, result, _) => {
+            Ty::Function(parameters.clone(), result.clone(), false)
+        }
+        other => other.clone(),
     }
 }
 fn read_type(ty: Ty) -> Ty {
@@ -254,6 +262,15 @@ fn compatible(actual: &Ty, expected: &Ty) -> bool {
                 }
         }
         (Ty::Tuple(actual, _, _), Ty::Tuple(expected, _, _)) => actual == expected,
+        // A `fn` value may be used where a `var fn` is expected, not the reverse.
+        (
+            Ty::Function(actual_parameters, actual_result, actual_var),
+            Ty::Function(expected_parameters, expected_result, expected_var),
+        ) => {
+            actual_parameters == expected_parameters
+                && actual_result == expected_result
+                && (!*actual_var || *expected_var)
+        }
         _ => {
             actual == expected
                 || matches!(actual, Ty::Error | Ty::Never)
@@ -373,7 +390,7 @@ fn name(ty: &Ty) -> String {
         Ty::Box(inner) => format!("Box<{}>", name(inner)),
         Ty::Array(element, count) => format!("array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
-        Ty::Function(parameters, result) => {
+        Ty::Function(parameters, result, var) => {
             let parameters = parameters
                 .iter()
                 .map(|parameter| match parameter.access {
@@ -382,10 +399,11 @@ fn name(ty: &Ty) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            let var = if *var { "var " } else { "" };
             if **result == UNIT {
-                format!("fn({parameters})")
+                format!("{var}fn({parameters})")
             } else {
-                format!("fn({parameters}) -> {}", name(result))
+                format!("{var}fn({parameters}) -> {}", name(result))
             }
         }
         Ty::Reference { access, inner, .. } => {
@@ -939,9 +957,6 @@ pub(crate) struct OwnedClosure {
     pub(crate) wrapper: u32,
     pub(crate) env: u32,
     pub(crate) variant: u32,
-    /// The closure mutates its environment (a share capture), so it can only
-    /// be called through a mutable place.
-    pub(crate) mutating: bool,
 }
 
 /// One captured variable of a closure: the local of the enclosing function and
@@ -991,6 +1006,18 @@ pub struct TypedModule {
 }
 
 fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
+    // Converting a field type can intern a function-value wrapper (see
+    // `owned_fn`), so repeat until the table stops growing.
+    loop {
+        let count = table.definitions().len();
+        let facts = type_facts_once(table);
+        if table.definitions().len() == count {
+            return facts;
+        }
+    }
+}
+
+fn type_facts_once(table: &TypeTable) -> Vec<TypeFact> {
     let unit = || IrType::Primitive(Primitive::Unit);
     table
         .definitions()
@@ -1041,7 +1068,7 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
 /// The scalar IR type of a function value: a table slot plus an environment
 /// word. Owned function types wrap it in a struct (see `owned_fn`).
 fn ir_scalar_function(ty: &Ty) -> Option<IrType> {
-    let Ty::Function(parameters, result) = ty else {
+    let Ty::Function(parameters, result, _) = ty else {
         return None;
     };
     Some(IrType::Function(Signature {
@@ -1077,10 +1104,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             "f64" => Primitive::F64,
             _ => return None,
         }),
-        Ty::Function(..) => match owned_fn::wrapper_id(ty) {
-            Some(wrapper) => IrType::Struct(TypeId(wrapper)),
-            None => ir_scalar_function(ty)?,
-        },
+        Ty::Function(..) => IrType::Struct(TypeId(owned_fn::wrapper_id(ty)?)),
         Ty::Reference { access, inner, .. } => {
             let inner = ir_type(inner)?;
             IrType::Reference {
@@ -1172,7 +1196,10 @@ fn infer_view(binding: &Binding, origin: usize) -> Binding {
         Ty::Reference { inner, .. } => inner.as_ref().clone(),
         other => other.clone(),
     };
-    let access = if matches!(inner, Ty::Function(..)) {
+    let access = if matches!(inner, Ty::Function(_, _, true)) {
+        // A `var fn` value may be called or lent to a `share fn` parameter.
+        IrAccess::Share
+    } else if matches!(inner, Ty::Function(..)) {
         function_effect(binding)
     } else {
         IrAccess::Share
@@ -1286,6 +1313,9 @@ struct Checker {
     /// Path expressions that may name a closure local (callee and argument
     /// positions).
     closure_uses: HashSet<usize>,
+    /// Callee paths that name a top-level function directly: their fact keeps
+    /// the scalar function type (no function-value wrapper is needed).
+    direct_callees: HashSet<usize>,
     /// Set while the arguments of a call through a function value are checked.
     value_call: bool,
     result: Ty,
@@ -1516,6 +1546,27 @@ impl Checker {
                     self.note_write(origin);
                 }
             }
+        }
+    }
+    /// Whether a `var fn` value may be called or lent with share access
+    /// through this place: the root is a `var` binding or a `share`
+    /// parameter, or the place is a temporary. Records the write for the
+    /// capture analysis.
+    fn place_mutable(&mut self, place: &Expr) -> bool {
+        match &place.kind {
+            ExprKind::Path(path) if path.len() == 1 => {
+                let Some(binding) = self.lookup(&path[0]) else {
+                    return true;
+                };
+                let writable = binding.mutable || binding.access == IrAccess::Share;
+                let origin = binding.origin;
+                if writable {
+                    self.note_write(origin);
+                }
+                writable
+            }
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.place_mutable(base),
+            _ => true,
         }
     }
     /// TE004: a write through a projection chain (`a[i].x`, `l.pts[j]`) needs
@@ -1810,11 +1861,20 @@ impl Checker {
             );
         }
         if !compatible(actual, expected) {
-            self.error(
+            let mut diagnostic = diagnostic(
                 2,
                 span,
                 format!("expected {}, found {}", name(expected), name(actual)),
             );
+            if matches!(
+                (actual, expected),
+                (Ty::Function(_, _, true), Ty::Function(_, _, false))
+            ) {
+                diagnostic.help = Some(
+                    "note: a `var fn(...)` value may change its environment, so it cannot be used as a `fn(...)`; a `fn(...)` converts to `var fn(...)`, not the reverse".into(),
+                );
+            }
+            self.diagnostics.push(diagnostic);
         }
     }
     fn register_local(
@@ -2337,6 +2397,21 @@ impl Checker {
                             Ty::Error
                         }
                     };
+                    if operator == "="
+                        && matches!(target.kind, ExprKind::Path(_))
+                        && matches!(target_ty, Ty::Function(..))
+                    {
+                        let mut diagnostic = diagnostic(
+                            18,
+                            target.span,
+                            "a function value is an owner and cannot be assigned as a whole",
+                        );
+                        diagnostic.help = Some(
+                            "use `replace(name, value)` to put a new function value in its place"
+                                .into(),
+                        );
+                        self.diagnostics.push(diagnostic);
+                    }
                     if operator == "=" {
                         self.allow_array_value(value);
                     }
@@ -2550,6 +2625,7 @@ impl Checker {
                                                 parameters[0].clone(),
                                             ],
                                             Box::new(UNIT.clone()),
+                                            false,
                                         ))
                                     {
                                         facts.selected_assignments.push(SelectedCall {
@@ -2653,13 +2729,7 @@ impl Checker {
                 } => {
                     self.allow_array_value(items);
                     let ty = match read_type(self.expr(items, None)) {
-                        Ty::Array(element, _)
-                            if numeric(&element)
-                                || *element == BOOL
-                                || matches!(*element, Ty::Function(..)) =>
-                        {
-                            *element
-                        }
+                        Ty::Array(element, _) if numeric(&element) || *element == BOOL => *element,
                         Ty::Array(element, _)
                             if place_root(items).is_some()
                                 && !matches!(*element, Ty::Primitive(_) | Ty::Reference { .. }) =>
@@ -2807,7 +2877,15 @@ impl Checker {
             facts.expressions.push(ExpressionFact {
                 id,
                 span: expr.span,
-                ty: ir_type(&ty),
+                ty: if matches!(ty, Ty::Function(..))
+                    && self
+                        .direct_callees
+                        .contains(&(expr as *const Expr as usize))
+                {
+                    ir_scalar_function(&ty)
+                } else {
+                    ir_type(&ty)
+                },
                 node_addr: expr as *const Expr as usize,
             });
         }
@@ -2842,7 +2920,7 @@ impl Checker {
         expected: Option<&Ty>,
     ) -> Ty {
         let expected_signature = match expected {
-            Some(Ty::Function(parameters, result)) => {
+            Some(Ty::Function(parameters, result, _)) => {
                 Some((parameters.clone(), result.as_ref().clone()))
             }
             _ => None,
@@ -2969,11 +3047,15 @@ impl Checker {
                 other => other.clone(),
             };
             let is_function = matches!(inner, Ty::Function(..));
-            let access = if is_function && will_own && source.mutable {
-                // A `var` closure moved into an owned environment may be
-                // called with share access there: it can mutate its own
-                // environment, so the new closure mutates its environment too.
-                IrAccess::Share
+            let access = if is_function && matches!(inner, Ty::Function(_, _, true)) {
+                // A `var fn` value is called (or lent to a `share fn`
+                // parameter) with share access: the closure that does so
+                // mutates its environment.
+                if shared.contains(name) {
+                    IrAccess::Share
+                } else {
+                    IrAccess::Borrow
+                }
             } else if is_function {
                 // A function value is only called: it needs the access its
                 // own effect has (a closure that mutates is a share effect).
@@ -2985,10 +3067,7 @@ impl Checker {
             };
             if access == IrAccess::Share {
                 share_effect = true;
-                if !will_own
-                    && !is_function
-                    && !(source.mutable || source.access == IrAccess::Share)
-                {
+                if !will_own && !(source.mutable || source.access == IrAccess::Share) {
                     self.error(
                         4,
                         expr.span,
@@ -2999,6 +3078,7 @@ impl Checker {
                 }
             }
             let inner_copy = inner.clone();
+            let inner_var = inner.clone();
             plan.push(CapturePlan {
                 name: name.clone(),
                 access,
@@ -3016,7 +3096,10 @@ impl Checker {
                     log.push((name.clone(), index));
                 }
             }
-            if access == IrAccess::Share && !is_function && !will_own {
+            if access == IrAccess::Share
+                && !will_own
+                && (!is_function || matches!(inner_var, Ty::Function(_, _, true)))
+            {
                 self.note_write(source.origin);
             }
         }
@@ -3027,7 +3110,7 @@ impl Checker {
             if failed || result == Ty::Error {
                 return Ty::Error;
             }
-            return Ty::Function(parameters, Box::new(result));
+            return Ty::Function(parameters, Box::new(result), false);
         }
         let body = self.closure_body(
             expr,
@@ -3041,7 +3124,8 @@ impl Checker {
         if failed || result == Ty::Error {
             return Ty::Error;
         }
-        let function_ty = Ty::Function(parameters, Box::new(result));
+        let expected_var = matches!(expected, Some(Ty::Function(_, _, true)));
+        let function_ty = Ty::Function(parameters, Box::new(result), will_own && expected_var);
         let mode = if share_effect {
             IrAccess::Share
         } else {
@@ -3049,8 +3133,26 @@ impl Checker {
         };
         let owned_closure = will_own && !plan.is_empty();
         if owned_closure {
-            owned_fn::discover(&function_ty);
             self.require_alloc(expr.span, "an owned closure with captures");
+            if share_effect && !expected_var {
+                let names = plan
+                    .iter()
+                    .filter(|capture| capture.access == IrAccess::Share)
+                    .map(|capture| format!("'{}'", capture.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut diagnostic = diagnostic(
+                    17,
+                    expr.span,
+                    format!(
+                        "this closure changes its captured state ({names}), so it cannot be a `fn(...)` value"
+                    ),
+                );
+                diagnostic.help = Some(
+                    "note: write the type as `var fn(...)`; a `var fn(...)` value is called through a `var` binding or a `share` parameter".into(),
+                );
+                self.diagnostics.push(diagnostic);
+            }
             for capture in &plan {
                 if capture.unmovable {
                     self.error(
@@ -3131,7 +3233,6 @@ impl Checker {
                     wrapper,
                     env,
                     variant,
-                    mutating: share_effect,
                 })
             } else {
                 None
@@ -3235,6 +3336,7 @@ impl Checker {
         let saved_context = self.closure_context.take();
         self.scopes.push(HashMap::new());
         for (parameter, resolved) in function.parameters.iter().zip(parameters) {
+            check_declared_parameter(self, resolved.access, &resolved.ty, parameter.span);
             bind_named_parameter(
                 self,
                 &parameter.name,
@@ -3839,6 +3941,28 @@ impl Checker {
         }
         self.concat_destination = previous_concat;
         self.temporary_borrow_argument = previous_borrow;
+        if let (Some(parameter), true) = (
+            function_parameter,
+            matches!(&actual, Ty::Function(_, _, true))
+                || matches!(&actual, Ty::Reference { inner, .. } if matches!(**inner, Ty::Function(_, _, true))),
+        ) {
+            if parameter.access == IrAccess::Borrow {
+                self.error(
+                    17,
+                    arg.span,
+                    "a `var fn` value changes its environment when called, so it can only be lent to a `share fn` parameter",
+                );
+            } else if !self.place_mutable(arg) {
+                self.error(
+                    4,
+                    arg.span,
+                    format!(
+                        "lending a `var fn` value to a `share fn` parameter needs a mutable place{}",
+                        root_note(arg)
+                    ),
+                );
+            }
+        }
         if param.is_some_and(|parameter| {
             parameter.access == IrAccess::Owned
                 && self.struct_has_unsupported_nested_string_owner(&parameter.ty)
@@ -3904,7 +4028,7 @@ impl Checker {
             if param.access == IrAccess::Owned {
                 self.ensure(&actual, &param.ty, arg.span);
             } else if function_parameter.is_some() && matches!(actual, Ty::Function(..)) {
-                self.ensure(&actual, &param.ty, arg.span);
+                self.ensure(&without_var(&actual), &without_var(&param.ty), arg.span);
             } else if matches!(&actual, Ty::Reference { inner, .. }
                 if !(compatible(inner, &param.ty)
                     || direct && self.table.has_error_ancestor(inner, &param.ty)))
@@ -6767,6 +6891,7 @@ impl Checker {
                                         ty: operand_ty.clone(),
                                     }],
                                     Box::new(result.clone()),
+                                    false,
                                 )) {
                                     Some(IrType::Function(signature)) => signature,
                                     _ => return Ty::Error,
@@ -7065,6 +7190,7 @@ impl Checker {
                                     parameters[0].clone(),
                                 ],
                                 Box::new(result.clone()),
+                                false,
                             )) {
                                 Some(IrType::Function(signature)) => signature,
                                 _ => return Ty::Error,
@@ -7163,6 +7289,7 @@ impl Checker {
                                     parameters[0].clone(),
                                 ],
                                 Box::new(BOOL),
+                                false,
                             )) {
                                 Some(IrType::Function(signature)) => signature,
                                 _ => return Ty::Error,
@@ -7280,6 +7407,7 @@ impl Checker {
                                     parameters[0].clone(),
                                 ],
                                 Box::new(BOOL),
+                                false,
                             )) {
                                 Some(IrType::Function(signature)) => signature,
                                 _ => return Ty::Error,
@@ -7609,6 +7737,7 @@ impl Checker {
                             let signature = match ir_scalar_function(&Ty::Function(
                                 function_parameters,
                                 Box::new(result.clone()),
+                                false,
                             )) {
                                 Some(IrType::Function(signature)) => signature,
                                 _ => {
@@ -7633,6 +7762,10 @@ impl Checker {
                 if matches!(&callee.kind, ExprKind::Path(path) if path.len() == 1) {
                     self.closure_uses.insert(&**callee as *const Expr as usize);
                 }
+                if self.direct_callee(callee) {
+                    self.direct_callees
+                        .insert(&**callee as *const Expr as usize);
+                }
                 let ty = self.expr(callee, None);
                 // A `borrow fn` / `share fn` parameter (or a capture of a
                 // function value) is called through its reference.
@@ -7640,7 +7773,17 @@ impl Checker {
                     Ty::Reference { inner, .. } if matches!(*inner, Ty::Function(..)) => *inner,
                     other => other,
                 };
-                if let Ty::Function(params, result) = ty {
+                if let Ty::Function(params, result, var) = ty {
+                    if var && !self.place_mutable(callee) {
+                        self.error(
+                            4,
+                            callee.span,
+                            format!(
+                                "a `var fn` value changes its environment when called, so it needs a mutable place{}; declare it with var, take it as a `share` parameter or call a temporary",
+                                root_note(callee)
+                            ),
+                        );
+                    }
                     let direct = self.direct_callee(callee);
                     if params.len() != arguments.len() {
                         self.error(
@@ -8093,17 +8236,10 @@ fn imports_for_module(module: &Module, project: &Project) -> HashMap<String, Str
     imports
 }
 
-/// Run a check until the set of owned function types is stable (see
-/// `owned_fn`): the first pass discovers them, the next one uses them.
-fn with_passes<R>(mut run: impl FnMut() -> R) -> R {
-    owned_fn::reset();
-    let mut result = run();
-    for _ in 0..3 {
-        if !owned_fn::take_grew() {
-            break;
-        }
-        result = run();
-    }
+/// Run one check; the function-value wrappers it interns (see `owned_fn`) live
+/// in its type table and are forgotten when it ends.
+fn with_wrappers<R>(run: impl FnOnce() -> R) -> R {
+    let result = run();
     owned_fn::finish();
     result
 }
@@ -8112,7 +8248,7 @@ fn check_standalone(
     module: &Module,
     mode: CheckMode,
 ) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
-    with_passes(|| check_standalone_once(module, mode))
+    with_wrappers(|| check_standalone_once(module, mode))
 }
 
 fn check_standalone_once(
@@ -8170,6 +8306,7 @@ fn check_standalone_once(
         closure_context: None,
         closure_exprs: HashMap::new(),
         closure_uses: HashSet::new(),
+        direct_callees: HashSet::new(),
         value_call: false,
         result: UNIT,
     };
@@ -8202,7 +8339,7 @@ fn check_standalone_once(
                     .collect();
                 let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
                 if c.functions
-                    .insert(name.clone(), Ty::Function(params, Box::new(result)))
+                    .insert(name.clone(), Ty::Function(params, Box::new(result), false))
                     .is_some()
                 {
                     c.error(14, item.span, format!("duplicate function '{name}'"));
@@ -8236,7 +8373,7 @@ fn check_standalone_once(
             ..
         } = &item.kind
         {
-            let Ty::Function(params, result) = c.functions.get(name).cloned().unwrap() else {
+            let Ty::Function(params, result, _) = c.functions.get(name).cloned().unwrap() else {
                 unreachable!()
             };
             if capture {
@@ -8249,6 +8386,7 @@ fn check_standalone_once(
                     signature: match ir_scalar_function(&Ty::Function(
                         params.clone(),
                         result.clone(),
+                        false,
                     )) {
                         Some(IrType::Function(signature)) => signature,
                         _ => Signature {
@@ -8417,7 +8555,7 @@ pub(crate) fn check_resolved_mode(
     resolution: &Resolution,
     mode: CheckMode,
 ) -> Result<TypedModule, Vec<Diagnostic>> {
-    with_passes(|| check_resolved_mode_once(project, resolution, mode))
+    with_wrappers(|| check_resolved_mode_once(project, resolution, mode))
 }
 
 fn check_resolved_mode_once(
@@ -8583,7 +8721,7 @@ fn check_resolved_mode_once(
                     let result = result.as_ref().map(|t| c.type_path(t)).unwrap_or(UNIT);
                     signatures.insert(
                         format!("{module_name}::{name}"),
-                        Ty::Function(params, Box::new(result)),
+                        Ty::Function(params, Box::new(result), false),
                     );
                 }
                 ItemKind::Type { .. }
@@ -8635,11 +8773,11 @@ fn check_resolved_mode_once(
             } = &item.kind
             {
                 let key = format!("{module_name}::{name}");
-                if let (Some(Ty::Function(params, result)), Some(id)) =
+                if let (Some(Ty::Function(params, result, _)), Some(id)) =
                     (signatures.get(&key), ids.get(&key))
                 {
                     let ir_signature = if lowering {
-                        ir_scalar_function(&Ty::Function(params.clone(), result.clone()))
+                        ir_scalar_function(&Ty::Function(params.clone(), result.clone(), false))
                     } else {
                         None
                     };
@@ -8729,9 +8867,11 @@ fn check_resolved_mode_once(
                     .map(|ty| c.type_path(ty))
                     .unwrap_or(UNIT);
                 if lowering {
-                    if let Some(IrType::Function(signature)) =
-                        ir_scalar_function(&Ty::Function(params.clone(), Box::new(result.clone())))
-                    {
+                    if let Some(IrType::Function(signature)) = ir_scalar_function(&Ty::Function(
+                        params.clone(),
+                        Box::new(result.clone()),
+                        false,
+                    )) {
                         c.facts = Some(FunctionFacts {
                             id: function,
                             span: method.span,
@@ -9027,6 +9167,7 @@ fn check_resolved_mode_once(
                 if let Some(IrType::Function(signature)) = ir_scalar_function(&Ty::Function(
                     parameter_types.clone(),
                     Box::new(result.clone()),
+                    false,
                 )) {
                     c.facts = Some(FunctionFacts {
                         id: request.id,
@@ -9128,6 +9269,7 @@ fn checker() -> Checker {
         closure_context: None,
         closure_exprs: HashMap::new(),
         closure_uses: HashSet::new(),
+        direct_callees: HashSet::new(),
         value_call: false,
         result: UNIT,
     }
@@ -9160,7 +9302,19 @@ fn infer_direct_type_parameter(
         }
     }
 }
+/// A `borrow`/`share` function parameter is never `var fn`: `share fn` already
+/// allows the callee to call a `var fn` value it is lent.
+fn check_declared_parameter(c: &mut Checker, access: IrAccess, ty: &Ty, span: Span) {
+    if access != IrAccess::Owned && matches!(ty, Ty::Function(_, _, true)) {
+        c.error(
+            17,
+            span,
+            "a `borrow` or `share` function parameter is written `borrow fn(...)` or `share fn(...)`; `var fn(...)` is the type of an owned value",
+        );
+    }
+}
 fn bind_parameter(c: &mut Checker, p: &Parameter, ty: Ty) {
+    check_declared_parameter(c, ir_access(p.access), &ty, p.span);
     bind_named_parameter(
         c,
         &p.name,
@@ -9288,8 +9442,9 @@ mod access_tests {
                 ty: I32,
             }],
             Box::new(UNIT.clone()),
+            false,
         );
-        let Some(IrType::Function(signature)) = ir_type(&ty) else {
+        let Some(IrType::Function(signature)) = ir_scalar_function(&ty) else {
             panic!("function type should lower");
         };
         assert_eq!(signature.parameters[0].access, IrAccess::Share);

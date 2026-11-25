@@ -191,7 +191,7 @@ fn adders_counters_and_captured_strings_work() {
     // string and a number: 3 + 4 = 7.
     // 3 + 15 + 10 + 3 + 7 + 4 = 42.
     let source = r#"fn make_adder(n: i32) -> fn(i32) -> i32 { fn(x) => x + n }
-fn make_counter() -> fn() -> i32 {
+fn make_counter() -> var fn() -> i32 {
     var c := 0;
     fn() -> i32 { c += 1; c }
 }
@@ -306,20 +306,22 @@ fn main() -> i32 {
 }
 
 #[test]
-fn plain_function_values_stay_copyable_beside_owned_closures() {
-    // `fn(i32) -> i32` is an owned function type here (adder returns an owned
-    // closure), yet names and non-capturing literals bound with `let` copy.
+fn plain_function_values_are_lent_beside_owned_closures() {
+    // Every function value is a move-only owner. A name or a non-capturing
+    // literal is a fresh value at each mention, a `let` of one is lent to
+    // `borrow fn` parameters (never copied), and an owned closure is lent the
+    // same way.
     let source = r#"fn inc(x: i32) -> i32 { x + 1 }
 fn adder(n: i32) -> fn(i32) -> i32 { fn(x) => x + n }
-fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn apply(f: borrow fn(i32) -> i32, x: i32) -> i32 { f(x) }
 fn main() -> i32 {
     let f := inc;
-    let g := f;
+    let g := inc;
     let h := fn(x: i32) -> i32 => x * 2;
     apply(f, 1) + apply(f, 2) + apply(g, 3) + f(4) + h(1) + h(2) + apply(adder(1), 20) - 19 + 20
 }
 "#;
-    single(source, 0, 42, "plain copies");
+    single(source, 0, 42, "plain lending");
 }
 
 // ---------------------------------------------------------------------------
@@ -441,13 +443,13 @@ fn a_closure_mutates_its_own_environment_through_a_mutable_place() {
     // `var` locals and fields of `var` structs, `var` parameters and `share fn`
     // parameters may call a mutating closure; the enclosing variable is not
     // touched (the capture was a copy).
-    let source = r#"fn counter(start: i32) -> fn() -> i32 {
+    let source = r#"fn counter(start: i32) -> var fn() -> i32 {
     var c := start;
     fn() -> i32 { c += 1; c }
 }
-fn twice(var f: fn() -> i32) -> i32 { f() + f() }
+fn twice(var f: var fn() -> i32) -> i32 { f() + f() }
 fn shared(f: share fn() -> i32) -> i32 { f() + f() }
-type Slot { run: fn() -> i32 }
+type Slot { run: var fn() -> i32 }
 fn main() -> i32 {
     var start := 0;
     var a := counter(start);
@@ -468,75 +470,22 @@ fn main() -> i32 {
 }
 
 #[test]
-fn calling_a_mutating_closure_through_an_immutable_place_traps() {
-    let prelude = "fn counter() -> fn() -> i32 { var c := 0; fn() -> i32 { c += 1; c } }\nfn once(f: fn() -> i32) -> i32 { f() }\nfn read(f: borrow fn() -> i32) -> i32 { f() }\nfn bump(f: share fn() -> i32) -> i32 { f() }\n";
-    for (body, label) in [
-        ("let c := counter(); c()", "a let binding"),
-        ("once(counter())", "an owned parameter"),
-        ("var c := counter(); read(c)", "a borrow fn parameter"),
-        (
-            "let c := counter(); bump(c)",
-            "an immutable binding lent to a share fn parameter",
-        ),
-        ("let h: fn() -> i32 = counter(); h()", "an annotated let"),
-    ] {
-        let source = format!("{prelude}fn main() -> i32 {{ {body} }}\n");
-        let f = Fixture::new(&source);
-        assert!(f.run(&["check"]).status.success(), "{label}: must check");
-        let run = f.run(&["run"]);
-        assert!(!run.status.success(), "{label}: ran");
-        assert!(
-            text(&run.stderr).contains("mutates its environment"),
-            "{label}: {}",
-            text(&run.stderr)
-        );
-        let build = f.run(&["build", "--output", "h5.wasm"]);
-        assert!(build.status.success());
-        let wasm = f.run(&["run", "h5.wasm"]);
-        assert!(!wasm.status.success(), "{label}: wasm ran");
-        assert!(
-            text(&wasm.stderr).contains("mutates its environment"),
-            "{label}: {}",
-            text(&wasm.stderr)
-        );
-    }
-    // A closure that only reads its environment can be called from anywhere.
-    let readers = format!(
-        "{prelude}fn adder(n: i32) -> fn() -> i32 {{ fn() -> i32 => n }}\nfn main() -> i32 {{ let a := adder(40); let b := adder(1); once(adder(0)) + read(a) + bump(b) + a() + b() - 41 - 0 + 0 + 0 }}\n"
-    );
-    // 0 + 40 + 1 + 40 + 1 - 41 = 41; the check only needs it to run.
-    let f = Fixture::new(&readers);
-    let run = f.run(&["run"]);
-    assert!(run.status.success(), "{}", text(&run.stderr));
-    assert_eq!(text(&run.stdout), "Result: i32(41)\n");
+fn closures_that_only_read_are_called_from_any_place() {
+    // A plain `fn` value never changes its environment, so it can be called
+    // through an immutable binding, an owned parameter, a `borrow fn`
+    // parameter and lent to a `share fn` parameter.
+    let source = r#"fn adder(n: i32) -> fn() -> i32 { fn() -> i32 => n }
+fn once(f: fn() -> i32) -> i32 { f() }
+fn read(f: borrow fn() -> i32) -> i32 { f() }
+fn bump(f: share fn() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    let a := adder(40);
+    let b := adder(1);
+    once(adder(0)) + read(a) + bump(b) + a() + b() - 41 - 0 + 0 + 0
 }
-
-#[test]
-fn the_owned_representation_is_chosen_per_exact_function_type() {
-    // `fn(i64) -> i64` has an owned closure, so its values are owners and
-    // `get()` (which copies) is rejected; `fn(i32) -> i32` has none and keeps
-    // the copy rules of plain function values.
-    let shared = "use alloc::List;\nfn inc(x: i32) -> i32 { x + 1 }\nfn adder(n: i64) -> fn(i64) -> i64 { fn(x) => x + n }\nfn plus(x: i64) -> i64 { x + 1 }\n";
-    let accepted = format!(
-        "{shared}fn main() -> i32 {{ var fs: List<fn(i32) -> i32> = []; fs.push(inc); let f := inc; let g := f; let r := match fs.get(0) {{ Some(h) => h(1) + g(1) + f(1), None => 0 }}; r + 36 }}\n"
-    );
-    single(&accepted, 0, 42, "plain function type");
-    rejects(
-        &format!(
-            "{shared}fn main() -> i32 {{ var fs: List<fn(i64) -> i64> = []; fs.push(adder(1)); match fs.get(0) {{ Some(h) => 1, None => 0 }} }}\n"
-        ),
-        "TE022",
-        "get() copies its element",
-    );
-    // A function name still copies for the owned type when bound with `let`.
-    single(
-        &format!(
-            "{shared}fn main() -> i32 {{ let p := plus; let q := p; (p(1) + q(2) + adder(40)(0)) as i32 - 3 }}\n"
-        ),
-        0,
-        42,
-        "plain value of the owned type",
-    );
+"#;
+    // 0 + 40 + 1 + 40 + 1 - 41 = 41.
+    single(source, 0, 41, "readers");
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +497,7 @@ fn owned_closures_lend_to_borrow_and_share_function_parameters() {
 fn probe(f: borrow fn(i32) -> i32, x: i32) -> i32 { f(x) }
 fn forward(f: borrow fn(i32) -> i32, x: i32) -> i32 { probe(f, x) + 1 }
 fn visit(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }
-fn recorder() -> fn(i32) -> i32 {
+fn recorder() -> var fn(i32) -> i32 {
     var seen := 0;
     fn(x) { seen += x; seen }
 }
@@ -581,11 +530,11 @@ type Handler {{ name: string, run: fn() -> u32 }}
 fn by_text(text: string) -> fn() -> u32 {{ fn() -> u32 => text.len() }}
 fn by_list(items: List<u32>) -> fn() -> u32 {{ fn() -> u32 => items.len() }}
 fn by_label(label: Label) -> fn() -> u32 {{ fn() -> u32 => label.text.len() + label.n }}
-fn counting(text: string) -> fn() -> u32 {{
+fn counting(text: string) -> var fn() -> u32 {{
     var seen: u32 = 0;
     fn() -> u32 {{ seen += text.len(); seen }}
 }}
-fn growing(text: string) -> fn() -> u32 {{
+fn growing(text: string) -> var fn() -> u32 {{
     var s := text;
     fn() -> u32 {{ s.push_str("ab"); s.len() }}
 }}

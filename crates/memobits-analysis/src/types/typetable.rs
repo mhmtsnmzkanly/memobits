@@ -449,8 +449,9 @@ impl TypeTable {
             Ty::Reference { access, inner, .. } => {
                 format!("{access:?} {}", self.stable_identity(inner))
             }
-            Ty::Function(parameters, result) => format!(
-                "fn({}) -> {}",
+            Ty::Function(parameters, result, var) => format!(
+                "{}fn({}) -> {}",
+                if *var { "var " } else { "" },
                 parameters
                     .iter()
                     .map(|parameter| format!(
@@ -655,8 +656,9 @@ impl TypeTable {
                 "reference({access:?}, {})",
                 self.semantic_tuple_element_identity(inner)
             ),
-            Ty::Function(parameters, result) => format!(
-                "function({:?}, {})",
+            Ty::Function(parameters, result, var) => format!(
+                "{}function({:?}, {})",
+                if *var { "var " } else { "" },
                 parameters
                     .iter()
                     .map(|parameter| (
@@ -1636,7 +1638,7 @@ impl TypeTable {
         if ty.path.as_slice() == ["\0unit"] {
             return Ok(Ty::Primitive("Unit"));
         }
-        if ty.path.as_slice() == ["\0fn"] {
+        if ty.path.first().is_some_and(|part| part == "\0fn") {
             let Some((TypeArgument::Type(result), parameters)) = ty.arguments.split_last() else {
                 return Err(failure(2, "malformed function type".into()));
             };
@@ -1659,7 +1661,11 @@ impl TypeTable {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let result = self.resolve(module, result)?;
-            return Ok(Ty::Function(parameters, Box::new(result)));
+            return Ok(Ty::Function(
+                parameters,
+                Box::new(result),
+                ty.path.len() > 1,
+            ));
         }
         if ty.path.as_slice() == ["\0record"] {
             let mut labels = HashSet::new();

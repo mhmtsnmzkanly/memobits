@@ -1,14 +1,13 @@
-//! Owned function types. A function type `fn(...) -> R` is a plain scalar
-//! (a table slot plus an environment word) until a closure literal that
-//! captures variables by move is written where such a type is expected. From
-//! then on every value of that exact function type is represented as a wrapper
-//! struct `{ call, env }`: `call` is the scalar callable word and `env` owns
-//! the heap environment (an empty box for a plain function). The wrapper and
-//! its environment enum live in the type table; this module decides which
-//! function types use them. Checking runs in passes: the first pass discovers
-//! the owned function types, later passes use the wrapper.
+//! Owned function values. Every function type `fn(...) -> R` (and
+//! `var fn(...) -> R`) is represented the same way, whatever else the program
+//! contains: a wrapper struct `{ call, env }` in the type table. `call` is the
+//! scalar callable word (a table slot plus an environment word) and `env` owns
+//! the heap environment, a box of the environment enum of the function type.
+//! The box is empty (no heap) for a function name, a literal without captures
+//! and a second-class closure, so releasing such a value is a no-op check.
+//! Both spellings of a signature share one wrapper: `var` is a checker-only
+//! property that says the environment may change when the value is called.
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use memobits_diagnostics::Span;
@@ -16,61 +15,18 @@ use memobits_diagnostics::Span;
 use super::typetable::TypeTable;
 use super::Ty;
 
-#[derive(Default)]
-struct State {
-    owned: BTreeSet<String>,
-    grew: bool,
-    table: Option<Rc<TypeTable>>,
-}
-
 thread_local! {
-    static STATE: RefCell<State> = RefCell::new(State::default());
+    static TABLE: RefCell<Option<Rc<TypeTable>>> = const { RefCell::new(None) };
 }
 
-/// Start a checking run: no owned function types are known yet.
-pub(super) fn reset() {
-    STATE.with(|state| {
-        *state.borrow_mut() = State::default();
-    });
-}
-
-/// Forget the run's state (and the table it holds).
-pub(super) fn finish() {
-    STATE.with(|state| *state.borrow_mut() = State::default());
-}
-
-/// The table of the pass that is about to run.
+/// The table of the check that is about to run.
 pub(super) fn set_table(table: Rc<TypeTable>) {
-    STATE.with(|state| state.borrow_mut().table = Some(table));
+    TABLE.with(|state| *state.borrow_mut() = Some(table));
 }
 
-/// Whether the last pass found an owned function type that was not known, which
-/// means another pass is needed.
-pub(super) fn take_grew() -> bool {
-    STATE.with(|state| std::mem::take(&mut state.borrow_mut().grew))
-}
-
-/// Record that a closure with captures was written for this function type.
-pub(super) fn discover(function: &Ty) {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let Some(table) = state.table.clone() else {
-            return;
-        };
-        let key = table.stable_identity(function);
-        if state.owned.insert(key) {
-            state.grew = true;
-        }
-    });
-}
-
-/// The environment variant index for a closure literal of the owned function
-/// type `function`, if that type is owned in this pass.
-pub(super) fn add_variant(function: &Ty, payload: Vec<Ty>) -> Option<(u32, u32, u32)> {
-    let (table, key) = lookup(function)?;
-    let (wrapper, env) = table.closure_types(&key, function, span());
-    let variant = table.add_closure_variant(&key, payload);
-    Some((wrapper, env, variant))
+/// Forget the table of the finished check.
+pub(super) fn finish() {
+    TABLE.with(|state| *state.borrow_mut() = None);
 }
 
 fn span() -> Span {
@@ -81,25 +37,36 @@ fn span() -> Span {
     }
 }
 
-fn lookup(function: &Ty) -> Option<(Rc<TypeTable>, String)> {
-    STATE.with(|state| {
-        let state = state.borrow();
-        let table = state.table.clone()?;
-        let key = table.stable_identity(function);
-        state.owned.contains(&key).then_some((table, key))
-    })
+/// The wrapper identity of a function type: its signature without `var`.
+fn lookup(function: &Ty) -> Option<(Rc<TypeTable>, String, Ty)> {
+    let Ty::Function(parameters, result, _) = function else {
+        return None;
+    };
+    let table = TABLE.with(|state| state.borrow().clone())?;
+    let plain = Ty::Function(parameters.clone(), result.clone(), false);
+    let key = table.stable_identity(&plain);
+    Some((table, key, plain))
 }
 
-/// The wrapper struct id of `function` when it is an owned function type.
+/// The environment variant index for a closure literal of the function type
+/// `function`: the wrapper struct, the environment enum and the variant.
+pub(super) fn add_variant(function: &Ty, payload: Vec<Ty>) -> Option<(u32, u32, u32)> {
+    let (table, key, plain) = lookup(function)?;
+    let (wrapper, env) = table.closure_types(&key, &plain, span());
+    let variant = table.add_closure_variant(&key, payload);
+    Some((wrapper, env, variant))
+}
+
+/// The wrapper struct id of the function type `function`.
 pub(super) fn wrapper_id(function: &Ty) -> Option<u32> {
-    let (table, key) = lookup(function)?;
-    Some(table.closure_types(&key, function, span()).0)
+    let (table, key, plain) = lookup(function)?;
+    Some(table.closure_types(&key, &plain, span()).0)
 }
 
-/// Whether the struct `id` is the wrapper of an owned function type.
+/// Whether the struct `id` is the wrapper of a function type.
 pub(super) fn is_wrapper(id: u32) -> bool {
-    STATE.with(|state| {
-        state.borrow().table.as_ref().is_some_and(|table| {
+    TABLE.with(|state| {
+        state.borrow().as_ref().is_some_and(|table| {
             let info = table.info(id);
             info.module == "\0tuple" && info.name.starts_with("fn(")
         })

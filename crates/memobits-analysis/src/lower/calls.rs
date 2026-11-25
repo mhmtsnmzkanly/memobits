@@ -9,7 +9,6 @@ impl Builder<'_> {
         callee: &Expr,
         arguments: &[Expr],
     ) -> Option<Operand> {
-        let callee_expr = callee;
         let callee_ty = self.ty(callee).expect("checked callee");
         // A `borrow fn` / `share fn` parameter is called through its reference.
         let through_reference = matches!(callee_ty, Type::Reference { .. });
@@ -52,19 +51,6 @@ impl Builder<'_> {
         } else {
             callee
         };
-        if wrapped
-            && !matches!(callee.source, Source::Function(_))
-            && !self.callee_is_mutable(callee_expr)
-        {
-            // A closure that mutates its environment needs a mutable place.
-            self.emit(
-                callee_expr.span,
-                InstructionKind::ClosureReadOnly {
-                    value: read(callee),
-                },
-                None,
-            );
-        }
         let callee = self.capture(callee)?;
         let scope_start = self.owned_locals.len();
         let result = (|| {
@@ -97,35 +83,6 @@ impl Builder<'_> {
         }
         self.owned_locals.truncate(scope_start);
         result
-    }
-
-    /// Whether a call through this place may mutate the environment of an
-    /// owned closure: the place is rooted in a `var`, a `share` reference, or
-    /// is a temporary.
-    fn callee_is_mutable(&self, callee: &Expr) -> bool {
-        match &callee.kind {
-            ExprKind::Path(_) => match self.path(callee) {
-                PathTarget::Local(id) => {
-                    let local = &self.function.locals[id.0 as usize];
-                    match &local.ty {
-                        Type::Reference { access, .. } => {
-                            *access == Access::Share
-                                || self
-                                    .facts
-                                    .locals
-                                    .get(id.0 as usize)
-                                    .is_some_and(|fact| fact.share_function)
-                        }
-                        _ => local.mutable,
-                    }
-                }
-                PathTarget::Function(_) => true,
-            },
-            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
-                self.callee_is_mutable(base)
-            }
-            _ => true,
-        }
     }
 
     /// The function a path expression names, if it names one directly.
@@ -203,25 +160,6 @@ impl Builder<'_> {
             } else {
                 value
             };
-            // An owned closure lent to a `share fn` parameter may mutate its
-            // environment: that needs a mutable place.
-            if parameter.access == Access::Borrow
-                && self.closure_wrapper(&self.operand_type(value)?).is_some()
-                && self
-                    .facts
-                    .share_function_arguments
-                    .contains(&(argument as *const Expr as usize))
-                && !self.callee_is_mutable(argument)
-            {
-                let place = self.borrow(value, Access::Borrow)?;
-                let word = self.field_addr_index(place, 0, Access::Borrow, argument.span)?;
-                let word = self.scalar(word)?;
-                self.emit(
-                    argument.span,
-                    InstructionKind::ClosureReadOnly { value: read(word) },
-                    None,
-                );
-            }
             // Keep the original pointee and loan.
             let mut reference = self.borrow(value, parameter.access)?;
             reference.mode = access_mode(parameter.access);

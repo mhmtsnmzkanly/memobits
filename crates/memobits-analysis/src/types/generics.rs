@@ -197,8 +197,8 @@ impl Checker {
             }
             return true;
         }
-        if pattern.path.as_slice() == ["\0fn"] {
-            let Ty::Function(parameters, result) = actual else {
+        if pattern.path.first().is_some_and(|part| part == "\0fn") {
+            let Ty::Function(parameters, result, _) = actual else {
                 return false;
             };
             let Some((TypeArgument::Type(written_result), written)) =
@@ -351,7 +351,7 @@ impl Checker {
         if !has_unbound(ty, set, bindings) {
             return Some(self.resolve_declared(template, ty, bindings, evidence));
         }
-        if ty.path.as_slice() != ["\0fn"] {
+        if ty.path.first().is_none_or(|part| part != "\0fn") {
             return None;
         }
         let (TypeArgument::Type(result), written) = ty.arguments.split_last()? else {
@@ -377,7 +377,11 @@ impl Checker {
         let result = self
             .resolve_partial(template, result, set, bindings, evidence)
             .unwrap_or(Ty::Error);
-        Some(Ty::Function(parameters, Box::new(result)))
+        Some(Ty::Function(
+            parameters,
+            Box::new(result),
+            ty.path.len() > 1,
+        ))
     }
 
     /// Selects the evidence of every bound whose parameter is bound and not yet
@@ -478,7 +482,7 @@ impl Checker {
         result: Ty,
         span: Span,
     ) -> Option<(FunctionId, Ty)> {
-        let function_ty = Ty::Function(parameter_types, Box::new(result));
+        let function_ty = Ty::Function(parameter_types, Box::new(result), false);
         let Some(IrType::Function(signature)) = super::ir_scalar_function(&function_ty) else {
             self.error(
                 7,
@@ -761,7 +765,7 @@ impl Checker {
                 let (actual, unknown) = match partial {
                     Some(ty) if !unbound || literal => {
                         if literal {
-                            if let Ty::Function(params, _) = &ty {
+                            if let Ty::Function(params, _, _) = &ty {
                                 let describe = if generic_value {
                                     "generic function value"
                                 } else {
@@ -922,7 +926,7 @@ impl Checker {
         expected: Option<&Ty>,
     ) -> Ty {
         let display = format!("{}::{}", template.module, template.name);
-        let Some(Ty::Function(expected_parameters, expected_result)) = expected else {
+        let Some(Ty::Function(expected_parameters, expected_result, _)) = expected else {
             self.error(
                 2,
                 expr.span,
@@ -1004,10 +1008,10 @@ impl Checker {
         else {
             return Ty::Error;
         };
-        let function_ty = Ty::Function(parameter_types.clone(), Box::new(result.clone()));
-        let expected_ty = Ty::Function(expected_parameters.clone(), expected_result.clone());
+        let function_ty = Ty::Function(parameter_types.clone(), Box::new(result.clone()), false);
+        let expected_ty = Ty::Function(expected_parameters.clone(), expected_result.clone(), false);
         let open_result = **expected_result == Ty::Error
-            && matches!(&function_ty, Ty::Function(found, _) if found == expected_parameters);
+            && matches!(&function_ty, Ty::Function(found, _, _) if found == expected_parameters);
         if function_ty != expected_ty && !open_result {
             self.error(
                 2,
