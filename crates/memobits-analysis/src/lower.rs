@@ -725,7 +725,7 @@ struct Builder<'a> {
 fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
     fn contains_owned_string(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String | Type::List(_) => true,
+            Type::String | Type::List(_) | Type::Box(_) => true,
             Type::Struct(id) => {
                 let Some(info) = types.get(id.0 as usize) else {
                     return false;
@@ -759,7 +759,7 @@ impl memobits_ir::OwnerTypeModel for FactOwnerModel<'_> {
     fn view<'a>(&self, ty: &'a Type) -> memobits_ir::OwnerTyView<'a, Type> {
         use memobits_ir::OwnerTyView as View;
         match ty {
-            Type::String | Type::List(_) => View::String,
+            Type::String | Type::List(_) | Type::Box(_) => View::String,
             Type::Primitive(_) | Type::Function(_) => View::Primitive,
             Type::Enum(_) if is_string_owner_aggregate_type(self.0, ty) => View::Heap,
             Type::Enum(_) => View::Primitive,
@@ -810,7 +810,7 @@ fn is_flat_string_owner_struct_type(types: &[TypeFact], ty: &Type) -> bool {
 fn is_string_owner_aggregate_type(types: &[TypeFact], ty: &Type) -> bool {
     fn owns(types: &[TypeFact], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String | Type::List(_) => true,
+            Type::String | Type::List(_) | Type::Box(_) => true,
             Type::Array { element, len } => *len != 0 && owns(types, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 let Some(info) = types.get(id.0 as usize) else {
@@ -904,7 +904,7 @@ impl<'a> Builder<'a> {
                 let parameter = function.signature.parameters.get(position)?;
                 let ty = &function.locals[local.0 as usize].ty;
                 (parameter.access == Access::Owned
-                    && (matches!(ty, Type::String | Type::List(_))
+                    && (matches!(ty, Type::String | Type::List(_) | Type::Box(_))
                         || is_string_owner_aggregate_type(types, ty)))
                 .then_some(local)
             })
@@ -1206,7 +1206,8 @@ impl<'a> Builder<'a> {
     /// has a direct binding and exact cleanup wherever it is consumed
     /// (tail, `return`, element, payload, field, argument).
     fn stage_fresh_call(&mut self, value: Operand, ty: &Type, span: Span) -> Operand {
-        let owner = matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty);
+        let owner = matches!(ty, Type::String | Type::List(_) | Type::Box(_))
+            || self.is_string_owner_struct(ty);
         let Source::Value(id) = value.source else {
             return value;
         };
@@ -1255,8 +1256,8 @@ impl<'a> Builder<'a> {
         elements: &[Expr],
         list_ty: Type,
     ) -> Option<Operand> {
-        let Type::List(element_ty) = &list_ty else {
-            unreachable!("checked List literal type")
+        let (Type::List(element_ty) | Type::Box(element_ty)) = &list_ty else {
+            unreachable!("checked List or Box literal type")
         };
         let element_ty = element_ty.as_ref().clone();
         let empty = self.emit(expr.span, InstructionKind::EmptyList, Some(list_ty.clone()))?;
@@ -1411,7 +1412,9 @@ impl<'a> Builder<'a> {
             None,
         );
         let ty = &self.function.locals[local.0 as usize].ty;
-        if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty) {
+        if matches!(ty, Type::String | Type::List(_) | Type::Box(_))
+            || self.is_string_owner_struct(ty)
+        {
             self.owned_locals.push(local);
         }
     }
@@ -1522,7 +1525,8 @@ impl<'a> Builder<'a> {
                 }
             }
             if let Some(ty) = self.ty(expr).filter(|ty| {
-                matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty)
+                matches!(ty, Type::String | Type::List(_) | Type::Box(_))
+                    || self.is_string_owner_struct(ty)
             }) {
                 if let Some(result) = self.lower_expr(expr) {
                     let owner = self.hidden_local("discarded call result", ty, expr.span);
@@ -1582,6 +1586,16 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_read_receiver(&mut self, base: &Expr) -> Option<Operand> {
+        let depth = self.box_depth(base);
+        if depth > 0 {
+            // A built-in method on a boxed String or List reads through the
+            // box: a borrow of the value the box holds.
+            let (root, mut projections) = self.lower_place(base)?;
+            for _ in 0..depth {
+                projections.push(Projection::Deref);
+            }
+            return self.address_chain(root, &projections, Access::Borrow, base.span);
+        }
         if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
             let (root, projections) = self.lower_place(base)?;
             self.address_chain(root, &projections, Access::Borrow, base.span)
@@ -1594,6 +1608,14 @@ impl<'a> Builder<'a> {
     /// The List a mutating method acts on: a named local, or an element of
     /// an outer List (`outer[i].push(x)`) whose path is evaluated now.
     fn list_place(&mut self, base: &Expr) -> Option<ListPlace> {
+        let depth = self.box_depth(base);
+        if depth > 0 {
+            let (root, mut projections) = self.lower_place(base)?;
+            for _ in 0..depth {
+                projections.push(Projection::Deref);
+            }
+            return Some(ListPlace::Element(root, projections));
+        }
         if let ExprKind::Index { .. } | ExprKind::Field { .. } = base.kind {
             let (root, positions) = self.lower_place(base)?;
             return Some(ListPlace::Element(root, positions));
@@ -1636,8 +1658,10 @@ impl<'a> Builder<'a> {
         let scope_start = self.owned_locals.len();
         let result = (|| {
             let search = matches!(method, "contains" | "index_of");
-            let string_field = matches!(base.kind, ExprKind::Field { .. } | ExprKind::Index { .. })
-                && matches!(self.ty(base), Some(Type::String | Type::List(_)));
+            let string_field =
+                (matches!(base.kind, ExprKind::Field { .. } | ExprKind::Index { .. })
+                    && matches!(self.ty(base), Some(Type::String | Type::List(_))))
+                    || self.box_depth(base) > 0;
             let receiver = if search || string_field {
                 // Keep the receiver loan live across value evaluation.
                 self.lower_read_receiver(base)?
@@ -1711,7 +1735,7 @@ impl<'a> Builder<'a> {
         for index in (from..self.owned_locals.len()).rev() {
             let local = self.owned_locals[index];
             let end = match self.function.locals[local.0 as usize].ty {
-                Type::List(_) => InstructionKind::EndListLocal { local },
+                Type::List(_) | Type::Box(_) => InstructionKind::EndListLocal { local },
                 Type::Struct(_) | Type::Enum(_) | Type::Array { .. } => {
                     InstructionKind::EndStructLocal { local }
                 }
@@ -2115,9 +2139,9 @@ impl<'a> Builder<'a> {
     /// Element type of an array owner or of a reference to an array.
     fn array_element(&self, array: Operand) -> Box<Type> {
         match self.operand_type(array) {
-            Some(Type::Array { element, .. } | Type::List(element)) => element,
+            Some(Type::Array { element, .. } | Type::List(element) | Type::Box(element)) => element,
             Some(Type::Reference { inner, .. }) => match *inner {
-                Type::Array { element, .. } | Type::List(element) => element,
+                Type::Array { element, .. } | Type::List(element) | Type::Box(element) => element,
                 _ => unreachable!("checked array index base"),
             },
             _ => unreachable!("checked array index base"),
@@ -2317,7 +2341,7 @@ impl<'a> Builder<'a> {
         }
         if operator == "=" {
             if let Some(place_ty) = self.ty(target) {
-                if matches!(place_ty, Type::String | Type::List(_))
+                if matches!(place_ty, Type::String | Type::List(_) | Type::Box(_))
                     || self.is_string_owner_struct(&place_ty)
                 {
                     // Owning overwrite: stage the value first (it may read the
@@ -2396,7 +2420,7 @@ impl<'a> Builder<'a> {
         let scope_start = self.owned_locals.len();
         let span = value.span;
         if matches!(value.kind, ExprKind::If { .. } | ExprKind::Match { .. })
-            && (matches!(place_ty, Type::String | Type::List(_))
+            && (matches!(place_ty, Type::String | Type::List(_) | Type::Box(_))
                 || self.is_string_owner_struct(place_ty))
         {
             // Branch values move into the hidden local from inside each
@@ -2962,7 +2986,7 @@ impl<'a> Builder<'a> {
                     let Some(mut value) = (if *field_ty == Type::String {
                         self.owned_to(value, field_ty)
                     } else if self.is_string_transport_owner(field_ty)
-                        || matches!(field_ty, Type::List(_))
+                        || matches!(field_ty, Type::List(_) | Type::Box(_))
                         || (matches!(field_ty, Type::Enum(_) | Type::Array { .. })
                             && self.is_string_owner_struct(field_ty))
                     {
@@ -3299,14 +3323,17 @@ impl<'a> Builder<'a> {
                         // The place path (indices) is evaluated first, then the
                         // element, then the checked address of the target list.
                         let place = self.list_place(base)?;
-                        let element_ty = match self.ty(base) {
-                            Some(Type::List(element)) => *element,
-                            Some(Type::Reference { inner, .. }) => match *inner {
-                                Type::List(element) => *element,
-                                _ => unreachable!("checked List push receiver"),
-                            },
-                            _ => unreachable!("checked List push receiver"),
+                        let mut receiver_ty = self.ty(base);
+                        // Look through a reference and any boxes to the List.
+                        while let Some(Type::Reference { inner, .. } | Type::Box(inner)) =
+                            receiver_ty
+                        {
+                            receiver_ty = Some(*inner);
+                        }
+                        let Some(Type::List(element_ty)) = receiver_ty else {
+                            unreachable!("checked List push receiver")
                         };
+                        let element_ty = *element_ty;
                         let value = if element_ty.is_scalar() {
                             let value = self.lower_expr(&arguments[0])?;
                             read(self.scalar(value)?)
@@ -3408,7 +3435,7 @@ impl<'a> Builder<'a> {
                         );
                         self.initialize_local(staged, consume(value), init.value.span);
                         consume(op(Source::Local(staged), init.value.span))
-                    } else if matches!(ty, Type::List(_))
+                    } else if matches!(ty, Type::List(_) | Type::Box(_))
                         || (matches!(ty, Type::Enum(_)) && self.is_string_owner_struct(ty))
                         || self.is_string_tuple(ty)
                         || self.is_string_transport_owner(ty)
@@ -3548,7 +3575,7 @@ impl<'a> Builder<'a> {
             let mut source = self.lower_expr(scrutinee)?;
             if let Some(option_ty) = self.match_unboxes.get(&self.id(expr)).cloned() {
                 // An owned box is consumed: its value is the scrutinee.
-                let Some(Type::List(inner)) = self.operand_type(source) else {
+                let Some(Type::Box(inner)) = self.operand_type(source) else {
                     unreachable!("checked owned box scrutinee")
                 };
                 source = self.take_box_value(source, option_ty, *inner, span)?;
@@ -3619,7 +3646,9 @@ impl<'a> Builder<'a> {
             arm_fact.pattern.collect_bindings(&mut bindings);
             for local in bindings {
                 let ty = &self.function.locals[local.0 as usize].ty;
-                if matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(ty) {
+                if matches!(ty, Type::String | Type::List(_) | Type::Box(_))
+                    || self.is_string_owner_struct(ty)
+                {
                     self.owned_locals.push(local);
                 }
             }
@@ -3734,7 +3763,7 @@ impl<'a> Builder<'a> {
             base.mode = UseMode::Borrow;
             base
         };
-        if let Type::List(inner) = &occurrence.ty {
+        if let Type::Box(inner) = &occurrence.ty {
             // A refutable pattern on a box sees through it: test the value the
             // box holds, reached through its (always present) element.
             let zero = self.constant(
@@ -4144,11 +4173,9 @@ impl<'a> Builder<'a> {
                     None,
                 );
             }
-            MatchPattern::Variant { .. } | MatchPattern::Tuple(_)
-                if matches!(ty, Type::List(_)) =>
-            {
+            MatchPattern::Variant { .. } | MatchPattern::Tuple(_) if matches!(ty, Type::Box(_)) => {
                 // A pattern on a box binds inside the value it holds.
-                let Type::List(inner) = ty else {
+                let Type::Box(inner) = ty else {
                     unreachable!("checked box pattern")
                 };
                 let zero = self.constant(
@@ -4359,7 +4386,7 @@ impl<'a> Builder<'a> {
     fn release_owned(&mut self, local: LocalId, ty: &Type, span: Span) {
         let end = match ty {
             Type::String => InstructionKind::EndStringLocal { local },
-            Type::List(_) => InstructionKind::EndListLocal { local },
+            Type::List(_) | Type::Box(_) => InstructionKind::EndListLocal { local },
             _ if self.owns_storage(ty) => InstructionKind::EndStructLocal { local },
             _ => return,
         };
@@ -4451,7 +4478,9 @@ impl<'a> Builder<'a> {
         let Some(ty) = self.ty(expr) else {
             return (None, None);
         };
-        if !(matches!(ty, Type::String | Type::List(_)) || self.is_string_owner_struct(&ty)) {
+        if !(matches!(ty, Type::String | Type::List(_) | Type::Box(_))
+            || self.is_string_owner_struct(&ty))
+        {
             return (None, None);
         }
         let local = self.hidden_local("branch value", ty.clone(), expr.span);

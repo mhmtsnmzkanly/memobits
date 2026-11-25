@@ -869,3 +869,275 @@ fn live_loans_block_moving_or_writing_a_box() {
         "cannot write this value while it is borrowed",
     );
 }
+
+// ---------------------------------------------------------------------------
+// H4b: release of recursive owners does not recurse per node
+
+const GROW_LIST: &str = r#"use alloc::Box;
+type Cell [Nil, Cons(i32, Box<Cell>)]
+type Holder { head: Cell }
+fn grow(h: share Holder, n: i32) {
+    var i: i32 = 0;
+    loop {
+        if i == n { break; }
+        h.head = Cell::Cons(i, Box(replace(h.head, Cell::Nil)));
+        i += 1;
+    }
+}
+"#;
+
+#[test]
+fn dropping_a_million_node_list_neither_traps_nor_recurses() {
+    single(
+        &format!(
+            r#"{GROW_LIST}
+fn round() -> i32 {{
+    var h := Holder {{ head: Cell::Nil }};
+    grow(h.share(), 1000000);
+    match h.head {{
+        Nil => 0,
+        Cons(v, _) => v,
+    }}
+}}
+fn main() -> i32 {{
+    // Two rounds: the second reuses the million blocks the first released.
+    round() - 999999 + round() - 999999 + 42
+}}
+"#
+        ),
+        0,
+        42,
+        "million list",
+    );
+}
+
+const SHAPES: &str = r#"use alloc::Box;
+use alloc::List;
+type Tree [Leaf, Node(Box<Tree>, i32, Box<Tree>)]
+type Holder { t: Tree }
+type Kid { name: string, kids: List<Kid> }
+type KidHolder { k: Kid }
+type A [AEnd, AMore(string, Box<B>)]
+type B [BEnd, BMore(i32, Box<A>, string)]
+type AHolder { a: A }
+fn left(n: i32) -> i32 {
+    var h := Holder { t: Tree::Leaf };
+    var i: i32 = 0;
+    loop {
+        if i == n { break; }
+        h.t = Tree::Node(Box(replace(h.t, Tree::Leaf)), i, Box(Tree::Leaf));
+        i += 1;
+    }
+    i
+}
+fn right(n: i32) -> i32 {
+    var h := Holder { t: Tree::Leaf };
+    var i: i32 = 0;
+    loop {
+        if i == n { break; }
+        h.t = Tree::Node(Box(Tree::Leaf), i, Box(replace(h.t, Tree::Leaf)));
+        i += 1;
+    }
+    i
+}
+fn kids(n: i32) -> i32 {
+    var k := KidHolder { k: Kid { name: "root", kids: [] } };
+    var i: i32 = 0;
+    loop {
+        if i == n { break; }
+        let old := replace(k.k, Kid { name: "kid", kids: [] });
+        k.k.kids.push(old);
+        i += 1;
+    }
+    i
+}
+fn mutual(n: i32) -> i32 {
+    var h := AHolder { a: A::AEnd };
+    var i: i32 = 0;
+    loop {
+        if i == n { break; }
+        let b := B::BMore(i, Box(replace(h.a, A::AEnd)), "q");
+        h.a = A::AMore("z", Box(b));
+        i += 1;
+    }
+    i
+}
+"#;
+
+// Each shape runs in its own program: the allocator reuses released blocks
+// first-fit, so mixing block sizes in one run would only measure its scan.
+#[test]
+fn dropping_degenerate_trees_and_other_recursive_shapes_is_iterative() {
+    for (call, expected, label) in [
+        ("left(100000)", 100_000, "left spine"),
+        ("right(100000)", 100_000, "right spine"),
+        ("kids(200000)", 200_000, "list of children"),
+        ("mutual(100000)", 100_000, "mutual recursion"),
+    ] {
+        single(
+            &format!("{SHAPES}fn main() -> i32 {{\n    {call}\n}}\n"),
+            0,
+            expected,
+            label,
+        );
+    }
+}
+
+#[test]
+fn a_balanced_tree_drops_after_a_deep_walk() {
+    single(
+        &format!(
+            r#"{TREE}
+fn full(depth: i32, base: i32) -> Tree {{
+    if depth == 0 {{ Tree::Leaf }} else {{
+        Tree::Node(Box(full(depth - 1, base * 2)), base, Box(full(depth - 1, base * 2 + 1)))
+    }}
+}}
+fn count(t: borrow Tree) -> i32 {{
+    match t {{
+        Leaf => 0,
+        Node(l, _, r) => 1 + count(l.borrow()) + count(r.borrow()),
+    }}
+}}
+fn main() -> i32 {{
+    let t := full(16, 1);
+    count(t.borrow()) - 65535 + 5
+}}
+"#
+        ),
+        0,
+        5,
+        "balanced",
+    );
+}
+
+fn long_list_program(keep_declaration: &str, keep_statement: &str) -> String {
+    format!(
+        r#"{GROW_LIST}
+use alloc::List;
+fn main() -> i32 {{
+    var total: i32 = 0;
+    var round: i32 = 0;
+    {keep_declaration}
+    loop {{
+        if round == 300 {{ break; }}
+        var h := Holder {{ head: Cell::Nil }};
+        grow(h.share(), 1500);
+        total += match h.head {{
+            Nil => 0,
+            Cons(v, _) => v,
+        }};
+        {keep_statement}
+        round += 1;
+    }}
+    total
+}}
+"#
+    )
+}
+
+#[test]
+fn long_lists_build_and_drop_repeatedly_under_the_cap() {
+    let source = long_list_program("", "");
+    let (_f, output, limits) = run_capped(&source);
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "capped run failed: {}",
+        text(&output.stderr)
+    );
+    assert_eq!(text(&output.stdout), "Result: i32(449700)\n");
+    let (initial, maximum) = limits.unwrap();
+    assert_eq!(maximum, initial + 1);
+}
+
+#[test]
+fn mutation_check_keeping_long_lists_exhausts_the_capped_memory() {
+    // The released lists are kept instead (a drop removed): the cap must trap.
+    let source = long_list_program("var kept: List<Holder> = [];", "kept.push(h);");
+    let (_f, output, _) = run_capped(&source);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        text(&output.stderr).contains("guest heap allocation failed"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H4b: built-in String and List methods see through a box
+
+#[test]
+fn builtin_string_and_list_methods_auto_deref_through_boxes() {
+    single(
+        r#"use alloc::Box;
+use alloc::List;
+type Bag { items: List<i32>, name: string }
+fn sum(b: borrow Box<List<i32>>) -> i32 {
+    var total: i32 = 0;
+    var i: u32 = 0;
+    loop {
+        if i == b.len() { break; }
+        total += b[i];
+        i += 1;
+    }
+    total
+}
+fn grow(b: share Box<List<i32>>) { b.push(100); }
+fn main() -> i32 {
+    var b: Box<List<i32>> = Box([1, 2, 3]);
+    b.push(4);
+    let n := b.len();
+    let s := Box("héllo");
+    let sl := s.len();
+    let has := b.contains(3);
+    let at := match b.index_of(3) { Some(v) => v, None => 99 };
+    let g := match b.get(1) { Some(v) => v, None => 0 };
+    grow(b.share());
+    let p := match b.pop() { Some(v) => v, None => 0 };
+    var bag := Box(Bag { items: [], name: "x" });
+    bag.items.push(5);
+    bag.items.push(6);
+    let k := bag.items.len() + bag.name.len();
+    let boundary := s.is_char_boundary(2);
+    let first := match s.byte_at(0) { Some(v) => v.to_u32(), None => 0 };
+    var cleared: Box<List<i32>> = Box([7, 8]);
+    cleared.clear();
+    let kept := cleared.len();
+    if has && !boundary && first == 104 {
+        n as i32 * 1000 + sl as i32 * 100 + g * 10 + p + k as i32 + sum(b.borrow())
+            + at as i32 * 10000 + kept as i32
+    } else { 0 }
+}
+"#,
+        0,
+        // n 4, sl 6 ("héllo"), g 2, p 100, k 3, sum 10, at 2, kept 0
+        24733,
+        "builtin methods through a box",
+    );
+}
+
+#[test]
+fn builtin_methods_through_a_box_keep_the_write_rules() {
+    rejects(
+        r#"use alloc::Box;
+use alloc::List;
+fn main() {
+    let b: Box<List<i32>> = Box([1, 2, 3]);
+    b.push(4);
+}
+"#,
+        "TE017",
+        "push() requires a mutable List local",
+    );
+    rejects(
+        r#"use alloc::Box;
+use alloc::List;
+fn make() -> Box<List<i32>> { Box([1]) }
+fn main() {
+    let n := make().len();
+}
+"#,
+        "TE017",
+        "a method through a Box needs the box in a named local",
+    );
+}

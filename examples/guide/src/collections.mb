@@ -589,3 +589,29 @@ test fn boxes_see_through_for_fields_and_methods() {
     let inner := unbox(pixel);
     assert(inner.y == 9);
 }
+test fn boxes_forward_builtin_string_and_list_methods() {
+    // `len`, `push`, `pop`, `get`, `contains` and the like act on the value in
+    // the box; mutation needs a `var` box or a `share` parameter.
+    var names: Box<List<i32>> = Box([1, 2]);
+    names.push(3);
+    assert(names.len() == 3);
+    assert(names.contains(2));
+    let last := match names.pop() { Some(v) => v, None => 0 };
+    assert(last == 3);
+    let word := Box("héllo");
+    assert(word.len() == 6);
+}
+type Links { head: Chain }
+test fn releasing_a_long_chain_does_not_recurse() {
+    // Releasing a recursive owner is iterative, so a chain of any length drops
+    // without growing the call stack. (Building uses `replace` in a loop.)
+    var links := Links { head: Chain::End };
+    var i: i32 = 0;
+    loop {
+        if i == 50000 { break; }
+        links.head = Chain::Link(i, Box(replace(links.head, Chain::End)));
+        i += 1;
+    }
+    // (Walking it would recurse in user code; only the release is iterative.)
+    assert(match links.head { End => false, Link(top, _) => top == 49999 });
+}

@@ -822,7 +822,12 @@ pub(super) fn direct_share_owner(
         .is_some_and(|local| {
             matches!(
                 local.ty,
-                Type::String | Type::Struct(_) | Type::Array { .. } | Type::List(_) | Type::Enum(_)
+                Type::String
+                    | Type::Struct(_)
+                    | Type::Array { .. }
+                    | Type::List(_)
+                    | Type::Box(_)
+                    | Type::Enum(_)
             ) && local.mutable
         })
         .then_some(*local)
@@ -896,7 +901,7 @@ pub(super) fn call_binding(
         } => {
             let permitted = match result {
                 Type::String => string_destination(function, *target, *initialize),
-                Type::List(_) => {
+                Type::List(_) | Type::Box(_) => {
                     (!initialize || !function.parameter_locals.contains(target))
                         && function.locals.get(target.0 as usize).is_some_and(|local| {
                             &local.ty == result && (*initialize || local.mutable)
@@ -1147,7 +1152,7 @@ impl OwnerTypeModel for IrOwnerModel<'_> {
     type Ty = Type;
     fn view<'a>(&self, ty: &'a Type) -> OwnerTyView<'a, Type> {
         match ty {
-            Type::String | Type::List(_) => OwnerTyView::String,
+            Type::String | Type::List(_) | Type::Box(_) => OwnerTyView::String,
             Type::Primitive(_) => OwnerTyView::Primitive,
             Type::Enum(_) if owns_string_aggregate_in(self.0, ty) => OwnerTyView::Heap,
             Type::Enum(_) => OwnerTyView::Primitive,
@@ -1213,7 +1218,7 @@ fn tuple_owns_string_in(types: &[super::TypeDef], id: u32) -> bool {
             return false;
         }
         let result = fields.iter().any(|field| match &field.ty {
-            Type::String | Type::List(_) => true,
+            Type::String | Type::List(_) | Type::Box(_) => true,
             Type::Struct(child) => owns(types, child.0, visited),
             // An enum or array element that owns heap storage.
             ty @ (Type::Enum(_) | Type::Array { .. }) => owns_string_aggregate_in(types, ty),
@@ -1232,7 +1237,7 @@ pub(super) fn owns_string_aggregate(program: &super::Program, ty: &Type) -> bool
 fn owns_string_aggregate_in(types: &[super::TypeDef], ty: &Type) -> bool {
     fn owns(types: &[super::TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String | Type::List(_) => true,
+            Type::String | Type::List(_) | Type::Box(_) => true,
             Type::Array { element, len } => *len != 0 && owns(types, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 let Some(definition) = types.get(id.0 as usize) else {
@@ -1261,7 +1266,7 @@ fn owns_string_aggregate_in(types: &[super::TypeDef], ty: &Type) -> bool {
 }
 
 pub(super) fn owns_string_storage(program: &super::Program, ty: &Type) -> bool {
-    matches!(ty, Type::String | Type::List(_)) || owns_string_aggregate(program, ty)
+    matches!(ty, Type::String | Type::List(_) | Type::Box(_)) || owns_string_aggregate(program, ty)
 }
 
 /// An aggregate that holds a List somewhere inside (a List itself is a local
@@ -1269,7 +1274,7 @@ pub(super) fn owns_string_storage(program: &super::Program, ty: &Type) -> bool {
 pub(super) fn owns_list_aggregate(program: &super::Program, ty: &Type) -> bool {
     fn has(program: &super::Program, ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::List(_) => true,
+            Type::List(_) | Type::Box(_) => true,
             Type::Array { element, len } => *len != 0 && has(program, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 let Some(definition) = program.types.get(id.0 as usize) else {
@@ -1535,7 +1540,7 @@ pub(super) fn list_share_destination(
         return None;
     };
     let binding = function.locals.get(local.0 as usize)?;
-    (matches!(referent, Type::List(_))
+    (matches!(referent, Type::List(_) | Type::Box(_))
         && reference.mode == UseMode::Share
         && (binding.mutable || function.parameter_locals.contains(&local))
         && matches!(&binding.ty,
@@ -1652,11 +1657,9 @@ pub(super) fn local_move_source(
 }
 
 fn list_destination(function: &Function, target: LocalId, initialize: bool) -> bool {
-    function
-        .locals
-        .get(target.0 as usize)
-        .is_some_and(|local| matches!(local.ty, Type::List(_)) && (initialize || local.mutable))
-        && (!initialize || !function.parameter_locals.contains(&target))
+    function.locals.get(target.0 as usize).is_some_and(|local| {
+        matches!(local.ty, Type::List(_) | Type::Box(_)) && (initialize || local.mutable)
+    }) && (!initialize || !function.parameter_locals.contains(&target))
 }
 
 fn string_destination(function: &Function, target: LocalId, initialize: bool) -> bool {
@@ -1679,7 +1682,7 @@ pub(super) fn validate(
         function
             .locals
             .get(id.0 as usize)
-            .is_some_and(|local| matches!(local.ty, Type::List(_)))
+            .is_some_and(|local| matches!(local.ty, Type::List(_) | Type::Box(_)))
     };
     let struct_local = |id: LocalId| {
         function
@@ -1693,7 +1696,7 @@ pub(super) fn validate(
             .iter()
             .enumerate()
             .filter_map(|(index, local)| {
-                matches!(local.ty, Type::List(_)).then_some(LocalId(index as u32))
+                matches!(local.ty, Type::List(_) | Type::Box(_)).then_some(LocalId(index as u32))
             }),
     );
     if locals.is_empty() || function.entry.0 as usize >= function.blocks.len() {

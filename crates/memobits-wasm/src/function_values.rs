@@ -33,6 +33,7 @@ fn erase_type(ty: &Type) -> Type {
     match ty {
         Type::Function(_) => Type::Primitive(Primitive::U64),
         Type::List(element) => Type::List(Box::new(erase_type(element))),
+        Type::Box(element) => Type::Box(Box::new(erase_type(element))),
         Type::Array { element, len } => Type::Array {
             element: Box::new(erase_type(element)),
             len: *len,
@@ -62,7 +63,9 @@ pub(super) fn erase_signature(signature: &Signature) -> Signature {
 pub(super) fn contains_function(ty: &Type) -> bool {
     match ty {
         Type::Function(_) => true,
-        Type::List(inner) | Type::Reference { inner, .. } => contains_function(inner),
+        Type::List(inner) | Type::Box(inner) | Type::Reference { inner, .. } => {
+            contains_function(inner)
+        }
         Type::Array { element, .. } => contains_function(element),
         _ => false,
     }

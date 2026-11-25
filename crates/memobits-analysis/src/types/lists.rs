@@ -18,8 +18,8 @@ impl Checker {
 
     pub(super) fn list_get(&mut self, expr: &Expr, base: &Expr, arguments: &[Expr]) -> Ty {
         self.allow_array_value(base);
-        let receiver = self.expr(base, None);
-        let Ty::List(element) = read_type(receiver) else {
+        let receiver = self.builtin_receiver(base);
+        let Ty::List(element) = receiver else {
             self.error(
                 17,
                 base.span,
@@ -70,6 +70,7 @@ impl Checker {
         let mutable_receiver = matches!(
             receiver,
             Ty::List(_)
+                | Ty::Box(_)
                 | Ty::Reference {
                     access: IrAccess::Share,
                     ..
@@ -103,7 +104,21 @@ impl Checker {
         if writable {
             self.note_write_root(base);
         }
-        let Ty::List(element) = read_type(receiver) else {
+        let (receiver, boxed) = super::peel_boxes(read_type(receiver));
+        if boxed
+            && !matches!(
+                base.kind,
+                ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+            )
+        {
+            self.error(
+                17,
+                base.span,
+                "a method through a Box needs the box in a named local, field or element; bind the box to a local first",
+            );
+            return Ty::Error;
+        }
+        let Ty::List(element) = receiver else {
             let root = super::root_note(base);
             self.error(17, base.span, format!("{method}() requires a mutable List local, mutable share handle, or share parameter{root}"));
             return Ty::Error;

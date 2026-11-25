@@ -184,7 +184,7 @@ pub(super) fn validate_string_struct_borrows(
                 *len != 0 && type_owns_string_storage(program, element, visited)
             }
             // A List is heap storage whatever it holds, like a String.
-            Type::List(_) => true,
+            Type::List(_) | Type::Box(_) => true,
             _ => false,
         }
     }
@@ -547,13 +547,14 @@ pub(super) fn primitive_signature<'a>(
                 Type::Primitive(_)
                     | Type::String
                     | Type::List(_)
+                    | Type::Box(_)
                     | Type::Array { .. }
                     | Type::Struct(_)
                     | Type::Enum(_)
             )
         }
         memobits_ir::Access::Borrow | memobits_ir::Access::Share => {
-            matches!(p.ty, Type::List(_))
+            matches!(p.ty, Type::List(_) | Type::Box(_))
                 || matches!(p.ty, Type::Primitive(kind) if kind != Primitive::Unit)
                 || matches!(
                     p.ty,
@@ -565,6 +566,7 @@ pub(super) fn primitive_signature<'a>(
         Type::Primitive(_)
             | Type::String
             | Type::List(_)
+            | Type::Box(_)
             | Type::Array { .. }
             | Type::Struct(_)
             | Type::Enum(_)
@@ -576,11 +578,11 @@ pub(super) fn supported_type(ty: &Type) -> bool {
         Type::Primitive(_) => true,
         // A struct or enum is an inline frame-cell value, passed internally by address.
         Type::String | Type::Struct(_) | Type::Enum(_) => true,
-        Type::List(element) => supported_type(element),
+        Type::List(element) | Type::Box(element) => supported_type(element),
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
-        } if matches!(inner.as_ref(), Type::List(_)) => supported_type(inner),
+        } if matches!(inner.as_ref(), Type::List(_) | Type::Box(_)) => supported_type(inner),
         Type::Reference {
             access: memobits_ir::Access::Borrow | memobits_ir::Access::Share,
             inner,
@@ -592,7 +594,7 @@ pub(super) fn supported_type(ty: &Type) -> bool {
         },
         Type::Array { element, .. } => match element.as_ref() {
             Type::Primitive(kind) => *kind != Primitive::Unit,
-            nested @ (Type::Array { .. } | Type::List(_)) => supported_type(nested),
+            nested @ (Type::Array { .. } | Type::List(_) | Type::Box(_)) => supported_type(nested),
             Type::String | Type::Struct(_) | Type::Enum(_) => true,
             _ => false,
         },

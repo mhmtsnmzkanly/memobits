@@ -790,6 +790,31 @@ impl Ty {
     }
 }
 
+impl Checker {
+    /// Type of the receiver of a built-in String or List method: the value
+    /// itself, looking through one reference and any boxes (a box lends its
+    /// value). A boxed receiver must be a named place, so the box is addressed
+    /// in place.
+    pub(super) fn builtin_receiver(&mut self, base: &Expr) -> Ty {
+        let ty = self.expr(base, None);
+        let (peeled, boxed) = peel_boxes(read_type(ty));
+        if boxed
+            && !matches!(
+                base.kind,
+                ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. }
+            )
+        {
+            self.error(
+                17,
+                base.span,
+                "a method through a Box needs the box in a named local, field or element; bind the box to a local first",
+            );
+            return Ty::Error;
+        }
+        peeled
+    }
+}
+
 /// The type under every `Box` level (looking through one reference) and
 /// whether any box was peeled.
 fn peel_boxes(ty: Ty) -> (Ty, bool) {
@@ -1016,7 +1041,8 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
                 inner: Box::new(inner),
             }
         }
-        Ty::List(element) | Ty::Box(element) => IrType::List(Box::new(ir_type(element)?)),
+        Ty::List(element) => IrType::List(Box::new(ir_type(element)?)),
+        Ty::Box(element) => IrType::Box(Box::new(ir_type(element)?)),
         Ty::Array(element, len) => IrType::Array {
             element: Box::new(ir_type(element)?),
             len: *len,
@@ -3824,7 +3850,7 @@ impl Checker {
         if method != "concat" {
             self.concat_destination = Some(base as *const Expr as usize);
         }
-        let receiver = read_type(self.expr(base, None));
+        let receiver = self.builtin_receiver(base);
         self.concat_destination = previous;
         if matches!(receiver, Ty::List(_)) && method == "len" {
             if !self.list_read_receiver(base) {
@@ -4013,7 +4039,7 @@ impl Checker {
         arguments: &[Expr],
     ) -> Ty {
         self.allow_array_value(base);
-        let receiver = read_type(self.expr(base, None));
+        let receiver = self.builtin_receiver(base);
         let mut diverges = receiver == Ty::Never;
         let element = match receiver {
             Ty::Array(element, _) if numeric(&element) || *element == BOOL => Some(*element),

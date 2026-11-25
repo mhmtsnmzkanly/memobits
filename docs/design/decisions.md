@@ -1505,11 +1505,10 @@ implementation notes are in `docs/design/box.md`.
   box (BE005 for moving or writing the box while one is live). `Box<T>`
   works as a field, array element, `List` element, `T?` / `T ! E` payload,
   tuple element, enum payload and generic argument.
-- Representation: the checker has a distinct `Ty::Box`; the IR stores it as a
-  one-element `List<T>`. A box therefore occupies the 12-byte List descriptor
-  in its owner (not one pointer word) and its block is the list block of one
-  element. All list owner rules (heap leaf in every owner predicate, moves
-  clear the descriptor, type-directed release) apply unchanged.
+- Representation (interim, replaced by H4b below): the checker has a distinct
+  `Ty::Box`; H4 stored it in the IR as a one-element `List<T>` (12-byte List
+  descriptor, not one pointer word). H4b gave Box its own IR type and one
+  pointer word; see "Shipped H4b details".
 - Auto-deref: a field access, index, method receiver or `match` scrutinee of
   type `Box<T>`, `borrow Box<T>` or `share Box<T>` (any number of nested
   levels) addresses the boxed value. `b.f`, `b[i]`, `b.m()` (receiver modes
@@ -1525,9 +1524,11 @@ implementation notes are in `docs/design/box.md`.
   follows fields, payloads and arrays, so recursion through `Box<T>`, a `T?`
   of a box or a `List` of boxes is accepted and direct recursion is rejected.
   Wasm releases a type that reaches itself with one generated function per
-  type (`recursive.rs`); releasing a chain recurses once per node and traps
-  with a call-stack error for chains of hundreds of thousands of nodes.
-- Limits: the IR representation above (single-word layout not done);
+  type (`recursive.rs`); in H4 that function recursed once per node and
+  trapped with a call-stack error for chains of hundreds of thousands of nodes
+  (fixed by H4b: the release is iterative).
+- Limits (H4; the first two are lifted by H4b): the IR representation above
+  (single-word layout not done);
   built-in String and List methods (`len`, `push`, ...) do not auto-deref (bind
   or `unbox` first; user methods do); a payload bound by an owned `match`
   cannot be passed directly as an owned call argument (`f(unbox(rest))`, the
@@ -1545,3 +1546,71 @@ implementation notes are in `docs/design/box.md`.
   out of a box field, immutable write, loans, nested-pattern gate). Guide:
   `collections.mb` (+2 tests, 141 total); example `examples/apps/tree`
   (4 tests).
+### Shipped H4b details (2026-11-25)
+
+H4b completes the H4 `Box<T>` step. The Stage 4 decision is unchanged: this
+records the facts of the single-pointer-word box and the iterative release.
+Implementation notes are in `docs/design/box.md` and `docs/design/wasm-backend.md`.
+
+- Representation: the IR has its own type `Type::Box(T)`. A box is one `i32`
+  pointer (4 bytes, 4-aligned) to a heap block whose payload, after the 8-byte
+  block header, is one value with T's layout; there is no list descriptor,
+  length or capacity. An empty (never filled or moved-out) box is the null
+  pointer. Struct fields, enum payloads, array elements, tuples and locals
+  therefore shrink: a `{ Box<i32>, i32 }` struct is 8 bytes (16 with a
+  `List<i32>` field), an `array<Box<i32>, 4>` field 16 bytes (48 for Lists);
+  checked by `a_box_occupies_one_pointer_word_where_a_list_occupies_a_descriptor`
+  in `memobits-wasm`. The block of a box is exactly header plus T (a one-element
+  List block used to be rounded up by the List growth policy).
+- Owner rules are unchanged: a box is a heap owner in every owner predicate
+  (moves, scope exit, reassignment, `replace`, `swap`, `drop`, early returns,
+  loans, `T?` / `T ! E` / tuple / array / List / enum-payload / generic /
+  function-value compositions). IR instructions: a Box local is built with
+  `EmptyList` (empty box) and `ListPush` (reserve the block and move the value
+  in), emptied with `ListPop` (move the value out, release the block) and
+  addressed with `ElementAddr` at the constant index 0 (the address of the
+  value; no bounds check, a live box always holds one). These share the
+  List owner-slot instructions deliberately: only their Wasm emission and type
+  checks differ for `Type::Box`. All H4 tests pass unchanged.
+- Iterative release: releasing a recursive owner type no longer recurses per
+  node. A recursive type gets one release function that walks the value's own
+  fields inline and *defers* every `Box` or `List` position whose element
+  mentions a recursive type onto an intrusive worklist (one Wasm global head
+  per deferral kind); one shared `drain` function pops items in a loop. The
+  links live in storage that is already dead: a deferred box item links
+  through the free-list word of its own (still allocated) block header, a
+  deferred List item through the `data` word of its descriptor (a heap List
+  has `data == allocation + 8`, restored when popped). No allocation happens
+  during release, so releasing never fails and needs no memory beyond the
+  structure. The call-stack depth of a release is constant (user code,
+  `release_T`, `drain`). A million-node linked list, degenerate left/right
+  trees of 100,000 nodes, a 200,000-deep `List`-of-children chain, mutually
+  recursive types and balanced trees release without trapping; building such
+  structures in user code that recurses is still bounded by the call stack.
+- Built-in method auto-deref: `len`, `get`, `contains`, `index_of`,
+  `is_char_boundary`, `byte_at`, `scalar_at` (reads, through `borrow`, `share`
+  or owned boxes) and `push`, `pop`, `clear` (writes: the box must be a `var`
+  or a `share` parameter) act on the String or List inside a box, at any box
+  depth, when the receiver is a named local, field or element holding the box
+  (a box returned by a call must be bound first, TE017). `push_str` and `concat`
+  do not see through a box.
+- Consuming-match nested patterns through a box payload (TE017) stay rejected.
+  Moving owned parts out of a box's content while the block remains needs
+  partial-move tracking inside the box that the owner model does not have; the
+  new representation does not change that. In-place matches are unchanged.
+- `[prelude]`: `Box` cannot be mapped (`Box='alloc::Box'` is ME005 because the
+  virtual `alloc` module declares the name); `List` behaves the same, and an
+  alias of an alloc type (`Seq='alloc::List'`) does not give the alias the
+  built-in methods, so no prelude support was added. Import with `use alloc::Box;`.
+- Allocator note (not changed): released blocks are reused first-fit from one
+  free list, so a program that frees many blocks of one size and then
+  allocates many larger ones scans the whole list per allocation. Box blocks
+  are now exact-size, so mixed shapes in one run can expose this; it is
+  unrelated to the release depth.
+- Exported Wasm signatures cannot use `Box` (own diagnostic, "the external Box
+  ABI is not defined").
+- Tests: `crates/memobits-cli/tests/h4_box.rs` (25: the 18 H4 tests unchanged
+  plus million-node list, degenerate/other recursive shapes, balanced tree,
+  capped-memory long-list build/drop and its mutation check, built-in method
+  auto-deref and its negatives); `memobits-wasm` layout test; guide
+  `collections.mb` (+2 tests, 143 total).

@@ -190,12 +190,19 @@ all eight widths (`memobits-wasm/src/numerics.rs`):
   `<<` discards the high bits (re-normalized for narrow widths) and `>>` is
   arithmetic for signed types (`shr_s`) and zero-filling for unsigned types.
 
-## Recursive owner release (H4)
+## Recursive owner release (H4, H4b)
 
-A type that reaches itself through a `List` element (every `Box<T>` is a
-one-element List in the IR) cannot have its type-directed release walk
-emitted inline. `crates/memobits-wasm/src/recursive.rs` finds those types and
-appends one `(i32) -> ()` function per type after the thunks; the release
-emitter calls it with the address of the value (the function's own top level
-is emitted inline, so it calls itself only for the recursive positions). The
-table of function indices is thread-local for the duration of one encode.
+A type that reaches itself through a `List` or `Box` element cannot have its
+type-directed release walk emitted inline. `crates/memobits-wasm/src/recursive.rs`
+finds those types and appends one `(i32) -> ()` release function per type plus
+one shared `() -> ()` `drain` function after the thunks. The release emitter
+calls `release_T` with the address of the value. `release_T` walks the value's
+own fields inline and defers every box or list position whose element mentions a
+recursive type onto an intrusive worklist (one global head per kind, after the
+five fixed globals); `drain` pops and processes items in a loop, so the call
+depth is constant and no memory is needed beyond the structure. A box item
+links through its block header's free-list word, a list item through its
+descriptor's data word. See `docs/design/box.md`.
+
+A `Box` is a one-pointer cell (`box_cell.rs`, 4 bytes): the address of a block
+holding one value at `CONTENT_OFFSET` (8), or 0 when empty.

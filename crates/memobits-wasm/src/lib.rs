@@ -21,6 +21,7 @@ use wasm_encoder::{
 };
 
 mod arrays;
+mod box_cell;
 mod float_format;
 mod function_values;
 mod interpolation;
@@ -257,6 +258,19 @@ fn compile_target(
             {
                 errors.push(diagnostic(
                     "Wasm exported signatures cannot use List; the external List ABI is not defined",
+                    Some(function.span),
+                ));
+                continue;
+            }
+            if function
+                .signature
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter.ty, Type::Box(_)))
+                || matches!(function.signature.result.as_ref(), Type::Box(_))
+            {
+                errors.push(diagnostic(
+                    "Wasm exported signatures cannot use Box; the external Box ABI is not defined",
                     Some(function.span),
                 ));
                 continue;
@@ -615,14 +629,14 @@ impl FrameLayout {
                             Type::Primitive(primitive) => {
                                 storage_layout(*primitive).map_err(error)?;
                             }
-                            Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                            Type::String | Type::List(_) | Type::Box(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                             _ => return Err(error("nested or non-primitive references are not supported by frame layout".into())),
                         }
                         // A reference already carries its owner's address. Reborrowing
                         // it must never create a second authoritative owner cell.
                     }
                     // An array owner already has its cell (one per array local or value).
-                    Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
+                    Type::String | Type::List(_) | Type::Box(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {}
                     _ => return Err(error("Owned references and non-primitive owners are not supported by frame layout".into())),
                 }
             }
@@ -686,6 +700,8 @@ impl FrameLayout {
                 "String"
             } else if matches!(ty, Type::List(_)) {
                 "List"
+            } else if matches!(ty, Type::Box(_)) {
+                "Box"
             } else if matches!(ty, Type::Struct(_)) {
                 "struct"
             } else if matches!(ty, Type::Enum(_)) {
@@ -933,7 +949,7 @@ fn construction_aliases(function: &Function, uses: &[u32]) -> BTreeMap<u32, u32>
             let has_staged_string = matches!(&producer.kind, InstructionKind::StructNew { fields, .. }
                 if fields.iter().any(|operand| matches!(operand.source, Source::Local(id)
                     if matches!(function.locals[id.0 as usize].ty,
-                        Type::String | Type::List(_) | Type::Struct(_) | Type::Enum(_) | Type::Array { .. }))));
+                        Type::String | Type::List(_) | Type::Box(_) | Type::Struct(_) | Type::Enum(_) | Type::Array { .. }))));
             let consumer = if has_staged_string {
                 // Initializer slots end after the constructor has moved from them.
                 after.find(|inst| {
@@ -981,6 +997,7 @@ fn construction_aliases(function: &Function, uses: &[u32]) -> BTreeMap<u32, u32>
                     Some(
                         Type::String
                             | Type::List(_)
+                            | Type::Box(_)
                             | Type::Array { .. }
                             | Type::Struct(_)
                             | Type::Enum(_)
@@ -1026,9 +1043,12 @@ const LAYOUT_OVERFLOW: &str = "array layout overflows the 32-bit address space";
 /// owner or reference).
 fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
     match ty {
-        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
-            aggregate_layout(structs, ty).map(|(size, _)| size)
-        }
+        Type::String
+        | Type::List(_)
+        | Type::Box(_)
+        | Type::Array { .. }
+        | Type::Struct(_)
+        | Type::Enum(_) => aggregate_layout(structs, ty).map(|(size, _)| size),
         Type::Reference { inner, .. } => aggregate_bytes(structs, inner),
         _ => Err("expected an array or struct type".into()),
     }
@@ -1039,7 +1059,12 @@ fn aggregate_bytes(structs: &[StructLayout], ty: &Type) -> Result<u32, String> {
 fn is_aggregate(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+        Type::String
+            | Type::List(_)
+            | Type::Box(_)
+            | Type::Array { .. }
+            | Type::Struct(_)
+            | Type::Enum(_)
     )
 }
 
@@ -1094,9 +1119,12 @@ fn wasm_type(ty: &Type) -> ValType {
         Type::Reference { .. } => ValType::I32,
         // Array slots keep an unused Wasm local; their authoritative storage is
         // a frame cell and operands push the cell address.
-        Type::String | Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_) => {
-            ValType::I32
-        }
+        Type::String
+        | Type::List(_)
+        | Type::Box(_)
+        | Type::Array { .. }
+        | Type::Struct(_)
+        | Type::Enum(_) => ValType::I32,
     }
 }
 
@@ -1797,6 +1825,9 @@ fn encode_frames_traced(
         for _ in &recursive_ids {
             functions.function(type_index);
         }
+        // The shared drain function takes nothing.
+        functions.function(types.len());
+        types.ty().function([], []);
     }
     let _recursive_table = recursive::install(recursive_ids.clone(), recursive_base);
     let mut code = CodeSection::new();
@@ -1893,6 +1924,13 @@ fn encode_frames_traced(
             heap_copy_index,
         )?);
     }
+    if !recursive_ids.is_empty() {
+        code.function(&recursive::drain(
+            &program.types,
+            &structs,
+            heap_copy_index,
+        )?);
+    }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
     let has_traps = heap_copy_index.is_some() || !traps.spans.is_empty();
@@ -1956,6 +1994,10 @@ fn encode_frames_traced(
         };
         globals.global(heap_global, &ConstExpr::i32_const(heap_start as i32));
         globals.global(heap_global, &ConstExpr::i32_const(0));
+        // One worklist head per deferred kind of recursive release.
+        for _ in 0..recursive::head_count() {
+            globals.global(heap_global, &ConstExpr::i32_const(0));
+        }
     }
     let mut module = Module::new();
     module.section(&types);
@@ -2127,6 +2169,9 @@ fn compile_function(
             if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
                 body.instructions().local_get(index as u32);
                 list_descriptor::clear(body);
+            } else if matches!(function.locals[local.0 as usize].ty, Type::Box(_)) {
+                body.instructions().local_get(index as u32);
+                box_cell::clear(body);
             } else if heap_locals.contains(local)
                 && type_has_string_storage(&program.types, &function.locals[local.0 as usize].ty)
             {
@@ -2468,7 +2513,9 @@ fn max_string_array_depth(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u3
         Type::Array { element, len } if *len != 0 => {
             1 + max_string_array_depth(types, element, visited)
         }
-        Type::List(element) => 1 + max_string_array_depth(types, element, visited),
+        Type::List(element) | Type::Box(element) => {
+            1 + max_string_array_depth(types, element, visited)
+        }
         Type::Struct(id) | Type::Enum(id) if visited.insert(id.0) => {
             let depth = match types.get(id.0 as usize).map(|definition| &definition.kind) {
                 Some(TypeDefKind::Struct { fields }) => fields
@@ -2573,11 +2620,10 @@ fn emit_string_storage_cleanup(
     if !type_has_string_storage(types, ty) {
         return Ok(());
     }
-    if release && recursive::is_recursive(ty).is_some() {
-        // A type that reaches itself is released by its own function, except
-        // where that function's body starts.
-        let id = recursive::is_recursive(ty).expect("checked recursive type");
-        if recursive::take_body() != Some(id) {
+    if release && !recursive::work_mode() {
+        if let Some(id) = recursive::is_recursive(ty) {
+            // A type that reaches itself is released by its own iterative
+            // function; work-mode walks (inside that function) stay inline.
             emit_relative_address(body, base_local, offset);
             body.instruction(&WasmInstruction::Call(
                 recursive::function_index(id).expect("recursive function index"),
@@ -2586,6 +2632,85 @@ fn emit_string_storage_cleanup(
         }
     }
     match ty {
+        Type::Box(element)
+            if release && recursive::work_mode() && recursive::defers(types, element) =>
+        {
+            // Deferred: push the block on the worklist of its kind, linking
+            // through the block header's free-list word (unused while the block
+            // is allocated).
+            let head = recursive::head_global(true, element);
+            let block = scratch_base + 2 + (array_depth as u32) * 2;
+            emit_relative_address(body, base_local, offset);
+            box_cell::load_block(body);
+            body.instruction(&WasmInstruction::LocalTee(block));
+            body.instruction(&WasmInstruction::If(BlockType::Empty));
+            body.instruction(&WasmInstruction::LocalGet(block));
+            body.instruction(&WasmInstruction::GlobalGet(head));
+            body.instruction(&WasmInstruction::I32Store(string_heap::header_field(
+                string_heap::NEXT_OFFSET,
+            )));
+            body.instruction(&WasmInstruction::LocalGet(block));
+            body.instruction(&WasmInstruction::GlobalSet(head));
+            body.instruction(&WasmInstruction::End);
+        }
+        Type::Box(element) => {
+            if release {
+                // Release the content, then the block; an empty (moved-out)
+                // box owns nothing.
+                let block = scratch_base + 2 + (array_depth as u32) * 2;
+                emit_relative_address(body, base_local, offset);
+                box_cell::load_block(body);
+                body.instruction(&WasmInstruction::LocalTee(block));
+                body.instruction(&WasmInstruction::If(BlockType::Empty));
+                if type_has_string_storage(types, element) {
+                    body.instruction(&WasmInstruction::LocalGet(block));
+                    body.instruction(&WasmInstruction::I32Const(box_cell::CONTENT_OFFSET));
+                    body.instruction(&WasmInstruction::I32Add);
+                    body.instruction(&WasmInstruction::LocalSet(block));
+                    emit_string_storage_cleanup(
+                        body,
+                        types,
+                        structs,
+                        element,
+                        block,
+                        0,
+                        scratch_base,
+                        array_depth + 1,
+                        heap_copy_index,
+                        true,
+                    )?;
+                    emit_relative_address(body, base_local, offset);
+                    box_cell::load_block(body);
+                } else {
+                    body.instruction(&WasmInstruction::LocalGet(block));
+                }
+                if let Some(releaser) = heap_copy_index {
+                    body.instruction(&WasmInstruction::Call(releaser + 1));
+                } else {
+                    body.instruction(&WasmInstruction::Drop);
+                }
+                body.instruction(&WasmInstruction::End);
+            } else {
+                // A moved-from cell must look empty to a later visit.
+                emit_relative_address(body, base_local, offset);
+                box_cell::clear(body);
+            }
+        }
+        Type::List(element)
+            if release && recursive::work_mode() && recursive::defers(types, element) =>
+        {
+            // Deferred: push the descriptor on the worklist of its kind.
+            let head = recursive::head_global(false, element);
+            emit_relative_address(body, base_local, offset);
+            list_descriptor::load_allocation(body);
+            body.instruction(&WasmInstruction::If(BlockType::Empty));
+            emit_relative_address(body, base_local, offset);
+            body.instruction(&WasmInstruction::GlobalGet(head));
+            list_descriptor::store_address(body);
+            emit_relative_address(body, base_local, offset);
+            body.instruction(&WasmInstruction::GlobalSet(head));
+            body.instruction(&WasmInstruction::End);
+        }
         Type::List(element) => {
             if release {
                 emit_list_elements_cleanup(
@@ -2815,6 +2940,9 @@ fn clear_moved_heap_source(
         if matches!(function.locals[source.0 as usize].ty, Type::List(_)) {
             emit_operand(body, function, param_count, &owner_operand, layout, frame)?;
             list_descriptor::clear(body);
+        } else if matches!(function.locals[source.0 as usize].ty, Type::Box(_)) {
+            emit_operand(body, function, param_count, &owner_operand, layout, frame)?;
+            box_cell::clear(body);
         } else if heap_locals.contains(&source) {
             if type_has_string_storage(types, &function.locals[source.0 as usize].ty) {
                 let cell = array_cell_of(layout, Slot::Local(source.0))?;
@@ -3470,7 +3598,10 @@ fn compile_instruction(
             let Source::Local(local) = value.source else {
                 return Err("drop requires a local".into());
             };
-            if matches!(function.locals[local.0 as usize].ty, Type::List(_)) {
+            if matches!(
+                function.locals[local.0 as usize].ty,
+                Type::List(_) | Type::Box(_)
+            ) {
                 let cell = array_cell_of(layout, Slot::Local(local.0))?;
                 release_list_cell(
                     body,
@@ -3754,6 +3885,57 @@ fn compile_instruction(
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
+            if let Type::Box(element) = list {
+                // Fill an empty box: reserve its block, point the cell at it
+                // and move the value in.
+                let (width, _) = aggregate_layout(&layout.structs, element)?;
+                let receiver = Operand {
+                    source: Source::Local(*target),
+                    mode: memobits_ir::UseMode::Read,
+                    span: instruction.span,
+                };
+                body.instructions()
+                    .i32_const(width as i32)
+                    .call(heap_copy_index.ok_or("missing Box allocation helper")? + 2)
+                    .local_tee(cleanup_base)
+                    .i32_eqz();
+                trap_if(
+                    body,
+                    traps.site(instruction.span),
+                    TrapReason::HeapAllocation,
+                );
+                emit_operand(body, function, param_count, &receiver, layout, frame)?;
+                body.instruction(&WasmInstruction::LocalGet(cleanup_base));
+                box_cell::store_block(body);
+                body.instruction(&WasmInstruction::LocalGet(cleanup_base));
+                body.instruction(&WasmInstruction::I32Const(box_cell::CONTENT_OFFSET));
+                body.instruction(&WasmInstruction::I32Add);
+                emit_operand(body, function, param_count, value, layout, frame)?;
+                match element.as_ref() {
+                    Type::Primitive(kind) => emit_store(body, *kind),
+                    _ => {
+                        body.instruction(&WasmInstruction::I32Const(width as i32));
+                        body.instruction(&WasmInstruction::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                        if type_has_string_storage(type_definitions, element) {
+                            clear_moved_heap_source(
+                                body,
+                                function,
+                                param_count,
+                                value,
+                                layout,
+                                frame,
+                                type_definitions,
+                                cleanup_base,
+                                heap_locals,
+                            )?;
+                        }
+                    }
+                }
+                return Ok(());
+            }
             let Type::List(element) = list else {
                 return Err("List push target is not a List".into());
             };
@@ -3805,7 +3987,11 @@ fn compile_instruction(
             let value = instruction.output.ok_or("empty List lacks a value")?;
             let cell = array_cell_of(layout, Slot::Value(value.0))?;
             emit_address(body, frame.ok_or("List requires a frame")?, cell.offset);
-            list_descriptor::initialize_empty(body);
+            if matches!(function.values[value.0 as usize], Type::Box(_)) {
+                box_cell::clear(body);
+            } else {
+                list_descriptor::initialize_empty(body);
+            }
         }
         InstructionKind::ListClear { target } => {
             let receiver = Operand {
@@ -3854,6 +4040,43 @@ fn compile_instruction(
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
+            if let Type::Box(element) = list {
+                // Move the boxed value into the Option, release the block and
+                // leave the cell empty.
+                let (width, _) = aggregate_layout(&layout.structs, element)?;
+                emit_address(body, frame, tag);
+                emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
+                box_cell::load_block(body);
+                body.instructions()
+                    .local_tee(scratch)
+                    .if_(BlockType::Result(ValType::I32));
+                emit_address(body, frame, payload);
+                body.instruction(&WasmInstruction::LocalGet(scratch));
+                body.instruction(&WasmInstruction::I32Const(box_cell::CONTENT_OFFSET));
+                body.instruction(&WasmInstruction::I32Add);
+                match element.as_ref() {
+                    Type::Primitive(kind) => {
+                        emit_load(body, *kind);
+                        emit_store(body, *kind);
+                    }
+                    _ => {
+                        body.instruction(&WasmInstruction::I32Const(width as i32));
+                        body.instruction(&WasmInstruction::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+                body.instruction(&WasmInstruction::LocalGet(scratch));
+                body.instruction(&WasmInstruction::Call(
+                    heap_copy_index.ok_or("missing Box release helper")? + 1,
+                ));
+                emit_operand(body, function, param_count, &receiver, layout, Some(frame))?;
+                box_cell::clear(body);
+                body.instructions().i32_const(0).else_().i32_const(1).end();
+                emit_store(body, Primitive::U8);
+                return Ok(());
+            }
             let Type::List(element) = list else {
                 return Err("List pop target is not a List".into());
             };
@@ -4584,6 +4807,16 @@ fn compile_instruction(
                 Type::Reference { inner, .. } => inner.as_ref(),
                 owner => owner,
             };
+            if matches!(collection, Type::Box(_)) {
+                // The value of a live box: its block address plus the offset
+                // of the content. The index is the constant 0 and unchecked.
+                emit_operand(body, function, param_count, base, layout, frame)?;
+                box_cell::load_block(body);
+                body.instruction(&WasmInstruction::I32Const(box_cell::CONTENT_OFFSET));
+                body.instruction(&WasmInstruction::I32Add);
+                body.instruction(&WasmInstruction::LocalSet(output));
+                return Ok(());
+            }
             let (len, element) = match collection {
                 Type::Array { element, len } => (Some(*len), element.as_ref()),
                 Type::List(element) => (None, element.as_ref()),
@@ -4832,12 +5065,15 @@ fn compile_instruction(
             if let Type::Reference { inner, .. } = value_type(function, reference)? {
                 if is_aggregate(&inner) {
                     let list = matches!(inner.as_ref(), Type::List(_));
-                    let owns_heap = list || *inner == Type::String;
+                    let boxed = matches!(inner.as_ref(), Type::Box(_));
+                    let owns_heap = list || boxed || *inner == Type::String;
                     if owns_heap {
                         if let Some(copy) = heap_copy_index {
                             emit_operand(body, function, param_count, reference, layout, frame)?;
                             if list {
                                 list_descriptor::load_allocation(body);
+                            } else if boxed {
+                                box_cell::load_block(body);
                             } else {
                                 string_descriptor::load_allocation(body);
                             }
@@ -4893,7 +5129,10 @@ fn compile_instruction(
             initialize,
         } => {
             if let Some(cell) = layout.arrays.get(&Slot::Local(target.0)).copied() {
-                let list = matches!(function.locals[target.0 as usize].ty, Type::List(_));
+                let list = matches!(
+                    function.locals[target.0 as usize].ty,
+                    Type::List(_) | Type::Box(_)
+                );
                 if !initialize && (list || heap_locals.contains(target)) {
                     // A self-move leaves the descriptor in the same slot.
                     if value.source == Source::Local(*target) {
@@ -5853,6 +6092,42 @@ mod struct_layout_tests {
         let parsed = memobits_syntax::parse(memobits_diagnostics::SourceId(0), source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         memobits_analysis::lower_module(&parsed.module, "test", &["main".into()]).unwrap()
+    }
+
+    /// A box is one pointer word where a List is the 12-byte descriptor, in
+    /// struct fields, enum payloads and arrays.
+    #[test]
+    fn a_box_occupies_one_pointer_word_where_a_list_occupies_a_descriptor() {
+        let sizes = |source: &str| {
+            let program = lower(source);
+            struct_layouts(&program.types)
+                .unwrap()
+                .iter()
+                .map(|layout| layout.size)
+                .collect::<Vec<_>>()
+        };
+        let boxed = sizes(
+            "use alloc::Box; type B { a: Box<i32>, n: i32 } type C [Some(Box<i64>), Nil] \
+             type D { a: array<Box<i32>, 4> } fn main() {}",
+        );
+        let listed = sizes(
+            "use alloc::List; type B { a: List<i32>, n: i32 } type C [Some(List<i64>), Nil] \
+             type D { a: array<List<i32>, 4> } fn main() {}",
+        );
+        // B: 4 + 4 vs 12 + 4; C: tag + payload; D: 4 * 4 vs 4 * 12.
+        assert_eq!(boxed[0], 8);
+        assert_eq!(listed[0], 16);
+        assert_eq!(boxed[1], 8);
+        assert_eq!(listed[1], 16);
+        assert_eq!(boxed[2], 16);
+        assert_eq!(listed[2], 48);
+        let (size, align) = type_layout(
+            &|_| None,
+            &Type::Box(Box::new(Type::Primitive(Primitive::I64))),
+        )
+        .unwrap();
+        assert_eq!((size, align), (box_cell::SIZE, box_cell::ALIGN));
+        assert_eq!(size, 4);
     }
 
     #[test]

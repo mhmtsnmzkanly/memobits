@@ -127,7 +127,7 @@ impl TypeDef {
             [Type::Reference {
                 access: Access::Borrow,
                 inner,
-            }] if !matches!(inner.as_ref(), Type::List(_))
+            }] if !matches!(inner.as_ref(), Type::List(_) | Type::Box(_))
                 && some.name == "Some"
                 && none.name == "None"
                 && none.payload.is_empty() =>
@@ -163,6 +163,14 @@ pub enum Type {
     String,
     /// Owned homogeneous list with private descriptor storage.
     List(Box<Type>),
+    /// Single-owner heap box: one pointer word to a heap block that holds a
+    /// value of the element type (its layout, nothing else). A box is a heap
+    /// owner like a List and uses the same owner-slot instructions: `EmptyList`
+    /// makes an empty (null) box, `ListPush` fills it with its one value and
+    /// `ListPop` moves the value out and releases the block. `ElementAddr` on a
+    /// box (or a reference to one) with the constant index 0 is the address of
+    /// the value; there is no bounds check because a live box always holds one.
+    Box(Box<Type>),
     Function(Signature),
     Reference {
         access: Access,
@@ -802,7 +810,10 @@ impl Program {
             for (block_index, block) in function.blocks.iter().enumerate() {
                 let block_id = BlockId(block_index as u32);
                 for value in &block.parameters {
-                    if matches!(function.values.get(value.0 as usize), Some(Type::List(_))) {
+                    if matches!(
+                        function.values.get(value.0 as usize),
+                        Some(Type::List(_) | Type::Box(_))
+                    ) {
                         push(
                             &mut errors,
                             id,
@@ -1105,9 +1116,9 @@ impl Program {
                         } else {
                             // `List<T>?` from `pop()` carries a List payload.
                             variant.payload.iter().all(|ty| match ty {
-                                Type::List(element) => {
+                                Type::List(element) | Type::Box(element) => {
                                     self.valid_field_type(element)
-                                        || matches!(element.as_ref(), Type::List(_))
+                                        || matches!(element.as_ref(), Type::List(_) | Type::Box(_))
                                 }
                                 ty => self.valid_field_type(ty),
                             })
@@ -1187,7 +1198,7 @@ fn field_type_is_valid(ty: &Type, type_count: usize) -> bool {
         Type::Primitive(kind) => *kind != Primitive::Unit,
         Type::String | Type::Function(_) => true,
         Type::Struct(id) | Type::Enum(id) => (id.0 as usize) < type_count,
-        Type::Array { element, .. } | Type::List(element) => {
+        Type::Array { element, .. } | Type::List(element) | Type::Box(element) => {
             field_type_is_valid(element, type_count)
         }
         _ => false,
@@ -1263,13 +1274,14 @@ fn validate_type_shape(
     context: &str,
 ) {
     match ty {
-        Type::List(element) => match element.as_ref() {
+        Type::List(element) | Type::Box(element) => match element.as_ref() {
             Type::Primitive(kind) if *kind != Primitive::Unit => {}
             Type::String => {}
             Type::Array { .. }
             | Type::Struct(_)
             | Type::Enum(_)
             | Type::List(_)
+            | Type::Box(_)
             | Type::Function(_) => validate_type_shape(type_count, element, errors, id, context),
             _ => push(errors, id, None, "unsupported List element type"),
         },
@@ -1317,6 +1329,7 @@ fn validate_type_shape(
                     | Type::Function(_)
                     | Type::String
                     | Type::List(_)
+                    | Type::Box(_)
                     | Type::Array { .. }
                     | Type::Struct(_)
                     | Type::Enum(_)
@@ -1332,7 +1345,7 @@ fn validate_type_shape(
             }
             if matches!(
                 inner.as_ref(),
-                Type::List(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
+                Type::List(_) | Type::Box(_) | Type::Array { .. } | Type::Struct(_) | Type::Enum(_)
             ) {
                 validate_type_shape(type_count, inner, errors, id, context);
             }
@@ -1340,7 +1353,7 @@ fn validate_type_shape(
         Type::Array { element, len: _ } => match element.as_ref() {
             Type::Primitive(p) if *p != Primitive::Unit => {}
             Type::String | Type::Function(_) => {}
-            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) => {
+            Type::Array { .. } | Type::Struct(_) | Type::Enum(_) | Type::List(_) | Type::Box(_) => {
                 validate_type_shape(type_count, element, errors, id, context)
             }
             _ => push(
@@ -1370,16 +1383,26 @@ fn list_read_element(ty: &Type) -> Option<Type> {
     }
 }
 
+/// The element of a List or Box owner slot, or of a reference to one.
+fn slot_element(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Box(element) => Some(element.as_ref().clone()),
+        Type::Reference {
+            access: Access::Borrow | Access::Share,
+            inner,
+        } if matches!(inner.as_ref(), Type::Box(_)) => slot_element(inner),
+        other => list_read_element(other),
+    }
+}
+
 fn mutable_list_element(function: &Function, target: LocalId) -> Option<Type> {
     let local = function.locals.get(target.0 as usize)?;
     match &local.ty {
-        Type::List(element) if local.mutable => Some(element.as_ref().clone()),
+        Type::List(element) | Type::Box(element) if local.mutable => Some(element.as_ref().clone()),
         Type::Reference {
             access: Access::Share,
             inner,
-        } if local.mutable || function.parameter_locals.contains(&target) => {
-            list_read_element(inner)
-        }
+        } if local.mutable || function.parameter_locals.contains(&target) => slot_element(inner),
         _ => None,
     }
 }
@@ -1536,8 +1559,13 @@ fn validate_instruction(
     let out = output_type(function, instruction.output);
     match &instruction.kind {
         InstructionKind::EmptyList => {
-            if !matches!(out, Some(Type::List(_))) {
-                push(errors, id, Some(block), "empty List requires a List output");
+            if !matches!(out, Some(Type::List(_) | Type::Box(_))) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "empty List requires a List or Box output",
+                );
             }
         }
         InstructionKind::EndListLocal { local } => {
@@ -1545,7 +1573,7 @@ fn validate_instruction(
                 || !function
                     .locals
                     .get(local.0 as usize)
-                    .is_some_and(|entry| matches!(entry.ty, Type::List(_)))
+                    .is_some_and(|entry| matches!(entry.ty, Type::List(_) | Type::Box(_)))
             {
                 push(
                     errors,
@@ -1854,7 +1882,7 @@ fn validate_instruction(
             if instruction.output.is_some()
                 || value.mode != UseMode::Consume
                 || !matches!(value.source, Source::Local(_))
-                || !matches!(ty, Some(Type::String | Type::List(_)))
+                || !matches!(ty, Some(Type::String | Type::List(_) | Type::Box(_)))
             {
                 push(
                     errors,
@@ -2119,7 +2147,7 @@ fn validate_instruction(
                     }
                     Some(*inner)
                 }
-                Type::List(_)
+                Type::List(_) | Type::Box(_)
                     if matches!(access, Access::Borrow | Access::Share)
                         && matches!(owner.source, Source::Local(_)) =>
                 {
@@ -2262,7 +2290,9 @@ fn validate_instruction(
                 );
             }
             let element = actual.and_then(|actual| match actual {
-                Type::Array { element, .. } | Type::List(element) if *access != Access::Owned => {
+                Type::Array { element, .. } | Type::List(element) | Type::Box(element)
+                    if *access != Access::Owned =>
+                {
                     Some(*element)
                 }
                 Type::Reference {
@@ -2285,7 +2315,9 @@ fn validate_instruction(
                         );
                     }
                     match *inner {
-                        Type::Array { element, .. } | Type::List(element) => Some(*element),
+                        Type::Array { element, .. } | Type::List(element) | Type::Box(element) => {
+                            Some(*element)
+                        }
                         _ => {
                             push(
                                 errors,
@@ -2956,12 +2988,12 @@ fn validate_instruction(
                             "load operand mode does not match reference access",
                         );
                     }
-                    if matches!(inner.as_ref(), Type::List(_)) {
+                    if matches!(inner.as_ref(), Type::List(_) | Type::Box(_)) {
                         push(
                             errors,
                             id,
                             Some(block),
-                            "whole Lists cannot be loaded through a borrow",
+                            "whole Lists and Boxes cannot be loaded through a borrow",
                         );
                     }
                     if matches!(inner.as_ref(), Type::Array { .. }) {
@@ -3101,7 +3133,7 @@ fn validate_instruction(
                     access: Access::Share,
                     inner,
                 }) => {
-                    if matches!(inner.as_ref(), Type::List(_))
+                    if matches!(inner.as_ref(), Type::List(_) | Type::Box(_))
                         && scoped_string::list_share_destination(function, reference, &inner)
                             .is_none()
                     {
@@ -3302,7 +3334,7 @@ fn validate_instruction(
                     "borrow Option assignment requires a consuming initialization",
                 );
             }
-            if matches!(actual, Some(Type::List(_)))
+            if matches!(actual, Some(Type::List(_) | Type::Box(_)))
                 && (value.mode != UseMode::Consume
                     || !initialize
                         && function
@@ -3449,7 +3481,7 @@ fn validate_instruction(
                         .zip(argument_types)
                         .zip(&signature.parameters)
                     {
-                        if matches!(parameter.ty, Type::List(_))
+                        if matches!(parameter.ty, Type::List(_) | Type::Box(_))
                             && parameter.access == Access::Owned
                             && !matches!(arg.source, Source::Local(_))
                         {
@@ -3590,14 +3622,18 @@ fn validate_operand_escapes(
     for (index, block) in function.blocks.iter().enumerate() {
         let block_id = Some(BlockId(index as u32));
         let list_return = scoped_string::return_capture(block).filter(|(_, source)| {
-            matches!(function.signature.result.as_ref(), Type::List(_))
-                && function
-                    .locals
-                    .get(source.0 as usize)
-                    .is_some_and(|local| &local.ty == function.signature.result.as_ref())
+            matches!(
+                function.signature.result.as_ref(),
+                Type::List(_) | Type::Box(_)
+            ) && function
+                .locals
+                .get(source.0 as usize)
+                .is_some_and(|local| &local.ty == function.signature.result.as_ref())
         });
-        if matches!(function.signature.result.as_ref(), Type::List(_))
-            && matches!(&block.terminator.kind, TerminatorKind::Return(_))
+        if matches!(
+            function.signature.result.as_ref(),
+            Type::List(_) | Type::Box(_)
+        ) && matches!(&block.terminator.kind, TerminatorKind::Return(_))
             && list_return.is_none()
         {
             push(
@@ -3611,7 +3647,7 @@ fn validate_operand_escapes(
             if let InstructionKind::Capture(_) = &instruction.kind {
                 if matches!(
                     output_type(function, instruction.output),
-                    Some(Type::List(_))
+                    Some(Type::List(_) | Type::Box(_))
                 ) && !list_return.is_some_and(|(returned, _)| returned == position)
                     && !instruction.output.is_some_and(|output| {
                         // A List moved into an outer List element, an enum
@@ -3712,7 +3748,7 @@ fn validate_operand_escapes(
                             .collect(),
                         ..HeapStrings::default()
                     };
-                    if matches!(result, Type::List(_))
+                    if matches!(result, Type::List(_) | Type::Box(_))
                         && scoped_string::call_binding(
                             program,
                             function,
@@ -3935,7 +3971,7 @@ fn validate_operand_escapes(
                                                 Type::Reference { inner, .. } => inner.as_ref(),
                                                 other => other,
                                             };
-                                            matches!(list, Type::List(element) if **element == *source_ty)
+                                            matches!(list, Type::List(element) | Type::Box(element) if **element == *source_ty)
                                         }))
                             })
                     });
@@ -4139,7 +4175,7 @@ fn validate_operand_escapes(
                         let direct_string_move = field.mode == UseMode::Consume
                             && matches!(field.source, Source::Local(local)
                                 if function.locals.get(local.0 as usize)
-                                    .is_some_and(|local| matches!(local.ty, Type::String | Type::List(_))));
+                                    .is_some_and(|local| matches!(local.ty, Type::String | Type::List(_) | Type::Box(_))));
                         let nested_tuple_move = field.mode == UseMode::Consume
                             && struct_fields
                                 .and_then(|fields| fields.get(index))
@@ -4291,7 +4327,7 @@ fn validate_operand_escapes(
                                         Type::Reference { inner, .. } => inner.as_ref(),
                                         other => other,
                                     };
-                                    matches!(list, Type::List(element) if **element == binding.ty)
+                                    matches!(list, Type::List(element) | Type::Box(element) if **element == binding.ty)
                                 })));
                     if !moved_owner {
                         report(block_id, value, false, false)

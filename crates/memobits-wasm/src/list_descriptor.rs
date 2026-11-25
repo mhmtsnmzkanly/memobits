@@ -21,6 +21,10 @@ pub(super) fn load_address(body: &mut Function) {
     body.instruction(&Instruction::I32Load(field(DATA_OFFSET)));
 }
 
+pub(super) fn store_address(body: &mut Function) {
+    body.instruction(&Instruction::I32Store(field(DATA_OFFSET)));
+}
+
 pub(super) fn load_length(body: &mut Function) {
     body.instruction(&Instruction::I32Load(field(LENGTH_OFFSET)));
 }

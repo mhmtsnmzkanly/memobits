@@ -89,7 +89,7 @@ impl Builder<'_> {
         has_later_argument: bool,
     ) -> Option<Operand> {
         let direct_string = direct && parameter.ty == Type::String;
-        let direct_list = direct && matches!(parameter.ty, Type::List(_));
+        let direct_list = direct && matches!(parameter.ty, Type::List(_) | Type::Box(_));
         let direct_owned_string_aggregate = direct
             && parameter.access == Access::Owned
             && (self.is_string_transport_owner(&parameter.ty)
@@ -205,7 +205,7 @@ impl Builder<'_> {
                 if boxed > 0 {
                     // A by-value method on a box consumes it.
                     let option_ty = self.match_unboxes[&self.id(expr)].clone();
-                    let Some(Type::List(inner)) = self.operand_type(receiver) else {
+                    let Some(Type::Box(inner)) = self.operand_type(receiver) else {
                         unreachable!("checked boxed receiver")
                     };
                     receiver = self.take_box_value(receiver, option_ty, *inner, base.span)?;

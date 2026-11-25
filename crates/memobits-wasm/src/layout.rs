@@ -60,7 +60,7 @@ pub(super) const STRUCT_LAYOUT_OVERFLOW: &str = "struct layout overflows the 32-
 pub(super) fn type_has_string_storage(types: &[TypeDef], ty: &Type) -> bool {
     pub(super) fn has(types: &[TypeDef], ty: &Type, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Type::String | Type::List(_) => true,
+            Type::String | Type::List(_) | Type::Box(_) => true,
             Type::Array { element, len } => *len != 0 && has(types, element, visited),
             Type::Struct(id) | Type::Enum(id) => {
                 if !visited.insert(id.0) {
@@ -167,7 +167,7 @@ pub(super) fn struct_layout_at(
         TypeDefKind::Struct { fields } => {
             let has_string_fields = fields
                 .iter()
-                .any(|field| matches!(field.ty, Type::String | Type::List(_)));
+                .any(|field| matches!(field.ty, Type::String | Type::List(_) | Type::Box(_)));
             let is_tuple = definition.path.module.as_slice() == ["\0tuple"];
             if definition.error_ancestry.is_some()
                 && fields
@@ -220,6 +220,12 @@ pub(super) fn struct_layout_at(
                         list_descriptor::SIZE,
                         list_descriptor::ALIGN,
                         FieldStorage::Aggregate(list_descriptor::SIZE),
+                    ))
+                } else if matches!(field.ty, Type::Box(_)) {
+                    Some((
+                        box_cell::SIZE,
+                        box_cell::ALIGN,
+                        FieldStorage::Aggregate(box_cell::SIZE),
                     ))
                 } else {
                     member_layout(
@@ -289,6 +295,13 @@ pub(super) fn struct_layout_at(
                             list_descriptor::SIZE,
                             list_descriptor::ALIGN,
                             FieldStorage::Aggregate(list_descriptor::SIZE),
+                        ))
+                    } else if matches!(ty, Type::Box(_)) {
+                        // A Box payload is the one-word box cell.
+                        Some((
+                            box_cell::SIZE,
+                            box_cell::ALIGN,
+                            FieldStorage::Aggregate(box_cell::SIZE),
                         ))
                     } else {
                         member_layout(types, ty, done, active, true, true)?
@@ -380,6 +393,7 @@ pub(super) fn type_layout<'a>(
         Type::Primitive(kind) => storage_layout(*kind),
         Type::String => Ok((string_descriptor::SIZE, string_descriptor::ALIGN)),
         Type::List(_) => Ok((list_descriptor::SIZE, list_descriptor::ALIGN)),
+        Type::Box(_) => Ok((box_cell::SIZE, box_cell::ALIGN)),
         Type::Struct(id) | Type::Enum(id) => struct_layout(id.0)
             .map(|layout| (layout.size, layout.align))
             .ok_or_else(|| "type is out of range".to_string()),

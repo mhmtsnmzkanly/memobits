@@ -186,8 +186,13 @@ matches also match nested patterns through a box payload), `.borrow()` of a box 
 a parameter of the content type lends the content, and `replace`/`swap` work on places
 inside boxes. A type may contain itself only through a box (also inside `T?` or `List`);
 direct recursion stays TE026. The box and everything it owns are released exactly once on
-every path; it is represented internally as a one-element List. Built-in String/List
-methods do not see through a box. See `docs/design/box.md` and `examples/apps/tree`.
+every path; a box is one pointer word to a heap block holding the value (H4b), and
+releasing a recursive structure is iterative (a million-node list drops without growing
+the call stack; building one with recursive user code is still bounded by the stack).
+Built-in String/List methods (`len`, `get`, `contains`, `index_of`, `push`, `pop`,
+`clear`, `byte_at`, ...) act on the value inside a named box (writes need a `var` box or
+a `share` parameter); `push_str`/`concat` do not, and `Box` has no `[prelude]` mapping.
+See `docs/design/box.md` and `examples/apps/tree`.
 Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
 usable in parameters, results, locals, struct, tuple and record fields, array and List
 elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function

@@ -7,7 +7,7 @@ pub(super) const CURSOR_GLOBAL: u32 = 3;
 pub(super) const FREE_GLOBAL: u32 = 4;
 pub(super) const BLOCK_ALIGN: u32 = 4;
 const CAPACITY_OFFSET: u64 = 0;
-const NEXT_OFFSET: u64 = 4;
+pub(super) const NEXT_OFFSET: u64 = 4;
 pub(super) const HEADER_BYTES: i32 = 8;
 
 const LEN: u32 = 0;
@@ -213,7 +213,7 @@ pub(super) fn load_capacity(body: &mut Function) {
     body.instruction(&I::I32Load(header_field(CAPACITY_OFFSET)));
 }
 
-fn header_field(offset: u64) -> MemArg {
+pub(super) fn header_field(offset: u64) -> MemArg {
     MemArg {
         offset,
         ..memory_arg(Primitive::U32)
