@@ -1,7 +1,7 @@
 // A shape calculator and a small state machine, both built on `match`.
-type Shape [ Empty, Circle(f64), Rect(f64, f64) ]
+type Shape [Empty, Circle(f64), Rect(f64, f64)]
 
-type Job [ Waiting, Running(i32), Finished(i32) ]
+type Job [Waiting, Running(i32), Finished(i32)]
 
 // An alias of an enum type names its variants too: `Figure::Circle(..)`.
 type Figure = Shape;
@@ -87,7 +87,12 @@ fn main() -> i32 ! Error {
             break;
         }
     }
-    let tiles: array<Shape, 4> = [Shape::Rect(3.0, 2.0), Shape::Empty, Shape::Circle(1.0), Shape::Rect(1.0, 5.0)];
+    let tiles: array<Shape, 4> = [
+        Shape::Rect(3.0, 2.0),
+        Shape::Empty,
+        Shape::Circle(1.0),
+        Shape::Rect(1.0, 5.0),
+    ];
     let wide := if is_wide(tiles[0].borrow()) { 1 } else { 0 };
     let borrowed := count_corners(tiles.borrow()) + wide * 100;
     Ok(total(job) + shapes * 1000 + corners(Shape::Empty) + borrowed * 10000)

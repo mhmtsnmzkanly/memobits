@@ -1,5 +1,6 @@
 //! Source-spanned syntax for the initial Memobits language subset.
 //! Parsing does not perform name, type, ownership, or control-flow checks.
+pub mod format;
 mod items;
 mod literals;
 pub use literals::NumberLiteral;

@@ -41,15 +41,18 @@ test fn numbers() {
     assert(negative_half == -0.5);
     assert(quarter * 4.0 == 1.0);
 }
+
 // Numeric `as` casts are explicit across supported integer and float types.
 // Integer casts keep low bits; float-to-int truncates and saturates, with NaN
 // becoming zero. The byte convenience method is equivalent to `as u32`.
 fn widen_byte(value: u8) -> u32 {
     value as u32
 }
+
 fn widen_byte_method(value: u8) -> u32 {
     value.to_u32()
 }
+
 test fn widenings() {
     let bytes: array<u8, 4> = [0, 127, 128, 255];
     assert(widen_byte(bytes[0]) == 0);
@@ -57,6 +60,7 @@ test fn widenings() {
     assert(bytes[2] as u32 == 128);
     assert(bytes[3].to_u32() == 255);
 }
+
 test fn numeric_casts() {
     let all_bits: u32 = 4294967295;
     let signed: i32 = all_bits as i32;
@@ -70,6 +74,7 @@ test fn numeric_casts() {
     assert(saturated == 18446744073709551615);
     assert(rounded == 16777216);
 }
+
 // Explicit arithmetic methods exist for every integer width (i8..i64, u8..u64).
 // `wrapping_*` computes modulo 2^width, `saturating_*` clamps to the type's
 // minimum or maximum, and `checked_*` returns `T?` (`None` on overflow, on a
@@ -89,6 +94,7 @@ test fn wrapping_arithmetic() {
     let wide: i64 = -9223372036854775808;
     assert(wide.wrapping_sub(1) == 9223372036854775807);
 }
+
 test fn saturating_arithmetic() {
     let byte: u8 = 200;
     assert(byte.saturating_add(100) == 255);
@@ -101,6 +107,7 @@ test fn saturating_arithmetic() {
     assert(high.saturating_add(1) == high);
     assert(high.saturating_mul(-2) == -9223372036854775808);
 }
+
 test fn checked_arithmetic() {
     let byte: u8 = 200;
     assert(match byte.checked_add(55) { Some(v) => v == 255, None => false });
@@ -120,6 +127,7 @@ test fn checked_arithmetic() {
     assert(match one.checked_shl(16) { Some(_) => false, None => true });
     assert(one.wrapping_shl(17) == 2);
 }
+
 // Integer literals can be written in hexadecimal (`0xFF`, `0XFF`), binary
 // (`0b1010`) or octal (`0o17`), and `_` may separate the digits of any integer
 // or float literal (`1_000`, `0xFF_FF`, `1_0.5_0`, `1e1_0`). A separator sits
@@ -128,9 +136,11 @@ test fn checked_arithmetic() {
 // checked exactly like decimal literals, also in constants and in patterns.
 // Literal suffixes such as `0xFFu8` do not exist; annotate the binding.
 const RADIX_MASK: u32 = 0xFF_00;
+
 fn radix_class(value: u8) -> u32 {
     match value { 0x00 => 1, 0b1 => 2, 0o10 => 3, 0xF0 | 0xF5 | 0xFF => 4, _ => 0 }
 }
+
 test fn radix_literals() {
     let hex: u8 = 0xFF;
     let binary: u8 = 0b1010_0101;
@@ -154,6 +164,7 @@ test fn radix_literals() {
     assert(radix_class(0xF5) == 4);
     assert(radix_class(2) == 0);
 }
+
 // Bitwise operators `& | ^` and shifts `<< >>` work on every integer width
 // (operands share one type; the shift count is always u32), and so do the
 // compound forms `&= |= ^= <<= >>=` and the methods `bit_and`, `bit_or`,
@@ -170,6 +181,7 @@ test fn bit_operations() {
     assert(1 << 31 == high);
     assert(high >> 31 == 1);
 }
+
 test fn bit_operations_on_every_width() {
     let negative: i8 = -128;
     assert(negative >> 7 == -1);
@@ -194,6 +206,7 @@ test fn bit_operations_on_every_width() {
     signed &= -2;
     assert(signed == -4);
 }
+
 // `~x` is the bitwise complement of an integer at the operand's own width
 // (Rust's `!x`): `~0u8` is 255, `~(-128i8)` is 127. It is a prefix operator
 // with the precedence of unary `-` and `!`, applies to integers only
@@ -202,6 +215,7 @@ test fn bit_operations_on_every_width() {
 // An untyped literal operand without type context takes u32 like the other
 // bitwise operators.
 const LOW_NIBBLE_MASK: u8 = ~240;
+
 test fn bitwise_complement() {
     let zero: u8 = 0;
     let top: u8 = 255;
@@ -223,6 +237,7 @@ test fn bitwise_complement() {
     assert(~zero as u32 == 255);
     assert(LOW_NIBBLE_MASK == 15);
 }
+
 // `loop i in a..b` counts from `a` up to but not including `b`; `a..=b`
 // includes `b`. Both bounds are evaluated once, left to right, before the
 // first iteration, and must have one integer type (an untyped literal takes
@@ -262,6 +277,7 @@ test fn range_loops() {
     loop i in 250..=top { last = i; }
     assert(last == 255);
 }
+
 // Integer arithmetic and array indexing are checked. Proven invalid cases
 // can fail compilation. Dynamic overflow, zero divisors and invalid indices
 // trap at runtime. Floats use IEEE arithmetic.
@@ -282,6 +298,7 @@ const HALF: f32 = 0.5;
 const SHORT_WEEK: bool = DAYS_PER_WEEK < 7;
 const INITIAL: char = 'm';
 const UNIT: string = "seconds";
+
 test fn module_constants() {
     assert(SECONDS_PER_DAY == 86_400);
     assert(DAYS_PER_WEEK * HOURS_PER_DAY == 168);

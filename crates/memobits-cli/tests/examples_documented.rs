@@ -158,3 +158,52 @@ fn every_example_project_documents_and_matches_its_output() {
     let _ = fs::remove_dir_all(&temp);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Every example project and standalone analysis input stays formatted: run
+/// `mb fmt --project PATH` (or `mb fmt examples/analysis/*.mb`) after editing.
+#[test]
+fn every_example_is_formatted() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut manifests: Vec<PathBuf> = vec![examples.join("guide/project.toml")];
+    for group in ["topics", "apps"] {
+        manifests.extend(
+            fs::read_dir(examples.join(group))
+                .unwrap()
+                .map(|entry| entry.unwrap().path().join("project.toml")),
+        );
+    }
+    manifests.retain(|manifest| manifest.is_file());
+    manifests.sort();
+    assert!(manifests.len() >= 13, "found {manifests:?}");
+    let mut failures = Vec::new();
+    for manifest in &manifests {
+        let output = mb(&["fmt", "--check", "--project", manifest.to_str().unwrap()]);
+        if !output.status.success() {
+            failures.push(format!(
+                "{}: run `mb fmt --project {}`\n{}{}",
+                manifest.display(),
+                manifest.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    let mut analysis: Vec<String> = fs::read_dir(examples.join("analysis"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "mb"))
+        .map(|path| path.to_str().unwrap().to_string())
+        .collect();
+    analysis.sort();
+    assert!(!analysis.is_empty());
+    let mut args = vec!["fmt", "--check"];
+    args.extend(analysis.iter().map(String::as_str));
+    let output = mb(&args);
+    if !output.status.success() {
+        failures.push(format!(
+            "examples/analysis: run `mb fmt examples/analysis/*.mb`\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -1867,3 +1867,63 @@ R1 owning overwrite and the H3 generics step).
   RE007) is in `.local-design/logs/f4-mutation.log`. Stale negatives updated: `cli.rs`,
   `d2_owned_struct_transport.rs`, `d2_nested_owner_transport.rs`,
   `d2_record_owner_transport.rs`, `h5b_function_ownership.rs`. Guide: 154 tests.
+
+## Source formatting (2026-11-25, architect default; stage 5 step 1)
+
+- `mb fmt` formats Memobits sources to one canonical style, derived from the
+  style already used by the runnable guide: 4-space indentation, opening
+  braces on the same line, one space around binary operators and after
+  commas/colons, one blank line between top-level items (blank lines inside
+  bodies are preserved but collapsed to at most one), maximum line width 100
+  with breaking of long argument/parameter/field lists one item per line
+  with trailing commas, and all comments preserved in place.
+- Formatting never changes meaning (same syntax tree modulo positions) and
+  is idempotent. `mb fmt --check` reports files that would change and exits
+  non-zero without writing.
+
+### Shipped S5-1 details (2026-11-25)
+
+- `mb fmt [--check] [--project PATH | FILE...]` is shipped; rules, examples, guarantees and
+  limits are in [formatting.md](formatting.md), usage and exit codes in the CLI README
+  ("Formatting"). Exit 0 when nothing needs formatting (or all files were rewritten), 1 when
+  `--check` finds a file that would change, on a syntax error (the file is untouched and the
+  SE diagnostics go to stderr), on a failed self-check (PE008) and on usage or I/O errors.
+- Implementation: `memobits_syntax::format` (`format_source`, `same_syntax`,
+  `syntax_fingerprint`). It is token-driven, not a pretty-printer over the syntax tree, because
+  the tree is lowered (`try` becomes `match`, `Self` is resolved, grouped `use` lists are
+  expanded, parentheses are dropped) and printing from it could not reproduce what the user
+  wrote. Comments are read from the gaps between tokens and attached to tokens; the tree is
+  used only to tell generic `<`/`>` from comparisons and to find item starts. Every result is
+  verified (parses, same tree modulo spans, same comments, second pass identical) before it is
+  returned.
+- Interpretations of the binding style, for the architect to confirm or overrule:
+  1. "One blank line between top-level items" is applied to every pair except two adjacent items
+     that were each written on one line with no blank line between them (runs of `use`, one-line
+     functions and types, as in the guide); a blank line the source had is kept.
+  2. Inline bodies are kept inline: `fn f() -> i32 { 1 }`, `match x { A => 1, B => 2 }`, struct
+     literals and arrays written on one line stay on one line while they fit in 100 columns; a
+     body, `match`, struct, record or array written with a newline after its opening bracket
+     stays expanded. An inline `if`/`else` chain that does not fit is expanded block by block.
+  3. In an expanded `match`, expression arms end with a comma (including the last) and arms whose
+     body begins with `{`, `if` or `match` take none. This removes the `},` the guide and the
+     enf-lexer example used in nine places.
+  4. `where` stays on the line the source put it on.
+  5. A trailing comma in a one-element tuple or tuple pattern is preserved; a parenthesized
+     single expression never gains one.
+- Applied to the examples: `examples/guide`, `examples/topics/*`, `examples/apps/*` and
+  `examples/analysis/*.mb` are formatted (formatting-only change; 15 files changed, mostly blank
+  lines between multi-line items, trailing commas in broken lists and `match` commas).
+  `mb run` and `mb test` output (stdout, stderr, exit status) of every example is byte-identical
+  before and after (`.local-design/logs/s5fmt-before` vs `s5fmt-after`); the only output that
+  differs is the byte count in `mb check` for two projects, because the `memobits.traps` custom
+  section stores source positions (code, data and every other section are byte-identical). The
+  guide still runs 154 tests. `examples_documented.rs` now fails when any example is not
+  formatted. `docs/design/proposed-language-guide.mb` (a historical proposal) does not parse and
+  is not formatted. Memobits sources inside Rust test files are not reformatted.
+- Tests: `crates/memobits-syntax/tests/format_corpus.rs` (4: 42 repository files, 2,712 Memobits
+  programs embedded in Rust tests, each program re-flowed five ways, and 1,401 programs with
+  comments inserted between arbitrary tokens twelve ways, all idempotent, tree-preserving and
+  comment-preserving), `format_cases.rs` (23), `crates/memobits-cli/tests/s5_fmt.rs` (6) and
+  `examples_documented.rs::every_example_is_formatted`.
+- Known limit: dense inline block comments can push a line across the width limit between the
+  first and second pass; the self-check then reports PE008 and leaves the file untouched.

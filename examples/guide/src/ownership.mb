@@ -18,10 +18,12 @@ test fn explicit_drop() {
     assert(bytes.len() == 1);
     assert(bytes.contains(7));
 }
+
 type TextLabel {
     number: u32,
     text: string,
 }
+
 // A local struct can own a literal-backed String alongside primitive fields.
 // Read the field by borrowing it and move the whole struct to transfer it.
 // Scope exit needs no deallocation. The frame is reclaimed on return, and
@@ -39,6 +41,7 @@ test fn local_string_fields() {
     assert(label.number == 7);
     assert(label.text.len() == 0);
 }
+
 // Move a named heap String into a new local struct, then move the whole
 // struct into another local. The final owner releases the String at scope exit.
 // Borrow the field to read it. Wasm gates temporary String initializers,
@@ -55,6 +58,7 @@ test fn local_heap_string_fields() {
         assert(byte_is(moved.text.byte_at(2), 33));
     }
 }
+
 // A flat struct whose fields are Strings and primitives moves into an owned
 // internal parameter from a named local. The callee owns it and releases the
 // String at its exit, on an early return too. The caller cannot use the moved
@@ -72,11 +76,13 @@ fn label_total(label: TextLabel, early: bool) -> u32 {
     if early { return 1; }
     label.number + label.text.len()
 }
+
 fn make_label(number: u32) -> TextLabel {
     let heap := "é".concat("!");
     let label := TextLabel { number: number, text: heap };
     label
 }
+
 test fn owned_string_struct_argument() {
     let heap := "é".concat("!");
     let first := TextLabel { number: 9, text: heap };
@@ -87,16 +93,20 @@ test fn owned_string_struct_argument() {
     assert(label_total(second, false) == 7);
     assert(label_total(spare, true) == 1);
 }
+
 fn label_pair_total(labels: array<TextLabel, 2>, early: bool) -> u32 {
     if early { return 1; }
     label_total_borrowed(labels[0].borrow()) + label_total_borrowed(labels[1].borrow())
 }
+
 fn label_total_borrowed(label: borrow TextLabel) -> u32 {
     label.number + label.text.len()
 }
+
 fn label_row_total(row: borrow (TextLabel, u32)) -> u32 {
     row.0.number + row.0.text.len() + row.1
 }
+
 // Elements are read through a borrow of the element or of the whole tuple.
 // Scope exit releases the Strings, and the array moves into an owned call.
 test fn string_struct_elements() {
@@ -117,15 +127,19 @@ test fn string_struct_elements() {
     assert(label_pair_total(pair, false) == 19);
     assert(label_pair_total(spare, true) == 1);
 }
+
 type NestedLabel {
     label: TextLabel,
     extra: u32,
 }
+
 type LabelSlot [Empty, Holds(NestedLabel), Rows(array<TextLabel, 2>)]
+
 fn nested_label_total(nested: NestedLabel, early: bool) -> u32 {
     if early { return 1; }
     nested.label.number + nested.label.text.len() + nested.extra
 }
+
 fn label_slot_total(slot: LabelSlot) -> u32 {
     match slot {
         LabelSlot::Holds(nested) => nested.label.text.len() + nested.extra,
@@ -133,6 +147,7 @@ fn label_slot_total(slot: LabelSlot) -> u32 {
         LabelSlot::Empty => 0,
     }
 }
+
 // A String-owning struct moves into a field of another struct, into an enum
 // payload, or into an array held by either. The owner then releases the inner
 // Strings once, on normal and early exits. `match` of a whole local enum
@@ -159,6 +174,7 @@ test fn nested_string_owners() {
     assert(label_slot_total(slot) == 6);
     assert(label_slot_total(rows) == 14);
 }
+
 test fn owned_string_struct_result() {
     let made := make_label(4);
     let unused := make_label(1);
@@ -166,14 +182,17 @@ test fn owned_string_struct_result() {
     assert(made.text.len() == 3);
     assert(label_total(made, false) == 7);
 }
+
 type EditableLabel {
     note: string,
     text: string,
 }
+
 fn append_question(text: borrow string) -> string {
     let result := text.concat("?");
     result
 }
+
 // A new local struct can take a direct concat or internal String call
 // result. Initializers run in source order. A temporary owner is released
 // on an early exit from a later initializer. After construction the struct
@@ -193,14 +212,15 @@ test fn temporary_string_fields() {
     assert(byte_is(label.text.byte_at(2), 33));
     assert(byte_is(called.note.byte_at(2), 63));
 }
+
 fn inspect_text_label(label: borrow TextLabel) -> bool {
-    label.number == 9 && byte_length(label.text.borrow()) == 3
-        && byte_is(label.text.byte_at(2), 33)
+    label.number == 9 && byte_length(label.text.borrow()) == 3 && byte_is(label.text.byte_at(2), 33)
 }
+
 fn inspect_shared_text_label(label: share TextLabel) -> bool {
-    label.number == 9 && byte_length(label.text.borrow()) == 3
-        && byte_is(label.text.byte_at(2), 33)
+    label.number == 9 && byte_length(label.text.borrow()) == 3 && byte_is(label.text.byte_at(2), 33)
 }
+
 // Pass an explicit borrow or share of a named owner to a direct internal call.
 // The callee reads fields through either parameter. A share is exclusive for
 // the call, while the caller still owns the struct and can move it afterwards.
@@ -214,6 +234,7 @@ test fn borrow_string_struct() {
     assert(inspect_text_label(moved.borrow()));
     assert(moved.text.len() == 3);
 }
+
 // Direct String field assignment on a var local consumes a named String
 // or stages a literal, concat, or direct internal String call. The RHS can
 // borrow the old field. The write releases the old allocation after the RHS
@@ -246,6 +267,7 @@ test fn replace_returns_the_old_value() {
     assert(replace(counter, 9) == 7);
     assert(counter == 9);
 }
+
 // swap(a, b) exchanges two places of one type without copying heap data. The
 // places must be provably disjoint: different locals or fields, or distinct
 // constant indices. Two dynamic indices into one collection are rejected
@@ -262,6 +284,7 @@ test fn swap_exchanges_disjoint_places() {
     swap(low, high);
     assert(low == 2);
 }
+
 // Assigning an owning element or field is an RHS-first replacement: the new
 // value is evaluated before the old one is released, exactly once.
 test fn overwrite_releases_the_old_value() {
@@ -274,6 +297,7 @@ test fn overwrite_releases_the_old_value() {
     words[1] = extra;
     assert(words[1].len() == 1);
 }
+
 // `x = value` on a whole `var` local, or on a `share` parameter, of any owner
 // type (a String-owning struct, tuple, enum or array, a List, a Box or a
 // function value) is an RHS-first replacement: the right-hand side is evaluated
@@ -285,17 +309,21 @@ fn extend_label(label: TextLabel, extra: u32) -> TextLabel {
     let text := label.text.concat("+");
     TextLabel { number: label.number + extra, text: text }
 }
+
 fn reset_label(label: share TextLabel, replacement: TextLabel) -> u32 {
     label = replacement;
     label.number
 }
+
 fn reassign_unless(early: bool) -> u32 {
     var label := make_label(1);
     let next := make_label(2);
     label = { if early { return 99; } next };
     label.number
 }
+
 type Reading [Pending, Done(string)]
+
 test fn whole_owner_reassignment() {
     var label := make_label(1);
     label = make_label(2);
@@ -338,6 +366,7 @@ test fn whole_owner_reassignment() {
     assert(reassign_unless(true) == 99);
     assert(reassign_unless(false) == 2);
 }
+
 // An owner temporary can be passed straight to an owned parameter: a struct
 // literal or a call result is staged in a hidden local, so the callee still
 // receives a named owner and cleanup stays exact.
@@ -347,10 +376,12 @@ test fn owner_temporaries_as_arguments() {
     assert(label_total(make_label(2), false) == 5);
     assert(label_total(TextLabel { text: "lit", number: 1 }, false) == 4);
 }
+
 // `replace` takes an `if` or `match` value for an owner place: each branch
 // moves its value into the replacement slot, and the other branch's locals are
 // released as usual.
 type Pick [Left, Right]
+
 test fn replace_with_branch_values() {
     var current := "ab".concat("");
     let first := "xyz".concat("");
@@ -365,6 +396,7 @@ test fn replace_with_branch_values() {
     assert(again.len() == 1);
     assert(current.len() == 2);
 }
+
 // A struct literal can mix a String field with an owner field and an array of
 // owners; every field moves in and is released with the struct.
 type Mixed {
@@ -372,6 +404,7 @@ type Mixed {
     first: TextLabel,
     rows: array<TextLabel, 2>,
 }
+
 test fn mixed_owner_struct_literal() {
     let name := "mix".concat("");
     let first := make_label(1);
@@ -381,6 +414,7 @@ test fn mixed_owner_struct_literal() {
     assert(mixed.name.len() == 3);
     assert(mixed.rows[1].number == 3);
 }
+
 // An `if` or `match` can produce an owner value (a `string`, a List or a
 // String-owning struct, tuple or enum) anywhere a value is accepted: a binding,
 // an argument, an assignment or a function result. Each branch moves its value
@@ -391,6 +425,7 @@ fn pick_text(first: bool) -> string {
     let b := "xy".concat("");
     if first { a } else { b }
 }
+
 fn pick_label(first: bool) -> TextLabel {
     let a := "abc".concat("");
     let b := "xy".concat("");
@@ -400,6 +435,7 @@ fn pick_label(first: bool) -> TextLabel {
         TextLabel { number: 2, text: b }
     }
 }
+
 test fn if_and_match_produce_owner_values() {
     let a := "abc".concat("");
     let b := "xy".concat("");
@@ -416,11 +452,13 @@ test fn if_and_match_produce_owner_values() {
     current = match pick { Left => c, Right => d };
     assert(current.len() == 4);
 }
+
 // A struct literal can be a function's last expression or a `return` operand.
 fn label_tail(number: u32, text: string) -> TextLabel {
     if number == 0 { return TextLabel { number: 9, text: text }; }
     TextLabel { number: number, text: text }
 }
+
 test fn struct_literal_as_function_result() {
     let first := "ab".concat("");
     let second := "cde".concat("");
@@ -431,6 +469,7 @@ test fn struct_literal_as_function_result() {
     assert(two.number == 4);
     assert(two.text.len() == 3);
 }
+
 // A heap String or String-owning aggregate that a call returns can be used
 // directly: as a function's last expression or `return` operand, a `push`
 // argument, a field, an array or tuple element, an enum payload, an assigned
@@ -440,14 +479,18 @@ fn fresh_text() -> string {
     let text := "ab".concat("cd");
     text
 }
+
 fn relay_text() -> string { fresh_text() }
+
 fn early_text(early: bool) -> string {
     if early { return fresh_text(); }
     relay_text()
 }
+
 fn fresh_label() -> TextLabel { TextLabel { number: 4, text: fresh_text() } }
 fn relay_label() -> TextLabel { fresh_label() }
 fn text_length(text: string) -> u32 { text.len() }
+
 test fn call_results_in_every_value_position() {
     var words: List<string> = [];
     words.push(fresh_text());
@@ -473,12 +516,14 @@ test fn call_results_in_every_value_position() {
     assert(text_length(fresh_text()) == 4);
     assert(label_total(relay_label(), false) == 8);
 }
+
 // Methods take the same arguments as functions: an owned struct, tuple, enum,
 // array, List or String moves in (a temporary is staged and released by the
 // callee), and `.borrow()` / `.share()` pass a loan for a `borrow` / `share`
 // parameter. Only the receiver keeps its own rules. `of Interface` calls and
 // generic nominal methods work the same way.
 type Meter { base: u32 }
+
 extend Meter {
     fn plus_label(borrow self, label: TextLabel) -> u32 {
         self.base + label.number + label.text.len()
@@ -489,6 +534,7 @@ extend Meter {
     }
     fn plus_pair(borrow self, pair: (string, u32)) -> u32 { self.base + pair.0.len() + pair.1 }
 }
+
 test fn method_arguments_follow_function_rules() {
     let meter := Meter { base: 100 };
     let kept := relay_label();

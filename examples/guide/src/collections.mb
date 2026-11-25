@@ -17,25 +17,30 @@ use alloc::Box;
 
 // Fixed arrays, structs, and ownership.
 pub type Row = array<i32, 3>;
+
 type Station {
     id: u32,
     readings: Row,
 }
+
 fn station(id: u32) -> Station {
     // Every field must be initialized. The order here can differ from the type.
     Station { readings: [0; 3], id: id }
 }
+
 fn record(row: share Row, index: i32, reading: i32) {
     // share grants exclusive write access. The caller sees the update.
     row[index] = reading;
     return;
 }
+
 pub fn total(row: borrow Row) -> i32 {
     // borrow grants read-only access. Primitive values copy implicitly;
     // .copy() makes the same read explicit.
     let first := row[0];
     first + row[1].copy() + row[2]
 }
+
 fn calibrate(var row: Row) -> Row {
     // An owned parameter takes the caller's array. var lets this function edit it.
     row[0] -= 1;
@@ -44,6 +49,7 @@ fn calibrate(var row: Row) -> Row {
     row[2] %= 3;
     row
 }
+
 test fn stations() {
     // Repetition calls station once per element.
     var pair := [station(7); 2];
@@ -70,16 +76,20 @@ test fn stations() {
     assert(total(grid[1].borrow()) == 14);
     assert(pair[1].readings[2] == 9);
 }
+
 // array<u8, N> is the fixed-byte representation.
 fn set_first_byte(buffer: share array<u8, 2>) {
     buffer[0] = 42;
 }
+
 fn first_byte(buffer: borrow array<u8, 2>) -> u8 {
     buffer[0]
 }
+
 fn return_bytes(buffer: array<u8, 2>) -> array<u8, 2> {
     buffer
 }
+
 test fn fixed_bytes() {
     var bytes: array<u8, 2> = [0; 2];
     set_first_byte(bytes.share());
@@ -88,19 +98,19 @@ test fn fixed_bytes() {
     // The utf8-validator project checks malformed bytes and error offsets.
     let valid := match array.validate_utf8(1) {
         Ok(count) => count == 1,
-        Err(_) => false
+        Err(_) => false,
     };
     // Construction copies just the validated prefix into an owned String.
     let copied := match array.to_utf8_string(1) {
         Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
-        Err(_) => false
+        Err(_) => false,
     };
     // contains and index_of read without moving the array. Numeric and bool
     // arrays use == for comparisons, including nested rows.
     // index_of returns the first zero-based match, or None for a miss.
     let first := match [0, 42, 42].index_of(42) {
         Some(index) => index == 1,
-        None => false
+        None => false,
     };
     assert(valid);
     assert(copied);
@@ -109,6 +119,7 @@ test fn fixed_bytes() {
     assert(!array.contains(255));
     assert(first_byte(array.borrow()) == 42);
 }
+
 // Fixed arrays iterate in index order. Each iteration binds an immutable
 // primitive copy. The read loan ends when the loop exits.
 test fn fixed_iteration() {
@@ -126,26 +137,33 @@ test fn fixed_iteration() {
     assert(digits == 13);
     assert(bytes[0] == 7);
 }
+
 fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
     items.get(index)
 }
+
 fn list_has_word(items: borrow List<u32>, value: u32) -> bool {
     items.contains(value)
 }
+
 fn append_word(items: share List<u32>, value: u32) {
     items.push(value);
 }
+
 fn owned_list_length(items: List<u32>) -> u32 {
     items.len()
 }
+
 pub fn make_words(first: u32) -> List<u32> {
     var words: List<u32> = [];
     words.push(first);
     words
 }
+
 fn replace_words(items: share List<u32>, value: u32) {
     items = make_words(value);
 }
+
 // List iteration visits immutable copies in insertion order. An empty List
 // skips the body. A direct call result stays alive until the loop exits.
 // The read loan prevents writes and moves of the receiver during the body.
@@ -171,11 +189,13 @@ test fn list_iteration() {
     assert(bytes.len() == 0);
     assert(first == 1000);
 }
+
 test fn qualified_list_path() {
     var bytes: alloc::List<u8> = [];
     bytes.push(7);
     assert(bytes.len() == 1);
 }
+
 // An annotation selects an empty List. push appends to a whole var local.
 // Moving into a new binding transfers ownership of the backing storage.
 test fn primitive_lists() {
@@ -198,18 +218,18 @@ test fn primitive_lists() {
     let borrowed_contains := list_has_word(words.borrow(), 1000);
     let missing_index := match make_words(1234).index_of(999) {
         Some(_) => false,
-        None => true
+        None => true,
     };
     let temporary_word := match make_words(1234).get(0) {
         Some(value) => value == 1234,
-        None => false
+        None => false,
     };
     // A direct borrow parameter also accepts an explicit borrow of a direct
     // List call result. The owner lives through the call and is released
     // afterward or on a normal early exit from a later argument.
     let borrowed_word := match list_word_at(make_words(2345).borrow(), 0) {
         Some(value) => value == 2345,
-        None => false
+        None => false,
     };
     // A direct owned parameter takes a direct List call result. Arguments
     // run left to right. The caller releases the temporary if a later
@@ -221,7 +241,7 @@ test fn primitive_lists() {
     // A direct call borrows the List. get copies the element out.
     let word := match list_word_at(moved.borrow(), 1) {
         Some(value) => value == 2000,
-        None => false
+        None => false,
     };
     let old_length := moved.len();
     // Replacement releases the old block after the RHS finishes.
@@ -236,11 +256,11 @@ test fn primitive_lists() {
     // Pop removes the last element and keeps the backing storage for reuse.
     let popped := match handle.pop() {
         Some(value) => value == 6000,
-        None => false
+        None => false,
     };
     let replacement := match handle.get(0) {
         Some(value) => value == 5000,
-        None => false
+        None => false,
     };
     // Clear removes every element and keeps the storage for subsequent pushes.
     handle.clear();
@@ -282,12 +302,15 @@ type Entry {
     label: string,
     weight: u32,
 }
+
 fn size_of(text: borrow string) -> u32 {
     text.len()
 }
+
 fn entry_weight(entry: borrow Entry) -> u32 {
     entry.label.len() + entry.weight
 }
+
 test fn owned_array_elements() {
     let first := "alpha".concat("");
     let second := "be".concat("ta");
@@ -323,17 +346,21 @@ fn word_total(words: borrow List<string>) -> u32 {
     }
     total
 }
+
 fn add_word(words: share List<string>, word: string) {
     words.push(word);
 }
+
 fn take_words(words: List<string>) -> u32 {
     words.len() + words[0].len()
 }
+
 fn two_words() -> List<string> {
     let first := "one".concat("");
     let words: List<string> = [first, "two"];
     words
 }
+
 test fn list_element_types() {
     // Every width, bool and char; indexing copies a primitive element.
     var wide: List<u64> = [5_000_000_000];
@@ -356,9 +383,11 @@ test fn list_element_types() {
     };
     assert(found == 1);
 }
+
 fn wide_index(items: borrow List<u64>, value: u64) -> u32? {
     items.index_of(value)
 }
+
 test fn list_of_strings() {
     var words: List<string> = two_words();
     let more := "three".concat("");
@@ -386,6 +415,7 @@ test fn list_of_strings() {
     scratch = two_words();
     assert(scratch.len() == 2);
 }
+
 test fn list_of_owner_structs() {
     let head := Entry { label: "head".concat(""), weight: 1 };
     var entries: List<Entry> = [head];
@@ -407,6 +437,7 @@ test fn list_of_owner_structs() {
     assert(taken_weight == 2);
     assert(entries.len() == 1);
 }
+
 test fn list_of_tuples_and_arrays() {
     let name := "pair".concat("");
     var pairs: List<(string, u32)> = [];
@@ -415,6 +446,7 @@ test fn list_of_tuples_and_arrays() {
     let rows: List<array<u32, 2>> = [[1, 2], [3, 4]];
     assert(rows[1][0] + rows[0][1] == 5);
 }
+
 // `loop x in array` over non-copyable elements binds read-only borrows, as for
 // a List. The array cannot be mutated inside the loop (BE005).
 test fn loop_over_an_array_of_strings() {
@@ -427,6 +459,7 @@ test fn loop_over_an_array_of_strings() {
     }
     assert(total == 5);
 }
+
 // List elements are places too: replace and swap work on them, and `xs[i] = v`
 // releases the old element once.
 test fn replace_and_swap_list_elements() {
@@ -440,6 +473,7 @@ test fn replace_and_swap_list_elements() {
     words[1] = "yy".concat("");
     assert(words[1].len() == 2);
 }
+
 // `List<List<T>>`: an outer List owns inner Lists. `outer.push(inner)` moves
 // the inner List in, `outer[i]` is a List place (`outer[i][j]` reads, and
 // `push`, `pop`, `clear`, `len`, `replace`, `swap` and `outer[i] = v` work on
@@ -474,6 +508,7 @@ test fn nested_lists() {
     words.push(row);
     assert(words[0][0].len() == 5);
 }
+
 // A List is an ordinary owner, so it composes with the other aggregates: a
 // struct or record field, a tuple element, an array element, and the payload
 // of `Some(..)`, `Ok(..)` or a user enum variant. Field and element places work
@@ -486,7 +521,9 @@ fn heap_text(base: string) -> string {
     let text := base.concat("");
     text
 }
+
 type Bag { items: List<i32>, label: string }
+
 fn count_to(n: i32) -> List<i32> {
     var out: List<i32> = [];
     var i := 0;
@@ -497,12 +534,16 @@ fn count_to(n: i32) -> List<i32> {
     }
     out
 }
+
 fn count_tail() -> List<i32> { count_to(3) }
+
 fn count_either(first: bool) -> List<i32> {
     if first { return count_to(4); }
     count_tail()
 }
+
 fn bag_total(bag: Bag) -> i32 { bag.items.len() as i32 + bag.label.len() as i32 }
+
 test fn list_call_results() {
     let a := count_either(true);
     let b := count_either(false);
@@ -514,6 +555,7 @@ test fn list_call_results() {
     outer.push(count_tail());
     assert(outer[1].len() == 3);
 }
+
 test fn lists_inside_aggregates() {
     var bag := Bag { items: count_to(3), label: heap_text("abcd") };
     bag.items.push(10);
@@ -538,6 +580,7 @@ test fn lists_inside_aggregates() {
     grid[1] = count_to(7);
     assert(grid[1].len() == 7);
 }
+
 test fn constant_array_length() {
     // An imported `u32` constant can be an array length or a repeat count.
     let week: array<u32, DAYS_PER_WEEK> = [1; DAYS_PER_WEEK];
@@ -549,9 +592,11 @@ test fn constant_array_length() {
 // A type may contain itself only through a Box (here, directly; a `T?` of a
 // Box or a List of Boxes works too). Direct recursion is rejected.
 type Chain [End, Link(i32, Box<Chain>)]
+
 fn chain_of(count: i32) -> Chain {
     if count == 0 { Chain::End } else { Chain::Link(count, Box(chain_of(count - 1))) }
 }
+
 fn chain_len(chain: borrow Chain) -> i32 {
     // A bound child is a borrowed Box; `.borrow()` lends the Chain inside it.
     match chain {
@@ -559,6 +604,7 @@ fn chain_len(chain: borrow Chain) -> i32 {
         Link(_, rest) => 1 + chain_len(rest.borrow()),
     }
 }
+
 fn chain_total(chain: Chain) -> i32 {
     // An owned `match` moves the Box out of the payload; `unbox` takes its value.
     match chain {
@@ -566,15 +612,19 @@ fn chain_total(chain: Chain) -> i32 {
         Link(value, rest) => value + chain_total(unbox(rest)),
     }
 }
+
 type Pixel { x: i32, y: i32 }
+
 extend Pixel {
     fn sum(borrow self) -> i32 { self.x + self.y }
 }
+
 test fn boxes_hold_recursive_types() {
     let chain := chain_of(4);
     assert(chain_len(chain.borrow()) == 4);
     assert(chain_total(chain) == 10);
 }
+
 test fn boxes_see_through_for_fields_and_methods() {
     // Fields, methods and indexing work on the boxed value; writes need `var`.
     var pixel := Box(Pixel { x: 1, y: 2 });
@@ -589,6 +639,7 @@ test fn boxes_see_through_for_fields_and_methods() {
     let inner := unbox(pixel);
     assert(inner.y == 9);
 }
+
 test fn boxes_forward_builtin_string_and_list_methods() {
     // `len`, `push`, `pop`, `get`, `contains` and the like act on the value in
     // the box; mutation needs a `var` box or a `share` parameter.
@@ -601,7 +652,9 @@ test fn boxes_forward_builtin_string_and_list_methods() {
     let word := Box("héllo");
     assert(word.len() == 6);
 }
+
 type Links { head: Chain }
+
 test fn releasing_a_long_chain_does_not_recurse() {
     // Releasing a recursive owner is iterative, so a chain of any length drops
     // without growing the call stack. (Building uses `replace` in a loop.)

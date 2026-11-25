@@ -31,6 +31,7 @@ Errors use the shared diagnostics renderer with these stable project codes:
 | PE005 | Unused (formerly the unsupported check command) |
 | PE006 | Unsupported build target or export |
 | PE007 | Invalid `[build]` setting, such as a `stack_size` out of range or not a multiple of 16 |
+| PE008 | `mb fmt` self-check failure: the formatter could not format a file safely and left it unchanged |
 
 The `MW` prefix is reserved for non-failing warnings, which render as
 `warning[MWnnn]: message` with the same file, line, column and caret layout as
@@ -426,6 +427,36 @@ keep working, and the emitted module contains no allocator function, no
 `memory.grow` and a memory whose maximum equals its minimum. The setting
 applies to `check`, `build`, `run` and `test` and is independent of
 `[host] profile`. See `examples/topics/core-only`.
+
+## Formatting
+
+`mb fmt [--check] [--project PATH | FILE...]` rewrites Memobits sources to the
+one canonical style described in [formatting.md](../../docs/design/formatting.md):
+4-space indentation, braces on the same line, lines of at most 100 characters
+with long argument, parameter and field lists broken one item per line with
+trailing commas, one blank line between top-level items, and every comment kept
+in place. Formatting never changes meaning (the syntax tree is the same modulo
+positions, numeric literals keep their spelling, string contents are untouched,
+parentheses are never added or removed) and is idempotent.
+
+- With no file arguments the command formats every source module of the
+  project selected by `--project PATH` (default `./project.toml`), reachable or
+  not. With file arguments it formats exactly those files; `--project` and file
+  arguments cannot be combined.
+- Without `--check` each file that changes is rewritten in place and reported as
+  `formatted PATH (-N +M lines)` on stdout, followed by a summary line.
+- With `--check` nothing is written. Each file that would change is listed as
+  `would reformat PATH (-N +M lines)` on stdout, where `-N +M` is the size of the
+  differing region.
+- A file that does not parse is reported with its SE diagnostics on stderr and
+  left untouched; the remaining files are still processed. Every output is
+  re-parsed and compared with the input (syntax tree, comments, and a second
+  formatting pass) before it is written; a failed self-check is reported as
+  PE008 and the file is left unchanged.
+- Exit status: 0 when every file is formatted (or was successfully rewritten);
+  1 when `--check` finds a file that would change, when any file has a syntax
+  error or fails the self-check, and on usage errors (PE004) or an unreadable
+  file or project (PE001 to PE003).
 
 ## Source-level tests
 

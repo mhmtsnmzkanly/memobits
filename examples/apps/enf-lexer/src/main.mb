@@ -70,14 +70,14 @@ fn token_is(scan_result: Scan, value: u32, start: i32, end: i32) -> bool {
         Ok(token) => match token {
             Some(integer) => integer.value == value && integer.start == start && integer.end == end,
             None => false,
-        },
+        }
         Err(_) => false,
     }
 }
 
 fn at_end(scan_result: Scan) -> bool {
     match scan_result {
-        Ok(token) => match token { None => true, Some(_) => false },
+        Ok(token) => match token { None => true, Some(_) => false }
         Err(_) => false,
     }
 }
@@ -91,10 +91,10 @@ fn error_is(scan_result: Scan, code: u32, offset: i32?) -> bool {
                 Some(position) => match offset {
                     Some(expected) => position == expected,
                     None => false,
-                },
-                None => match offset { None => true, Some(_) => false },
+                }
+                None => match offset { None => true, Some(_) => false }
             }
-        },
+        }
         Ok(_) => false,
     }
 }
@@ -110,8 +110,8 @@ fn main() -> i32 ! Error {
             return Err(Error { code: error.code });
         };
         match token {
-            Some(_) => { continue; },
-            None => { break; },
+            Some(_) => { continue; }
+            None => { break; }
         }
     }
     Ok(0)

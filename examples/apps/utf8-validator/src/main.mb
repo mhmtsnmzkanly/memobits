@@ -17,10 +17,10 @@ fn error_is(bytes: array<u8, 8>, length: i32, code: u32, expected: i32?) -> bool
                 Some(position) => match expected {
                     Some(wanted) => position == wanted,
                     None => false,
-                },
-                None => match expected { None => true, Some(_) => false },
+                }
+                None => match expected { None => true, Some(_) => false }
             }
-        },
+        }
     }
 }
 
@@ -89,7 +89,7 @@ test fn array_size_is_inferred() {
     let short: array<u8, 2> = [195, 169];
     let inferred_size := match short.borrow().validate_utf8(2) {
         Ok(count) => count == 1,
-        Err(_) => false
+        Err(_) => false,
     };
     assert(inferred_size);
 }

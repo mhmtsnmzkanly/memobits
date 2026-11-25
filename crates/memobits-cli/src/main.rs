@@ -17,7 +17,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --lib            Resolve library exports instead of the application entry\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact; unlike build and run it also checks every project module, reachable or not, and every test. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check and test but never included in the application or library artifact, and build and run ignore tests. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb fmt [--check] [--project PATH | FILE...]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  fmt              Format source modules in place to the canonical style (see docs/design/formatting.md)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --check          fmt: list files that would change and exit 1 without writing\n  --lib            Resolve library exports instead of the application entry\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact; unlike build and run it also checks every project module, reachable or not, and every test. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check and test but never included in the application or library artifact, and build and run ignore tests. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -1145,8 +1145,192 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     Ok(output)
 }
 
+/// What `mb fmt` produced: the stdout report, the stderr text and whether the
+/// command succeeded (exit status 0).
+struct FmtOutcome {
+    stdout: String,
+    stderr: String,
+    ok: bool,
+}
+
+/// Lines removed and added once the unchanged head and tail are trimmed.
+fn changed_lines(before: &str, after: &str) -> (usize, usize) {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (old.len() - head - tail, new.len() - head - tail)
+}
+
+fn display_path(path: &Path) -> String {
+    match std::env::current_dir() {
+        Ok(current) => path
+            .strip_prefix(&current)
+            .unwrap_or(path)
+            .display()
+            .to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// `mb fmt [--check] [--project PATH | FILE...]`.
+fn fmt_command(arguments: Vec<OsString>) -> Result<FmtOutcome, String> {
+    let mut check = false;
+    let mut selected = None;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut args = arguments.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            if args.next().is_some() {
+                return Err(diagnostic(4, "unexpected arguments after --help"));
+            }
+            return Ok(FmtOutcome {
+                stdout: HELP.into(),
+                stderr: String::new(),
+                ok: true,
+            });
+        }
+        if arg == "--check" {
+            check = true;
+        } else if arg == "--project" {
+            if selected.is_some() {
+                return Err(diagnostic(4, "--project may only be specified once"));
+            }
+            selected = Some(
+                args.next()
+                    .filter(|value| !value.is_empty() && !value.to_string_lossy().starts_with('-'))
+                    .map(PathBuf::from)
+                    .ok_or_else(|| diagnostic(4, "--project requires a manifest path"))?,
+            );
+        } else if arg.to_string_lossy().starts_with('-') {
+            return Err(diagnostic(
+                4,
+                format!(
+                    "unexpected fmt argument '{}'; fmt accepts --check, --project and source files",
+                    arg.to_string_lossy()
+                ),
+            ));
+        } else {
+            files.push(PathBuf::from(arg));
+        }
+    }
+    if selected.is_some() && !files.is_empty() {
+        return Err(diagnostic(
+            4,
+            "fmt takes either --project or source files, not both",
+        ));
+    }
+    if files.is_empty() {
+        let project = Project::load(".", selected.as_deref()).map_err(project_error)?;
+        files = project
+            .modules
+            .iter()
+            .map(|module| module.path.clone())
+            .collect();
+    }
+    let mut outcome = FmtOutcome {
+        stdout: String::new(),
+        stderr: String::new(),
+        ok: true,
+    };
+    let (mut changed, mut unchanged) = (0usize, 0usize);
+    for (index, path) in files.iter().enumerate() {
+        let name = display_path(path);
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                outcome
+                    .stderr
+                    .push_str(&diagnostic(1, format!("{name}: {error}")));
+                outcome.ok = false;
+                continue;
+            }
+        };
+        let id = SourceId(index as u32);
+        match memobits_syntax::format::format_source(id, &text) {
+            Ok(formatted) if formatted == text => unchanged += 1,
+            Ok(formatted) => {
+                changed += 1;
+                let (removed, added) = changed_lines(&text, &formatted);
+                if check {
+                    let _ = writeln!(
+                        outcome.stdout,
+                        "would reformat {name} (-{removed} +{added} lines)"
+                    );
+                    outcome.ok = false;
+                } else if let Err(error) = fs::write(path, &formatted) {
+                    outcome
+                        .stderr
+                        .push_str(&diagnostic(1, format!("{name}: {error}")));
+                    outcome.ok = false;
+                } else {
+                    let _ = writeln!(
+                        outcome.stdout,
+                        "formatted {name} (-{removed} +{added} lines)"
+                    );
+                }
+            }
+            Err(memobits_syntax::format::FormatError::Syntax(diagnostics)) => {
+                let source = SourceFile {
+                    id,
+                    name: &name,
+                    text: &text,
+                };
+                for diagnostic in &diagnostics {
+                    outcome.stderr.push_str(&render_with(diagnostic, &|wanted| {
+                        (wanted == id).then_some(source)
+                    }));
+                }
+                outcome.ok = false;
+            }
+            Err(memobits_syntax::format::FormatError::Internal(message)) => {
+                outcome.stderr.push_str(&diagnostic(
+                    8,
+                    format!("{name}: the formatter could not format this file safely ({message}); it was left unchanged"),
+                ));
+                outcome.ok = false;
+            }
+        }
+    }
+    let _ = if check {
+        writeln!(
+            outcome.stdout,
+            "fmt: {changed} file(s) would be reformatted, {unchanged} already formatted"
+        )
+    } else {
+        writeln!(
+            outcome.stdout,
+            "fmt: {changed} file(s) reformatted, {unchanged} unchanged"
+        )
+    };
+    Ok(outcome)
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1).peekable();
+    if arguments.peek().is_some_and(|command| command == "fmt") {
+        arguments.next();
+        return match fmt_command(arguments.collect()) {
+            Ok(outcome) => {
+                print!("{}", outcome.stdout);
+                eprint!("{}", outcome.stderr);
+                if outcome.ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => {
+                eprint!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if arguments.peek().is_some_and(|command| command == "test") {
         arguments.next();
         return match test_command(arguments.collect()) {

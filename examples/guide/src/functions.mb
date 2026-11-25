@@ -30,6 +30,7 @@ fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
 fn twice(f: fn(i32) -> i32, x: i32) -> i32 { f(f(x)) }
 fn then(f: fn(i32) -> i32, g: fn(i32) -> i32, x: i32) -> i32 { g(f(x)) }
 fn choose(flag: bool) -> fn(i32) -> i32 { if flag { inc } else { dbl } }
+
 test fn named_functions_are_values() {
     // A top-level function named without a call is a value of its type.
     let f := inc;
@@ -51,6 +52,7 @@ test fn named_functions_are_values() {
 // reassigned as a whole.
 fn plus(n: i32) -> fn(i32) -> i32 { fn(x) => x + n }
 fn after(f: fn(i32) -> i32, n: i32) -> fn(i32) -> i32 { fn(x) => f(x) + n }
+
 test fn function_values_are_reassigned_whole() {
     var f := inc;
     f = dbl;
@@ -67,6 +69,7 @@ test fn function_values_are_reassigned_whole() {
 // parameter does (a second use is BE001). Each mention of a function name is
 // a new value.
 fn probe_twice(f: borrow fn(i32) -> i32) -> i32 { f(1) + f(2) }
+
 test fn function_values_are_move_only_and_lent() {
     let f := inc;
     assert(f(1) == 2);
@@ -84,6 +87,7 @@ test fn function_values_are_move_only_and_lent() {
 // from `-> R` or the expected type. Without either, an `=>` body infers it.
 const OFFSET: i32 = 100;
 fn shifted(x: i32) -> i32 => x + OFFSET
+
 test fn anonymous_functions() {
     assert(apply(fn(x: i32) -> i32 => x + 1, 1) == 2);
     assert(apply(fn(x) => x + 2, 1) == 3);
@@ -111,9 +115,11 @@ test fn anonymous_functions() {
 // `replace` (or `swap`), as for any owner.
 type Holder { callback: fn(i32) -> i32, base: i32 }
 type Shadowing { run: fn(i32) -> i32 }
+
 extend Shadowing {
     fn run(borrow self, x: i32) -> i32 => x + 1000
 }
+
 test fn calls_through_values() {
     let holder := Holder { callback: inc, base: 4 };
     assert(holder.callback(holder.base) == 5);
@@ -138,7 +144,8 @@ test fn calls_through_values() {
 // array and List elements, enum payloads and `T?`. A stored value is called in
 // place (`list[i](x)`, `holder.run(x)`); `List::get` would copy it and is
 // rejected (TE022), so take it out with `pop`, `replace` or `swap`.
-type Op [ Unary(fn(i32) -> i32), Binary(fn(i32, i32) -> i32), Nothing ]
+type Op [Unary(fn(i32) -> i32), Binary(fn(i32, i32) -> i32), Nothing]
+
 fn run_op(op: Op, x: i32) -> i32 {
     match op {
         Unary(f) => f(x),
@@ -146,9 +153,11 @@ fn run_op(op: Op, x: i32) -> i32 {
         Nothing => 0,
     }
 }
+
 fn maybe_apply(f: (fn(i32) -> i32)?, x: i32) -> i32 {
     match f { Some(g) => g(x), None => -1 }
 }
+
 test fn function_values_in_aggregates() {
     let pair: (fn(i32) -> i32, i32) = (dbl, 4);
     assert(pair.0(pair.1) == 8);
@@ -184,6 +193,7 @@ fn through_borrow(f: fn(borrow string) -> u32, s: borrow string) -> u32 { f(s) }
 fn through_owned(f: fn(string) -> u32) -> u32 { let s := "he".concat("llo"); f(s) }
 fn through_share(f: fn(share u32), n: share u32) { f(n.share()); f(n.share()); }
 fn through_result(f: fn(u32) -> string) -> u32 { let s := f(1); s.len() }
+
 test fn access_modes_and_owners() {
     let text := "hello".concat("!");
     assert(through_borrow(length, text.borrow()) == 6);
@@ -198,6 +208,7 @@ test fn access_modes_and_owners() {
 // A generic function is a value only where an expected function type fixes its
 // type arguments; otherwise the use is an error that names the missing type.
 fn identity<T>(value: T) -> T { value }
+
 test fn generic_function_values() {
     let on_numbers: fn(i32) -> i32 = identity;
     let on_flags: fn(bool) -> bool = identity;
@@ -238,6 +249,7 @@ test fn generic_function_values() {
 fn visit(f: share fn(i32), n: i32) { loop i in 0..n { f(i); } }
 fn probe(f: borrow fn(i32) -> i32, x: i32) -> i32 { f(x) }
 fn weigh(f: borrow fn(borrow string) -> u32, s: borrow string) -> u32 { f(s) }
+
 test fn closures_capture_by_borrow_and_share() {
     var total := 0;
     var flag := false;
@@ -257,6 +269,7 @@ test fn closures_capture_by_borrow_and_share() {
 }
 
 type Counter { hits: i32, label: string }
+
 test fn closures_capture_strings_structs_and_lists() {
     var counter := Counter { hits: 0, label: "tick" };
     var items: List<i32> = [];
@@ -278,6 +291,7 @@ test fn closures_capture_strings_structs_and_lists() {
 
 fn call_twice(f: share fn(i32), x: i32) { f(x); f(x); }
 fn read_twice(f: borrow fn() -> i32) -> i32 { f() + f() }
+
 test fn closures_bound_with_let_and_loans() {
     var total := 0;
     let bump := fn(x: i32) { total += x; };
@@ -294,18 +308,22 @@ test fn closures_bound_with_let_and_loans() {
 }
 
 fn call2(f: borrow fn(i32) -> i32, x: i32) -> i32 { f(x) + f(x + 1) }
+
 fn wrap(f: borrow fn(i32) -> i32, k: i32) -> i32 {
     // A closure that captures a `borrow fn` parameter and only calls it.
     call2(fn(x) => f(x) + k, 1)
 }
+
 fn nested(n: i32) -> i32 {
     var total := 0;
     visit(fn(a) => visit(fn(b) => total += a * b, n), n);
     total
 }
+
 fn fact(f: borrow fn(i32) -> i32, n: i32) -> i32 {
     if n <= 1 { f(1) } else { n * fact(f, n - 1) }
 }
+
 test fn nested_closures_and_recursion_through_helpers() {
     let base := 3;
     let add := fn(x: i32) -> i32 => x + base;
@@ -322,6 +340,7 @@ fn plain(g: borrow fn(i32) -> i32) -> i32 => g(5)
 fn fill(l: share List<i32>, n: i32) { loop i in 0..n { l.push(i); } }
 fn sum_list(l: borrow List<i32>) -> i32 { var t := 0; loop x in l { t += x; } t }
 fn make_list(n: i32) -> List<i32> { var l: List<i32> = []; fill(l.share(), n); l }
+
 fn run_lists(
     f: fn(share List<i32>, i32),
     g: fn(borrow List<i32>) -> i32,
@@ -332,6 +351,7 @@ fn run_lists(
     let m := make(4);
     g(l.borrow()) + g(m.borrow())
 }
+
 test fn function_types_with_closures_and_lists() {
     let base := 7;
     assert(higher(fn(g) => g(1) + base) == 9);
@@ -387,16 +407,19 @@ test fn function_types_with_closures_and_lists() {
 // rejects a closure with captures (TE033); a non-capturing function value
 // never allocates.
 fn make_adder(n: i64) -> fn(i64) -> i64 { fn(x) => x + n }
+
 fn make_counter() -> var fn() -> u64 {
     var c: u64 = 0;
     fn() -> u64 { c += 1; c }
 }
+
 fn make_length(text: string) -> fn() -> u64 { fn() -> u64 => text.len() as u64 }
 fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 { fn(x) => g(f(x)) }
 type Handler { name: string, action: fn() -> u64 }
 fn run_twice(var f: var fn() -> u64) -> u64 { f() + f() }
 fn probe_owned(f: borrow fn(i64) -> i64, x: i64) -> i64 { f(x) }
 fn bump_twice(f: share fn() -> u64) -> u64 { f() + f() }
+
 test fn owned_closures_capture_by_move_and_copy() {
     let add := make_adder(10);
     assert(add(5) == 15);
@@ -413,6 +436,7 @@ test fn owned_closures_capture_by_move_and_copy() {
     let outer: fn(i64) -> fn(i64) -> i64 = fn(a) => fn(b) => a + b + n;
     assert(outer(1)(2) == 103);
 }
+
 test fn owned_closures_are_values_in_every_owned_position() {
     let handler := Handler { name: "tick".concat("s"), action: make_length("abc".concat("d")) };
     assert(handler.action() == 4);
@@ -437,6 +461,7 @@ test fn owned_closures_are_values_in_every_owned_position() {
     assert(old(0) == 1);
     assert(slot(0) == 2);
 }
+
 test fn closures_mutate_their_own_environment_through_a_mutable_place() {
     var counter := make_counter();
     counter();
@@ -448,6 +473,7 @@ test fn closures_mutate_their_own_environment_through_a_mutable_place() {
     assert(run_twice(make_counter()) == 3);
     assert(bump_twice(counter) == 9);
 }
+
 test fn owned_closures_are_lent_by_borrow_and_share() {
     let add := make_adder(7);
     assert(probe_owned(add, 1) == 8);
@@ -455,10 +481,12 @@ test fn owned_closures_are_lent_by_borrow_and_share() {
     // The closure is still ours afterwards.
     assert(add(3) == 10);
 }
+
 fn plus_one(x: i64) -> i64 => x + 1
 fn call_owned(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
 fn call_var(var f: var fn(i64) -> i64, x: i64) -> i64 { f(x) }
 type Accumulator { total: var fn(i64) -> i64 }
+
 test fn plain_function_values_follow_the_same_rules() {
     // Each mention of a name is a new value; a stored one is lent.
     assert(call_owned(plus_one, 1) == 2);

@@ -44,8 +44,13 @@ fn lowest(frontier: borrow Frontier, goal_x: i32, goal_y: i32) -> i32? {
     if best < 0 { None } else { Some(best) }
 }
 
-pub fn shortest_cost(grid: borrow Grid, start_x: i32, start_y: i32,
-                     goal_x: i32, goal_y: i32) -> i32? {
+pub fn shortest_cost(
+    grid: borrow Grid,
+    start_x: i32,
+    start_y: i32,
+    goal_x: i32,
+    goal_y: i32,
+) -> i32? {
     if !passable(grid, start_x, start_y) || !passable(grid, goal_x, goal_y) {
         return None;
     }
@@ -61,7 +66,7 @@ pub fn shortest_cost(grid: borrow Grid, start_x: i32, start_y: i32,
     loop {
         let cell := match lowest(frontier.borrow(), goal_x, goal_y) {
             Some(next) => next,
-            None => { return None; },
+            None => { return None; }
         };
         let cost := frontier.distance[cell];
         // With a consistent heuristic, a cell selected at minimum g + h
