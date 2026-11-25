@@ -479,7 +479,7 @@ impl Checker {
         span: Span,
     ) -> Option<(FunctionId, Ty)> {
         let function_ty = Ty::Function(parameter_types, Box::new(result));
-        let Some(IrType::Function(signature)) = ir_type(&function_ty) else {
+        let Some(IrType::Function(signature)) = super::ir_scalar_function(&function_ty) else {
             self.error(
                 7,
                 span,

@@ -362,6 +362,12 @@ fn transfer_instruction(
                 transfer_operand(capture, state, diagnostics.as_deref_mut(), function);
             }
         }
+        InstructionKind::ClosureOwned { env, .. } => {
+            transfer_operand(env, state, diagnostics, function);
+        }
+        InstructionKind::ClosureReadOnly { value } => {
+            transfer_operand(value, state, diagnostics, function);
+        }
         InstructionKind::Call { callee, arguments } => {
             let mut diagnostics = diagnostics;
             transfer_operand(callee, state, diagnostics.as_deref_mut(), function);

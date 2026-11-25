@@ -58,6 +58,24 @@ Wasm type of the callee's signature (signatures are deduplicated with the
 functions' own types). Modules without function values have no table or element
 section. Function values cannot be exported or returned by the entry function.
 
+### Owned closures (H5)
+
+A function type that has an owned closure with captures somewhere in the program
+is represented as a wrapper struct `{ call, env }` (a tuple-like IR struct named
+after the function type): `call` is the function value above, `env` a `Box` of a
+compiler-made enum with one variant per closure literal (plus `Plain`). The
+variant holds the captured values. `ClosureOwned` builds `call` for a box: the
+environment word is the address of the enum value inside the heap block (box
+block + content offset). The table thunk of an owned closure computes each
+capture address as `env + payload offset of the variant field` and calls the
+lifted function with those addresses (a frame closure's thunk loads addresses
+from its frame record instead). Release is ordinary struct/enum/box release: no
+special code. A closure that mutates its environment is flagged by bit 31 of the
+slot word (`ClosureOwned { mutating }`); when the program has such a closure,
+every indirect call masks the bit before the table check and `ClosureReadOnly`
+(emitted before calls through immutable places) traps with reason 14 when it is
+set. Modules without owned closures are unchanged.
+
 ## Trap reporting
 
 Every checked failure (integer overflow, division by zero, array bounds, input
@@ -87,6 +105,7 @@ program order, starting at 1 (at most 2^23 - 1).
 | 11 | ShiftCount | shift count must be less than the bit width |
 | 12 | AssertionFailed | assertion failed (`assert(false)`) |
 | 13 | InvalidFunction | call through an invalid function value (outside the function table) |
+| 14 | MutatingClosure | a closure that mutates its environment was called through an immutable place |
 
 Codes 5 and 6 are stored *before* a native Wasm division, which traps by itself.
 The host refines them by the native trap kind: divide-by-zero gives "division by

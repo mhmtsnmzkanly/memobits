@@ -652,18 +652,7 @@ fn access_after_the_last_use_of_a_closure_is_allowed() {
 #[test]
 fn capturing_closures_cannot_escape() {
     let second_class = "second-class";
-    // Returned directly.
-    rejects(
-        "fn make() -> fn(i32) -> i32 { let base := 3; fn(x: i32) -> i32 => x + base }\nfn main() -> i32 { make()(1) }\n",
-        "TE017",
-        second_class,
-    );
-    // Stored in a field, an array, a List.
-    rejects(
-        "type H { f: fn(i32) -> i32 }\nfn main() -> i32 { let base := 3; let h := H { f: fn(x: i32) -> i32 => x + base }; h.f(1) }\n",
-        "TE017",
-        second_class,
-    );
+    // A second-class closure stored in an array or a List.
     rejects(
         "fn main() -> i32 { let base := 3; let g := fn(x: i32) -> i32 => x + base; let fs := [g]; 0 }\n",
         "TE017",
@@ -696,17 +685,11 @@ fn capturing_closures_cannot_escape() {
         "TE017",
         second_class,
     );
-    // Passed to an owned `fn` parameter.
-    rejects(
-        "fn own(f: fn(i32), n: i32) {}\nfn main() -> i32 { var t := 0; own(fn(x) => t += x, 3); t }\n",
-        "TE017",
-        second_class,
-    );
-    // A closure that captures a `borrow fn` parameter is a capturing closure.
+    // An owned closure cannot capture a `borrow fn` parameter (H5).
     rejects(
         "fn keep(f: borrow fn(i32) -> i32) -> fn(i32) -> i32 { fn(x) => f(x) }\nfn main() -> i32 { 0 }\n",
         "TE017",
-        second_class,
+        "captures by move",
     );
 }
 

@@ -924,13 +924,9 @@ fn main() -> u32 {
 
 #[test]
 fn owned_function_values_cannot_capture() {
-    // Capturing closures arrived with H2 (`h2_closures.rs`); an owned `fn`
-    // value still cannot capture, because it could escape.
-    rejects(
-        "fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }\nfn outer(k: i32) -> i32 { apply(fn(x) => x + k, 1) }\nfn main() -> i32 { outer(1) }\n",
-        "TE017",
-        "second-class",
-    );
+    // A second-class closure cannot become an owned `fn` value (H5 owned
+    // closures are written where an owned function type is expected; see
+    // `h5_owned_closures.rs`).
     rejects(
         "fn main() -> i32 { let n := 5; let f := fn(x: i32) -> i32 => x + n; let g: fn(i32) -> i32 = f; g(1) }\n",
         "TE017",

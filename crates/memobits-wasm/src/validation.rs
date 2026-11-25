@@ -10,8 +10,16 @@ pub(super) fn validate_string_struct_borrows(
 ) {
     use memobits_ir::Access;
 
-    let is_string_struct =
-        |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields());
+    // The wrapper of an owned function type (a callable word and a box) is
+    // lent and forwarded like any function value, so it is not restricted
+    // like a String-owning struct.
+    let is_function_wrapper = |id: &memobits_ir::TypeId| {
+        program.types.get(id.0 as usize).is_some_and(|definition| {
+            definition.path.module.as_slice() == ["\0tuple"]
+                && definition.path.name.starts_with("fn(")
+        })
+    };
+    let is_string_struct = |ty: &Type| matches!(ty, Type::Struct(id) if structs[id.0 as usize].has_string_fields() && !is_function_wrapper(id));
     // One shared predicate (memobits-ir) for String-owning aggregates admitted
     // for by-value transport: String-owning tuples and flat nominal structs.
     let is_string_owner = |ty: &Type| memobits_ir::is_string_owner_transport(&program.types, ty);
@@ -525,6 +533,7 @@ pub(super) fn unsupported_instruction(instruction: &Instruction) -> Option<Strin
         // Calls through function values are erased to `call_indirect`.
         InstructionKind::Call { .. } => None,
         InstructionKind::ClosureNew { .. } => None,
+        InstructionKind::ClosureOwned { .. } | InstructionKind::ClosureReadOnly { .. } => None,
         InstructionKind::Unary { .. } => None,
         InstructionKind::Binary {
             op: BinaryOp::And | BinaryOp::Or,

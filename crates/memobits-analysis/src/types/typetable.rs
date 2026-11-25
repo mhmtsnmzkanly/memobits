@@ -82,6 +82,8 @@ enum InstanceKey {
     Tuple(String),
     Record(String),
     AnonymousEnum(Span, String),
+    /// The wrapper struct and environment enum of an owned function type.
+    Closure(String),
 }
 
 #[derive(Clone)]
@@ -424,6 +426,127 @@ impl TypeTable {
         Ok(Ty::Tuple(id, name.into(), aliases))
     }
 
+    /// A name for a type that does not depend on instance numbering, so that
+    /// a function type can be recognised across checking passes.
+    pub(super) fn stable_identity(&self, ty: &Ty) -> String {
+        match ty {
+            Ty::Primitive(name) => (*name).to_owned(),
+            Ty::String => "string".to_owned(),
+            Ty::List(element) => format!("List<{}>", self.stable_identity(element)),
+            Ty::Box(element) => format!("Box<{}>", self.stable_identity(element)),
+            Ty::Array(element, count) => {
+                format!("[{}; {count}]", self.stable_identity(element))
+            }
+            Ty::Struct(id, _) | Ty::Enum(id, _) => {
+                let info = self.info(*id);
+                if info.module.starts_with("__prelude::") || info.module.starts_with('\0') {
+                    info.name
+                } else {
+                    format!("{}::{}", info.module, info.name)
+                }
+            }
+            Ty::Tuple(..) => self.semantic_tuple_element_identity(ty),
+            Ty::Reference { access, inner, .. } => {
+                format!("{access:?} {}", self.stable_identity(inner))
+            }
+            Ty::Function(parameters, result) => format!(
+                "fn({}) -> {}",
+                parameters
+                    .iter()
+                    .map(|parameter| format!(
+                        "{:?} {}",
+                        parameter.access,
+                        self.stable_identity(&parameter.ty)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.stable_identity(result)
+            ),
+            Ty::Never => "never".to_owned(),
+            Ty::Error => "error".to_owned(),
+        }
+    }
+
+    /// The wrapper struct and the environment enum of the owned function type
+    /// `function` (a `Ty::Function`), interned on first use. The wrapper holds
+    /// the callable word (`call`) and the owner of the heap environment (`env`,
+    /// a box of the enum, empty for a plain function). The enum starts with a
+    /// `Plain` variant; each owned closure literal adds a variant that holds
+    /// its captured values.
+    pub(super) fn closure_types(&self, key: &str, function: &Ty, span: Span) -> (u32, u32) {
+        let mut instances = self.instances.borrow_mut();
+        if let Some(index) = instances
+            .iter()
+            .position(|(known, _, _)| *known == InstanceKey::Closure(key.to_owned()))
+        {
+            let wrapper = (self.types.len() + index) as u32;
+            return (wrapper, wrapper + 1);
+        }
+        let wrapper = (self.types.len() + instances.len()) as u32;
+        let env = wrapper + 1;
+        let env_name = format!("{key}$env");
+        instances.push((
+            InstanceKey::Closure(key.to_owned()),
+            Vec::new(),
+            StructInfo {
+                name: key.to_owned(),
+                module: "\0tuple".into(),
+                span,
+                is_enum: false,
+                bodyless: false,
+                fields: vec![
+                    FieldInfo {
+                        name: "0".into(),
+                        public: true,
+                        module: "\0tuple".into(),
+                        ty: function.clone(),
+                        ty_span: span,
+                    },
+                    FieldInfo {
+                        name: "1".into(),
+                        public: true,
+                        module: "\0tuple".into(),
+                        ty: Ty::Box(Box::new(Ty::Enum(env, env_name.clone().into()))),
+                        ty_span: span,
+                    },
+                ],
+                variants: Vec::new(),
+            },
+        ));
+        instances.push((
+            InstanceKey::Closure(format!("{key}$env")),
+            Vec::new(),
+            StructInfo {
+                name: env_name,
+                module: "\0closure".into(),
+                span,
+                is_enum: true,
+                bodyless: false,
+                fields: Vec::new(),
+                variants: vec![VariantInfo {
+                    name: "Plain".into(),
+                    payload: Vec::new(),
+                }],
+            },
+        ));
+        (wrapper, env)
+    }
+
+    /// Add the environment variant of one owned closure literal and return its
+    /// index in the environment enum of `key`.
+    pub(super) fn add_closure_variant(&self, key: &str, payload: Vec<Ty>) -> u32 {
+        let mut instances = self.instances.borrow_mut();
+        let entry = instances
+            .iter_mut()
+            .find(|(known, _, _)| *known == InstanceKey::Closure(format!("{key}$env")))
+            .expect("closure environment enum");
+        entry.2.variants.push(VariantInfo {
+            name: format!("Closure{}", entry.2.variants.len()),
+            payload,
+        });
+        (entry.2.variants.len() - 1) as u32
+    }
+
     /// Intern an anonymous record by its exact named field/type set. Field
     /// order in the resulting layout is canonical; initializer order remains
     /// in the syntax tree and is honored by lowering.
@@ -558,6 +681,7 @@ impl TypeTable {
                 InstanceKey::Generic(_)
                 | InstanceKey::Tuple(_)
                 | InstanceKey::Record(_)
+                | InstanceKey::Closure(_)
                 | InstanceKey::AnonymousEnum(_, _) => None,
             })
     }
@@ -707,6 +831,7 @@ impl TypeTable {
             InstanceKey::Template(_)
             | InstanceKey::Tuple(_)
             | InstanceKey::Record(_)
+            | InstanceKey::Closure(_)
             | InstanceKey::AnonymousEnum(_, _) => None,
         }
     }

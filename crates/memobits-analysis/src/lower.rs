@@ -720,6 +720,11 @@ struct Builder<'a> {
     /// Values produced by `Load`: read-only provenance that must be copied
     /// before it can be used as an owned value.
     loaded: HashSet<u32>,
+    /// Values that are a plain function in an owned-function wrapper (no
+    /// environment), and the immutable locals bound to one: both can be
+    /// copied by building a new wrapper.
+    plain_values: HashSet<u32>,
+    plain_locals: HashSet<u32>,
 }
 
 fn is_string_tuple_type(types: &[TypeFact], ty: &Type) -> bool {
@@ -940,6 +945,8 @@ impl<'a> Builder<'a> {
             loops: Vec::new(),
             next_loan: 0,
             loaded: HashSet::new(),
+            plain_values: HashSet::new(),
+            plain_locals: HashSet::new(),
         }
     }
     /// How many boxes the value of `expr` sits in (zero for a non-box).
@@ -1124,6 +1131,89 @@ impl<'a> Builder<'a> {
     }
     fn constant(&mut self, span: Span, value: Constant, ty: Type) -> Option<Operand> {
         self.emit(span, InstructionKind::Constant(value), Some(ty))
+    }
+    /// The wrapper struct of an owned function type (see `types/owned_fn.rs`).
+    fn closure_wrapper(&self, ty: &Type) -> Option<memobits_ir::TypeId> {
+        match ty {
+            Type::Struct(id)
+                if self.types.get(id.0 as usize).is_some_and(|info| {
+                    info.module == "\0tuple" && info.name.starts_with("fn(")
+                }) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+    /// The scalar function type a function value of type `ty` holds, and
+    /// whether it is wrapped. Looks through one reference.
+    fn function_signature_of(&self, ty: &Type) -> Option<(memobits_ir::Signature, bool)> {
+        match ty {
+            Type::Function(signature) => Some((signature.clone(), false)),
+            Type::Reference { inner, .. } => self.function_signature_of(inner),
+            Type::Struct(id) if self.closure_wrapper(ty).is_some() => {
+                match &self.types[id.0 as usize].fields[0].ty {
+                    Type::Function(signature) => Some((signature.clone(), true)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    /// Emit a scalar function value of expression type `ty`: bare for a plain
+    /// function type, wrapped (with an empty environment) for an owned one.
+    fn function_value(&mut self, span: Span, kind: InstructionKind, ty: Type) -> Option<Operand> {
+        let Some(wrapper) = self.closure_wrapper(&ty) else {
+            return self.emit(span, kind, Some(ty));
+        };
+        let scalar = self.types[wrapper.0 as usize].fields[0].ty.clone();
+        let plain = matches!(kind, InstructionKind::Constant(_));
+        let call = self.emit(span, kind, Some(scalar))?;
+        let value = self.wrap_function(call, wrapper, None, span)?;
+        if let (true, Source::Value(id)) = (plain, value.source) {
+            self.plain_values.insert(id.0);
+        }
+        Some(value)
+    }
+    /// Build the wrapper `{ call, env }` around a scalar callable. Without an
+    /// environment the `env` box is empty.
+    fn wrap_function(
+        &mut self,
+        call: Operand,
+        wrapper: memobits_ir::TypeId,
+        env: Option<Operand>,
+        span: Span,
+    ) -> Option<Operand> {
+        let env = match env {
+            Some(env) => env,
+            None => {
+                let env_ty = self.types[wrapper.0 as usize].fields[1].ty.clone();
+                consume(self.emit(span, InstructionKind::EmptyList, Some(env_ty))?)
+            }
+        };
+        // Like a struct literal, the value is staged by whoever consumes it.
+        self.emit(
+            span,
+            InstructionKind::StructNew {
+                ty: wrapper,
+                fields: vec![consume(call), env],
+            },
+            Some(Type::Struct(wrapper)),
+        )
+    }
+    /// A new wrapper around the plain function an immutable local holds.
+    fn copy_plain_function(&mut self, local: LocalId, span: Span) -> Option<Operand> {
+        let ty = self.function.locals[local.0 as usize].ty.clone();
+        let wrapper = self.closure_wrapper(&ty)?;
+        let place = self.borrow(op(Source::Local(local), span), Access::Borrow)?;
+        let word = self.field_addr_index(place, 0, Access::Borrow, span)?;
+        let call = self.scalar(word)?;
+        let call = self.owned(call)?;
+        let value = self.wrap_function(call, wrapper, None, span)?;
+        if let Source::Value(id) = value.source {
+            self.plain_values.insert(id.0);
+        }
+        Some(value)
     }
     fn unit(&mut self, span: Span) -> Option<Operand> {
         self.constant(span, Constant::Unit, Type::Primitive(Primitive::Unit))
@@ -1846,7 +1936,14 @@ impl<'a> Builder<'a> {
             .insert(id.0, builder.function);
         let ty = self.ty(expr).expect("checked anonymous function type");
         if captures.is_empty() {
-            return self.constant(expr.span, Constant::Function(id), ty);
+            return self.function_value(
+                expr.span,
+                InstructionKind::Constant(Constant::Function(id)),
+                ty,
+            );
+        }
+        if let Some(owned) = fact.anonymous.as_ref().and_then(|info| info.owned) {
+            return self.lower_owned_closure(expr.span, id, &captures, owned);
         }
         // A closure: reference every captured variable of this function with
         // the access the closure holds, then create the function value.
@@ -1857,13 +1954,77 @@ impl<'a> Builder<'a> {
             reference.mode = access_mode(capture.access);
             references.push(reference);
         }
-        self.emit(
+        self.function_value(
             expr.span,
             InstructionKind::ClosureNew {
                 function: id,
                 captures: references,
             },
-            Some(ty),
+            ty,
+        )
+    }
+
+    /// An owned closure: move the captured variables into a heap environment
+    /// (a variant of the environment enum of its function type, held in a box)
+    /// and wrap the callable word with the owner of that box.
+    fn lower_owned_closure(
+        &mut self,
+        span: Span,
+        function: memobits_ir::FunctionId,
+        captures: &[crate::types::CaptureFact],
+        owned: crate::types::OwnedClosure,
+    ) -> Option<Operand> {
+        let wrapper = memobits_ir::TypeId(owned.wrapper);
+        let enum_id = memobits_ir::TypeId(owned.env);
+        let enum_ty = Type::Enum(enum_id);
+        let box_ty = self.types[wrapper.0 as usize].fields[1].ty.clone();
+        let field_types = match &self.types[enum_id.0 as usize].variants[owned.variant as usize] {
+            variant => variant.payload.clone(),
+        };
+        let mut payload = Vec::new();
+        for (capture, field_ty) in captures.iter().zip(&field_types) {
+            let source = op(Source::Local(capture.local), span);
+            payload.push(self.owned_captured(source, field_ty)?);
+        }
+        let value = self.emit(
+            span,
+            InstructionKind::EnumNew {
+                ty: enum_id,
+                variant: owned.variant,
+                payload,
+            },
+            Some(enum_ty.clone()),
+        )?;
+        let staged = self.hidden_local("closure environment value", enum_ty, span);
+        self.initialize_local(staged, consume(value), span);
+        let empty = self.emit(span, InstructionKind::EmptyList, Some(box_ty.clone()))?;
+        let environment = self.hidden_local("closure environment", box_ty, span);
+        self.initialize_local(environment, consume(empty), span);
+        self.emit(
+            span,
+            InstructionKind::ListPush {
+                target: environment,
+                value: consume(op(Source::Local(staged), span)),
+            },
+            None,
+        );
+        let scalar = self.types[wrapper.0 as usize].fields[0].ty.clone();
+        let call = self.emit(
+            span,
+            InstructionKind::ClosureOwned {
+                function,
+                env: read(op(Source::Local(environment), span)),
+                enum_ty: enum_id,
+                variant: owned.variant,
+                mutating: owned.mutating,
+            },
+            Some(scalar),
+        )?;
+        self.wrap_function(
+            call,
+            wrapper,
+            Some(consume(op(Source::Local(environment), span))),
+            span,
         )
     }
 
@@ -1949,6 +2110,21 @@ impl<'a> Builder<'a> {
                     if let Some(rhs) = rhs {
                         let target = self.local(statement);
                         let ty = self.function.locals[target.0 as usize].ty.clone();
+                        if let (false, Source::Value(id)) = (
+                            matches!(statement.kind, StatementKind::Binding { mutable: true, .. }),
+                            rhs.source,
+                        ) {
+                            if self.plain_values.contains(&id.0) {
+                                self.plain_locals.insert(target.0);
+                            }
+                        }
+                        if matches!(value.kind, ExprKind::Function(_))
+                            && self.closure_wrapper(&ty).is_some()
+                        {
+                            // A second-class closure may be lent to a `share fn`
+                            // parameter; the checker never lets it be assigned.
+                            self.function.locals[target.0 as usize].mutable = true;
+                        }
                         if let Some(rhs) = self.owned_to(rhs, &ty) {
                             self.initialize_local(target, rhs, statement.span);
                         }
@@ -3101,12 +3277,19 @@ impl<'a> Builder<'a> {
                 self.lower_variant(expr, &[])
             }
             ExprKind::Path(_) => match self.path(expr) {
+                PathTarget::Local(id) if self.plain_locals.contains(&id.0) => {
+                    self.copy_plain_function(id, expr.span)
+                }
                 PathTarget::Local(id) => Some(op(Source::Local(id), expr.span)),
                 // A function named as a value: its table slot, no environment.
                 // A direct call names its callee through `lower_callee`.
                 PathTarget::Function(id) => {
                     let ty = self.ty(expr).expect("checked function value type");
-                    self.constant(expr.span, Constant::Function(id), ty)
+                    self.function_value(
+                        expr.span,
+                        InstructionKind::Constant(Constant::Function(id)),
+                        ty,
+                    )
                 }
             },
             ExprKind::Function(function) => self.lower_anonymous(expr, function),

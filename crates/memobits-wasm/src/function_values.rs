@@ -60,24 +60,29 @@ pub(super) fn erase_signature(signature: &Signature) -> Signature {
     }
 }
 
-pub(super) fn contains_function(ty: &Type) -> bool {
+pub(super) fn contains_function(program: &Program, ty: &Type) -> bool {
     match ty {
         Type::Function(_) => true,
+        // The wrapper of an owned function type.
+        Type::Struct(id) => program.types.get(id.0 as usize).is_some_and(|definition| {
+            definition.path.module.as_slice() == ["\0tuple"]
+                && definition.path.name.starts_with("fn(")
+        }),
         Type::List(inner) | Type::Box(inner) | Type::Reference { inner, .. } => {
-            contains_function(inner)
+            contains_function(program, inner)
         }
-        Type::Array { element, .. } => contains_function(element),
+        Type::Array { element, .. } => contains_function(program, element),
         _ => false,
     }
 }
 
 /// Whether a signature mentions a function value anywhere.
-pub(super) fn signature_has_function(signature: &Signature) -> bool {
+pub(super) fn signature_has_function(program: &Program, signature: &Signature) -> bool {
     signature
         .parameters
         .iter()
-        .any(|parameter| contains_function(&parameter.ty))
-        || contains_function(&signature.result)
+        .any(|parameter| contains_function(program, &parameter.ty))
+        || contains_function(program, &signature.result)
 }
 
 pub(super) fn erase(program: &Program) -> Erased {
@@ -177,6 +182,21 @@ pub(super) fn function_captures(
                     } => {
                         targets.insert(target.0, captures.len());
                     }
+                    InstructionKind::ClosureOwned {
+                        function: target,
+                        enum_ty,
+                        variant,
+                        ..
+                    } => {
+                        let captures = match program.types.get(enum_ty.0 as usize).map(|t| &t.kind)
+                        {
+                            Some(TypeDefKind::Enum { variants }) => variants
+                                .get(*variant as usize)
+                                .map_or(0, |variant| variant.payload.len()),
+                            _ => 0,
+                        };
+                        targets.insert(target.0, captures);
+                    }
                     _ => {}
                 }
             }
@@ -192,4 +212,29 @@ pub(super) fn function_slots(program: &Program, reachable: &BTreeSet<u32>) -> BT
         .enumerate()
         .map(|(index, id)| (id, index as u32 + 1))
         .collect()
+}
+
+/// The environment enum and variant of each function that is created as an
+/// owned closure: its thunk finds the captures inside the heap environment.
+pub(super) fn owned_environments(
+    program: &Program,
+    reachable: &BTreeSet<u32>,
+) -> BTreeMap<u32, (u32, u32)> {
+    let mut owned = BTreeMap::new();
+    for id in reachable {
+        for block in &program.functions[*id as usize].blocks {
+            for instruction in &block.instructions {
+                if let InstructionKind::ClosureOwned {
+                    function: target,
+                    enum_ty,
+                    variant,
+                    ..
+                } = &instruction.kind
+                {
+                    owned.insert(target.0, (enum_ty.0, *variant));
+                }
+            }
+        }
+    }
+    owned
 }

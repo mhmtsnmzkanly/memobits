@@ -720,6 +720,8 @@ fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             std::iter::once(callee).chain(arguments).collect()
         }
         InstructionKind::ClosureNew { captures, .. } => captures.iter().collect(),
+        InstructionKind::ClosureOwned { env, .. } => vec![env],
+        InstructionKind::ClosureReadOnly { value } => vec![value],
     }
 }
 
@@ -1132,10 +1134,11 @@ fn transfer_provenance(
             let info_changed = merge_info(infos, key, info);
             // Borrowing a closure value (to pass it to a `borrow fn`/`share fn`
             // parameter) keeps the closure's own capture loans alive with it.
+            // (An owned function value is a wrapper struct that holds the
+            // closure's loans, so the owner's own provenance is kept for any
+            // owner type: it is empty unless a closure was stored in it.)
             let held = match &instruction.kind {
-                InstructionKind::Borrow { owner, .. }
-                    if type_at(function, owner.source).is_some_and(is_function) =>
-                {
+                InstructionKind::Borrow { owner, .. } => {
                     Some(operand_provenance(function, state, owner))
                 }
                 _ => None,
@@ -1158,6 +1161,17 @@ fn transfer_provenance(
         InstructionKind::Capture(operand) => operand_provenance(function, state, operand),
         InstructionKind::Copy { source } if is_function(&function.values[output.0 as usize]) => {
             operand_provenance(function, state, source)
+        }
+        // A wrapper struct holds the loans of the second-class closure in it.
+        InstructionKind::StructNew { fields, .. } => {
+            let mut held = Provenance::default();
+            for field in fields {
+                let provenance = operand_provenance(function, state, field);
+                held.roots.extend(provenance.roots);
+                held.loans.extend(provenance.loans);
+                held.own.extend(provenance.own);
+            }
+            held
         }
         // A closure holds the loans of everything it captures.
         InstructionKind::ClosureNew { captures, .. } => {

@@ -9,27 +9,62 @@ impl Builder<'_> {
         callee: &Expr,
         arguments: &[Expr],
     ) -> Option<Operand> {
+        let callee_expr = callee;
         let callee_ty = self.ty(callee).expect("checked callee");
         // A `borrow fn` / `share fn` parameter is called through its reference.
         let through_reference = matches!(callee_ty, Type::Reference { .. });
-        let signature = match callee_ty {
-            Type::Function(signature) => signature,
-            Type::Reference { inner, .. } => match *inner {
-                Type::Function(signature) => signature,
-                _ => unreachable!("checked function"),
-            },
-            _ => unreachable!("checked function"),
-        };
+        let (signature, wrapped) = self
+            .function_signature_of(&callee_ty)
+            .expect("checked function");
         let callee = match (&callee.kind, self.paths_function(callee)) {
             // A named function is called directly, not through its value.
             (ExprKind::Path(_), Some(id)) => op(Source::Function(id), callee.span),
+            _ if wrapped && !through_reference => {
+                // An owned function value: read its callable word in place.
+                let place =
+                    if matches!(callee.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
+                        self.lower_read_receiver(callee)?
+                    } else {
+                        let value = self.lower_expr(callee)?;
+                        let value = self.stage_fresh_call(value, &callee_ty, callee.span);
+                        let value = if matches!(value.source, Source::Value(_)) {
+                            let staged =
+                                self.hidden_local("function value", callee_ty.clone(), callee.span);
+                            self.initialize_local(staged, consume(value), callee.span);
+                            op(Source::Local(staged), callee.span)
+                        } else {
+                            value
+                        };
+                        self.borrow(value, Access::Borrow)?
+                    };
+                let word = self.field_addr_index(place, 0, Access::Borrow, callee.span)?;
+                self.scalar(word)?
+            }
+            _ if wrapped => {
+                let place = self.lower_expr(callee)?;
+                let word = self.field_addr_index(place, 0, Access::Borrow, callee.span)?;
+                self.scalar(word)?
+            }
             _ => self.lower_expr(callee)?,
         };
-        let callee = if through_reference {
+        let callee = if through_reference && !wrapped {
             self.scalar(callee)?
         } else {
             callee
         };
+        if wrapped
+            && !matches!(callee.source, Source::Function(_))
+            && !self.callee_is_mutable(callee_expr)
+        {
+            // A closure that mutates its environment needs a mutable place.
+            self.emit(
+                callee_expr.span,
+                InstructionKind::ClosureReadOnly {
+                    value: read(callee),
+                },
+                None,
+            );
+        }
         let callee = self.capture(callee)?;
         let scope_start = self.owned_locals.len();
         let result = (|| {
@@ -62,6 +97,35 @@ impl Builder<'_> {
         }
         self.owned_locals.truncate(scope_start);
         result
+    }
+
+    /// Whether a call through this place may mutate the environment of an
+    /// owned closure: the place is rooted in a `var`, a `share` reference, or
+    /// is a temporary.
+    fn callee_is_mutable(&self, callee: &Expr) -> bool {
+        match &callee.kind {
+            ExprKind::Path(_) => match self.path(callee) {
+                PathTarget::Local(id) => {
+                    let local = &self.function.locals[id.0 as usize];
+                    match &local.ty {
+                        Type::Reference { access, .. } => {
+                            *access == Access::Share
+                                || self
+                                    .facts
+                                    .locals
+                                    .get(id.0 as usize)
+                                    .is_some_and(|fact| fact.share_function)
+                        }
+                        _ => local.mutable,
+                    }
+                }
+                PathTarget::Function(_) => true,
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                self.callee_is_mutable(base)
+            }
+            _ => true,
+        }
     }
 
     /// The function a path expression names, if it names one directly.
@@ -127,8 +191,9 @@ impl Builder<'_> {
         let value = if parameter.access != Access::Owned {
             // A function value (a name, a literal, a closure) is lent from a
             // local: stage a temporary one in a hidden local first.
-            let value = if matches!(self.operand_type(value), Some(Type::Function(_)))
-                && !matches!(value.source, Source::Local(_))
+            let value = if self.operand_type(value).is_some_and(|ty| {
+                matches!(ty, Type::Function(_)) || self.closure_wrapper(&ty).is_some()
+            }) && !matches!(value.source, Source::Local(_))
             {
                 let ty = self.operand_type(value)?;
                 let staged = self.hidden_local("function argument", ty, argument.span);
@@ -138,6 +203,25 @@ impl Builder<'_> {
             } else {
                 value
             };
+            // An owned closure lent to a `share fn` parameter may mutate its
+            // environment: that needs a mutable place.
+            if parameter.access == Access::Borrow
+                && self.closure_wrapper(&self.operand_type(value)?).is_some()
+                && self
+                    .facts
+                    .share_function_arguments
+                    .contains(&(argument as *const Expr as usize))
+                && !self.callee_is_mutable(argument)
+            {
+                let place = self.borrow(value, Access::Borrow)?;
+                let word = self.field_addr_index(place, 0, Access::Borrow, argument.span)?;
+                let word = self.scalar(word)?;
+                self.emit(
+                    argument.span,
+                    InstructionKind::ClosureReadOnly { value: read(word) },
+                    None,
+                );
+            }
             // Keep the original pointee and loan.
             let mut reference = self.borrow(value, parameter.access)?;
             reference.mode = access_mode(parameter.access);

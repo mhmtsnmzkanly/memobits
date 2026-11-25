@@ -124,18 +124,20 @@ impl Checker {
                 ty: candidate.target.clone(),
             }];
             function_parameters.extend(parameters.clone());
-            let signature =
-                match ir_type(&Ty::Function(function_parameters, Box::new(result.clone()))) {
-                    Some(IrType::Function(signature)) => signature,
-                    _ => {
-                        self.error(
-                            7,
-                            expr.span,
-                            "selected extension signature is outside the executable type subset",
-                        );
-                        return Ty::Error;
-                    }
-                };
+            let signature = match ir_scalar_function(&Ty::Function(
+                function_parameters,
+                Box::new(result.clone()),
+            )) {
+                Some(IrType::Function(signature)) => signature,
+                _ => {
+                    self.error(
+                        7,
+                        expr.span,
+                        "selected extension signature is outside the executable type subset",
+                    );
+                    return Ty::Error;
+                }
+            };
             facts.selected_calls.push(SelectedCall {
                 expression,
                 function,

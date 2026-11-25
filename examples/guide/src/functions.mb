@@ -14,9 +14,10 @@ use alloc::List;
 // need no heap, so they work with `[build] alloc = false`.
 //
 // Anonymous functions that refer to a local of the enclosing function are
-// closures; they are non-escaping and described in the closures section at the
-// end of this module (`borrow fn(...)` / `share fn(...)` parameters). Constants,
-// top-level functions and imports are not captures.
+// closures: non-escaping ones (`borrow fn(...)` / `share fn(...)` parameters)
+// and owned ones (stored, returned, moved) are described in the sections at the
+// end of this module. Constants, top-level functions and imports are not
+// captures.
 fn inc(x: i32) -> i32 { x + 1 }
 // A named function may use an expression body: `=> expr` instead of a block.
 fn dbl(x: i32) -> i32 => x * 2
@@ -299,4 +300,121 @@ test fn function_types_with_closures_and_lists() {
     };
     fill_with(l.share(), 2);
     assert(sum_list(l.borrow()) == 201);
+}
+
+// ---------------------------------------------------------------------------
+// Owned closures: escaping `fn(...)` values with captures
+//
+// An anonymous function written where an owned `fn(...)` value is expected (a
+// function result, an annotated `let`, a struct field or enum payload, a List
+// or array element, `T?`, an owned argument) may capture enclosing variables.
+// No keyword is needed: in such a position every capture is a move. A
+// primitive is copied (the enclosing variable keeps its own value and stays
+// usable); a String, List, Box or struct moves into a heap environment owned
+// by the function value, and the variable is unavailable afterwards (BE001).
+// A closure may only capture owned variables: a `borrow`/`share` parameter or
+// a second-class closure local cannot move into a heap environment.
+//
+// The value owns its environment. Moving it, storing it, returning it,
+// replacing it (`replace`) or letting it go out of scope releases the
+// environment exactly once, including everything the captures own. Copying a
+// closure that has an environment is rejected like copying any owner: `let g :=
+// f;` moves `f`. A function name or a non-capturing literal bound with `let`
+// has no environment and stays copyable. (Because every value of an owned
+// function type may own an environment, `List::get` and a field read, which
+// copy, are rejected for such a type; call in place with `list[i](x)` or
+// `holder.action(x)` instead.) The signatures below are used only by the examples
+// in this section, so the earlier examples keep their copy rules.
+//
+// Mutation: a closure mutates its own copy of a captured variable. Calling a
+// closure that mutates its environment needs a mutable place: a `var` binding
+// (or a field or element of one), a `var` parameter, a `share fn` parameter, or
+// a temporary. Through an immutable place (`let`, an owned parameter, a `borrow
+// fn` parameter) the call traps with "a closure that mutates its environment
+// was called through an immutable place". Lending an owned closure to a `borrow
+// fn` or `share fn` parameter lends it (nothing is copied or moved); a
+// `share fn` parameter needs a mutable lender for the same reason.
+//
+// Representation: `{ call, env }`. `call` is the usual function value (table
+// slot plus environment word); `env` owns a heap block that holds the captures
+// (a variant of a compiler-made enum per function type). `[build] alloc =
+// false` rejects a closure with captures (TE033); a non-capturing function
+// value never allocates.
+fn make_adder(n: i64) -> fn(i64) -> i64 { fn(x) => x + n }
+fn make_counter() -> fn() -> u64 {
+    var c: u64 = 0;
+    fn() -> u64 { c += 1; c }
+}
+fn make_length(text: string) -> fn() -> u64 { fn() -> u64 => text.len() as u64 }
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 { fn(x) => g(f(x)) }
+type Handler { name: string, action: fn() -> u64 }
+fn run_twice(var f: fn() -> u64) -> u64 { f() + f() }
+fn probe_owned(f: borrow fn(i64) -> i64, x: i64) -> i64 { f(x) }
+fn bump_twice(f: share fn() -> u64) -> u64 { f() + f() }
+test fn owned_closures_capture_by_move_and_copy() {
+    let add := make_adder(10);
+    assert(add(5) == 15);
+    // A String moves into the closure, which owns it from now on.
+    let length := make_length("hello".concat("!"));
+    assert(length() == 6);
+    // A primitive is copied: the closure keeps the value it captured.
+    var n: i64 = 1;
+    let snapshot: fn() -> i64 = fn() -> i64 => n;
+    n = 100;
+    assert(snapshot() == 1);
+    assert(n == 100);
+    // A closure that returns a closure copies the outer capture too.
+    let outer: fn(i64) -> fn(i64) -> i64 = fn(a) => fn(b) => a + b + n;
+    assert(outer(1)(2) == 103);
+}
+test fn owned_closures_are_values_in_every_owned_position() {
+    let handler := Handler { name: "tick".concat("s"), action: make_length("abc".concat("d")) };
+    assert(handler.action() == 4);
+    assert(handler.name.len() == 5);
+    var list: List<fn(i64) -> i64> = [];
+    list.push(make_adder(1));
+    list.push(make_adder(2));
+    assert(list[0](10) == 11);
+    assert(list[1](10) == 12);
+    let array := [make_adder(3), make_adder(4)];
+    assert(array[1](10) == 14);
+    let maybe: (fn(i64) -> i64)? = Some(make_adder(5));
+    match maybe {
+        Some(f) => assert(f(10) == 15),
+        None => assert(false),
+    }
+    let both := compose(make_adder(1), make_adder(2));
+    assert(both(0) == 3);
+    // Replacing a closure releases the old environment when it goes out of scope.
+    var slot := make_adder(1);
+    let old := replace(slot, make_adder(2));
+    assert(old(0) == 1);
+    assert(slot(0) == 2);
+}
+test fn closures_mutate_their_own_environment_through_a_mutable_place() {
+    var counter := make_counter();
+    counter();
+    assert(counter() == 2);
+    // The closure owns its state: a second counter starts from zero.
+    var other := make_counter();
+    assert(other() == 1);
+    assert(counter() == 3);
+    assert(run_twice(make_counter()) == 3);
+    assert(bump_twice(counter) == 9);
+}
+test fn owned_closures_are_lent_by_borrow_and_share() {
+    let add := make_adder(7);
+    assert(probe_owned(add, 1) == 8);
+    assert(probe_owned(add, 2) == 9);
+    // The closure is still ours afterwards.
+    assert(add(3) == 10);
+}
+fn plus_one(x: i64) -> i64 => x + 1
+fn call_owned(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+test fn plain_function_values_are_copied_by_let_even_for_owned_types() {
+    let p := plus_one;
+    let q := p;
+    assert(call_owned(p, 1) == 2);
+    assert(call_owned(p, 2) == 3);
+    assert(call_owned(q, 3) == 4);
 }

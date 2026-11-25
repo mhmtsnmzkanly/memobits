@@ -25,6 +25,7 @@ mod generics;
 mod interfaces;
 mod lists;
 mod operations;
+mod owned_fn;
 mod patterns;
 mod templates;
 mod typetable;
@@ -209,7 +210,12 @@ fn access_name(access: IrAccess) -> &'static str {
 }
 /// A value copied implicitly: a primitive or a function value.
 fn is_scalar(ty: &Ty) -> bool {
-    matches!(ty, Ty::Primitive(_) | Ty::Function(..))
+    match ty {
+        Ty::Primitive(_) => true,
+        // An owned function type is a wrapper that owns its environment.
+        Ty::Function(..) => owned_fn::wrapper_id(ty).is_none(),
+        _ => false,
+    }
 }
 fn read_type(ty: Ty) -> Ty {
     match ty {
@@ -594,6 +600,9 @@ pub struct LocalFact {
     pub access: IrAccess,
     /// Whether the local binding itself can be reassigned.
     pub mutable: bool,
+    /// A `share fn` parameter (or share capture of a function value): in IR it
+    /// is a `Borrow` reference, so the share access is kept here.
+    pub share_function: bool,
     pub span: Span,
     pub(crate) node_addr: usize,
 }
@@ -905,6 +914,9 @@ pub struct FunctionFacts {
     /// Anonymous functions written directly in this function's body, by the
     /// address of their expression node.
     pub(crate) anonymous_functions: Vec<(usize, FunctionId)>,
+    /// Arguments passed to `share fn` parameters, by expression address: an
+    /// owned closure lent there may mutate its environment.
+    pub(crate) share_function_arguments: Vec<usize>,
     next_expr: u32,
 }
 
@@ -915,6 +927,21 @@ pub(crate) struct AnonymousInfo {
     /// The variables of the enclosing function the closure uses, in the order
     /// of its trailing capture parameters.
     pub(crate) captures: Vec<CaptureFact>,
+    /// Set when the closure is an owned value: its captures move into a heap
+    /// environment (a variant of the environment enum of its function type).
+    pub(crate) owned: Option<OwnedClosure>,
+}
+
+/// The environment of an owned closure: the wrapper struct of its function
+/// type, the environment enum and the variant that holds its captures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OwnedClosure {
+    pub(crate) wrapper: u32,
+    pub(crate) env: u32,
+    pub(crate) variant: u32,
+    /// The closure mutates its environment (a share capture), so it can only
+    /// be called through a mutable place.
+    pub(crate) mutating: bool,
 }
 
 /// One captured variable of a closure: the local of the enclosing function and
@@ -984,7 +1011,15 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
                 .iter()
                 .map(|field| FieldFact {
                     name: field.name.clone(),
-                    ty: ir_type(&field.ty).unwrap_or_else(unit),
+                    ty: if info.module == "\0tuple"
+                        && info.name.starts_with("fn(")
+                        && field.name == "0"
+                    {
+                        ir_scalar_function(&field.ty)
+                    } else {
+                        ir_type(&field.ty)
+                    }
+                    .unwrap_or_else(unit),
                 })
                 .collect(),
             variants: info
@@ -1001,6 +1036,27 @@ fn type_facts(table: &TypeTable) -> Vec<TypeFact> {
                 .collect(),
         })
         .collect()
+}
+
+/// The scalar IR type of a function value: a table slot plus an environment
+/// word. Owned function types wrap it in a struct (see `owned_fn`).
+fn ir_scalar_function(ty: &Ty) -> Option<IrType> {
+    let Ty::Function(parameters, result) = ty else {
+        return None;
+    };
+    Some(IrType::Function(Signature {
+        parameters: parameters
+            .iter()
+            .map(|p| {
+                let ty = ir_type(&p.ty)?;
+                Some(ParameterType {
+                    access: ir_parameter_access(p.access, &ty),
+                    ty,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+        result: Box::new(ir_type(result)?),
+    }))
 }
 
 fn ir_type(ty: &Ty) -> Option<IrType> {
@@ -1021,19 +1077,10 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
             "f64" => Primitive::F64,
             _ => return None,
         }),
-        Ty::Function(parameters, result) => IrType::Function(Signature {
-            parameters: parameters
-                .iter()
-                .map(|p| {
-                    let ty = ir_type(&p.ty)?;
-                    Some(ParameterType {
-                        access: ir_parameter_access(p.access, &ty),
-                        ty,
-                    })
-                })
-                .collect::<Option<Vec<_>>>()?,
-            result: Box::new(ir_type(result)?),
-        }),
+        Ty::Function(..) => match owned_fn::wrapper_id(ty) {
+            Some(wrapper) => IrType::Struct(TypeId(wrapper)),
+            None => ir_scalar_function(ty)?,
+        },
         Ty::Reference { access, inner, .. } => {
             let inner = ir_type(inner)?;
             IrType::Reference {
@@ -1063,6 +1110,9 @@ struct CapturePlan {
     inner: Ty,
     /// The variable's local in the enclosing function.
     local: Option<LocalId>,
+    /// The variable is a reference (a `borrow`/`share` parameter) or a
+    /// second-class closure: it cannot move into an owned environment.
+    unmovable: bool,
 }
 
 enum BodyMode<'a> {
@@ -1145,7 +1195,10 @@ fn infer_view(binding: &Binding, origin: usize) -> Binding {
 /// parameter is a borrow in IR (the function value itself is never written;
 /// the share effect lives in the closure's loans on its captures).
 fn ir_parameter_access(access: IrAccess, ty: &IrType) -> IrAccess {
-    if access == IrAccess::Share && matches!(ty, IrType::Function(_)) {
+    if access == IrAccess::Share
+        && (matches!(ty, IrType::Function(_))
+            || matches!(ty, IrType::Struct(id) if owned_fn::is_wrapper(id.0)))
+    {
         IrAccess::Borrow
     } else {
         access
@@ -1773,6 +1826,7 @@ impl Checker {
         span: Span,
         node_addr: usize,
     ) -> Option<LocalId> {
+        let original = ty;
         let ty = ir_type(ty)?;
         let access = match &ty {
             IrType::Reference { inner, .. } => ir_parameter_access(access, inner),
@@ -1786,6 +1840,10 @@ impl Checker {
             ty,
             access,
             mutable,
+            share_function: matches!(
+                original,
+                Ty::Reference { access: IrAccess::Share, inner, .. } if matches!(**inner, Ty::Function(..))
+            ),
             span,
             node_addr,
         });
@@ -2118,7 +2176,10 @@ impl Checker {
                     self.allow_array_value(value);
                     let previous = self.concat_destination;
                     self.concat_destination = Some(value as *const Expr as usize);
-                    if matches!(value.kind, ExprKind::Function(_)) && !*mutable {
+                    if matches!(value.kind, ExprKind::Function(_))
+                        && !*mutable
+                        && !matches!(annotation, Some(Ty::Function(..)))
+                    {
                         self.closure_context = Some(ClosureContext::Binding);
                     }
                     let inferred = self.expr(value, annotation.as_ref());
@@ -2480,7 +2541,7 @@ impl Checker {
                                         continue;
                                     };
                                     if let Some(IrType::Function(signature)) =
-                                        ir_type(&Ty::Function(
+                                        ir_scalar_function(&Ty::Function(
                                             vec![
                                                 FunctionParameter {
                                                     access: IrAccess::Share,
@@ -2889,6 +2950,9 @@ impl Checker {
             .cloned()
             .collect::<Vec<_>>();
         let boundary = self.outer_scopes.len();
+        // A closure written where an owned function value is expected owns its
+        // environment: every capture moves into it (see `owned_fn`).
+        let will_own = context.is_none() && matches!(expected, Some(Ty::Function(..)));
         let mut plan: Vec<CapturePlan> = Vec::new();
         let mut share_effect = false;
         for name in &discovered {
@@ -2905,7 +2969,12 @@ impl Checker {
                 other => other.clone(),
             };
             let is_function = matches!(inner, Ty::Function(..));
-            let access = if is_function {
+            let access = if is_function && will_own && source.mutable {
+                // A `var` closure moved into an owned environment may be
+                // called with share access there: it can mutate its own
+                // environment, so the new closure mutates its environment too.
+                IrAccess::Share
+            } else if is_function {
                 // A function value is only called: it needs the access its
                 // own effect has (a closure that mutates is a share effect).
                 function_effect(&source)
@@ -2916,7 +2985,10 @@ impl Checker {
             };
             if access == IrAccess::Share {
                 share_effect = true;
-                if !is_function && !(source.mutable || source.access == IrAccess::Share) {
+                if !will_own
+                    && !is_function
+                    && !(source.mutable || source.access == IrAccess::Share)
+                {
                     self.error(
                         4,
                         expr.span,
@@ -2926,11 +2998,14 @@ impl Checker {
                     );
                 }
             }
+            let inner_copy = inner.clone();
             plan.push(CapturePlan {
                 name: name.clone(),
                 access,
                 inner,
                 local: source.id,
+                unmovable: (matches!(source.ty, Ty::Reference { .. }) && !is_scalar(&inner_copy))
+                    || source.closure.is_some(),
             });
             if index < boundary || source.origin & CAPTURE_ORIGIN != 0 {
                 // The name belongs to a function that encloses the parent
@@ -2941,7 +3016,7 @@ impl Checker {
                     log.push((name.clone(), index));
                 }
             }
-            if access == IrAccess::Share && !is_function {
+            if access == IrAccess::Share && !is_function && !will_own {
                 self.note_write(source.origin);
             }
         }
@@ -2972,7 +3047,24 @@ impl Checker {
         } else {
             IrAccess::Borrow
         };
-        if !plan.is_empty() {
+        let owned_closure = will_own && !plan.is_empty();
+        if owned_closure {
+            owned_fn::discover(&function_ty);
+            self.require_alloc(expr.span, "an owned closure with captures");
+            for capture in &plan {
+                if capture.unmovable {
+                    self.error(
+                        17,
+                        expr.span,
+                        format!(
+                            "an owned closure captures by move, but '{}' is a borrowed reference or a second-class closure and cannot move into a heap environment",
+                            capture.name
+                        ),
+                    );
+                }
+            }
+        }
+        if !plan.is_empty() && !owned_closure {
             match context {
                 Some(ClosureContext::Argument(IrAccess::Borrow)) if mode == IrAccess::Share => {
                     let names = plan
@@ -3001,7 +3093,7 @@ impl Checker {
             self.closure_exprs.insert(node_addr, mode);
         }
         if let Some(mut own) = body.own_facts {
-            let Some(IrType::Function(mut signature)) = ir_type(&function_ty) else {
+            let Some(IrType::Function(mut signature)) = ir_scalar_function(&function_ty) else {
                 self.error(
                     7,
                     expr.span,
@@ -3030,8 +3122,23 @@ impl Checker {
                 });
             }
             own.signature = signature;
+            let owned = if owned_closure {
+                owned_fn::add_variant(
+                    &function_ty,
+                    plan.iter().map(|capture| capture.inner.clone()).collect(),
+                )
+                .map(|(wrapper, env, variant)| OwnedClosure {
+                    wrapper,
+                    env,
+                    variant,
+                    mutating: share_effect,
+                })
+            } else {
+                None
+            };
             if let Some(info) = own.anonymous.as_mut() {
                 info.captures = captures;
+                info.owned = owned;
             }
             if let Some(outer) = self.facts.as_mut() {
                 outer.anonymous_functions.push((node_addr, own.id));
@@ -3103,8 +3210,10 @@ impl Checker {
                     anonymous: Some(AnonymousInfo {
                         parent: outer.id,
                         captures: Vec::new(),
+                        owned: None,
                     }),
                     anonymous_functions: Vec::new(),
+                    share_function_arguments: Vec::new(),
                     next_expr: 0,
                 });
             }
@@ -3674,6 +3783,13 @@ impl Checker {
             parameter.access != IrAccess::Owned && matches!(parameter.ty, Ty::Function(..))
         });
         let mut closure_access = None;
+        if function_parameter.is_some_and(|parameter| parameter.access == IrAccess::Share) {
+            if let Some(facts) = self.facts.as_mut() {
+                facts
+                    .share_function_arguments
+                    .push(arg as *const Expr as usize);
+            }
+        }
         if let Some(parameter) = function_parameter {
             match &arg.kind {
                 ExprKind::Function(_) => {
@@ -6645,7 +6761,7 @@ impl Checker {
                                 return Ty::Error;
                             }
                             if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
-                                let signature = match ir_type(&Ty::Function(
+                                let signature = match ir_scalar_function(&Ty::Function(
                                     vec![FunctionParameter {
                                         access: IrAccess::Owned,
                                         ty: operand_ty.clone(),
@@ -6940,7 +7056,7 @@ impl Checker {
                             return Ty::Error;
                         }
                         if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
-                            let signature = match ir_type(&Ty::Function(
+                            let signature = match ir_scalar_function(&Ty::Function(
                                 vec![
                                     FunctionParameter {
                                         access: IrAccess::Owned,
@@ -7038,7 +7154,7 @@ impl Checker {
                             return Ty::Error;
                         }
                         if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
-                            let signature = match ir_type(&Ty::Function(
+                            let signature = match ir_scalar_function(&Ty::Function(
                                 vec![
                                     FunctionParameter {
                                         access: IrAccess::Borrow,
@@ -7155,7 +7271,7 @@ impl Checker {
                             return Ty::Error;
                         }
                         if let Some((facts, expression)) = self.facts.as_mut().zip(id) {
-                            let signature = match ir_type(&Ty::Function(
+                            let signature = match ir_scalar_function(&Ty::Function(
                                 vec![
                                     FunctionParameter {
                                         access: IrAccess::Borrow,
@@ -7490,7 +7606,7 @@ impl Checker {
                                 ty: candidate.target.clone(),
                             }];
                             function_parameters.extend(parameters.clone());
-                            let signature = match ir_type(&Ty::Function(
+                            let signature = match ir_scalar_function(&Ty::Function(
                                 function_parameters,
                                 Box::new(result.clone()),
                             )) {
@@ -7977,12 +8093,36 @@ fn imports_for_module(module: &Module, project: &Project) -> HashMap<String, Str
     imports
 }
 
+/// Run a check until the set of owned function types is stable (see
+/// `owned_fn`): the first pass discovers them, the next one uses them.
+fn with_passes<R>(mut run: impl FnMut() -> R) -> R {
+    owned_fn::reset();
+    let mut result = run();
+    for _ in 0..3 {
+        if !owned_fn::take_grew() {
+            break;
+        }
+        result = run();
+    }
+    owned_fn::finish();
+    result
+}
+
 fn check_standalone(
+    module: &Module,
+    mode: CheckMode,
+) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
+    with_passes(|| check_standalone_once(module, mode))
+}
+
+fn check_standalone_once(
     module: &Module,
     mode: CheckMode,
 ) -> (Vec<Diagnostic>, Vec<FunctionFacts>, Vec<TypeFact>) {
     let capture = mode != CheckMode::Types;
     let (table, table_diagnostics) = TypeTable::build(&[("", module)], HashMap::new());
+    let table = Rc::new(table);
+    owned_fn::set_table(Rc::clone(&table));
     let mut c = Checker {
         alloc: true,
         diagnostics: table_diagnostics,
@@ -7995,7 +8135,7 @@ fn check_standalone(
         failed_fields: HashSet::new(),
         index_base: 0,
         module: String::new(),
-        table: Rc::new(table),
+        table,
         generic_types: HashMap::new(),
         generic_consts: HashMap::new(),
         generic_evidence: Vec::new(),
@@ -8106,7 +8246,10 @@ fn check_standalone(
                     source_module: String::new(),
                     source_name: name.clone(),
                     specialization_key: None,
-                    signature: match ir_type(&Ty::Function(params.clone(), result.clone())) {
+                    signature: match ir_scalar_function(&Ty::Function(
+                        params.clone(),
+                        result.clone(),
+                    )) {
                         Some(IrType::Function(signature)) => signature,
                         _ => Signature {
                             parameters: Vec::new(),
@@ -8135,6 +8278,7 @@ fn check_standalone(
                     next_expr: 0,
                     anonymous: None,
                     anonymous_functions: Vec::new(),
+                    share_function_arguments: Vec::new(),
                 });
             }
             check_function_body(&mut c, parameters, body, params, *result);
@@ -8273,6 +8417,14 @@ pub(crate) fn check_resolved_mode(
     resolution: &Resolution,
     mode: CheckMode,
 ) -> Result<TypedModule, Vec<Diagnostic>> {
+    with_passes(|| check_resolved_mode_once(project, resolution, mode))
+}
+
+fn check_resolved_mode_once(
+    project: &Project,
+    resolution: &Resolution,
+    mode: CheckMode,
+) -> Result<TypedModule, Vec<Diagnostic>> {
     let lowering = mode != CheckMode::Types;
     if !resolution.diagnostics.is_empty() {
         return Err(resolution.diagnostics.clone());
@@ -8307,6 +8459,7 @@ pub(crate) fn check_resolved_mode(
         .collect();
     let (table, table_diagnostics) = TypeTable::build(&modules, module_imports);
     let table = Rc::new(table);
+    owned_fn::set_table(Rc::clone(&table));
     diagnostics.extend(table_diagnostics);
     let mut generic_templates = HashMap::new();
     for (module_name, source) in &resolution.modules {
@@ -8486,7 +8639,7 @@ pub(crate) fn check_resolved_mode(
                     (signatures.get(&key), ids.get(&key))
                 {
                     let ir_signature = if lowering {
-                        ir_type(&Ty::Function(params.clone(), result.clone()))
+                        ir_scalar_function(&Ty::Function(params.clone(), result.clone()))
                     } else {
                         None
                     };
@@ -8520,6 +8673,7 @@ pub(crate) fn check_resolved_mode(
                             next_expr: 0,
                             anonymous: None,
                             anonymous_functions: Vec::new(),
+                            share_function_arguments: Vec::new(),
                         });
                     }
                     check_function_body(&mut c, parameters, body, params.clone(), *result.clone());
@@ -8576,7 +8730,7 @@ pub(crate) fn check_resolved_mode(
                     .unwrap_or(UNIT);
                 if lowering {
                     if let Some(IrType::Function(signature)) =
-                        ir_type(&Ty::Function(params.clone(), Box::new(result.clone())))
+                        ir_scalar_function(&Ty::Function(params.clone(), Box::new(result.clone())))
                     {
                         c.facts = Some(FunctionFacts {
                             id: function,
@@ -8607,6 +8761,7 @@ pub(crate) fn check_resolved_mode(
                             next_expr: 0,
                             anonymous: None,
                             anonymous_functions: Vec::new(),
+                            share_function_arguments: Vec::new(),
                         });
                     }
                 }
@@ -8747,6 +8902,7 @@ pub(crate) fn check_resolved_mode(
                     next_expr: 0,
                     anonymous: None,
                     anonymous_functions: Vec::new(),
+                    share_function_arguments: Vec::new(),
                 });
             }
             check_function_body(&mut c, parameters, body, params, result);
@@ -8868,7 +9024,7 @@ pub(crate) fn check_resolved_mode(
                 .map(|ty| c.type_path(ty))
                 .unwrap_or(UNIT);
             if lowering {
-                if let Some(IrType::Function(signature)) = ir_type(&Ty::Function(
+                if let Some(IrType::Function(signature)) = ir_scalar_function(&Ty::Function(
                     parameter_types.clone(),
                     Box::new(result.clone()),
                 )) {
@@ -8901,6 +9057,7 @@ pub(crate) fn check_resolved_mode(
                         next_expr: 0,
                         anonymous: None,
                         anonymous_functions: Vec::new(),
+                        share_function_arguments: Vec::new(),
                     });
                 }
             }

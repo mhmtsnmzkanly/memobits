@@ -1614,3 +1614,86 @@ Implementation notes are in `docs/design/box.md` and `docs/design/wasm-backend.m
   capped-memory long-list build/drop and its mutation check, built-in method
   auto-deref and its negatives); `memobits-wasm` layout test; guide
   `collections.mb` (+2 tests, 143 total).
+
+### Shipped H5 details (2026-11-25)
+
+Facts about the shipped owned (escaping) closures; the Stage 4 decision is unchanged.
+
+- **Where a closure is owned.** An anonymous function with captures whose expected
+  type is an owned `fn(...)` (not a `borrow fn`/`share fn` parameter) is an owned
+  closure: a function result or tail, an annotated `let` or `var` (`let f: fn(i32)
+  -> i32 = fn(x) => x + n;`), a struct field, enum payload, tuple/array/List element,
+  `T?` payload or an owned argument. No keyword: if a closure is used in such a
+  position all its captures are moves. An unannotated `let f := fn(..) captures` stays
+  a second-class closure (H2); using it where an owned value is needed is TE017
+  "second-class". Without an expected function type a capturing closure stays
+  second-class too. A closure without captures is a plain function value everywhere.
+- **Captures.** Captured primitives (and plain function values) are copied; a String,
+  List, Box, struct, enum, or owned closure is moved and the enclosing variable is
+  unavailable afterwards (BE001, the ordinary move check). The closure owns its copy:
+  a captured primitive keeps the value it had when the closure was created. A
+  `borrow`/`share` parameter, a reference binding of a non-copyable type or a
+  second-class closure cannot be captured by an owned closure (TE017 "captures by
+  move"). A nested owned closure may copy a primitive out of its parent's environment.
+  The closure body is the lifted function of H2 (captures are trailing `borrow`/`share`
+  reference parameters); only the creation and the thunk differ.
+- **Mutation rule.** The closure value owns the environment, so mutating a captured
+  variable (assignment, `push`, `push_str`, a `share` call, calling a captured `var`
+  closure that mutates) changes the closure's own copy. Whether a closure mutates is
+  not part of the type, so the rule is dynamic: a closure that mutates its
+  environment (any share capture) carries a flag; a call through a *mutable place* is
+  always allowed (a `var` local, a field or element of one, a `var` parameter, a
+  `share fn` parameter, or a temporary such as `make()()`); a call through an
+  immutable place (a `let`, an owned parameter, a field of a `let`, a `borrow fn`
+  parameter) traps with reason 14 "a closure that mutates its environment was called
+  through an immutable place; hold it in a `var` or a `share` parameter" when the
+  closure mutates, and runs normally when it only reads. Lending to a `share fn`
+  parameter from an immutable place is checked at the lend site the same way. A `var`
+  closure captured by another owned closure makes the new closure mutating.
+- **Ownership and copying.** An owned function type that has owned closures anywhere in
+  the program (whole project) is an owner type: its values are moved, stored,
+  returned, replaced (`replace`) and dropped like any String-owning aggregate; the
+  environment and everything it owns is released exactly once (the shared owner
+  predicates apply, recursive environments use the H4b iterative release; a
+  100,000-deep chain of closures drops). Copying a closure with an environment is
+  rejected by the move check (BE001 for `let g := f; f(..)`, passing it twice, storing it
+  twice), and `List::get` / reading a closure out of a field are TE022 as for any owner;
+  call in place (`list[i](x)`, `holder.run(x)`) instead. Non-capturing function values
+  stay copyable: a function name or non-capturing literal is a fresh value at each use,
+  and an immutable `let` bound to one is copied by rebuilding it. Function types
+  without owned closures keep the H1 rules exactly (copy like a primitive, `get`
+  works). Consequence to know: the representation is chosen per exact function type,
+  by whole-program discovery, so writing the first capturing closure of `fn(i32) -> i32`
+  changes the copy rules of every value of that type (plain function parameters used
+  twice need a plain `let`, `get` becomes TE022). Assigning to a whole owner local
+  (`f = make()`) is the general struct-owner limitation (TE018); use `replace(f, make())`.
+- **Lending.** Passing an owned closure to a `borrow fn` or `share fn` parameter lends
+  it without moving (the argument is written bare); the closure is still usable
+  afterwards. Second-class closures cannot become owned values (TE017).
+- **Representation.** The checker runs in passes (`types/owned_fn.rs`): pass one finds
+  the function types with owned capturing closures, later passes represent those types
+  as a wrapper struct `{ call: fn, env: Box<Env> }` (a tuple-module IR struct named
+  after the type, so every tuple/struct owner rule applies) and `Env` is an enum with a
+  `Plain` variant and one variant per closure literal whose payload is the captured
+  values. `ClosureOwned { function, env, enum_ty, variant, mutating }` builds the
+  callable word from the box; calls read field 0 in place. The environment is a
+  heap block (alloc layer): `[build] alloc = false` rejects an owned closure with
+  captures with TE033 naming the setting; plain and non-capturing function values and
+  H2 closures still need no heap. The table thunk adds the variant field offsets to the
+  environment pointer; release is the ordinary type-directed release of the enum.
+  Exported/entry signatures cannot contain function values (LE900).
+- **Loans.** A second-class closure stored in a wrapper local (an owned function type
+  that also has a `let`-bound H2 closure) keeps its capture loans (`StructNew` and
+  `Borrow` carry provenance).
+- Tests: `crates/memobits-cli/tests/h5_owned_closures.rs` (16: typical uses, every
+  owned position, generics, copy/move semantics, plain copies, move and copy
+  negatives, borrowed-capture negatives, `alloc = false`, mutation rule through
+  every kind of place with source and Wasm traps, per-type representation, lending, capped-memory creation
+  and drop of 4,096 rounds with heap captures in 12 positions plus the mutation
+  check, 100,000-deep chain). Stale H1/H2 negatives updated. Guide `functions.mb`
+  (+5 tests).
+- Not done: closures capturing by reference into a heap environment (not planned: a
+  heap environment owns, it does not borrow); a statically visible mutating flag in
+  the type; copying a closure explicitly (no `clone`); `drop(f)` of a whole
+  closure (scope end and `replace` release it, as for every struct owner); unannotated
+  `let f := fn(..) captures` becoming owned by later use.

@@ -193,6 +193,21 @@ Built-in String/List methods (`len`, `get`, `contains`, `index_of`, `push`, `pop
 `clear`, `byte_at`, ...) act on the value inside a named box (writes need a `var` box or
 a `share` parameter); `push_str`/`concat` do not, and `Box` has no `[prelude]` mapping.
 See `docs/design/box.md` and `examples/apps/tree`.
+Owned closures (H5): an anonymous function with captures written where an owned `fn(...)`
+value is expected (function result, annotated `let`/`var`, struct field, enum payload,
+tuple/array/List element, `T?`, owned argument) captures by move into a heap environment
+owned by the value (`fn make_adder(n: i32) -> fn(i32) -> i32 { fn(x) => x + n }`);
+primitives are copied, a String/List/Box/struct moves (the variable is BE001 afterwards),
+a `borrow`/`share` parameter or a second-class closure cannot be captured (TE017), and
+`[build] alloc = false` rejects it (TE033). The value owns its environment: moving,
+storing, returning, `replace` and scope end release it once; copying a closure with an
+environment is rejected (BE001; `List::get`/a field read are TE022: call in place with
+`xs[i](x)`), while function names and non-capturing literals stay copyable. A closure that
+mutates its environment (`var c := 0; fn() -> i32 { c += 1; c }`) mutates its own copy and
+must be called through a mutable place (`var`, `var` parameter, `share fn` parameter,
+temporary); through an immutable place it traps (reason 14). Owned closures can be lent to
+`borrow fn`/`share fn` parameters. An owned function type is chosen per exact type by
+whole-program discovery, see decisions.md "Shipped H5 details".
 Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
 usable in parameters, results, locals, struct, tuple and record fields, array and List
 elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function

@@ -953,6 +953,21 @@ impl super::Program {
                         InstructionKind::Constant(super::Constant::Function(target)) => {
                             taken.insert((target.0 as usize, 0));
                         }
+                        InstructionKind::ClosureOwned {
+                            function: target,
+                            enum_ty,
+                            variant,
+                            ..
+                        } => {
+                            let captures = match self.types.get(enum_ty.0 as usize).map(|t| &t.kind)
+                            {
+                                Some(super::TypeDefKind::Enum { variants }) => variants
+                                    .get(*variant as usize)
+                                    .map_or(0, |variant| variant.payload.len()),
+                                _ => 0,
+                            };
+                            taken.insert((target.0 as usize, captures));
+                        }
                         InstructionKind::ClosureNew {
                             function: target,
                             captures,

@@ -613,6 +613,27 @@ pub enum InstructionKind {
         function: FunctionId,
         captures: Vec<Operand>,
     },
+    /// Create the function value of an owned closure. `env` is the local that
+    /// owns the heap environment: a `Box` of the enum `enum_ty` that holds
+    /// variant `variant`, whose payload fields are the captured values in the
+    /// order of the lifted function's trailing capture parameters. The output
+    /// is a `Function` value of the declared signature whose environment word
+    /// points at the enum value in the box; the caller keeps `env` (it reads
+    /// the pointer) and moves it into the owner of the value.
+    ClosureOwned {
+        function: FunctionId,
+        env: Operand,
+        enum_ty: TypeId,
+        variant: u32,
+        /// The closure mutates its environment: a call through an immutable
+        /// place traps (see `ClosureReadOnly`).
+        mutating: bool,
+    },
+    /// Trap if the function value `value` is a closure that mutates its
+    /// environment. Emitted before a call through a place that is not mutable.
+    ClosureReadOnly {
+        value: Operand,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3452,6 +3473,78 @@ fn validate_instruction(
                 );
             }
         }
+        InstructionKind::ClosureReadOnly { value } => {
+            let value_type = operand_type(program, function, value, errors, id, block);
+            if !matches!(value_type, Some(Type::Function(_))) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "closure read-only check requires a function value",
+                );
+            }
+        }
+        InstructionKind::ClosureOwned {
+            function: target,
+            env,
+            enum_ty,
+            variant,
+            ..
+        } => {
+            let env_type = operand_type(program, function, env, errors, id, block);
+            let payload = match program.types.get(enum_ty.0 as usize).map(|ty| &ty.kind) {
+                Some(TypeDefKind::Enum { variants }) => {
+                    variants.get(*variant as usize).map(|v| v.payload.clone())
+                }
+                _ => None,
+            };
+            match (program.functions.get(target.0 as usize), payload) {
+                (Some(lifted), Some(payload))
+                    if payload.len() <= lifted.signature.parameters.len() =>
+                {
+                    let parameters = &lifted.signature.parameters;
+                    let declared = parameters.len() - payload.len();
+                    let value_signature = Signature {
+                        parameters: parameters[..declared].to_vec(),
+                        result: lifted.signature.result.clone(),
+                    };
+                    if out != Some(&Type::Function(value_signature)) {
+                        push(
+                            errors,
+                            id,
+                            Some(block),
+                            "owned closure value type differs from the closure function's declared signature",
+                        );
+                    }
+                    for (parameter, field) in parameters[declared..].iter().zip(&payload) {
+                        let matches_field = parameter.ty == *field
+                            && matches!(parameter.access, Access::Borrow | Access::Share);
+                        if !matches_field {
+                            push(
+                                errors,
+                                id,
+                                Some(block),
+                                "owned closure capture parameter differs from the environment field",
+                            );
+                        }
+                    }
+                }
+                _ => push(
+                    errors,
+                    id,
+                    Some(block),
+                    "owned closure function or environment variant is out of range",
+                ),
+            }
+            if env_type.as_ref() != Some(&Type::Box(Box::new(Type::Enum(*enum_ty)))) {
+                push(
+                    errors,
+                    id,
+                    Some(block),
+                    "owned closure environment must be a Box of its environment enum",
+                );
+            }
+        }
         InstructionKind::Call { callee, arguments } => {
             let callee_type = operand_type(program, function, callee, errors, id, block);
             let argument_types = arguments
@@ -4393,6 +4486,12 @@ fn validate_operand_escapes(
                     for capture in captures {
                         report(block_id, capture, false, false);
                     }
+                }
+                InstructionKind::ClosureOwned { env, .. } => {
+                    report(block_id, env, false, false);
+                }
+                InstructionKind::ClosureReadOnly { value } => {
+                    report(block_id, value, false, false);
                 }
                 InstructionKind::EmptyList
                 | InstructionKind::DropLocal { .. }

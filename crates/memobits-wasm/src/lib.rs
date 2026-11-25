@@ -189,7 +189,7 @@ fn compile_target(
     let mut function_value_errors = Vec::new();
     for id in exports.values() {
         if let Some(function) = program.functions.get(id.0 as usize) {
-            if function_values::signature_has_function(&function.signature) {
+            if function_values::signature_has_function(program, &function.signature) {
                 function_value_errors.push(diagnostic(
                     "Wasm exported signatures cannot use function values; the external function ABI is not defined",
                     Some(function.span),
@@ -904,6 +904,8 @@ fn value_use_counts(function: &Function) -> Vec<u32> {
                 InstructionKind::ClosureNew { captures, .. } => {
                     captures.iter().for_each(&mut count)
                 }
+                InstructionKind::ClosureOwned { env, .. } => count(env),
+                InstructionKind::ClosureReadOnly { value } => count(value),
             }
         }
         match &block.terminator.kind {
@@ -1170,6 +1172,8 @@ pub enum TrapReason {
     AssertionFailed = 12,
     /// A function value that is not a slot of the function table.
     InvalidFunction = 13,
+    /// A closure that mutates its environment, called through an immutable place.
+    MutatingClosure = 14,
 }
 
 impl TrapReason {
@@ -1542,11 +1546,30 @@ fn encode_frames_traced(
                 {
                     pending.push(*target);
                 }
+                if let InstructionKind::ClosureOwned {
+                    function: target, ..
+                } = &instruction.kind
+                {
+                    pending.push(*target);
+                }
             }
         }
     }
     let slots = function_values::function_slots(program, &reachable);
     let value_captures = function_values::function_captures(program, &reachable);
+    let owned_environments = function_values::owned_environments(program, &reachable);
+    let flagged = reachable.iter().any(|id| {
+        program.functions[*id as usize]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    InstructionKind::ClosureOwned { mutating: true, .. }
+                )
+            })
+    });
     let selected = reachable
         .iter()
         .map(|id| &program.functions[*id as usize])
@@ -1846,6 +1869,7 @@ fn encode_frames_traced(
             &FunctionValues {
                 slots: &slots,
                 calls: &call_types[*id as usize],
+                flagged,
             },
             sizes[*id as usize],
             observe,
@@ -1900,14 +1924,30 @@ fn encode_frames_traced(
         for index in 0..declared as u32 {
             thunk.instruction(&WasmInstruction::LocalGet(index));
         }
-        for capture in 0..*captures as u32 {
-            thunk.instruction(&WasmInstruction::LocalGet(declared as u32));
-            thunk.instruction(&WasmInstruction::I32Load(MemArg {
-                offset: u64::from(capture * 4),
-                align: 2,
-                target: wasm_encoder::MemArgTarget::Memory(0),
-                ordering: None,
-            }));
+        if let Some((enum_id, variant)) = owned_environments.get(target) {
+            // An owned closure: the environment word points at the enum value
+            // in the heap block; each capture is a field of its variant.
+            let layout = structs[*enum_id as usize]
+                .enum_layout
+                .as_ref()
+                .ok_or("owned closure environment is not an enum")?;
+            for capture in 0..*captures {
+                thunk.instruction(&WasmInstruction::LocalGet(declared as u32));
+                thunk.instruction(&WasmInstruction::I32Const(
+                    layout.variants[*variant as usize].offsets[capture] as i32,
+                ));
+                thunk.instruction(&WasmInstruction::I32Add);
+            }
+        } else {
+            for capture in 0..*captures as u32 {
+                thunk.instruction(&WasmInstruction::LocalGet(declared as u32));
+                thunk.instruction(&WasmInstruction::I32Load(MemArg {
+                    offset: u64::from(capture * 4),
+                    align: 2,
+                    target: wasm_encoder::MemArgTarget::Memory(0),
+                    ordering: None,
+                }));
+            }
         }
         if hidden {
             thunk.instruction(&WasmInstruction::LocalGet(declared as u32 + 1));
@@ -2064,7 +2104,14 @@ fn encode_frames_traced(
 struct FunctionValues<'a> {
     slots: &'a BTreeMap<u32, u32>,
     calls: &'a HashMap<u32, u32>,
+    /// Some owned closure mutates its environment: bit 31 of the slot word
+    /// flags it, and every indirect call masks the flag off.
+    flagged: bool,
 }
+
+/// Bit of a function value's slot word that marks a closure that mutates its
+/// environment.
+const MUTATING_FLAG: u32 = 1 << 31;
 
 fn compile_function(
     program: &Program,
@@ -4915,6 +4962,48 @@ fn compile_instruction(
                 output.ok_or("closure lacks output")?,
             ));
         }
+        InstructionKind::ClosureOwned {
+            function: target,
+            env,
+            mutating,
+            ..
+        } => {
+            // ((box block + content offset) << 32) | table slot
+            emit_operand(body, function, param_count, env, layout, frame)?;
+            box_cell::load_block(body);
+            body.instruction(&WasmInstruction::I32Const(box_cell::CONTENT_OFFSET));
+            body.instruction(&WasmInstruction::I32Add);
+            body.instruction(&WasmInstruction::I64ExtendI32U);
+            body.instruction(&WasmInstruction::I64Const(32));
+            body.instruction(&WasmInstruction::I64Shl);
+            let slot = *values
+                .slots
+                .get(&target.0)
+                .ok_or("closure function has no table slot")?;
+            let slot = if *mutating {
+                slot | MUTATING_FLAG
+            } else {
+                slot
+            };
+            body.instruction(&WasmInstruction::I64Const(i64::from(slot)));
+            body.instruction(&WasmInstruction::I64Or);
+            body.instruction(&WasmInstruction::LocalSet(
+                output.ok_or("closure lacks output")?,
+            ));
+        }
+        InstructionKind::ClosureReadOnly { value } => {
+            if values.flagged {
+                emit_operand(body, function, param_count, value, layout, frame)?;
+                body.instruction(&WasmInstruction::I32WrapI64);
+                body.instruction(&WasmInstruction::I32Const(MUTATING_FLAG as i32));
+                body.instruction(&WasmInstruction::I32And);
+                trap_if(
+                    body,
+                    traps.site(instruction.span),
+                    TrapReason::MutatingClosure,
+                );
+            }
+        }
         InstructionKind::Load { reference } => {
             emit_operand(body, function, param_count, reference, layout, frame)?;
             emit_load(body, reference_primitive(function, reference)?);
@@ -5200,6 +5289,10 @@ fn compile_instruction(
                 // Reject a function value outside the table before calling.
                 emit_operand(body, function, param_count, callee, layout, frame)?;
                 body.instruction(&WasmInstruction::I32WrapI64);
+                if values.flagged {
+                    body.instruction(&WasmInstruction::I32Const(!MUTATING_FLAG as i32));
+                    body.instruction(&WasmInstruction::I32And);
+                }
                 body.instruction(&WasmInstruction::I32Const(1));
                 body.instruction(&WasmInstruction::I32Sub);
                 body.instruction(&WasmInstruction::I32Const(values.slots.len() as i32));
@@ -5240,6 +5333,10 @@ fn compile_instruction(
                 (None, Some(type_index)) => {
                     emit_operand(body, function, param_count, callee, layout, frame)?;
                     body.instruction(&WasmInstruction::I32WrapI64);
+                    if values.flagged {
+                        body.instruction(&WasmInstruction::I32Const(!MUTATING_FLAG as i32));
+                        body.instruction(&WasmInstruction::I32And);
+                    }
                     body.instruction(&WasmInstruction::CallIndirect {
                         type_index,
                         table_index: 0,
