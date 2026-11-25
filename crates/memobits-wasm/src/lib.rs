@@ -1775,6 +1775,15 @@ fn encode_frames_traced(
                 _ => false,
             })
     });
+    // Size-class table of the guest allocator (bitmap and class heads), zeroed
+    // by fresh memory.
+    let heap_table = if use_heap {
+        static_layout
+            .reserve(string_heap::TABLE_BYTES)
+            .map_err(|_| "allocator table exceeds the supported memory size")?
+    } else {
+        0
+    };
     let float_scratch = if has_float {
         Some(
             static_layout
@@ -1896,8 +1905,8 @@ fn encode_frames_traced(
     }
     if let Some(copy) = heap_copy_index {
         code.function(&string_heap::copy_ranges(copy + 2));
-        code.function(&string_heap::releaser());
-        code.function(&string_heap::reserve());
+        code.function(&string_heap::releaser(heap_table));
+        code.function(&string_heap::reserve(heap_table));
         if has_list_push {
             code.function(&list_descriptor::append(copy + 2, copy + 1));
         }

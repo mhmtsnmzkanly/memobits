@@ -1615,6 +1615,15 @@ Implementation notes are in `docs/design/box.md` and `docs/design/wasm-backend.m
   auto-deref and its negatives); `memobits-wasm` layout test; guide
   `collections.mb` (+2 tests, 143 total).
 
+### Shipped BK1 details (2026-11-25)
+
+Backend-only change; no language or ABI change. Facts:
+- The guest allocator's single first-fit free list is replaced by segregated size classes: 52 classes (four-byte steps to 32 bytes, then four per octave up to 65,536 bytes) with a non-empty bitmap and one list head per class in a 216-byte static table, plus the old exact-size list for blocks above 65,536 bytes. Small requests round up to their class size and take the lowest non-empty class at or above it; a small request with no small block available reuses the head of the large list before growing. Alloc and free are O(1) for small sizes. No splitting or coalescing was needed to keep the capped-memory tests (initial + 1 page) passing.
+- Block header format unchanged (capacity at 0, next at 4; payload at +8), so String/List/Box descriptors and the H4b release worklist (which reuses `next` of still-allocated blocks and never touches `capacity`) are unchanged. A small block's capacity is now always an exact class size, so a freed block returns to the class it was taken from.
+- Behavior unchanged: allocation failure still returns zero without changing any list (trap "guest heap allocation failed"). Programs without heap use are byte-identical; heap programs differ (+453 bytes of code, the table) and produce identical output.
+- Pathology fixed: freeing 60,000 small blocks and then allocating 60,000 100-byte strings took 9.1 s (source run, debug build, no fuel limit; the default 10 billion fuel budget was exhausted) and now takes 0.05 s.
+- Tests: `crates/memobits-cli/tests/bk1_allocator.rs` (5).
+
 ### Shipped H5 details (2026-11-25)
 
 Facts about the shipped owned (escaping) closures; the Stage 4 decision is unchanged.

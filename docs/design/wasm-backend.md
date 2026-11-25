@@ -209,6 +209,31 @@ all eight widths (`memobits-wasm/src/numerics.rs`):
   `<<` discards the high bits (re-normalized for narrow widths) and `>>` is
   arithmetic for signed types (`shr_s`) and zero-filling for unsigned types.
 
+## Guest allocator (BK1)
+
+`string_heap.rs` holds the private whole-block allocator shared by String,
+List and Box. A block is an 8-byte header (`capacity` at offset 0, `next` at
+offset 4) followed by `capacity` payload bytes; a descriptor's data pointer is
+`block + 8`. `next` is only meaningful while the block is on a free list, which
+is why the iterative release worklists (see below) may borrow it while the
+block is still allocated; `capacity` is never touched by them.
+
+Free blocks live in segregated size classes. A small static table (bitmap word
+plus one list head per class, `TABLE_BYTES` = 216 bytes, reserved beside the
+other static regions and zero-initialised by fresh memory) holds 52 classes:
+exact four-byte steps from 4 to 32 bytes, then four classes per octave
+(40, 48, 56, 64, 80, 96, ... up to 65,536 bytes). A request up to 65,536
+bytes is rounded up to its class size, so a block's capacity is always an exact
+class size, and the request pops the head of the lowest non-empty class at or
+above its own (one `ctz` over the bitmap). `release` recomputes the class from
+the block's capacity and pushes it; both are O(1). Blocks above the limit stay
+on the single exact-size list (`FREE_GLOBAL`, global 4), searched first-fit; a
+small request that finds no small class reuses that list's head before the heap
+grows. There is no splitting or coalescing. Failure semantics are unchanged: a
+reservation that cannot grow memory returns zero without touching any list.
+Programs that never use the heap emit no allocator (byte-identical Wasm); heap
+programs grow by about 450 bytes of code plus the 216-byte table.
+
 ## Recursive owner release (H4, H4b)
 
 A type that reaches itself through a `List` or `Box` element cannot have its
