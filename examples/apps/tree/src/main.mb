@@ -1,0 +1,42 @@
+use tree;
+use alloc::Box;
+
+// The root sits behind a box too: fields, methods and `match` see through it.
+type Holder { root: Box<tree::Tree>, count: i32 }
+
+fn build() -> tree::Tree {
+    let t0 := tree::insert(tree::Tree::Leaf, 8);
+    let t1 := tree::insert(t0, 4);
+    let t2 := tree::insert(t1, 12);
+    let t3 := tree::insert(t2, 2);
+    tree::insert(t3, 6)
+}
+
+fn main() -> i32 {
+    let held := Holder { root: Box(build()), count: 5 };
+    // `held.root.borrow()` lends the tree inside the box.
+    let total := tree::sum(held.root.borrow());
+    let levels := tree::depth(held.root.borrow());
+    total * 100 + levels * 10 + held.count
+}
+
+test fn insert_keeps_every_value() {
+    let t := build();
+    assert(tree::sum(t.borrow()) == 32);
+}
+
+test fn depth_counts_levels() {
+    let t := build();
+    assert(tree::depth(t.borrow()) == 3);
+}
+
+test fn patterns_see_through_boxes() {
+    let t := build();
+    assert(tree::leftmost_pair(t.borrow()) == 408);
+}
+
+test fn unbox_moves_the_value_out() {
+    let boxed := Box(build());
+    let t := unbox(boxed);
+    assert(tree::sum(t.borrow()) == 32);
+}

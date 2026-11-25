@@ -1699,6 +1699,21 @@ impl TypeTable {
                     }
                     return Ok(Ty::List(Box::new(element.clone())));
                 }
+                TemplateId::Box => {
+                    let [ResolvedArgument::Type(inner)] = arguments.as_slice() else {
+                        unreachable!("template argument contract checked above");
+                    };
+                    match inner {
+                        Ty::Reference { .. } => {
+                            return Err(failure(17, "Box contents cannot be references".into()))
+                        }
+                        Ty::Primitive("Unit") => {
+                            return Err(failure(17, "Box contents cannot be Unit".into()))
+                        }
+                        _ => {}
+                    }
+                    return Ok(Ty::Box(Box::new(inner.clone())));
+                }
             }
         }
         if ty.path.last().is_some_and(|name| name == "String") {

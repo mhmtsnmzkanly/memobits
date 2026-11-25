@@ -249,6 +249,10 @@ pub(super) trait ConstructorNames {
 pub(super) fn render(witness: &Witness, names: &dyn ConstructorNames) -> String {
     match witness {
         Witness::Wild => "_".into(),
+        Witness::Ctor(ty @ Ty::Box(_), variant, arguments) => render(
+            &Witness::Ctor(ty.clone().unboxed(), *variant, arguments.clone()),
+            names,
+        ),
         Witness::Ctor(Ty::Primitive("bool"), value, _) => (*value == 1).to_string(),
         Witness::Ctor(ty @ Ty::Enum(..), variant, arguments) => {
             let name = names.variant_name(ty, *variant);

@@ -613,6 +613,8 @@ enum Projection {
     Index(Operand, bool),
     Field(String),
     FieldSlot(u32),
+    /// The value inside a box: element 0 of its one-element list.
+    Deref,
 }
 /// A pattern that tests nothing: `_`, a binding, or a tuple of such.
 fn irrefutable_pattern(pattern: &MatchPattern) -> bool {
@@ -695,6 +697,12 @@ struct Builder<'a> {
     explicit_asserts: HashSet<ExprId>,
     explicit_replaces: HashSet<ExprId>,
     explicit_swaps: HashSet<ExprId>,
+    box_constructors: HashSet<ExprId>,
+    explicit_unboxes: HashMap<ExprId, Type>,
+    match_unboxes: HashMap<ExprId, Type>,
+    /// Box depth of expressions whose type is a `Box` (by node address).
+    box_exprs: HashMap<usize, u32>,
+    box_coercions: HashMap<usize, u32>,
     selected_calls: HashMap<ExprId, SelectedCall>,
     selected_operators: HashMap<ExprId, SelectedCall>,
     selected_assignments: HashMap<ExprId, SelectedCall>,
@@ -915,6 +923,11 @@ impl<'a> Builder<'a> {
             explicit_asserts: facts.explicit_asserts.iter().copied().collect(),
             explicit_replaces: facts.explicit_replaces.iter().copied().collect(),
             explicit_swaps: facts.explicit_swaps.iter().copied().collect(),
+            box_constructors: facts.box_constructors.iter().copied().collect(),
+            explicit_unboxes: facts.explicit_unboxes.iter().cloned().collect(),
+            match_unboxes: facts.match_unboxes.iter().cloned().collect(),
+            box_exprs: facts.box_exprs.iter().copied().collect(),
+            box_coercions: facts.box_coercions.iter().copied().collect(),
             selected_calls,
             selected_operators,
             selected_assignments,
@@ -928,6 +941,13 @@ impl<'a> Builder<'a> {
             next_loan: 0,
             loaded: HashSet::new(),
         }
+    }
+    /// How many boxes the value of `expr` sits in (zero for a non-box).
+    fn box_depth(&self, expr: &Expr) -> u32 {
+        self.box_exprs
+            .get(&(expr as *const Expr as usize))
+            .copied()
+            .unwrap_or(0)
     }
     fn id(&self, expr: &Expr) -> ExprId {
         self.expression_ids[&(expr as *const Expr as usize)]
@@ -1262,6 +1282,51 @@ impl<'a> Builder<'a> {
             );
         }
         Some(consume(op(Source::Local(list), expr.span)))
+    }
+
+    /// `unbox(b)`: the box moves into a hidden list that gives its only value
+    /// back through `pop`; the emptied block is released with the hidden owner.
+    fn lower_unbox(&mut self, expr: &Expr, argument: &Expr) -> Option<Operand> {
+        let option_ty = self.explicit_unboxes[&self.id(expr)].clone();
+        let value_ty = self.ty(expr)?;
+        let boxed = self.lower_expr(argument)?;
+        self.take_box_value(boxed, option_ty, value_ty, expr.span)
+    }
+    /// Move the value out of an owned box operand (a one-element list).
+    fn take_box_value(
+        &mut self,
+        boxed: Operand,
+        option_ty: Type,
+        value_ty: Type,
+        span: Span,
+    ) -> Option<Operand> {
+        let list_ty = self.operand_type(boxed)?;
+        let boxed = self.stage_fresh_call(boxed, &list_ty, span);
+        let staged = self.hidden_local("unboxed box", list_ty, span);
+        self.initialize_local(staged, consume(boxed), span);
+        let popped = self.emit(
+            span,
+            InstructionKind::ListPop { target: staged },
+            Some(option_ty.clone()),
+        )?;
+        // The extraction below consumes the option, so it needs no cleanup.
+        let option = self.hidden_local("unboxed value", option_ty, span);
+        self.bind_local(option, consume(popped), span);
+        let extracted = self.emit(
+            span,
+            InstructionKind::VariantExtract {
+                base: consume(op(Source::Local(option), span)),
+                variant: 0,
+                field: 0,
+            },
+            Some(value_ty.clone()),
+        )?;
+        if value_ty.is_scalar() {
+            return Some(extracted);
+        }
+        let result = self.hidden_local("unboxed result", value_ty, span);
+        self.initialize_local(result, consume(extracted), span);
+        Some(consume(op(Source::Local(result), span)))
     }
 
     fn is_string_owner_struct(&self, ty: &Type) -> bool {
@@ -2077,6 +2142,9 @@ impl<'a> Builder<'a> {
             } else {
                 (self.lower_expr(base)?, Vec::new())
             };
+        for _ in 0..self.box_depth(base) {
+            projections.push(Projection::Deref);
+        }
         match (&expr.kind, step) {
             (ExprKind::Index { index, .. }, _) => {
                 let position = self.lower_expr(index)?;
@@ -2117,6 +2185,14 @@ impl<'a> Builder<'a> {
                 Projection::Field(name) => self.field_addr(current, name, access, span)?,
                 Projection::FieldSlot(slot) => {
                     self.field_addr_slot(current, *slot, access, span)?
+                }
+                Projection::Deref => {
+                    let zero = self.constant(
+                        span,
+                        Constant::Integer("0".into()),
+                        Type::Primitive(Primitive::U32),
+                    )?;
+                    self.element_addr(current, zero, access, span)?
                 }
             };
         }
@@ -3115,6 +3191,15 @@ impl<'a> Builder<'a> {
             ExprKind::Call { arguments, .. } if self.explicit_swaps.contains(&self.id(expr)) => {
                 self.lower_swap(expr, arguments)
             }
+            ExprKind::Call { arguments, .. } if self.box_constructors.contains(&self.id(expr)) => {
+                let list_ty = self.ty(expr)?;
+                self.lower_list_literal(expr, arguments, list_ty)
+            }
+            ExprKind::Call { arguments, .. }
+                if self.explicit_unboxes.contains_key(&self.id(expr)) =>
+            {
+                self.lower_unbox(expr, &arguments[0])
+            }
             ExprKind::Call { arguments, .. } if self.explicit_drops.contains(&self.id(expr)) => {
                 let value = consume(self.lower_expr(&arguments[0])?);
                 self.emit(expr.span, InstructionKind::DropLocal { value }, None);
@@ -3254,6 +3339,18 @@ impl<'a> Builder<'a> {
                         _ => None,
                     };
                     if let Some(access) = access {
+                        let coerced = self
+                            .box_coercions
+                            .get(&(expr as *const Expr as usize))
+                            .copied()
+                            .unwrap_or(0);
+                        if coerced > 0 {
+                            let (root, mut projections) = self.lower_place(base)?;
+                            for _ in 0..coerced {
+                                projections.push(Projection::Deref);
+                            }
+                            return self.address_chain(root, &projections, access, expr.span);
+                        }
                         if matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }) {
                             // A row, element or field that is itself an aggregate: the
                             // chain of addresses is the reference, with `access` on
@@ -3381,11 +3478,16 @@ impl<'a> Builder<'a> {
         // matched place of an in-place match).
         let (owner, root, root_ty) = if fact.borrowed {
             let scrutinee_ty = self.ty(scrutinee);
-            let reference = if matches!(
-                scrutinee.kind,
-                ExprKind::Index { .. } | ExprKind::Field { .. }
-            ) {
-                let (root, projections) = self.lower_place(scrutinee)?;
+            let depth = self.box_depth(scrutinee);
+            let reference = if depth > 0
+                || matches!(
+                    scrutinee.kind,
+                    ExprKind::Index { .. } | ExprKind::Field { .. }
+                ) {
+                let (root, mut projections) = self.lower_place(scrutinee)?;
+                for _ in 0..depth {
+                    projections.push(Projection::Deref);
+                }
                 self.address_chain(root, &projections, Access::Borrow, span)?
             } else if matches!(scrutinee_ty, Some(Type::String)) {
                 // Matched in place: the string is read, never moved.
@@ -3443,7 +3545,14 @@ impl<'a> Builder<'a> {
             };
             (None, root, *inner)
         } else {
-            let source = self.lower_expr(scrutinee)?;
+            let mut source = self.lower_expr(scrutinee)?;
+            if let Some(option_ty) = self.match_unboxes.get(&self.id(expr)).cloned() {
+                // An owned box is consumed: its value is the scrutinee.
+                let Some(Type::List(inner)) = self.operand_type(source) else {
+                    unreachable!("checked owned box scrutinee")
+                };
+                source = self.take_box_value(source, option_ty, *inner, span)?;
+            }
             let Some(ty @ (Type::Enum(_) | Type::Struct(_))) = self.operand_type(source) else {
                 unreachable!("checked match scrutinee")
             };
@@ -3625,6 +3734,40 @@ impl<'a> Builder<'a> {
             base.mode = UseMode::Borrow;
             base
         };
+        if let Type::List(inner) = &occurrence.ty {
+            // A refutable pattern on a box sees through it: test the value the
+            // box holds, reached through its (always present) element.
+            let zero = self.constant(
+                span,
+                Constant::Integer("0".into()),
+                Type::Primitive(Primitive::U32),
+            )?;
+            let child = self.element_addr(reference(), zero, Access::Borrow, span)?;
+            let local = self.hidden_local(
+                "match payload reference",
+                self.operand_type(child).expect("typed box content address"),
+                span,
+            );
+            self.emit(
+                span,
+                InstructionKind::Assign {
+                    target: local,
+                    value: consume(child),
+                    initialize: true,
+                },
+                None,
+            );
+            let mut next = rest_occurrences;
+            next.insert(
+                column,
+                MatchOccurrence {
+                    reference: local,
+                    ty: inner.as_ref().clone(),
+                    direct_owner: false,
+                },
+            );
+            return self.decide_match(plan, rows, next, owner_in_scope, arms, span);
+        }
         match &occurrence.ty {
             Type::Enum(enum_id) => {
                 let definition = &types[enum_id.0 as usize];
@@ -4000,6 +4143,21 @@ impl<'a> Builder<'a> {
                     },
                     None,
                 );
+            }
+            MatchPattern::Variant { .. } | MatchPattern::Tuple(_)
+                if matches!(ty, Type::List(_)) =>
+            {
+                // A pattern on a box binds inside the value it holds.
+                let Type::List(inner) = ty else {
+                    unreachable!("checked box pattern")
+                };
+                let zero = self.constant(
+                    span,
+                    Constant::Integer("0".into()),
+                    Type::Primitive(Primitive::U32),
+                )?;
+                let child = self.element_addr(reference, zero, Access::Borrow, span)?;
+                self.bind_in_place(pattern, child, inner, span)?;
             }
             MatchPattern::Variant { variant, args } => {
                 let Type::Enum(id) = ty else {

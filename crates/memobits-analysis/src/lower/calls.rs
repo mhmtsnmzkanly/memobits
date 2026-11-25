@@ -184,18 +184,32 @@ impl Builder<'_> {
         let result = (|| {
             let mut values = Vec::with_capacity(arguments.len() + 1);
             let receiver_parameter = &selected.signature.parameters[0];
+            let boxed = self.box_depth(base);
             if receiver_parameter.access != Access::Owned
-                && matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. })
+                && (boxed > 0
+                    || matches!(base.kind, ExprKind::Index { .. } | ExprKind::Field { .. }))
             {
                 // A projected receiver (`t.first.read()`, `xs[0].m()`) is
-                // addressed in place, never loaded as a whole aggregate.
-                let (root, projections) = self.lower_place(base)?;
+                // addressed in place, never loaded as a whole aggregate. A
+                // boxed receiver is addressed through the box.
+                let (root, mut projections) = self.lower_place(base)?;
+                for _ in 0..boxed {
+                    projections.push(Projection::Deref);
+                }
                 let mut reference =
                     self.address_chain(root, &projections, receiver_parameter.access, base.span)?;
                 reference.mode = access_mode(receiver_parameter.access);
                 values.push(reference);
             } else {
-                let receiver = self.lower_expr(base)?;
+                let mut receiver = self.lower_expr(base)?;
+                if boxed > 0 {
+                    // A by-value method on a box consumes it.
+                    let option_ty = self.match_unboxes[&self.id(expr)].clone();
+                    let Some(Type::List(inner)) = self.operand_type(receiver) else {
+                        unreachable!("checked boxed receiver")
+                    };
+                    receiver = self.take_box_value(receiver, option_ty, *inner, base.span)?;
+                }
                 values.push(self.lower_selected_argument(receiver, receiver_parameter)?);
             }
             for (index, (argument, parameter)) in arguments

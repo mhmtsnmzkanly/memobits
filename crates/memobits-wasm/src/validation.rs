@@ -451,10 +451,17 @@ pub(super) fn validate_string_struct_borrows(
             };
             // The root stays a named owner local (a borrowed parameter cannot
             // be forwarded as a whole struct; see `forwarded_parameter`).
+            // A lent place (a payload or content reference held in a local,
+            // such as a box's value) roots the chain like a named owner does.
             if matches!(root, Source::Local(local)
             if function.locals.get(local.0 as usize).is_some_and(|binding| {
                 type_owns_string_storage(program, &binding.ty, &mut HashSet::new())
-            })) {
+            })) || matches!(root, Source::Local(local)
+                    if lent_elements.contains(&local)
+                        && matches!(&function.locals[local.0 as usize].ty,
+                            Type::Reference { inner, .. }
+                                if type_owns_string_storage(program, inner, &mut HashSet::new())))
+            {
                 allowed.extend(chain);
             }
         }

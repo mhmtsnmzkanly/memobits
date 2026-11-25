@@ -30,6 +30,7 @@ examples/
 | [astar](apps/astar/README.md) | Fixed-grid A* search with an unreachable-goal case | `cargo run -p memobits-cli -- run --project examples/apps/astar/project.toml` | `Result: Ok(i32(12))` |
 | [enf-lexer](apps/enf-lexer/README.md) | Bounded ENF byte lexer fixture | `cargo run -p memobits-cli -- run --project examples/apps/enf-lexer/project.toml` | `Result: Ok(i32(0))` |
 | [hashing](apps/hashing/README.md) | FNV-1a, DJB2 and Adler-32 over `array<u8, N>` | `cargo run -p memobits-cli -- run --project examples/apps/hashing/project.toml` | `Result: Ok(u32(1774777415))` |
+| [tree](apps/tree/README.md) | Binary search tree through `Box<T>`: `Box(..)`, `unbox`, `borrow` walks, patterns through boxes | `cargo run -p memobits-cli -- run --project examples/apps/tree/project.toml` | `Result: i32(3235)` |
 | [utf8-validator](apps/utf8-validator/README.md) | Unicode scalar validation with byte offsets | `cargo run -p memobits-cli -- run --project examples/apps/utf8-validator/project.toml` | `Result: Ok(i32(0))` |
 
 `host-capability` needs the CLI host profile declared in its manifest; the

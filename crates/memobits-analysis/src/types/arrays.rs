@@ -28,6 +28,7 @@ impl Checker {
                     | Ty::Never
                     | Ty::String
                     | Ty::List(..)
+                    | Ty::Box(..)
                     | Ty::Array(..)
                     | Ty::Struct(..)
                     | Ty::Tuple(..)

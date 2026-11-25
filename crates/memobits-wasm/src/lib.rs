@@ -29,6 +29,7 @@ mod list_descriptor;
 mod memory;
 mod numerics;
 mod operations;
+mod recursive;
 mod string_descriptor;
 mod string_heap;
 mod utf8;
@@ -1783,6 +1784,21 @@ fn encode_frames_traced(
         thunk_indices.insert(*target, import_count + functions.len());
         functions.function(*type_index);
     }
+    // Recursive owner types are released by functions of their own.
+    let recursive_ids = if heap_copy_index.is_some() {
+        recursive::recursive_types(&program.types)
+    } else {
+        Vec::new()
+    };
+    let recursive_base = import_count + functions.len();
+    if !recursive_ids.is_empty() {
+        let type_index = types.len();
+        types.ty().function([ValType::I32], []);
+        for _ in &recursive_ids {
+            functions.function(type_index);
+        }
+    }
+    let _recursive_table = recursive::install(recursive_ids.clone(), recursive_base);
     let mut code = CodeSection::new();
     let mut traps = Traps {
         global: if has_frames { TRAP_GLOBAL } else { 0 },
@@ -1868,6 +1884,14 @@ fn encode_frames_traced(
         thunk.instruction(&WasmInstruction::Call(indices[target]));
         thunk.instruction(&WasmInstruction::End);
         code.function(&thunk);
+    }
+    for id in &recursive_ids {
+        code.function(&recursive::body(
+            &program.types,
+            &structs,
+            *id,
+            heap_copy_index,
+        )?);
     }
     // Check sites may exist without any frame (pure arithmetic), so the trap
     // record needs a global of its own then.
@@ -2548,6 +2572,18 @@ fn emit_string_storage_cleanup(
 ) -> Result<(), String> {
     if !type_has_string_storage(types, ty) {
         return Ok(());
+    }
+    if release && recursive::is_recursive(ty).is_some() {
+        // A type that reaches itself is released by its own function, except
+        // where that function's body starts.
+        let id = recursive::is_recursive(ty).expect("checked recursive type");
+        if recursive::take_body() != Some(id) {
+            emit_relative_address(body, base_local, offset);
+            body.instruction(&WasmInstruction::Call(
+                recursive::function_index(id).expect("recursive function index"),
+            ));
+            return Ok(());
+        }
     }
     match ty {
         Type::List(element) => {

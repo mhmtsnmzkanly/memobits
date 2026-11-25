@@ -1477,3 +1477,71 @@ Facts about the shipped generics step; the Stage 4 decision is unchanged.
   and projection, nested projection, uninferred parameter, conflicting types and
   consts, invalid declarations, wrong arity/kind of type arguments, the 256 limit).
   Guide: `generics.mb` (+5 tests, 139 total); example `generics-operators` (6 tests).
+
+### Shipped H4 details (2026-11-25)
+
+Facts about the shipped `Box<T>` step; the Stage 4 decision is unchanged. The
+implementation notes are in `docs/design/box.md`.
+
+- Import and layers: `use alloc::Box;` (same rules as `List`: the alloc layer,
+  `alloc = false` is ME012, a missing import is NE003 `unknown type 'Box'` with
+  the note ``add `use alloc::Box;` to use Box``, and a missing import for the
+  constructor is NE001 with the same hint). The `alloc` virtual module now
+  declares `List` and `Box`. After parsing, an applied `Box<T>` in a module that
+  has `use alloc::Box;` is rewritten to `alloc::Box<T>` (the same pass as
+  `Self`), so a module that does not import it may still declare its own
+  `type Box<T> { .. }`.
+- Surface: `Box(value)` moves `value` into a fresh box (any admitted `List`
+  element: primitives, strings, structs, tuples, enums, arrays, Lists, function
+  values, boxes; never a reference or `Unit`). `unbox(b) -> T` is a built-in
+  like `drop` / `replace` (an in-scope function, import or value of that name
+  takes precedence): it consumes an owned box and moves the value out. Moving
+  a box out of a field or element is the usual partial-move TE022; use
+  `replace`, `swap` or `unbox(replace(place, Box(..)))`.
+- Ownership: a box is a single owner. Moves, scope exit, reassignment
+  (`b = Box(..)`), `drop(b)`, early returns, `replace` / `swap` on box places
+  and overwrite of box fields and elements release the box block and the
+  value's owned contents exactly once. Loans on the contents are loans on the
+  box (BE005 for moving or writing the box while one is live). `Box<T>`
+  works as a field, array element, `List` element, `T?` / `T ! E` payload,
+  tuple element, enum payload and generic argument.
+- Representation: the checker has a distinct `Ty::Box`; the IR stores it as a
+  one-element `List<T>`. A box therefore occupies the 12-byte List descriptor
+  in its owner (not one pointer word) and its block is the list block of one
+  element. All list owner rules (heap leaf in every owner predicate, moves
+  clear the descriptor, type-directed release) apply unchanged.
+- Auto-deref: a field access, index, method receiver or `match` scrutinee of
+  type `Box<T>`, `borrow Box<T>` or `share Box<T>` (any number of nested
+  levels) addresses the boxed value. `b.f`, `b[i]`, `b.m()` (receiver modes
+  apply to the boxed place; a by-value method consumes the box), `b.f = v` and
+  `b.f += v` (the box must be `var` or a `share` parameter), `replace(b.f, v)`
+  and `swap(b.f, c.f)` work. `match b { .. }` on an owned box consumes it and
+  moves payloads out; on a borrowed box or a place it lends the value in place.
+  A refutable pattern on a payload of type `Box<T>` sees through the box in an
+  in-place match (`Node(Node(_, v, _), _, _)`); in a consuming match it is
+  TE017 (bind the box and `unbox` it). A `.borrow()` / `.share()` of a box
+  passed to a parameter of the content type lends the content.
+- Recursive types: the by-value recursion check (TE026) is unchanged and only
+  follows fields, payloads and arrays, so recursion through `Box<T>`, a `T?`
+  of a box or a `List` of boxes is accepted and direct recursion is rejected.
+  Wasm releases a type that reaches itself with one generated function per
+  type (`recursive.rs`); releasing a chain recurses once per node and traps
+  with a call-stack error for chains of hundreds of thousands of nodes.
+- Limits: the IR representation above (single-word layout not done);
+  built-in String and List methods (`len`, `push`, ...) do not auto-deref (bind
+  or `unbox` first; user methods do); a payload bound by an owned `match`
+  cannot be passed directly as an owned call argument (`f(unbox(rest))`, the
+  existing List rule); a consuming match or by-value method consumes one box
+  level; box contents cannot be a reference or `Unit`; a Box cannot cross the
+  entry ABI.
+- Tests: `crates/memobits-cli/tests/h4_box.rs` (18): construction, fields,
+  assignment, methods, indexing, `replace`/`swap`, contents of every kind,
+  containers, linked list and binary tree (insert, sum, depth, nested
+  patterns), deep recursion, capped-memory repeated build-and-drop (memory
+  capped to initial + 1 page, 4,096 iterations) for trees, box contents and
+  owned matches, reassignment/`drop`/early return, a mutation check that keeps
+  trees and must trap with "guest heap allocation failed", and the negatives
+  (missing import, `alloc = false`, direct recursion, use after move, moving
+  out of a box field, immutable write, loans, nested-pattern gate). Guide:
+  `collections.mb` (+2 tests, 141 total); example `examples/apps/tree`
+  (4 tests).

@@ -23,13 +23,21 @@ enum Mode {
 struct Resolver {
     mode: Mode,
     diagnostics: Vec<Diagnostic>,
+    /// The module has `use alloc::Box;`: an applied `Box<T>` names the alloc
+    /// layer's box, spelled `alloc::Box<T>` from here on.
+    box_imported: bool,
 }
 
 pub(crate) fn resolve(module: &mut Module, diagnostics: &mut Vec<Diagnostic>) {
+    let box_imported = module.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Use { path, alias: None, .. }
+            if path.as_slice() == ["alloc", "Box"])
+    });
     for item in &mut module.items {
         let mut resolver = Resolver {
             mode: Mode::Outside(OUTSIDE),
             diagnostics: Vec::new(),
+            box_imported,
         };
         match &mut item.kind {
             ItemKind::Function {
@@ -154,6 +162,9 @@ impl Resolver {
                 TypeArgument::Reference { referent, .. } => self.ty(referent),
                 TypeArgument::Const(_) | TypeArgument::Integer(_) => {}
             }
+        }
+        if self.box_imported && ty.path.as_slice() == ["Box"] && !ty.arguments.is_empty() {
+            ty.path = vec!["alloc".into(), "Box".into()];
         }
         if ty.path.first().map(String::as_str) != Some("Self") {
             return;

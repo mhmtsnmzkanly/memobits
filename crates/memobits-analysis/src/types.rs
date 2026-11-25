@@ -47,6 +47,9 @@ enum Ty {
     Primitive(&'static str),
     String,
     List(Box<Ty>),
+    /// `Box<T>` of the alloc layer: a single-owner heap box. The IR stores it
+    /// as a one-element list, so every list owner rule applies to it.
+    Box(Box<Ty>),
     Array(Box<Ty>, u32),
     /// A struct, by index in the type table, with its name for messages.
     Struct(u32, Rc<str>),
@@ -361,6 +364,7 @@ fn name(ty: &Ty) -> String {
         Ty::Primitive(s) => s.to_string(),
         Ty::String => "string".into(),
         Ty::List(element) => format!("List<{}>", name(element)),
+        Ty::Box(inner) => format!("Box<{}>", name(inner)),
         Ty::Array(element, count) => format!("array<{}, {count}>", name(element)),
         Ty::Struct(_, name) | Ty::Tuple(_, name, _) | Ty::Enum(_, name) => name.to_string(),
         Ty::Function(parameters, result) => {
@@ -779,6 +783,39 @@ pub enum PatternLiteral {
     String(String),
 }
 
+impl Ty {
+    /// The type under every `Box` level.
+    fn unboxed(self) -> Ty {
+        peel_boxes(self).0
+    }
+}
+
+/// The type under every `Box` level (looking through one reference) and
+/// whether any box was peeled.
+fn peel_boxes(ty: Ty) -> (Ty, bool) {
+    let mut ty = ty;
+    let mut peeled = false;
+    while let Ty::Box(inner) = ty {
+        ty = *inner;
+        peeled = true;
+    }
+    (ty, peeled)
+}
+
+/// Number of `Box` levels around a type, looking through one reference.
+fn box_depth(ty: &Ty) -> u32 {
+    let mut ty = match ty {
+        Ty::Reference { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    let mut depth = 0;
+    while let Ty::Box(inner) = ty {
+        depth += 1;
+        ty = inner;
+    }
+    depth
+}
+
 /// Local-to-this-expression tuple alias resolutions used by lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TupleProjectionFact {
@@ -823,6 +860,20 @@ pub struct FunctionFacts {
     /// `match` expressions over owned enums, with the pattern facts lowering needs.
     pub matches: Vec<MatchFact>,
     pub tuple_projections: Vec<TupleProjectionFact>,
+    /// `Box(value)` constructor calls.
+    pub box_constructors: Vec<ExprId>,
+    /// `unbox(b)` calls.
+    pub explicit_unboxes: Vec<(ExprId, IrType)>,
+    /// `match` expressions that consume an owned box: the match and the
+    /// `Option` of the boxed value used to take it out.
+    pub match_unboxes: Vec<(ExprId, IrType)>,
+    /// Expressions whose type is a `Box` (or a reference to one) with the
+    /// number of box levels, by AST node address; a field, index, method or
+    /// match base found here is dereferenced before it is projected.
+    pub box_exprs: Vec<(usize, u32)>,
+    /// `.borrow()` / `.share()` conversions that lend the content of a box
+    /// (by call node address, with the number of box levels).
+    pub box_coercions: Vec<(usize, u32)>,
     pub tuple_initializers: Vec<TupleInitializerFact>,
     /// Set for an anonymous function: the function that contains it.
     pub(crate) anonymous: Option<AnonymousInfo>,
@@ -965,7 +1016,7 @@ fn ir_type(ty: &Ty) -> Option<IrType> {
                 inner: Box::new(inner),
             }
         }
-        Ty::List(element) => IrType::List(Box::new(ir_type(element)?)),
+        Ty::List(element) | Ty::Box(element) => IrType::List(Box::new(ir_type(element)?)),
         Ty::Array(element, len) => IrType::Array {
             element: Box::new(ir_type(element)?),
             len: *len,
@@ -1293,7 +1344,7 @@ impl Checker {
 
     fn contains_string_owner(&self, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
         match ty {
-            Ty::String | Ty::List(_) => true,
+            Ty::String | Ty::List(_) | Ty::Box(_) => true,
             Ty::Array(element, _) => self.contains_string_owner(element, visited),
             Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
                 if !visited.insert(*id) {
@@ -1320,7 +1371,7 @@ impl Checker {
         self.table.info(*id).fields.iter().any(|field| {
             !matches!(
                 field.ty,
-                Ty::String | Ty::List(_) | Ty::Enum(..) | Ty::Array(..)
+                Ty::String | Ty::List(_) | Ty::Box(_) | Ty::Enum(..) | Ty::Array(..)
             ) && self.contains_string_owner(&field.ty, &mut HashSet::new())
                 && !self.supported_nested_string_tuple(&field.ty, &mut HashSet::new())
         })
@@ -1359,7 +1410,7 @@ impl Checker {
         let supported = info.fields.iter().all(|field| {
             matches!(
                 field.ty,
-                Ty::String | Ty::List(_) | Ty::Enum(..) | Ty::Array(..)
+                Ty::String | Ty::List(_) | Ty::Box(_) | Ty::Enum(..) | Ty::Array(..)
             ) || !self.contains_string_owner(&field.ty, &mut HashSet::new())
                 || self.supported_nested_string_tuple(&field.ty, visited)
         });
@@ -1398,11 +1449,17 @@ impl Checker {
         let aggregate = |ty: &Ty| match ty {
             Ty::Array(..) => Some("an element of immutable array"),
             Ty::List(_) => Some("an element of immutable List"),
+            Ty::Box(_) => Some("a value inside an immutable Box"),
             Ty::Struct(..) | Ty::Tuple(..) => Some("a field of immutable struct"),
             _ => None,
         };
         match &binding.ty {
-            ty @ (Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..))
+            ty @ (Ty::Array(..)
+            | Ty::List(_)
+            | Ty::Box(_)
+            | Ty::Struct(..)
+            | Ty::Tuple(..)
+            | Ty::Enum(..))
                 if !writable =>
             {
                 let what = aggregate(ty).expect("aggregate root");
@@ -1418,7 +1475,12 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                Ty::Array(..)
+                    | Ty::List(_)
+                    | Ty::Box(_)
+                    | Ty::Struct(..)
+                    | Ty::Tuple(..)
+                    | Ty::Enum(..)
             ) =>
             {
                 self.error(
@@ -1433,7 +1495,12 @@ impl Checker {
                 ..
             } if matches!(
                 inner.as_ref(),
-                Ty::Array(..) | Ty::List(_) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                Ty::Array(..)
+                    | Ty::List(_)
+                    | Ty::Box(_)
+                    | Ty::Struct(..)
+                    | Ty::Tuple(..)
+                    | Ty::Enum(..)
             ) && !writable =>
             {
                 self.error(
@@ -2643,6 +2710,12 @@ impl Checker {
             id
         });
         let ty = self.expr_impl(expr, expected, id);
+        if let Some(facts) = self.facts.as_mut() {
+            let depth = box_depth(&ty);
+            if depth > 0 {
+                facts.box_exprs.push((expr as *const Expr as usize, depth));
+            }
+        }
         if let Some((facts, id)) = self.facts.as_mut().zip(id) {
             facts.expressions.push(ExpressionFact {
                 id,
@@ -2995,6 +3068,11 @@ impl Checker {
                     selected_assignments: Vec::new(),
                     matches: Vec::new(),
                     tuple_projections: Vec::new(),
+                    box_constructors: Vec::new(),
+                    box_coercions: Vec::new(),
+                    match_unboxes: Vec::new(),
+                    explicit_unboxes: Vec::new(),
+                    box_exprs: Vec::new(),
                     tuple_initializers: Vec::new(),
                     anonymous: Some(AnonymousInfo {
                         parent: outer.id,
@@ -3356,6 +3434,92 @@ impl Checker {
         UNIT
     }
 
+    /// `Box(value)`: move `value` into a fresh heap box.
+    fn box_constructor(
+        &mut self,
+        expr: &Expr,
+        arguments: &[Expr],
+        id: Option<ExprId>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let [value] = arguments else {
+            self.error(
+                10,
+                expr.span,
+                format!("Box() expects one value, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        let expected_inner = match expected {
+            Some(Ty::Box(inner)) => Some(inner.as_ref().clone()),
+            _ => None,
+        };
+        self.allow_array_value(value);
+        let actual = self.expr(value, expected_inner.as_ref());
+        self.reject_extraction(value, &actual);
+        match &actual {
+            Ty::Error | Ty::Never => return actual,
+            Ty::Reference { .. } => {
+                self.error(17, value.span, "Box contents cannot be references");
+                return Ty::Error;
+            }
+            Ty::Primitive("Unit") => {
+                self.error(17, value.span, "Box contents cannot be Unit");
+                return Ty::Error;
+            }
+            _ => {}
+        }
+        self.check_list_element_support(&actual, value.span);
+        if let Some(inner) = &expected_inner {
+            self.ensure(&actual, inner, value.span);
+        }
+        if let Some((facts, id)) = self.facts.as_mut().zip(id) {
+            facts.box_constructors.push(id);
+        }
+        Ty::Box(Box::new(actual))
+    }
+
+    /// `unbox(b) -> T`: consume a box and move its value out.
+    fn explicit_unbox(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
+        let [value] = arguments else {
+            self.error(
+                10,
+                span,
+                format!("unbox() expects one Box, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                self.expr(argument, None);
+            }
+            return Ty::Error;
+        };
+        self.allow_array_value(value);
+        let ty = self.expr(value, None);
+        self.reject_extraction(value, &ty);
+        let Ty::Box(inner) = ty else {
+            if !matches!(ty, Ty::Error | Ty::Never) {
+                self.error(
+                    7,
+                    value.span,
+                    format!("unbox() requires an owned Box, found {}", name(&ty)),
+                );
+            }
+            return Ty::Error;
+        };
+        let inner = *inner;
+        let option = self.table.instantiate_enum(
+            registry::by_id(registry::TemplateId::Option),
+            vec![ResolvedArgument::Type(inner.clone())],
+            span,
+        );
+        if let (Some((facts, id)), Some(option)) = (self.facts.as_mut().zip(id), ir_type(&option)) {
+            facts.explicit_unboxes.push((id, option));
+        }
+        inner
+    }
+
     fn explicit_drop(&mut self, span: Span, arguments: &[Expr], id: Option<ExprId>) -> Ty {
         let [value] = arguments else {
             self.error(
@@ -3373,7 +3537,7 @@ impl Checker {
         if ty == Ty::Error {
             return Ty::Error;
         }
-        if !matches!(ty, Ty::String | Ty::List(_))
+        if !matches!(ty, Ty::String | Ty::List(_) | Ty::Box(_))
             || !matches!(&value.kind, ExprKind::Path(path) if path.len() == 1
                 && self.lookup(&path[0]).is_some_and(|binding| binding.access == IrAccess::Owned))
         {
@@ -3454,6 +3618,7 @@ impl Checker {
                     parameter.ty,
                     Ty::String
                         | Ty::List(_)
+                        | Ty::Box(_)
                         | Ty::Array(..)
                         | Ty::Struct(..)
                         | Ty::Tuple(..)
@@ -3552,7 +3717,9 @@ impl Checker {
                 "owned tuple calls cannot transport nested String-owning aggregates other than tuples in this slice",
             );
         }
-        if let Some(parameter) = param.filter(|parameter| matches!(parameter.ty, Ty::List(_))) {
+        if let Some(parameter) =
+            param.filter(|parameter| matches!(parameter.ty, Ty::List(_) | Ty::Box(_)))
+        {
             // A function value always names an internal function, so a call
             // through one passes Lists like a direct call.
             if !direct && !self.value_call {
@@ -3563,7 +3730,9 @@ impl Checker {
                 );
             } else if parameter.access == IrAccess::Owned
                 && !(matches!(&arg.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some())
-                    || matches!(&arg.kind, ExprKind::Call { callee, .. } if self.direct_callee(callee)))
+                    || matches!(&arg.kind, ExprKind::Call { callee, .. } if self.direct_callee(callee)
+                        || matches!(&callee.kind, ExprKind::Path(path)
+                            if path.as_slice() == ["Box"] || path.as_slice() == ["unbox"])))
             {
                 self.error(
                     17,
@@ -4036,6 +4205,7 @@ impl Checker {
                 Ty::String
                     | Ty::Array(..)
                     | Ty::List(..)
+                    | Ty::Box(..)
                     | Ty::Struct(..)
                     | Ty::Tuple(..)
                     | Ty::Enum(..)
@@ -4073,6 +4243,7 @@ impl Checker {
             owner @ (Ty::Primitive(_)
             | Ty::String
             | Ty::List(_)
+            | Ty::Box(_)
             | Ty::Array(..)
             | Ty::Struct(..)
             | Ty::Tuple(..)
@@ -4101,6 +4272,7 @@ impl Checker {
             Ty::Primitive(_)
                 | Ty::String
                 | Ty::List(_)
+                | Ty::Box(_)
                 | Ty::Array(..)
                 | Ty::Struct(..)
                 | Ty::Tuple(..)
@@ -4164,6 +4336,25 @@ impl Checker {
             return Ty::Error;
         }
 
+        // A borrowed or shared box passed where its content type is expected
+        // lends the content (deref coercion).
+        let mut inner = inner;
+        if let Some(wanted) = expected_inner {
+            if matches!(inner.as_ref(), Ty::Box(_))
+                && !matches!(wanted, Ty::Box(_) | Ty::Error | Ty::Never)
+            {
+                let (peeled, _) = peel_boxes((*inner).clone());
+                let depth = box_depth(&inner);
+                if compatible(&peeled, wanted) {
+                    inner = Box::new(peeled);
+                    if let Some(facts) = self.facts.as_mut() {
+                        facts
+                            .box_coercions
+                            .push((expression as *const Expr as usize, depth));
+                    }
+                }
+            }
+        }
         Ty::Reference {
             access,
             inner,
@@ -4301,12 +4492,17 @@ impl Checker {
         // its fields like its owner.
         let base_ty = match base_ty {
             Ty::Reference { inner, .. }
-                if matches!(inner.as_ref(), Ty::Struct(..) | Ty::Tuple(..)) =>
+                if matches!(inner.as_ref(), Ty::Struct(..) | Ty::Tuple(..) | Ty::Box(_)) =>
             {
                 *inner
             }
             other => other,
         };
+        // A box lends its value: `b.f` reads field `f` of the boxed struct.
+        let mut base_ty = base_ty;
+        while let Ty::Box(inner) = base_ty {
+            base_ty = *inner;
+        }
         let base_ty_for_hint = base_ty.clone();
         match base_ty {
             Ty::Tuple(id, tuple_name, aliases) => {
@@ -4809,6 +5005,54 @@ impl Checker {
     ) -> Ty {
         self.allow_array_value(scrutinee);
         let scrutinee_ty = self.expr(scrutinee, None);
+        // A box lends its value: a borrowed box is matched through a borrow of
+        // what it holds, an owned one by its (moved or placed) contents.
+        let mut owned_box = false;
+        let mut nested_box = false;
+        let mut box_scrutinee = false;
+        let scrutinee_ty = match scrutinee_ty {
+            Ty::Reference {
+                access,
+                inner,
+                origin,
+            } if matches!(inner.as_ref(), Ty::Box(_)) => {
+                let mut peeled = *inner;
+                while let Ty::Box(next) = peeled {
+                    peeled = *next;
+                }
+                box_scrutinee = true;
+                Ty::Reference {
+                    access,
+                    inner: Box::new(peeled),
+                    origin,
+                }
+            }
+            Ty::Box(inner) => {
+                let mut peeled = *inner;
+                while let Ty::Box(next) = peeled {
+                    peeled = *next;
+                    nested_box = true;
+                }
+                owned_box = true;
+                box_scrutinee = true;
+                peeled
+            }
+            other => other,
+        };
+        if box_scrutinee {
+            let inside = match &scrutinee_ty {
+                Ty::Reference { inner, .. } => inner.as_ref(),
+                other => other,
+            };
+            if !matches!(inside, Ty::Enum(..) | Ty::Tuple(..)) {
+                self.error(
+                    29,
+                    scrutinee.span,
+                    "`match` on a Box requires an enum or tuple inside the box",
+                );
+                return Ty::Error;
+            }
+        }
         let table = Rc::clone(&self.table);
         // The matched type: an enum or a tuple (behind the reference, if any).
         let mut column: Option<Ty> = None;
@@ -4864,17 +5108,17 @@ impl Checker {
         let signature = {
             let table = Rc::clone(&table);
             move |ty: &Ty| -> Option<Vec<Vec<Ty>>> {
-                match ty {
+                match ty.clone().unboxed() {
                     Ty::Enum(id, _) => Some(
                         table
-                            .info(*id)
+                            .info(id)
                             .variants
                             .iter()
                             .map(|variant| variant.payload.clone())
                             .collect(),
                     ),
                     Ty::Tuple(id, ..) => Some(vec![table
-                        .info(*id)
+                        .info(id)
                         .fields
                         .iter()
                         .map(|field| field.ty.clone())
@@ -5020,6 +5264,26 @@ impl Checker {
                     )
                 };
                 self.error(31, expr.span, message);
+            }
+        }
+        if owned_box && !borrowed {
+            if nested_box {
+                self.error(
+                    17,
+                    scrutinee.span,
+                    "an owned match consumes one Box level; unbox the outer boxes first",
+                );
+                return Ty::Error;
+            }
+            let option = self.table.instantiate_enum(
+                registry::by_id(registry::TemplateId::Option),
+                vec![ResolvedArgument::Type(scrutinee_ty.clone())],
+                scrutinee.span,
+            );
+            if let (Some((facts_out, expression)), Some(option)) =
+                (self.facts.as_mut().zip(id), ir_type(&option))
+            {
+                facts_out.match_unboxes.push((expression, option));
             }
         }
         if let Some((facts_out, expression)) = self.facts.as_mut().zip(id) {
@@ -5218,6 +5482,43 @@ impl Checker {
         names: &mut Vec<String>,
         tainted: &mut bool,
     ) -> MatchPattern {
+        if let Ty::Box(_) = expected {
+            // A refutable pattern sees through a box to the value it holds; a
+            // binding or `_` takes the box itself.
+            let (inside, _) = peel_boxes(expected.clone());
+            let refutable = match &pattern.kind {
+                PatternKind::Wildcard => false,
+                PatternKind::Binding(binding) => {
+                    let path = std::slice::from_ref(binding);
+                    let context = matches!(inside, Ty::Enum(..)).then_some(&inside);
+                    self.contextual_variant(path, pattern.span, context)
+                        .is_some()
+                        || self.prelude_variant(path).is_some()
+                }
+                PatternKind::Constant { path, .. } => {
+                    let context = matches!(inside, Ty::Enum(..)).then_some(&inside);
+                    path.len() == 1
+                        && (self
+                            .contextual_variant(path, pattern.span, context)
+                            .is_some()
+                            || self.prelude_variant(path).is_some())
+                }
+                PatternKind::Or(_) => false,
+                _ => true,
+            };
+            if refutable {
+                if !borrowed {
+                    self.error(
+                        17,
+                        pattern.span,
+                        "a pattern inside a Box needs an in-place match (match on a borrow, or bind the box and `unbox` it)",
+                    );
+                    *tainted = true;
+                    return MatchPattern::Wildcard;
+                }
+                return self.check_pattern(pattern, &inside, borrowed, top_level, names, tainted);
+            }
+        }
         match &pattern.kind {
             PatternKind::Wildcard => MatchPattern::Wildcard,
             PatternKind::Binding(binding) => {
@@ -5266,7 +5567,12 @@ impl Checker {
                 let bound_ty = if borrowed
                     && matches!(
                         expected,
-                        Ty::String | Ty::Array(..) | Ty::Struct(..) | Ty::Tuple(..) | Ty::Enum(..)
+                        Ty::String
+                            | Ty::Box(_)
+                            | Ty::Array(..)
+                            | Ty::Struct(..)
+                            | Ty::Tuple(..)
+                            | Ty::Enum(..)
                     ) {
                     Ty::Reference {
                         access: IrAccess::Borrow,
@@ -5973,12 +6279,17 @@ impl Checker {
                 // indexes like its owner.
                 let base_ty = match base_ty {
                     Ty::Reference { inner, .. }
-                        if matches!(inner.as_ref(), Ty::Array(..) | Ty::List(_)) =>
+                        if matches!(inner.as_ref(), Ty::Array(..) | Ty::List(_) | Ty::Box(_)) =>
                     {
                         *inner
                     }
                     other => other,
                 };
+                // A box lends its value: `b[i]` indexes the boxed array or List.
+                let mut base_ty = base_ty;
+                while let Ty::Box(inner) = base_ty {
+                    base_ty = *inner;
+                }
                 let result = match base_ty {
                     Ty::List(element) => *element,
                     Ty::Array(element, count) => {
@@ -6963,6 +7274,20 @@ impl Checker {
                     {
                         return self.explicit_swap(expr.span, arguments, id);
                     }
+                    if path.as_slice() == ["Box"]
+                        && self.lookup("Box").is_none()
+                        && !self.functions.contains_key("Box")
+                        && self.imports.get("Box").map(String::as_str) == Some("alloc::Box")
+                    {
+                        return self.box_constructor(expr, arguments, id, expected);
+                    }
+                    if path.as_slice() == ["unbox"]
+                        && self.lookup("unbox").is_none()
+                        && !self.functions.contains_key("unbox")
+                        && !self.imports.contains_key("unbox")
+                    {
+                        return self.explicit_unbox(expr.span, arguments, id);
+                    }
                     if path.as_slice() == ["assert"]
                         && self.lookup("assert").is_none()
                         && !self.functions.contains_key("assert")
@@ -7034,6 +7359,9 @@ impl Checker {
                     }) {
                         self.allow_array_value(base);
                         let receiver = read_type(self.expr(base, None));
+                        // A box lends its value: the method is found on what it holds.
+                        let box_levels = box_depth(&receiver);
+                        let (receiver, boxed) = peel_boxes(receiver);
                         let available = self.extension_candidates.clone();
                         let mut matching = Vec::new();
                         for candidate in available.into_iter().filter(|candidate| {
@@ -7088,6 +7416,28 @@ impl Checker {
                         let candidate = &applicable[0];
                         let (receiver_access, parameters, result, _, function) =
                             candidate.methods.get(name).cloned().unwrap();
+                        if boxed && receiver_access == Access::Owned {
+                            // A by-value method consumes the box and moves its
+                            // value into the call.
+                            if box_levels > 1 {
+                                self.error(
+                                    17,
+                                    base.span,
+                                    "a by-value method consumes one Box level; unbox the outer boxes first",
+                                );
+                                return Ty::Error;
+                            }
+                            let option = self.table.instantiate_enum(
+                                registry::by_id(registry::TemplateId::Option),
+                                vec![ResolvedArgument::Type(receiver.clone())],
+                                expr.span,
+                            );
+                            if let (Some((facts, expression)), Some(option)) =
+                                (self.facts.as_mut().zip(id), ir_type(&option))
+                            {
+                                facts.match_unboxes.push((expression, option));
+                            }
+                        }
                         if receiver_access == Access::Owned {
                             self.reject_extraction(base, &receiver);
                         }
@@ -7631,7 +7981,16 @@ fn check_standalone(
         facts: None,
         qualified_functions: HashMap::new(),
         qualified_function_ids: HashMap::new(),
-        imports: HashMap::new(),
+        // A standalone file has no resolver; `use alloc::Box;` still enables `Box(..)`.
+        imports: module
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(&item.kind, ItemKind::Use { path, alias: None, .. }
+                    if path.as_slice() == ["alloc", "Box"])
+            })
+            .map(|_| ("Box".to_owned(), "alloc::Box".to_owned()))
+            .collect(),
         extension_candidates: Vec::new(),
         scopes: Vec::new(),
         outer_scopes: Vec::new(),
@@ -7741,6 +8100,11 @@ fn check_standalone(
                     selected_assignments: Vec::new(),
                     matches: Vec::new(),
                     tuple_projections: Vec::new(),
+                    box_constructors: Vec::new(),
+                    box_coercions: Vec::new(),
+                    match_unboxes: Vec::new(),
+                    explicit_unboxes: Vec::new(),
+                    box_exprs: Vec::new(),
                     tuple_initializers: Vec::new(),
                     next_expr: 0,
                     anonymous: None,
@@ -8121,6 +8485,11 @@ pub(crate) fn check_resolved_mode(
                             selected_assignments: Vec::new(),
                             matches: Vec::new(),
                             tuple_projections: Vec::new(),
+                            box_constructors: Vec::new(),
+                            box_coercions: Vec::new(),
+                            match_unboxes: Vec::new(),
+                            explicit_unboxes: Vec::new(),
+                            box_exprs: Vec::new(),
                             tuple_initializers: Vec::new(),
                             next_expr: 0,
                             anonymous: None,
@@ -8203,6 +8572,11 @@ pub(crate) fn check_resolved_mode(
                             selected_assignments: Vec::new(),
                             matches: Vec::new(),
                             tuple_projections: Vec::new(),
+                            box_constructors: Vec::new(),
+                            box_coercions: Vec::new(),
+                            match_unboxes: Vec::new(),
+                            explicit_unboxes: Vec::new(),
+                            box_exprs: Vec::new(),
                             tuple_initializers: Vec::new(),
                             next_expr: 0,
                             anonymous: None,
@@ -8338,6 +8712,11 @@ pub(crate) fn check_resolved_mode(
                     selected_assignments: Vec::new(),
                     matches: Vec::new(),
                     tuple_projections: Vec::new(),
+                    box_constructors: Vec::new(),
+                    box_coercions: Vec::new(),
+                    match_unboxes: Vec::new(),
+                    explicit_unboxes: Vec::new(),
+                    box_exprs: Vec::new(),
                     tuple_initializers: Vec::new(),
                     next_expr: 0,
                     anonymous: None,
@@ -8487,6 +8866,11 @@ pub(crate) fn check_resolved_mode(
                         selected_assignments: Vec::new(),
                         matches: Vec::new(),
                         tuple_projections: Vec::new(),
+                        box_constructors: Vec::new(),
+                        box_coercions: Vec::new(),
+                        match_unboxes: Vec::new(),
+                        explicit_unboxes: Vec::new(),
+                        box_exprs: Vec::new(),
                         tuple_initializers: Vec::new(),
                         next_expr: 0,
                         anonymous: None,
@@ -8858,7 +9242,7 @@ impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
     fn view<'a>(&self, ty: &'a Ty) -> memobits_ir::OwnerTyView<'a, Ty> {
         use memobits_ir::OwnerTyView as View;
         match ty {
-            Ty::String | Ty::List(_) => View::String,
+            Ty::String | Ty::List(_) | Ty::Box(_) => View::String,
             Ty::Primitive(_) => View::Primitive,
             Ty::Enum(..) | Ty::Tuple(..) if table_owns_heap(self.0, ty, &mut HashSet::new()) => {
                 View::Heap
@@ -8887,7 +9271,7 @@ impl memobits_ir::OwnerTypeModel for TyOwnerModel<'_> {
 /// Whether an enum or tuple type holds a String or List anywhere inside.
 fn table_owns_heap(table: &TypeTable, ty: &Ty, visited: &mut HashSet<u32>) -> bool {
     match ty {
-        Ty::String | Ty::List(_) => true,
+        Ty::String | Ty::List(_) | Ty::Box(_) => true,
         Ty::Array(element, len) => *len != 0 && table_owns_heap(table, element, visited),
         Ty::Struct(id, _) | Ty::Tuple(id, _, _) | Ty::Enum(id, _) => {
             if !visited.insert(*id) {

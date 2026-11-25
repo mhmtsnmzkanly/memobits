@@ -189,3 +189,13 @@ all eight widths (`memobits-wasm/src/numerics.rs`):
   mask the count with `width - 1`; `checked_shl`/`checked_shr` return `None`.
   `<<` discards the high bits (re-normalized for narrow widths) and `>>` is
   arithmetic for signed types (`shr_s`) and zero-filling for unsigned types.
+
+## Recursive owner release (H4)
+
+A type that reaches itself through a `List` element (every `Box<T>` is a
+one-element List in the IR) cannot have its type-directed release walk
+emitted inline. `crates/memobits-wasm/src/recursive.rs` finds those types and
+appends one `(i32) -> ()` function per type after the thunks; the release
+emitter calls it with the address of the value (the function's own top level
+is emitted inline, so it calls itself only for the recursive positions). The
+table of function indices is thread-local for the duration of one encode.

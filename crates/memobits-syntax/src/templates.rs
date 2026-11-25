@@ -13,6 +13,7 @@ pub enum ParameterKind {
 pub enum TemplateId {
     Array,
     List,
+    Box,
     Option,
     Result,
     Error,
@@ -63,6 +64,13 @@ const TEMPLATES: &[Template] = &[
         argument_error: "List requires one element type",
     },
     Template {
+        id: TemplateId::Box,
+        name: "Box",
+        parameters: &[ParameterKind::Type],
+        variants: &[],
+        argument_error: "Box requires one value type",
+    },
+    Template {
         id: TemplateId::Option,
         variants: &[
             VariantTemplate {
@@ -107,14 +115,17 @@ pub fn lookup(path: &[String]) -> Option<&'static Template> {
     // Only the applied spellings `array<T, N>` and `List<T>` (which also
     // needs `use alloc::List;`) are built in.
     // Bare names can still refer to a user-defined type or import.
-    lookup_applied(path).filter(|template| template.id != TemplateId::List)
+    lookup_applied(path)
+        .filter(|template| !matches!(template.id, TemplateId::List | TemplateId::Box))
 }
 
 pub fn lookup_applied(path: &[String]) -> Option<&'static Template> {
     let name = match path {
-        [name] => name,
-        // `List<T>` lives in the Rust-owned virtual module `alloc`.
-        [module, name] if module == ALLOC_MODULE && name == "List" => name,
+        // A bare `Box` is rewritten to `alloc::Box` right after parsing when the
+        // module imports it, so the bare spelling is never the template.
+        [name] if name != "Box" => name,
+        // `List<T>` and `Box<T>` live in the Rust-owned virtual module `alloc`.
+        [module, name] if module == ALLOC_MODULE && (name == "List" || name == "Box") => name,
         _ => return None,
     };
     TEMPLATES.iter().find(|template| template.name == name)

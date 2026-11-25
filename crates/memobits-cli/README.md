@@ -178,6 +178,16 @@ A call that leaves a parameter unfixed is TE002; missing, ambiguous or per-bound
 and the 256-specialization cap are TE007. Not available: explicit call-site type
 arguments, method-level type parameters, `where` bounds on type declarations, const
 parameters as values, nested projections.
+`Box<T>` (H4): `use alloc::Box;` (alloc layer; ME012 with `[build] alloc = false`, NE003
+without the import) gives a single-owner heap box. `Box(value)` moves a value in,
+`unbox(b)` consumes the box and moves the value out. Field access, indexing, method calls
+and `match` see through a box (`b.x`, `b.x = v`, `b[i]`, `b.m()`, `match b { .. }`; in-place
+matches also match nested patterns through a box payload), `.borrow()` of a box passed to
+a parameter of the content type lends the content, and `replace`/`swap` work on places
+inside boxes. A type may contain itself only through a box (also inside `T?` or `List`);
+direct recursion stays TE026. The box and everything it owns are released exactly once on
+every path; it is represented internally as a one-element List. Built-in String/List
+methods do not see through a box. See `docs/design/box.md` and `examples/apps/tree`.
 Function values (H1): `fn(T1, borrow T2) -> R` is a type (`fn(i32)` has a Unit result),
 usable in parameters, results, locals, struct, tuple and record fields, array and List
 elements, enum payloads and `T?` (write `(fn(i32) -> i32)?`). A top-level function

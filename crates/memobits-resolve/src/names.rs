@@ -477,16 +477,23 @@ impl Checker<'_> {
             return;
         }
         if let Some(template) = templates::lookup_type(ty) {
-            if template.id == templates::TemplateId::List && !self.list_is_imported(ty) {
+            let alloc_type = match template.id {
+                templates::TemplateId::List => Some("List"),
+                templates::TemplateId::Box => Some("Box"),
+                _ => None,
+            };
+            if let Some(type_name) =
+                alloc_type.filter(|name| !self.alloc_type_is_imported(ty, name))
+            {
                 let note = if self.alloc_enabled {
-                    "add `use alloc::List;` to use List"
+                    format!("add `use alloc::{type_name};` to use {type_name}")
                 } else {
-                    "List is part of the alloc layer, which `[build] alloc = false` disables"
+                    format!("{type_name} is part of the alloc layer, which `[build] alloc = false` disables")
                 };
                 let mut d = Diagnostic::new(
                     DiagnosticCode::new(Category::Name, 3).unwrap(),
                     Severity::Error,
-                    "unknown type 'List'".to_owned(),
+                    format!("unknown type '{type_name}'"),
                 );
                 d.span = Some(ty.span);
                 self.diagnostics.push(d.with_label(ty.span, note));
@@ -527,7 +534,19 @@ impl Checker<'_> {
                 .iter()
                 .any(|parameters| parameters.contains(&ty.path[0]))
         {
+            let box_note = ty.path[0] == "Box" && !ty.arguments.is_empty();
             self.error(3, ty.span, format!("unknown type '{}'", ty.path[0]));
+            if box_note {
+                let note = if self.alloc_enabled {
+                    "add `use alloc::Box;` to use Box".to_owned()
+                } else {
+                    "Box is part of the alloc layer, which `[build] alloc = false` disables"
+                        .to_owned()
+                };
+                if let Some(last) = self.diagnostics.pop() {
+                    self.diagnostics.push(last.with_label(ty.span, note));
+                }
+            }
         }
     }
     /// A path of two or more segments: a local enum variant (possibly through
@@ -587,13 +606,21 @@ impl Checker<'_> {
     }
     /// `List<T>` needs `use alloc::List;` (any alias-free symbol import or the
     /// prelude) or `use alloc;` with the path `alloc::List<T>`.
-    fn list_is_imported(&self, ty: &Type) -> bool {
+    fn alloc_type_is_imported(&self, ty: &Type, type_name: &str) -> bool {
         match ty.path.as_slice() {
             [name] => self
                 .imports
                 .get(name)
-                .is_some_and(|path| path == "alloc::List"),
-            _ => self.alloc_module_imported,
+                .is_some_and(|path| path == &format!("alloc::{type_name}")),
+            // `Box<T>` is spelled `alloc::Box<T>` after its import was seen.
+            _ => {
+                self.alloc_module_imported
+                    || (type_name == "Box"
+                        && self
+                            .imports
+                            .get("Box")
+                            .is_some_and(|path| path == "alloc::Box"))
+            }
         }
     }
     fn error(&mut self, number: u16, span: Span, message: String) {
@@ -742,6 +769,8 @@ impl Checker<'_> {
                 {
                     let hint = if self.test_names.contains(&path[0]) {
                         " (test functions cannot be called or used as values)"
+                    } else if path[0] == "Box" {
+                        " (add `use alloc::Box;` to construct a Box)"
                     } else {
                         ""
                     };
@@ -781,7 +810,8 @@ impl Checker<'_> {
                     if (path.as_slice() == ["drop"]
                         || path.as_slice() == ["assert"]
                         || path.as_slice() == ["replace"]
-                        || path.as_slice() == ["swap"])
+                        || path.as_slice() == ["swap"]
+                        || path.as_slice() == ["unbox"])
                     && !self.scopes.iter().rev().any(|scope| scope.contains(&path[0])))
                 {
                     self.expr(callee);

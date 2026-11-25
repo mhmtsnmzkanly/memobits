@@ -2,12 +2,18 @@ use text::{byte_is, no_byte};
 use numbers::DAYS_PER_WEEK;
 use alloc;
 use alloc::List;
+use alloc::Box;
 
 // `List<T>` is a library type in the compiler-provided `alloc` module, so it
 // must be imported with `use alloc::List;`. Without the import, `List` is an
 // unknown type. `use alloc;` also admits the qualified spelling
 // `alloc::List<T>`. A project that sets `[build] alloc = false` has no `alloc`
 // module and no heap at all (see examples/topics/core-only).
+//
+// `Box<T>` lives in the same module (`use alloc::Box;`): a single-owner heap
+// box. `Box(value)` moves a value into it, `unbox(b)` moves it back out, and
+// the box and everything it owns are released exactly once. See
+// `boxes_hold_recursive_types` below and examples/apps/tree.
 
 // Fixed arrays, structs, and ownership.
 pub type Row = array<i32, 3>;
@@ -538,4 +544,48 @@ test fn constant_array_length() {
     var total: u32 = 0;
     loop i in 0..DAYS_PER_WEEK { total += week[i]; }
     assert(total == 7);
+}
+
+// A type may contain itself only through a Box (here, directly; a `T?` of a
+// Box or a List of Boxes works too). Direct recursion is rejected.
+type Chain [End, Link(i32, Box<Chain>)]
+fn chain_of(count: i32) -> Chain {
+    if count == 0 { Chain::End } else { Chain::Link(count, Box(chain_of(count - 1))) }
+}
+fn chain_len(chain: borrow Chain) -> i32 {
+    // A bound child is a borrowed Box; `.borrow()` lends the Chain inside it.
+    match chain {
+        End => 0,
+        Link(_, rest) => 1 + chain_len(rest.borrow()),
+    }
+}
+fn chain_total(chain: Chain) -> i32 {
+    // An owned `match` moves the Box out of the payload; `unbox` takes its value.
+    match chain {
+        End => 0,
+        Link(value, rest) => value + chain_total(unbox(rest)),
+    }
+}
+type Pixel { x: i32, y: i32 }
+extend Pixel {
+    fn sum(borrow self) -> i32 { self.x + self.y }
+}
+test fn boxes_hold_recursive_types() {
+    let chain := chain_of(4);
+    assert(chain_len(chain.borrow()) == 4);
+    assert(chain_total(chain) == 10);
+}
+test fn boxes_see_through_for_fields_and_methods() {
+    // Fields, methods and indexing work on the boxed value; writes need `var`.
+    var pixel := Box(Pixel { x: 1, y: 2 });
+    pixel.x = 40;
+    assert(pixel.x == 40);
+    assert(pixel.sum() == 42);
+    let cells := Box([5, 6, 7]);
+    assert(cells[1] == 6);
+    // `replace` and `swap` work on places inside boxes; `unbox` consumes one.
+    let old := replace(pixel.y, 9);
+    assert(old == 2);
+    let inner := unbox(pixel);
+    assert(inner.y == 9);
 }

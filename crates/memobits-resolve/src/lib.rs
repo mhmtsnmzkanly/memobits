@@ -206,7 +206,7 @@ fn virtual_source(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-const ALLOC_SOURCE: &str = "pub type List;";
+const ALLOC_SOURCE: &str = "pub type List;\npub type Box;";
 fn is_project_module(project: &Project, name: &str) -> bool {
     virtual_source(name).is_some() || project.modules.iter().any(|item| item.name == name)
 }
