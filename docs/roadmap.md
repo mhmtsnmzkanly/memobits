@@ -1,7 +1,6 @@
 # Memobits roadmap and status
 
-Status as of 2026-11-26. Development is paused; this page is the restart point.
-The `launch/manifest-completion` branch holds the recorded work since `main`.
+This page records completed work and the next development stages.
 Binding language rules live in [design/decisions.md](design/decisions.md); the
 feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 
@@ -16,6 +15,7 @@ feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 | Stage 4 | function values, anonymous functions, `borrow fn` / `share fn` closures, owned closures, `var fn`, multi-parameter generics with `where`, method generics, `Box<T>` with iterative release, whole-owner reassignment |
 | Backend | size-class guest allocator |
 | Stage 5 step 1 | `mb fmt` |
+| Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime; Wasmi remains the `run`/`test` engine |
 
 Verification at pause: 1,615 workspace tests passing, 0 failing; every
 example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns
@@ -23,10 +23,9 @@ example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns
 
 ## Next: Stage 5 (outside world)
 
-1. **S5-2 engines and Component Model** — see the 2026-11-26 decision in
-   [design/decisions.md](design/decisions.md): `mb exec` on wasmtime with
-   engine parity tests, then WIT mapping and `mb build --component`, then host
-   capabilities as WIT imports.
+1. **S5-2b/c Component Model** — see the 2026-11-26 decision in
+   [design/decisions.md](design/decisions.md): WIT mapping and
+   `mb build --component`, then host capabilities as WIT imports.
 2. **S5-3 packages** — dependencies in `project.toml`, package identity,
    cross-package extensions (see PKG-03/PKG-04 in the inventory).
 3. **S5-4 LSP** — diagnostics, go-to-definition, completion.

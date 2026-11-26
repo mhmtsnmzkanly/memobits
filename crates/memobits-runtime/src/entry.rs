@@ -194,6 +194,34 @@ mod tests {
         module.finish()
     }
 
+    #[cfg(feature = "wasmtime")]
+    #[test]
+    fn wasmtime_and_wasmi_validate_entry_metadata_and_memory_equally() {
+        let valid = metadata();
+        let base = guest(16, 12, [0; 12], true);
+        let attached = with_custom_section(&base, SECTION, &valid);
+        let cases = [
+            base,
+            attached.clone(),
+            with_custom_section(&attached, SECTION, &valid),
+            with_custom_section(&guest(16, 12, [0; 12], false), SECTION, &valid),
+            with_custom_section(&guest(3, 12, [0; 12], true), SECTION, &valid),
+            with_custom_section(&guest(16, 11, [0; 12], true), SECTION, &valid),
+            with_custom_section(&guest(16, 12, [0; 12], true), SECTION, &[0, 1, 2]),
+        ];
+        for bytes in cases {
+            assert_eq!(
+                run(&bytes, ENTRY_EXPORT),
+                crate::exec_with_capabilities(
+                    &bytes,
+                    ENTRY_EXPORT,
+                    &crate::RunOptions::default(),
+                    &[]
+                )
+            );
+        }
+    }
+
     #[test]
     fn validates_entry_metadata_before_reading_guest_results() {
         let module = guest(16, 12, [0; 12], true);

@@ -17,6 +17,7 @@ cargo run -p memobits-cli -- run --project examples/guide/project.toml
 artifact_dir=$(mktemp -d)
 cargo run -p memobits-cli -- build --project examples/guide/project.toml --output "$artifact_dir/guide.wasm"
 cargo run -p memobits-cli -- run "$artifact_dir/guide.wasm"
+cargo run -p memobits-cli -- exec "$artifact_dir/guide.wasm"
 ```
 
 ## Source-level tests
@@ -52,7 +53,7 @@ it with the same report. `mb check` type-checks every module and every test;
 
 ## Expected output
 
-Source and standalone Wasm runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
+Source, standalone Wasm, and Wasmtime `exec` runs print exactly the following on stdout, with empty stderr (this is checked by `crates/memobits-cli/tests/examples_documented.rs`).
 
 ```text
 Result: Ok(i32(42))

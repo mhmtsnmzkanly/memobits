@@ -106,6 +106,16 @@ cargo run -p memobits-cli -- build --project examples/guide/project.toml
 cargo run -p memobits-cli -- run examples/guide/target/memobits/app.wasm
 ```
 
+The default CLI also runs a built core Wasm artifact with Wasmtime:
+
+```sh
+cargo run -p memobits-cli -- exec examples/guide/target/memobits/app.wasm
+```
+
+`mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts, with
+`--entry`, `--project`, and the same fuel options as artifact `run`. Build the
+CLI with `--no-default-features` to omit Wasmtime and `mb exec`.
+
 ## Language notes
 
 - The guide's [collections module](examples/guide/src/collections.mb) demonstrates `contains(value) -> bool` and

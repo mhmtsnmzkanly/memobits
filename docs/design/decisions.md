@@ -1934,6 +1934,8 @@ R1 owning overwrite and the H3 generics step).
 
 ## Execution engines and the Component Model (2026-11-26, user decision; not implemented yet)
 
+> The core-module `mb exec` portion is implemented; Component Model and WIT work remain future stages. See the [roadmap](../roadmap.md).
+
 - Two engines are used, selected by command rather than by a flag:
   - `mb run` and `mb test` use **wasmi** (interpreter: instant start, fuel
     limits, detailed trap reports) for the development loop;

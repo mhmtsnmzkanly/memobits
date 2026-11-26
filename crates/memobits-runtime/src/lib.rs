@@ -2,6 +2,11 @@
 //! Bare Wasm exports use scalar results. Memobits application artifacts can
 //! also carry a versioned adapter for compiler-known outcomes.
 
+#[cfg(feature = "wasmtime")]
+mod wasmtime_engine;
+#[cfg(feature = "wasmtime")]
+pub use wasmtime_engine::run_with_capabilities as exec_with_capabilities;
+
 mod entry;
 pub use entry::{EntryOutcome, EntrySuccess, ReturnedError};
 use memobits_entry_abi as entry_abi;
@@ -388,6 +393,53 @@ mod tests {
         module.finish()
     }
 
+    #[cfg(feature = "wasmtime")]
+    #[test]
+    fn engines_agree_on_scalar_unit_signature_and_fuel() {
+        let options = RunOptions { fuel: Some(100) };
+        for result in [
+            None,
+            Some((ValType::I32, Instruction::I32Const(42))),
+            Some((ValType::I64, Instruction::I64Const(-7))),
+            Some((ValType::F32, Instruction::F32Const(1.25.into()))),
+            Some((ValType::F64, Instruction::F64Const(2.5.into()))),
+        ] {
+            let bytes = module(result);
+            assert_eq!(
+                super::exec_with_capabilities(&bytes, "entry", &options, &[]),
+                run_with(&bytes, "entry", &options)
+            );
+        }
+        let mut bytes = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        let mut exports = ExportSection::new();
+        exports.export("entry", ExportKind::Func, 0);
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::Loop(BlockType::Empty));
+        function.instruction(&Instruction::Br(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        let mut code = CodeSection::new();
+        code.function(&function);
+        bytes
+            .section(&types)
+            .section(&functions)
+            .section(&exports)
+            .section(&code);
+        let bytes = bytes.finish();
+        assert_eq!(
+            run_with(&bytes, "entry", &options),
+            Err(RunError::FuelExhausted)
+        );
+        assert_eq!(
+            super::exec_with_capabilities(&bytes, "entry", &options, &[]),
+            Err(RunError::FuelExhausted)
+        );
+    }
+
     #[test]
     fn returns_supported_scalar_values_and_unit() {
         assert_eq!(
@@ -438,6 +490,45 @@ mod tests {
             run_with_fuel(&module(None), "missing", 100),
             Err(RunError::MissingExport(_))
         ));
+    }
+
+    #[cfg(feature = "wasmtime")]
+    #[test]
+    fn engines_reject_mismatched_host_import_and_parameterized_entry() {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I64], []);
+        let mut imports = ImportSection::new();
+        imports.import("memobits:console", "write_i32", EntityType::Function(0));
+        module.section(&types).section(&imports);
+        let bytes = module.finish();
+        let capability = [super::HostCapability::ConsoleWriteI32];
+        let options = RunOptions::default();
+        assert_eq!(
+            super::run_with_capabilities(&bytes, "entry", &options, &capability),
+            super::exec_with_capabilities(&bytes, "entry", &options, &capability)
+        );
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32], []);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        let mut exports = ExportSection::new();
+        exports.export("entry", ExportKind::Func, 0);
+        let mut code = CodeSection::new();
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::End);
+        code.function(&function);
+        module
+            .section(&types)
+            .section(&functions)
+            .section(&exports)
+            .section(&code);
+        let bytes = module.finish();
+        assert_eq!(
+            super::run_with_capabilities(&bytes, "entry", &options, &[]),
+            super::exec_with_capabilities(&bytes, "entry", &options, &[])
+        );
     }
 
     #[test]

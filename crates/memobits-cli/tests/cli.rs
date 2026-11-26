@@ -7687,6 +7687,150 @@ fn project_inventory_labels_configured_host_imports() {
     );
 }
 
+#[cfg(feature = "wasmtime")]
+#[test]
+fn exec_matches_run_for_the_same_outcome_artifact() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='exec-parity'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() -> i32 ! Error { Ok(42) }");
+    assert!(f.run(&["build", "--output", "app.wasm"]).status.success());
+    let run = f.run(&["run", "app.wasm"]);
+    let exec = f.run(&["exec", "app.wasm"]);
+    assert!(exec.status.success(), "{exec:?}");
+    assert_eq!(exec.stdout, b"Result: Ok(i32(42))\n");
+    assert_eq!(exec.stdout, run.stdout);
+    assert_eq!(exec.stderr, run.stderr);
+    assert_eq!(exec.status.code(), run.status.code());
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn exec_parity_for_outcomes_traps_and_fuel() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='exec-cases'\nentry='main::main'\n",
+    );
+    for (source, expected) in [
+        ("fn main() -> i32 { 42 }", "Result: i32(42)\n"),
+        ("fn main() {}", "Result: Unit\n"),
+        (
+            "fn main() -> i32 ?! Error { Ok(Some(42)) }",
+            "Result: Ok(Some(i32(42)))\n",
+        ),
+        (
+            "fn main() -> i32 ?! Error { Ok(None) }",
+            "Result: Ok(None)\n",
+        ),
+        (
+            "fn main() -> i32 ! Error { Err(Error { code: 9 }) }",
+            "Result: Err(Error, code=9)\n",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        assert!(
+            f.run(&["build", "--output", "app.wasm"]).status.success(),
+            "{source}"
+        );
+        let run = f.run(&["run", "app.wasm"]);
+        let exec = f.run(&["exec", "app.wasm"]);
+        assert!(run.status.success(), "{run:?}");
+        assert_eq!(exec.status.code(), run.status.code(), "{source}");
+        assert_eq!(exec.stdout, run.stdout, "{source}");
+        assert_eq!(exec.stderr, run.stderr, "{source}");
+        assert_eq!(
+            String::from_utf8(exec.stdout).unwrap(),
+            expected,
+            "{source}"
+        );
+    }
+    f.write("src/main.mb", "fn main() { assert(false); }");
+    assert!(f.run(&["build", "--output", "trap.wasm"]).status.success());
+    let run = f.run(&["run", "trap.wasm"]);
+    let exec = f.run(&["exec", "trap.wasm"]);
+    assert_eq!(exec.status.code(), run.status.code());
+    assert_eq!(exec.stdout, run.stdout);
+    assert_eq!(exec.stderr, run.stderr);
+    assert!(String::from_utf8_lossy(&exec.stderr).contains("assertion failed"));
+    f.write("src/main.mb", "fn main() { loop {} }");
+    assert!(f.run(&["build", "--output", "loop.wasm"]).status.success());
+    let run = f.run(&["run", "loop.wasm", "--fuel", "100"]);
+    let exec = f.run(&["exec", "loop.wasm", "--fuel", "100"]);
+    assert_eq!(exec.status.code(), run.status.code());
+    assert_eq!(exec.stderr, run.stderr);
+    assert!(String::from_utf8_lossy(&exec.stderr).contains("fuel exhausted"));
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn exec_parity_for_export_selection_invalid_input_and_stack_overflow() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='exec-stack'\nentry='main::main'\n[build]\nstack_size=65536\n",
+    );
+    f.write("src/main.mb", "fn r(n: i32) -> i32 { let a := [n; 1000]; if n == 0 { 0 } else { r(n - 1) + a[0] } } fn main() -> i32 { r(100000) }");
+    let build = f.run(&["build", "--output", "stack.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    for args in [
+        vec!["stack.wasm", "--entry", "main"],
+        vec!["stack.wasm", "--entry", "missing"],
+    ] {
+        let mut run_args = vec!["run"];
+        run_args.extend(args.iter().copied());
+        let mut exec_args = vec!["exec"];
+        exec_args.extend(args.iter().copied());
+        let run = f.run(&run_args);
+        let exec = f.run(&exec_args);
+        assert_eq!(exec.status.code(), run.status.code());
+        assert_eq!(exec.stdout, run.stdout);
+        assert_eq!(exec.stderr, run.stderr);
+    }
+    f.write("invalid.wasm", "not wasm");
+    for command in ["run", "exec"] {
+        let output = f.run(&[command, "invalid.wasm"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid WebAssembly module"));
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn exec_parity_for_typed_host_import() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='exec-host'\nentry='main::main'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i32']\nresult='unit'\n");
+    f.write(
+        "src/main.mb",
+        "extern fn write_i32(value: i32); fn main() -> i32 { write_i32(42); 7 }",
+    );
+    let build = f.run(&["build", "--output", "host.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let run = f.run(&["run", "host.wasm", "--project", "project.toml"]);
+    let exec = f.run(&["exec", "host.wasm", "--project", "project.toml"]);
+    assert!(exec.status.success(), "{exec:?}");
+    assert_eq!(exec.stdout, b"Host i32: 42\nResult: i32(7)\n");
+    assert_eq!(exec.stdout, run.stdout);
+    assert_eq!(exec.stderr, run.stderr);
+    let no_host = f.run(&["exec", "host.wasm"]);
+    assert!(!no_host.status.success());
+    assert!(String::from_utf8_lossy(&no_host.stderr).contains("memobits:console.write_i32"));
+}
+
+#[cfg(not(feature = "wasmtime"))]
+#[test]
+fn exec_is_not_advertised_when_wasmtime_is_disabled() {
+    let f = Fixture::new();
+    let help = f.run(&["--help"]);
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("mb exec"));
+    let output = f.run(&["exec", "app.wasm"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("built without the wasmtime feature"));
+}
+
 #[test]
 fn help_usage_and_unsupported_commands_are_truthful() {
     let f = Fixture::new();

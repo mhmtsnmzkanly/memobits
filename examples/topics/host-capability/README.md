@@ -11,6 +11,7 @@ the same profile:
 target/debug/mb run --project examples/topics/host-capability/project.toml
 target/debug/mb build --project examples/topics/host-capability/project.toml --output target/host-capability.wasm
 target/debug/mb run target/host-capability.wasm --project examples/topics/host-capability/project.toml
+target/debug/mb exec target/host-capability.wasm --project examples/topics/host-capability/project.toml
 ```
 
 Each invocation calls the typed host import, prints `Host i32: 42`, and reports

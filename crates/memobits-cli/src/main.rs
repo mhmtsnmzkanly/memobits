@@ -19,6 +19,14 @@ use std::{
 
 const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb fmt [--check] [--project PATH | FILE...]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  fmt              Format source modules in place to the canonical style (see docs/design/formatting.md)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --check          fmt: list files that would change and exit 1 without writing\n  --lib            Resolve library exports instead of the application entry\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact; unlike build and run it also checks every project module, reachable or not, and every test. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check and test but never included in the application or library artifact, and build and run ignore tests. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
 
+fn help() -> String {
+    let help = HELP.to_owned();
+    #[cfg(feature = "wasmtime")]
+    let help = help.replace("       mb test [--project", "       mb exec FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project")
+        .replace("  test             Run", "  exec             Run a core Wasm artifact using Wasmtime\n  test             Run");
+    help
+}
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 fn diagnostic(number: u16, message: impl Into<String>) -> String {
@@ -291,7 +299,7 @@ fn test_command(arguments: Vec<OsString>) -> Result<(String, bool), String> {
             if args.next().is_some() {
                 return Err(diagnostic(4, "unexpected arguments after --help"));
             }
-            return Ok((HELP.into(), true));
+            return Ok((help(), true));
         }
         if fuel.take(&arg, &mut args)? {
             continue;
@@ -631,7 +639,7 @@ fn display_run_value(value: memobits_runtime::RunValue, ty: Option<&Type>) -> St
     }
 }
 
-fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
+fn run_command(arguments: Vec<OsString>, exec: bool) -> Result<String, String> {
     if arguments
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -639,7 +647,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         if arguments.len() != 1 {
             return Err(diagnostic(4, "unexpected arguments after --help"));
         }
-        return Ok(HELP.into());
+        return Ok(help());
     }
     if arguments
         .first()
@@ -656,7 +664,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
                 if args.next().is_some() {
                     return Err(diagnostic(4, "unexpected arguments after --help"));
                 }
-                return Ok(HELP.into());
+                return Ok(help());
             }
             if fuel.take(&arg, &mut args)? {
                 continue;
@@ -702,12 +710,22 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
         let capabilities = host_capabilities(project.as_ref());
         let bytes = fs::read(&wasm_path)
             .map_err(|error| diagnostic(1, format!("{}: {error}", wasm_path.display())))?;
-        let value =
+        #[cfg(feature = "wasmtime")]
+        let result = if exec {
+            memobits_runtime::exec_with_capabilities(&bytes, &entry, &run_options, &capabilities)
+        } else {
             memobits_runtime::run_with_capabilities(&bytes, &entry, &run_options, &capabilities)
-                .map_err(runtime_error)?;
+        };
+        #[cfg(not(feature = "wasmtime"))]
+        let result =
+            memobits_runtime::run_with_capabilities(&bytes, &entry, &run_options, &capabilities);
+        let value = result.map_err(runtime_error)?;
         return Ok(format!("Result: {}\n", display_run_value(value, None)));
     }
 
+    if exec {
+        return Err(diagnostic(4, "exec requires a core Wasm artifact path"));
+    }
     let mut selected = None;
     let mut fuel = FuelArgs::default();
     let mut args = arguments.into_iter();
@@ -716,7 +734,7 @@ fn run_command(arguments: Vec<OsString>) -> Result<String, String> {
             if args.next().is_some() {
                 return Err(diagnostic(4, "unexpected arguments after --help"));
             }
-            return Ok(HELP.into());
+            return Ok(help());
         }
         if fuel.take(&arg, &mut args)? {
             continue;
@@ -779,10 +797,19 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
         if args.next().is_some() {
             return Err(diagnostic(4, "unexpected arguments after --help"));
         }
-        return Ok(HELP.into());
+        return Ok(help());
     }
     if command == "run" {
-        return run_command(args.collect());
+        return run_command(args.collect(), false);
+    }
+    if command == "exec" {
+        #[cfg(feature = "wasmtime")]
+        return run_command(args.collect(), true);
+        #[cfg(not(feature = "wasmtime"))]
+        return Err(diagnostic(
+            4,
+            "exec is unavailable: CLI was built without the wasmtime feature",
+        ));
     }
     if command == "syntax" || command == "analyze" || command == "ownership" {
         let path = args
@@ -792,7 +819,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             if args.next().is_some() {
                 return Err(diagnostic(4, "unexpected arguments after --help"));
             }
-            return Ok(HELP.into());
+            return Ok(help());
         }
         if args.next().is_some() {
             return Err(diagnostic(
@@ -906,7 +933,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             if args.next().is_some() {
                 return Err(diagnostic(4, "unexpected arguments after --help"));
             }
-            return Ok(HELP.into());
+            return Ok(help());
         }
         if arg == "--lib"
             && (command == "resolve"
@@ -1195,7 +1222,7 @@ fn fmt_command(arguments: Vec<OsString>) -> Result<FmtOutcome, String> {
                 return Err(diagnostic(4, "unexpected arguments after --help"));
             }
             return Ok(FmtOutcome {
-                stdout: HELP.into(),
+                stdout: help(),
                 stderr: String::new(),
                 ok: true,
             });

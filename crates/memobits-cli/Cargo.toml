@@ -3,6 +3,10 @@ name = "memobits-cli"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["wasmtime"]
+wasmtime = ["memobits-runtime/wasmtime"]
+
 [[bin]]
 name = "mb"
 path = "src/main.rs"
