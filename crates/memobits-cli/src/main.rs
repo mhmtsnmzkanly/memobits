@@ -1095,8 +1095,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     if let Some(host) = &manifest.host {
         let _ = writeln!(
             output,
-            "Host profile: {} (import-free)",
-            host.profile.as_deref().unwrap_or("<missing>")
+            "Host profile: {}{}",
+            host.profile.as_deref().unwrap_or("<missing>"),
+            if host.imports.is_empty() {
+                " (import-free)"
+            } else {
+                ""
+            }
         );
         for import in &host.imports {
             let _ = writeln!(

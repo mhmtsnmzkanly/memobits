@@ -7669,6 +7669,25 @@ fn cli_host_profile_is_validated_before_import_free_execution() {
 }
 
 #[test]
+fn project_inventory_labels_configured_host_imports() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='host-profile'\nentry='main::main'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i32']\nresult='unit'\n");
+    f.write("src/main.mb", "this is not valid Memobits source");
+    let output = f.run(&["project"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.lines().any(|line| line == "Host profile: cli"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  import memobits:console.write_i32"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn help_usage_and_unsupported_commands_are_truthful() {
     let f = Fixture::new();
     for args in [&["--help"][..], &["-h"], &["project", "--help"]] {
