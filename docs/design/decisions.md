@@ -758,7 +758,7 @@ Facts about the shipped behavior; no new decisions.
   without placeholders is exactly the old static literal (`{{`/`}}` become
   single braces), so programs without interpolation lower and encode
   byte-identically (checked on all 14 example artifacts and 112 command
-  outputs with `.local-design/g4/equivalence.sh`). The AST node is
+  outputs with `docs/tools/equivalence.sh`). The AST node is
   `ExprKind::Interpolation(Vec<InterpolationPart>)` with `Text` and
   `Value(Path)` parts.
 - Typing: the identifier is read like any value read (NE001 unknown name, BE001
@@ -1169,7 +1169,7 @@ are allowed once cleanup is proven, and the float text is exactly Rust's).
 - Reachability: the formatter functions, their eight function types and the
   scratch region exist only when a reachable `InitInterpolatedString` has an
   `f32` or `f64` part. A program without a float placeholder is byte-identical
-  to the F2 output (`.local-design/g5/equivalence.sh` against a HEAD build:
+  to the F2 output (`docs/tools/equivalence.sh` against a HEAD build:
   14 artifacts and 337 command outputs identical; the guide's new float test is
   left out of the compared copy because the F2 compiler cannot compile it). The
   formatter adds about 1.7 KB of code to a minimal program (3,307 bytes with a
@@ -1927,3 +1927,24 @@ R1 owning overwrite and the H3 generics step).
   `examples_documented.rs::every_example_is_formatted`.
 - Known limit: dense inline block comments can push a line across the width limit between the
   first and second pass; the self-check then reports PE008 and leaves the file untouched.
+
+## Execution engines and the Component Model (2026-11-26, user decision; not implemented yet)
+
+- Two engines are used, selected by command rather than by a flag:
+  - `mb run` and `mb test` use **wasmi** (interpreter: instant start, fuel
+    limits, detailed trap reports) for the development loop;
+  - `mb build` produces artifacts (`--component` will produce a WebAssembly
+    Component with its WIT world);
+  - a new `mb exec` runs built artifacts and Components with **wasmtime**
+    (Cranelift JIT, near-native speed, Component Model and WASI 0.2).
+  The same `.wasm` must produce the same results under `mb run` and
+  `mb exec`; a parity test suite will enforce it. wasmtime is built behind a
+  Cargo feature that is enabled by default for `mb`.
+- The Component Model is the external ABI direction: exported signatures map
+  `string`→`string`, `List<T>`→`list<T>`, `T?`→`option<T>`, `T ! E`→
+  `result<T, E>`, structs→`record`, enums→`variant`, tuples→`tuple`, names
+  in kebab-case; host capabilities (including today's `console.write_i32`)
+  move to WIT imports mapped from `[host] profile`.
+- Planned order: (1) `mb exec` with wasmtime + engine parity tests,
+  (2) WIT type mapping and `mb build --component`, (3) host capabilities as
+  WIT imports.

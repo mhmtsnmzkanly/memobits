@@ -58,6 +58,7 @@ Code, diagnostics, and documentation are written in English.
 
 ## Design and status
 
+- [Roadmap and status](docs/roadmap.md) — what is done, what is next, known open items.
 - [Accepted decisions](docs/design/decisions.md) — the target language.
 - [Implementation plan](docs/design/implementation-plan.md) — milestones and
   the current implemented subset.
