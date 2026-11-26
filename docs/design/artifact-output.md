@@ -15,7 +15,9 @@ the private [outcome entry adapter](outcome-implementation.md). Other aggregate
 application signatures and aggregate library exports are rejected with LE900.
 
 The output is an experimental core Wasm module. It does not yet carry a stable
-Memobits ABI, dependency packaging, host bindings, or a compatibility promise.
+Memobits ABI, dependency packaging, WIT Component Model support, or a
+compatibility promise. Typed host imports are supported through the current
+experimental `extern` interface; the Stage 5 WIT mapping is still pending.
 Relative explicit output paths are interpreted from the invoking directory.
 Default paths must remain inside the project's build output directory and must
 not use unchecked package metadata as path segments.

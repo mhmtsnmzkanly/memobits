@@ -1,10 +1,15 @@
 # Struct implementation sequence
 
+> **Checkpoint record, not a current feature checklist.** The A1–A4 sections
+> below preserve the staged implementation history, including gates that later
+> work may have opened. For current support and known limits, use the
+> [roadmap](../roadmap.md) and [accepted decisions](decisions.md).
+
 The accepted design uses nominal structs, `type Name { field: Type, ... }`, with
 struct literals `Name { field: value }`, field reads `p.field`, and per-field
-visibility. Fields are module-private unless marked `pub`. This document
-separates what executes from what is still gated, and orders the remaining work
-into packages (A1 to A4), each of which must land with its own gates and tests.
+visibility. Fields are module-private unless marked `pub`. The A1–A4 sections
+record the implementation sequence and checkpoint-specific gates; current
+support and open limits are summarized in the [roadmap](../roadmap.md).
 
 ## Package sequence
 
@@ -42,7 +47,10 @@ independently, and likewise distinct constant array indices.
   definitions of their own.
 - **IR.** `Program::types` holds `TypeDef { path, span, kind }` with
   `TypeDefKind::Struct { fields: Vec<FieldDef> }`. A value has type
-  `Type::Struct(TypeId)`. Field types are non-Unit primitives only.
+  `Type::Struct(TypeId)`. Field types use the ordinary resolved type system;
+  nested structs, fixed arrays, tuples, enums, and supported String-owner shapes
+  are implemented, subject to the owner-transport limits below and in the
+  [roadmap](../roadmap.md).
 - **Construction.** `InstructionKind::StructNew { ty, fields }` takes one consumed
   operand per field in declaration order. Source evaluation order is kept by the
   earlier instructions that produce the operands, so initialisers run in source
@@ -57,10 +65,10 @@ independently, and likewise distinct constant array indices.
   `struct_layouts`). A struct value owns an inline cell in the activation
   frame (bounded by the configured `[build].stack_size`), shared with arrays. Overflow is a backend diagnostic (LE900), never a host
   allocation.
-- **Loans.** A `FieldAddr` loan is rooted at the whole struct local. A live
-  reference to any field therefore conflicts with a write to any other field of
-  the same struct (BE005). A1 to A3 were conservative here; A4 gives loans a
-  projection path (see the A4 checkpoint).
+- **Loans.** A `FieldAddr` loan retains its projected place path. Overlapping
+  paths conflict, while proven disjoint fields may be borrowed independently;
+  dynamic array indices remain overlapping. The A1–A3 checkpoints used a
+  conservative whole-struct root, superseded by A4's projection-path analysis.
 - **Primitive copies.** `decisions.md` says primitive fields are copied
   implicitly, so `let q := p.x;` is valid. See the implicit primitive copy
   checkpoint below.

@@ -1,10 +1,12 @@
 > Historical working document, moved from the local design folder on 2026-11-26.
-> It records decisions and evidence at the time; current rules are in
+> This is a dated snapshot, not a current work plan. Its pending items,
+> approval requests, paths, commands, and status describe the original report
+> checkpoint; do not treat them as current instructions. Current status is in
 > [../design/decisions.md](../design/decisions.md) and status in [../roadmap.md](../roadmap.md).
 
-# Memobits launch report (DRAFT, contractor, 2026-11-23)
+# Memobits launch report (historical draft, 2026-11-23)
 
-Status: DRAFT for the parent audit. No commits, staging, stashes, formatting or source/test/example edits were made by this report run. All launch manifest rows are accepted by the architect (PLAN.md, last sections). Scoped commits for every row: 554e0d1 (bulk) + 5a58b35 (fmt) on branch launch/manifest-completion.
+Status at the time: draft for the parent audit. No commits, staging, stashes, formatting or source/test/example edits were made by this report run. All launch manifest rows are accepted by the architect (PLAN.md, last sections). Scoped commits for every row: 554e0d1 (bulk) + 5a58b35 (fmt) on branch launch/manifest-completion.
 
 ## 1. Starting and ending status
 
@@ -47,7 +49,7 @@ Baseline failures: none observed. The workspace run is fully green. (One pre-exi
 
 ## 3. Per-manifest-row evidence
 
-Scoped commits: PENDING for all rows. Paths cite `crates/memobits-cli/tests/` unless noted. Full clause-by-clause tables are in `.local-design/PLAN.md` ("D2 acceptance reconciliation", "D3 acceptance reconciliation", "C1 acceptance reconciliation", "Reconciliation of M1, I1, G1, G2, OP1, H1, D1", "M1 acceptance reconciliation") and checkpoint entries in `.local-design/launch-progress.md`. Exact diagnostics/outputs are asserted inside the cited tests; the guide result is `Result: Ok(i32(42))` for source and standalone Wasm at every accepted checkpoint.
+At the time of this draft, scoped commits were still pending. Paths cite `crates/memobits-cli/tests/` unless noted. Full clause-by-clause tables were in the local-only `.local-design/PLAN.md` ("D2 acceptance reconciliation", "D3 acceptance reconciliation", "C1 acceptance reconciliation", "Reconciliation of M1, I1, G1, G2, OP1, H1, D1", "M1 acceptance reconciliation") and checkpoint entries in `.local-design/launch-progress.md`. Exact diagnostics/outputs were asserted inside the cited tests; the guide result was `Result: Ok(i32(42))` for source and standalone Wasm at accepted checkpoints.
 
 | Row | Activated syntax / limits | Focused tests (positive / negative) | Verification record |
 | --- | --- | --- | --- |
@@ -86,7 +88,7 @@ Scoped commits: PENDING for all rows. Paths cite `crates/memobits-cli/tests/` un
 - Other recorded gates: partial moves out of nested storage (swap/replace is a post-launch candidate), exported tuple/struct signatures (LE900), reference-bearing aggregate payloads, empty anonymous shapes, signed/other-width shifts, `Bytes` outside core, MW warnings only for parsed source, `mb run FILE.wasm` has no source warnings, actual package loading, non-CLI hosts.
 - Possible lost WIP (needs owner check): the archived 15-path transfer snapshot (`.local-design/archive/superseded/transfer-handoff.md`) listed `types/lists.rs` and `types/templates.rs` as modified; they now show no diff against HEAD and hashes differ from the snapshot. Their pre-launch WIP is no longer in the tree (reverted or folded elsewhere). Not investigated further and nothing was changed.
 
-## 7. Decisions under delegated defaults and decisions needed from the human
+## 7. Decisions under delegated defaults and questions recorded at the time
 
 Delegated (docs/design/decisions.md, 2026-11-23, and PLAN.md architect decisions):
 - Composition allowed by default through one shared String-owner transport predicate; references stay second-class; no implicit partial moves; `Array<T, N>` target spelling (`array(T; N)` withdrawn); anonymous records use the same predicate.
@@ -95,7 +97,8 @@ Delegated (docs/design/decisions.md, 2026-11-23, and PLAN.md architect decisions
 - D2 accepted without partial moves out of nested storage; swap/replace deferred; struct-literal field owners staged in hidden locals accepted; direct temporaries as owned args and element-borrow reads deferred; Error-ancestry negative uses generic LE900 message.
 - Residual bugs fixed as bugs not rules (const params in nested type args; projected-field receivers); M1 accepted by named seams with byte-identical Wasm, not line counts.
 
-Human decisions still needed:
+The following questions were open when this draft was written; they are
+historical and do not request a decision now:
 1. (a) Commit packaging plan (section 8).
 2. (b) Whether to run a repo-wide `cargo fmt` (18 files; 2 are HEAD debt) and whether in its own commit.
 3. (c) `examples/projects/strings` migration (bare `String`, TE001 at HEAD and now) and the other legacy-spelling examples (`hashing`, `utf8-validator`, `strings`) that now print MW003/other warnings.

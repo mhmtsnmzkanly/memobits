@@ -1,5 +1,10 @@
 # First executable List slice
 
+> **Staged implementation record.** The E1b summary at the start describes
+> generalized current behavior. The “original primitive slice” and subsequent
+> checkpoint sections are historical and retain limits that later work may
+> have removed. See the [roadmap](../roadmap.md) for current status.
+
 [Accepted collection and ownership decisions](decisions.md) define `List<T>`
 as a homogeneous dynamic collection and `array<T, N>` as fixed-length.
 A `let` owner cannot mutate its elements. Primitive elements can be read
@@ -45,7 +50,7 @@ arrays of Lists and List payloads of enums are supported (G1, F2).
   the body is BE005.
 - Entry/export ABI is unchanged: Lists are not entry results and cannot cross an
   exported signature.
-- Runnable guide: `examples/guide/src/collections.mb`
+- Runnable guide: [`examples/guide/src/collections.mb`](../../examples/guide/src/collections.mb)
   (`list_element_types`, `list_of_strings`, `list_of_owner_structs`,
   `list_of_tuples_and_arrays`); stress and negatives in
   `crates/memobits-cli/tests/e1b_lists.rs`.
@@ -99,7 +104,7 @@ argument and its result lives in a temporary owner until the read finishes.
 Normal early exits during argument evaluation release it through lexical
 cleanup. Other temporary uses, indirect calls, nesting, subscript syntax,
 and exports remain gated.
-[Runnable guide](../../examples/guide/src/main.mb)
+[Runnable guide](../../examples/guide/src/collections.mb)
 
 ## Source scope
 
@@ -183,7 +188,7 @@ ends when the loop exits. `continue` advances to the next element,
 result stays alive across iterations and is released on exhaustion, break,
 or return.
 
-[Runnable language guide](../../examples/guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/collections.mb)
 
 ## Private Wasm storage and cleanup
 

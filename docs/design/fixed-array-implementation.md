@@ -1,5 +1,9 @@
 # Fixed-array implementation sequence
 
+> **Checkpoint record.** The syntax and WP1–WP4 sections retain the original
+> staged plan and historical gates. They are not a complete current support
+> list; consult the [roadmap](../roadmap.md) and [accepted decisions](decisions.md).
+
 `array<u8, N>` is the byte-buffer type. It accepts nonnegative integer literal
 lengths, including zero, and uses ordinary array literals, with the usual
 type identity, ownership, borrowing, layout and ABI restrictions. Dynamic byte buffers are outside this slice.
@@ -367,7 +371,7 @@ The receiver is evaluated and borrowed before the value is evaluated
 once. The scan stops at the first match. The receiver can be a local,
 a borrow or share handle, a row or field of a local aggregate, or an array
 value such as a literal or a function result.
-[Runnable language guide](../../examples/guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/collections.mb)
 
 ## Fixed array iteration
 
@@ -384,7 +388,7 @@ exits the function. Bare `loop { ... }` still repeats until control leaves it.
 [List iteration](list-slice.md#list-iteration) uses the same loop syntax.
 Iteration over Strings and arrays of aggregates remains deferred.
 
-[Runnable language guide](../../examples/guide/src/main.mb)
+[Runnable language guide](../../examples/guide/src/collections.mb)
 
 ## Implicit primitive copy checkpoint
 

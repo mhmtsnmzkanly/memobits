@@ -10,5 +10,17 @@ Helper scripts used while developing the compiler. They are not part of the
 | `migrate_types.py` | Token-aware rewriter used for the built-in type spelling migration (`Bool`→`bool`, `Option<T>`→`T?`, `Result<T, E>`→`T ! E`, …), including Memobits sources embedded in Rust tests. `--check` prints a diff. |
 | `migrate_alloc_list.py` | Adds `use alloc::List;` to sources that use `List` (alloc layer migration). |
 
+Run the snapshot tools from the repository root. For example:
+
+```sh
+cargo build -j1 -p memobits-cli
+docs/tools/fmt-snapshot.sh /tmp/memobits-fmt-snapshot
+MBBIN="$PWD/target/debug/mb" docs/tools/equivalence.sh /tmp/memobits-equivalence
+```
+
+`equivalence.sh` removes and recreates `target/equivalence-work` during its
+run; do not store files there. It records individual command exit statuses in
+its output, so inspect those results as well as the directory diff.
+
 The old spellings these migrations target are now compile errors, so the
 migration scripts are kept as references for future spelling changes.

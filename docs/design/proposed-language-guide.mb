@@ -1,8 +1,12 @@
-// HISTORICAL PROPOSAL: not current. Current language rules are in docs/design/decisions.md and examples/guide.
+// HISTORICAL PROPOSAL: this file is not a current-language guide. Current
+// rules and limits are in docs/design/decisions.md and docs/roadmap.md; runnable
+// examples and executable checks are in examples/guide/.
 // Memobits language design guide
 // =============================
 // STATUS: design reference, NOT an executable program or a conformance test.
-// The current compiler does not implement this proposed language revision.
+// The current compiler implements some features illustrated here and rejects
+// others. This file has not been reconciled feature-by-feature and must not be
+// used to infer current support. The roadmap and runnable guide are authoritative.
 // Sections are independent examples, not a single shared scope. Definitions may
 // be repeated to compare alternatives. Commented ERROR examples must be rejected
 // by the future compiler once their associated feature is implemented.

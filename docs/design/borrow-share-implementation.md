@@ -2,7 +2,8 @@
 
 This document applies the accepted access rules to the primitive compiler path.
 The checkpoints record the primitive implementation as it landed. See the
-[implementation plan](implementation-plan.md) for current support.
+[roadmap](../roadmap.md) for current support and the accepted rules in
+[decisions](decisions.md).
 
 ## Frontend access information
 

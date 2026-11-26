@@ -2,7 +2,7 @@
 
 This historical plan follows the source-reference audit and records the
 checkpoints through primitive reference emission. See the
-[implementation plan](implementation-plan.md) for current support.
+[roadmap](../roadmap.md) for current support.
 
 ## Implementation sequence
 

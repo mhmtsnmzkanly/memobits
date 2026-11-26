@@ -1,14 +1,16 @@
 > Historical working document, moved from the local design folder on 2026-11-26.
-> It records decisions and evidence at the time; current rules are in
+> This is a dated snapshot, not a current work plan. Its task queues, pending
+> items, approval requests, paths, commands, and status describe earlier
+> checkpoints; do not treat them as current instructions. Current rules are in
 > [../design/decisions.md](../design/decisions.md) and status in [../roadmap.md](../roadmap.md).
 
-# Current work plan — D2 closure, phase 1
+# Archived work-plan snapshot — D2 closure, phase 1
 
-Written 2026-11-23 by the architect (Claude Opus). This file replaces the
-archived `next-agent-handoff.md` and `transfer-handoff.md`. Authoritative
-acceptance criteria remain in `implementation-requirements.md`; evidence
-history is in `launch-progress.md`. Historical logs and superseded notes live
-in `archive/` and are not evidence for current code.
+Written 2026-11-23 by the architect (Claude Opus). At the time, this file
+replaced `next-agent-handoff.md` and `transfer-handoff.md`. Its acceptance
+criteria and work packages record that checkpoint only; later evidence is
+recorded in `launch-progress.md`. Historical logs and superseded notes live in
+`archive/` and are not evidence for current code.
 
 ## Roles
 

@@ -1,5 +1,10 @@
 # Compiler-known outcomes (B4)
 
+> **Implementation record.** The sections below document the B4 delivery and
+> its particular accepted boundaries. Consult the [roadmap](../roadmap.md) for
+> the current overall status and [accepted decisions](decisions.md) for the
+> binding contract.
+
 Owned `T?`, `T ! E`, and `T ?! E` execute inside Memobits
 functions. `T ?! E` is exactly `T? ! E` (that is, `T? ! E`); there is no
 separate three-state type, and values are built and matched as `Ok(Some(v))`,

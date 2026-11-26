@@ -49,11 +49,16 @@ message naming the gated form. A name that is a `const` is resolved to a constan
 pattern before analysis; an array repeat count `[v; name]` accepts any identifier. `match` is a reserved word. Whether a pattern names a variant of the scrutinee's enum
 is left to analysis.
 
-Ordinary single-line UTF-8 string literals parse. String escapes, general generic types, richer match patterns, defaults and try are still pending. The design guide covers the target language, not this crate's
-current accepted subset. The parser is handwritten and uses Pratt precedence.
+Ordinary single-line UTF-8 string literals parse; escape sequences and default
+parameter values are not supported. Generic parameters and type arguments are
+parsed for functions, nominal types, interfaces, extensions and struct literals;
+the later pipeline determines which generic forms are executable. Match syntax
+includes nested tuple and variant patterns, literals, constant patterns,
+alternatives and guards, but not float literals or struct patterns. The parser
+is handwritten and uses Pratt precedence.
 
 Fixed-array syntax includes structured `array<T, N>` (including nested element
 types), element literals, repetitions, and postfix indexing. Counts are
-source-located nonnegative integer literals. Other generic constructors are
-rejected. This crate only parses arrays; typing, ownership and execution live in
-the later pipeline crates, which gate unsupported array forms with diagnostics.
+source-located nonnegative integer literals or constant names. This crate only
+parses syntax; typing, ownership and execution live in the later pipeline
+crates, which gate unsupported forms with diagnostics.

@@ -1,8 +1,10 @@
 > Historical working document, moved from the local design folder on 2026-11-26.
-> It records decisions and evidence at the time; current rules are in
+> This is a dated snapshot, not a current work plan. Its task queues, pending
+> items, approval requests, paths, commands, and status describe earlier
+> checkpoints; do not treat them as current instructions. Current status is in
 > [../design/decisions.md](../design/decisions.md) and status in [../roadmap.md](../roadmap.md).
 
-# Launch progress handoff
+# Launch progress record
 
 Starting checkout: `113ec0932ad3a014f9a0afbe783dafffc93dd34b`.
 
@@ -27,9 +29,11 @@ Copied only the hashing `project.toml` and `.mb` sources into `/tmp/memobits-has
 
 This verifies the existing fallback consumer and the selected native numeric primitives against the same complete internal FNV-1a, DJB2 and Adler-32 known-vector checks. It did not complete N4 at that checkpoint or the overall launch manifest. The protected hashing source and artifact remain unchanged.
 
-## Restart point
+## Restart point recorded at the time
 
-See [the transfer handoff](#local-only ".local-design/archive/superseded/transfer-handoff.md is a local note, not in the repository") for the current restart instructions.
+The original restart reference was a local-only transfer handoff and is not
+part of the repository. It recorded instructions for the 2026-11-23 checkpoint;
+it is not a current restart guide.
 
 ## N4 seam review (initial state; superseded below)
 
@@ -782,7 +786,7 @@ declarations, non-CLI hosts, JavaScript, and a stable external ABI remain out
 of this slice.
 
 The full workspace suite passed **1,067 tests** (verification log:
-[workspace-test-h1-final-2026-11-22.log](#local-only ".local-design/archive/logs/workspace-test-h1-final-2026-11-22.log is a local note, not in the repository")).
+workspace-test-h1-final-2026-11-22.log (.local-design/archive/logs/workspace-test-h1-final-2026-11-22.log is a local note, not in the repository)).
 Focused CLI coverage includes configured source and artifact calls, import-free
 execution, and undeclared or type-mismatched Wasm imports rejected before guest
 execution. The runnable guide source and standalone Wasm both report
@@ -964,7 +968,7 @@ and diff checks pass; Cargo verification remains pending.
 
 ### D1 generic nominal trailing methods (implementation checkpoint)
 
-The parser retains owner type and const parameters on the synthetic trailing inherent extension. Project analysis matches declarations against concrete generic receiver identities, substitutes arguments into method signatures, queues receiver-specific method body facts, and gives each specialization a distinct function ID and lowered name. A combined specialization worklist drains generic function and generic method requests to a fixed point, including requests discovered while checking either specialized body; both request families have a 256-instance diagnostic limit. Regressions cover multiple type and const instances, mutual method calls, method-to-generic-function calls, the cap, and public/private/direct/symbol/transitive visibility. The guide demonstrates `Box<T>` method dispatch. The owner reports generic D1 focused tests passed **13/13**, the full workspace passed **1092 tests**, and guide source plus standalone Wasm both returned `Result: Ok(i32(42))`; this documentation update did not run Cargo. Nested expanding generic type arguments such as constructing a receiver whose type contains the current `T` nested inside another nominal type remain unsupported, so receiver-type expansion is not claimed. The broader D1 manifest acceptance remains in force; this is a remaining implementation limit, not a reduced requirement. See [the handoff checkpoint](#local-only ".local-design/archive/superseded/d1-generic-inherent-checkpoint.md is a local note, not in the repository").
+The parser retains owner type and const parameters on the synthetic trailing inherent extension. Project analysis matches declarations against concrete generic receiver identities, substitutes arguments into method signatures, queues receiver-specific method body facts, and gives each specialization a distinct function ID and lowered name. A combined specialization worklist drains generic function and generic method requests to a fixed point, including requests discovered while checking either specialized body; both request families have a 256-instance diagnostic limit. Regressions cover multiple type and const instances, mutual method calls, method-to-generic-function calls, the cap, and public/private/direct/symbol/transitive visibility. The guide demonstrates `Box<T>` method dispatch. The owner reports generic D1 focused tests passed **13/13**, the full workspace passed **1092 tests**, and guide source plus standalone Wasm both returned `Result: Ok(i32(42))`; this documentation update did not run Cargo. Nested expanding generic type arguments such as constructing a receiver whose type contains the current `T` nested inside another nominal type remain unsupported, so receiver-type expansion is not claimed. The broader D1 manifest acceptance remains in force; this is a remaining implementation limit, not a reduced requirement. See the handoff checkpoint (.local-design/archive/superseded/d1-generic-inherent-checkpoint.md is a local note, not in the repository).
 
 ### D2 enum ignored-payload cleanup (Cargo verification pending)
 

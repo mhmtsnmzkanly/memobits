@@ -1,20 +1,28 @@
 # Owned heap foundation
 
+> **Design and implementation record.** “Current starting point” and staged
+> progression notes capture the heap as it was introduced. Check the
+> [roadmap](../roadmap.md) and [accepted decisions](decisions.md) for the
+> present implementation boundary.
+
 This proposal follows the [accepted memory layout and ownership decisions](decisions.md).
 Storage placement is private to the backend. Owned aggregate transfers move,
 borrows read, and shares grant exclusive mutable access. The heap follows
 static data and grows at the end of linear memory.
 
-## Current starting point
+## Initial String-heap checkpoint (historical)
 
 The [Wasm backend](../../crates/memobits-wasm/src/lib.rs) reserves the first
 16 bytes, then lays out the configured stack, the optional outcome return
 cell, and reachable String literal descriptors and bytes. The initial Wasm32
-memory covers these regions rounded up to 64 KiB pages. Modules without
-reachable concat keep their fixed memory maximum. Frame entry checks the
-stack bound, and normal return restores the stack pointer. The
-[typed IR](typed-ir.md) records consuming operands, initialization,
-reassignment, and control-flow edges. General drop insertion remains pending.
+memory covers these regions rounded up to 64 KiB pages. The fixed-memory and
+concat-specific statements describe the first String heap slice; Lists, Boxes,
+recursive owner release, and additional String consumers were added later.
+Frame entry checks the stack bound, and normal return restores the stack
+pointer. The [typed IR](typed-ir.md) records consuming operands,
+initialization, reassignment, and control-flow edges. Cleanup is now emitted
+for supported String, List, Box, and nested owner forms; the
+[roadmap](../roadmap.md) identifies remaining unsupported placements.
 
 The [static layout planner](../../crates/memobits-wasm/src/memory.rs) now
 places the stack, outcome cell and literal regions using one checked cursor.
@@ -64,9 +72,12 @@ concat, a literal, or an owned local. Use a named local for a heap-producing
 call result on the RHS. Replacement reads the RHS before releasing the old
 allocation, then moves the new descriptor into the caller's existing slot.
 The caller remains responsible for its eventual cleanup. Simply borrowing
-or sharing that slot leaves its descriptor intact. Installing heap text
-through a forwarded share or a share alias remains gated. General nested
-heap uses still require broader drop elaboration.
+or sharing that slot leaves its descriptor intact. Installing heap text through
+a forwarded share or stored share alias remains gated. Owner cleanup and
+transport now support many nested combinations, including Lists, Boxes,
+tuples, arrays, and enums. One known unresolved placement is a struct with an
+`array<string, N>` field built from a named array local; see the
+[roadmap](../roadmap.md).
 
 A direct `share Record` parameter can also replace one of its String fields.
 The same RHS forms and sequencing rules apply as for a direct mutable local:
@@ -74,8 +85,9 @@ the RHS is staged before the previous field descriptor is released, and a
 named local is required for a heap-producing call result. The caller keeps
 the only owning descriptor and cleans it up after the call. Field loans remain
 exclusive for the written field, while disjoint sibling field loans remain
-available. Stored or forwarded share aliases and whole-record replacement
-remain gated.
+available. Whole-owner reassignment of String-owning records is implemented
+with RHS staging (F4); forwarding a share alias through an additional call
+still has the specific gate described above.
 
 `text.push_str(suffix)` appends a read-only String suffix and returns unit.
 The receiver must be a named mutable String local or a direct `share string`
@@ -244,7 +256,7 @@ replacement through a reference or projection chain, indirect calls, and
 general block or branch results as field replacements are gated. Direct
 literal initializers still need to be evaluated in the constructor's
 basic block. See the checked examples in the
-[runnable language guide](../../examples/guide/src/main.mb).
+[runnable language guide](../../examples/guide/src/text.mb).
 
 ### Whole String locals
 

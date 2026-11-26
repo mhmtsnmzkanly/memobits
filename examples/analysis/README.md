@@ -7,8 +7,10 @@ cargo run -p memobits-cli -- analyze examples/analysis/numeric.mb
 ```
 
 The example exercises typed parameters, branches, integer limits, mutation,
-shadowing, and function calls. Analysis currently checks primitive types and
-loop-control placement; it does not check ownership or produce Wasm.
+shadowing, and function calls. Analysis checks the supported source types and
+loop-control placement; it does not check ownership or produce Wasm. The
+supported subset includes arrays, structs, enums, aliases, matches, and
+primitive and aggregate references; unsupported forms receive diagnostics.
 
 For project-wide imports and library roots, use `examples/topics/numeric`:
 

@@ -1,9 +1,15 @@
 # UTF-8 text and the first executable slice
 
+> **Staged design record.** The first-slice and later-operation sections were
+> written across multiple implementation stages; their “later” and “gated”
+> statements may be historical. Current language support is summarized in the
+> [roadmap](../roadmap.md), with binding rules in [accepted decisions](decisions.md).
+
 [Accepted Memobits decisions](decisions.md) give string literals owned
 `String` semantics, require UTF-8, and separate byte length from scalar
-iteration. The API and storage choices below are proposals for staging that
-design.
+iteration. This record combines shipped API details with proposals for future
+text views and iteration; the [roadmap](../roadmap.md) is the current status
+summary.
 
 ## Ownership and validity
 
@@ -94,21 +100,22 @@ The language guide demonstrates scalar traversal with a loop: it reads
 `.scalar_at(offset)`, advances by the decoded scalar's UTF-8 width, and counts
 visited scalars. This keeps scalar count distinct from `.len()` while
 preserving byte-offset access. Empty, ASCII, multibyte and supplementary
-examples check both quantities. This bounded source-level traversal does not
-add a general iterator or change the existing byte-indexed `.scalar_at` API.
+examples check both quantities. This is source-level traversal; a general
+String iterator API remains unimplemented.
 
-The [runnable guide](../../examples/guide/src/main.mb)
+The [runnable guide](../../examples/guide/src/text.mb)
 checks empty, ASCII, and multibyte text from source and standalone Wasm.
 CLI tests cover owner reads during a read-only loan, last-use release,
 and rejected reads after a move or during a live exclusive loan.
 
 ## Later operations
 
-Use Rust's operations as semantic references. Byte traversal or a read-only
-byte view exposes the encoded bytes. Scalar traversal yields Unicode scalar
-values and can report their starting byte offsets. An individual scalar
-may be only part of a user-perceived character. Keep byte/scalar API names,
-iterator representation and the scalar type open.
+Use Rust's operations as semantic references for future iteration APIs.
+`.byte_at` reads encoded bytes and `.scalar_at` reads one Unicode scalar at a
+byte offset; a source loop can report scalar starting offsets. An individual
+scalar may be only part of a user-perceived character. A dedicated iterator
+representation and scalar sequence API remain open; the shipped method names
+and the `u32` scalar result are established.
 [Rust str::bytes](https://doc.rust-lang.org/std/primitive.str.html#method.bytes) ·
 [Rust str::char_indices](https://doc.rust-lang.org/std/primitive.str.html#method.char_indices)
 
@@ -216,7 +223,10 @@ outcome ABI continues to require a primitive success payload.
 1. Implemented internal `string ! E` for static success descriptors,
    including construction, return, receipt and consuming match. A String
    local or internal call result can be used when heap provenance is absent.
-   Containers of these results and external signatures remain gated.
+   Container placements for heap-backed `string ! E` are now supported where
+   the owner-transport rules admit them (including Lists, arrays, tuples and
+   enum payloads). Aggregate external signatures and application entries with
+   non-primitive success payloads remain gated by the experimental ABI.
 2. Implemented same-function heap `Ok` with an immediate consuming match.
    The IR validator requires a named String moved into `Ok`, a Result
    binding, and the very next operation to match that binding. Both arms

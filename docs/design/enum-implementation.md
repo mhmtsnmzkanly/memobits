@@ -1,10 +1,16 @@
 # Enum implementation sequence
 
+> **Checkpoint record, not a current feature checklist.** B1–B3 and their
+> “still gated” lists describe the state at those checkpoints; later stages
+> supersede some of those limits. Use the [roadmap](../roadmap.md) and
+> [accepted decisions](decisions.md) for current support.
+
 The accepted design uses nominal enums, `type Name [ Variant, Variant(T, U), ... ]`,
 with variants written `Type::Variant` and Rust-inspired semantics
 (`decisions.md`). Enums reuse the struct and array machinery: they are inline
-frame-cell aggregates that move as whole values. This document separates what
-executes from what is still gated and orders the work into packages B1 to B4.
+frame-cell aggregates that move as whole values. B1–B4 record the implementation
+sequence and checkpoint-specific gates; use the [roadmap](../roadmap.md) for
+current support and open limits.
 
 ## Package sequence
 

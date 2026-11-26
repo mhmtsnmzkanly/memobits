@@ -1,6 +1,16 @@
 # Memobits implementation requirements
 
-This is the full scope contract for the [canonical launch prompt](../history/local-implementation-handoff.md#canonical-launch-prompt). Language behavior is based on `863a45e`; handoff preparations were added on `113ec09`. The S1 String-struct share marker has been retired after activation; the hashing preparation module remains disconnected and its signatures are illustrative Rust interfaces, establishing no Memobits syntax or compiler API.
+Status: completed launch record. The manifest defines the historical launch
+contract and evidence; it is not a current backlog. See the
+[roadmap](../roadmap.md) for shipped stages, remaining limits and next work.
+Detailed evidence below includes intermediate checkpoints; the final launch
+report and progress log supersede their counts and status.
+
+This is the full scope contract for the completed 2026-11 launch. Its early
+baseline and intermediate evidence are historical; final status and current
+behavior are in the [roadmap](../roadmap.md) and [decisions](decisions.md).
+The hashing preparation module remains disconnected and its signatures are
+illustrative Rust interfaces, not Memobits syntax or compiler APIs.
 
 ## Decision boundaries
 

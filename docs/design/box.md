@@ -1,5 +1,9 @@
 # `Box<T>` implementation notes (H4)
 
+> **Implementation record.** The representation and limits below describe H4
+> as shipped. Use the [roadmap](../roadmap.md) and [accepted decisions](decisions.md)
+> for current support and open limitations.
+
 `Box<T>` is the alloc layer's single-owner heap box (`use alloc::Box;`). The
 language rules are in `decisions.md` ("Stage 4" and "Shipped H4 details"); this
 file records how the compiler realizes them.

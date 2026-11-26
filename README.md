@@ -86,6 +86,7 @@ project from source and as standalone Wasm and compares the output to it. See
 | [guide](examples/guide/README.md) | Whole language, one module per topic | `cargo run -p memobits-cli -- run --project examples/guide/project.toml` | `Result: Ok(i32(42))` |
 | [basics](examples/topics/basics/README.md) | Arithmetic, loops and `string` basics as modules of one project | `cargo run -p memobits-cli -- run --project examples/topics/basics/project.toml` | `Result: Ok(i32(462))` |
 | [arrays](examples/topics/arrays/README.md) | Fixed arrays: locals, calls, results, nested arrays | `cargo run -p memobits-cli -- run --project examples/topics/arrays/project.toml` | `Result: Ok(i32(493))` |
+| [core-only](examples/topics/core-only/README.md) | `[build] alloc = false`, literals, arrays, `match`, and core string operations | `cargo run -p memobits-cli -- run --project examples/topics/core-only/project.toml` | `Result: Ok(i32(57911))` |
 | [enums](examples/topics/enums/README.md) | Variants, `match`, exhaustiveness, aliases, state machine | `cargo run -p memobits-cli -- run --project examples/topics/enums/project.toml` | `Result: Ok(i32(1094300))` |
 | [generics-operators](examples/topics/generics-operators/README.md) | `core::ops` Add/Sub/PartialEq on a `Vec2`, multi-bound and higher-order generic functions | `cargo run -p memobits-cli -- run --project examples/topics/generics-operators/project.toml` | `Result: Ok(i32(41))` |
 | [host-capability](examples/topics/host-capability/README.md) | CLI host import declared in the manifest, bound with `extern fn` | `cargo run -p memobits-cli -- run --project examples/topics/host-capability/project.toml` | `Host i32: 42` and `Result: i32(7)` |
@@ -95,6 +96,7 @@ project from source and as standalone Wasm and compares the output to it. See
 | [astar](examples/apps/astar/README.md) | Fixed-grid A* search with an unreachable-goal case | `cargo run -p memobits-cli -- run --project examples/apps/astar/project.toml` | `Result: Ok(i32(12))` |
 | [enf-lexer](examples/apps/enf-lexer/README.md) | Bounded ENF byte lexer fixture | `cargo run -p memobits-cli -- run --project examples/apps/enf-lexer/project.toml` | `Result: Ok(i32(0))` |
 | [hashing](examples/apps/hashing/README.md) | FNV-1a, DJB2 and Adler-32 over `array<u8, N>` | `cargo run -p memobits-cli -- run --project examples/apps/hashing/project.toml` | `Result: Ok(u32(1774777415))` |
+| [tree](examples/apps/tree/README.md) | Binary search tree through `Box<T>` | `cargo run -p memobits-cli -- run --project examples/apps/tree/project.toml` | `Result: i32(3235)` |
 | [utf8-validator](examples/apps/utf8-validator/README.md) | Unicode scalar validation with byte offsets | `cargo run -p memobits-cli -- run --project examples/apps/utf8-validator/project.toml` | `Result: Ok(i32(0))` |
 
 Build and run a standalone artifact, for example the guide:
@@ -106,16 +108,16 @@ cargo run -p memobits-cli -- run examples/guide/target/memobits/app.wasm
 
 ## Language notes
 
-- The language guide demonstrates `contains(value) -> bool` and
+- The guide's [collections module](examples/guide/src/collections.mb) demonstrates `contains(value) -> bool` and
   `index_of(value) -> u32?` on fixed arrays of numbers or `bool`
   (including `array<u8, N>`) and on `List<u8>` and `List<u32>`.
   It also demonstrates `loop value in items` over those fixed arrays and Lists.
   [Fixed array iteration](docs/design/fixed-array-implementation.md#fixed-array-iteration)
   · [List iteration](docs/design/list-slice.md#list-iteration)
-  · [Runnable language guide](examples/guide/src/main.mb)
+  · [Runnable language guide](examples/guide/src/collections.mb)
 - `drop(value)` consumes a whole named owned `string`, `List<u8>`, or
   `List<u32>` local or parameter and releases any heap storage it owns.
   Any live borrow or share prevents the drop. The binding is unavailable on
   every path that drops it until it is assigned again, if mutable.
   An in-scope function, import, or value named `drop` takes precedence over the
-  built-in. [Runnable example](examples/guide/src/main.mb)
+  built-in. [Runnable example](examples/guide/src/ownership.mb)

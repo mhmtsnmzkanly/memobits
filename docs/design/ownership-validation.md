@@ -2,7 +2,8 @@
 
 This historical checkpoint records the initial scalar-move criteria before
 implicit primitive copying and borrow/share checking. The
-[implementation plan](implementation-plan.md) records current ownership rules.
+[roadmap](../roadmap.md) records current ownership status; binding rules are in
+[accepted decisions](decisions.md).
 
 ## Repeated reads
 

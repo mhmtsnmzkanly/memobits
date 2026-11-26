@@ -1,8 +1,15 @@
 # Memobits interface architecture plan
 
-Implementation baseline `113ec09`. This plan records interface, core, host and type decisions made since that baseline. Box and broader reference support are outside its scope. These are target contracts and proposals. The current compiler and runnable guide still use their shipped spellings and behavior. [Feature inventory](feature-inventory.md#interfaces-extensions-generics-and-host-capabilities) · [Current language decisions](decisions.md) · [Repository verification rules](../../AGENTS.md)
+Status: historical architecture plan. Interface/extension behavior and the
+associated launch work are implemented; consult the
+[roadmap](../roadmap.md) and [decisions](decisions.md) for current scope and
+remaining limits. Phase descriptions below explain the design and delivery
+sequence and should not be read as uncompleted tasks where later checkpoints
+record completion.
 
-This document describes compiler architecture and prior approvals. The [full launch manifest](launch-manifest.md#full-launch-manifest) selects the complete implementation scope, and its [operator matrix](launch-manifest.md#operator-contract-matrix) sets the bounded expansion beyond the Add pilot. Use the [canonical launch prompt](../history/local-implementation-handoff.md#canonical-launch-prompt) to start the run.
+Implementation baseline `113ec09`. This plan records interface, core, host and type decisions made since that baseline. Box and broader reference support were outside its original scope. These are target contracts and proposals unless later checkpoints record delivery. [Feature inventory](feature-inventory.md#interfaces-extensions-generics-and-host-capabilities) · [Current language decisions](decisions.md) · [Repository verification rules](../../AGENTS.md)
+
+This document describes compiler architecture and prior approvals. The [full launch manifest](launch-manifest.md#full-launch-manifest) records the completed implementation scope, and its [operator matrix](launch-manifest.md#operator-contract-matrix) records the bounded expansion beyond the Add pilot. Use the [roadmap](../roadmap.md) as the restart point.
 
 ## Approved contracts
 

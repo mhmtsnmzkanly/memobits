@@ -1,5 +1,11 @@
 # Initial Wasm backend
 
+> **Historical backend design and checkpoints.** This file includes original
+> “until implemented” requirements whose features have since shipped, including
+> function values, closures, numeric operations, and heap ownership. The current
+> shipped set and remaining limits are in the [roadmap](../roadmap.md); binding
+> semantics are in [accepted decisions](decisions.md).
+
 The first backend consumes validated typed IR after successful move checking.
 It must not infer types or resolve source names. Its output is an experimental
 core Wasm artifact; a stable cross-language ABI is a later design milestone.
@@ -12,11 +18,10 @@ Short-circuit expressions retain their existing branches. Edge arguments are
 parallel transfers: evaluate into scratch locals before updating target block
 parameters. Sequential copies would corrupt swaps and some loop backedges.
 
-Primitive representations use Wasm integer or floating-point types. Function
-values require table indices and signature-checked indirect calls, or explicit
-unsupported diagnostics until implemented. Unit needs a consistent representation
-at calls, locals, and return boundaries. Unsupported IR must never be silently
-reinterpreted.
+Primitive representations use Wasm integer or floating-point types. Supported
+function values use table indices and signature-checked indirect calls. Unit
+calls have no Wasm result; the IR uses an internal zero where a value slot is
+required. Unsupported IR must never be silently reinterpreted.
 
 ## Numeric behavior
 
@@ -185,8 +190,9 @@ unsigned when comparing expected results.
 
 A constant-only test or a Wasm validator pass is insufficient evidence for these
 runtime rules. Generated modules must execute with assertions on results and
-error paths. Indirect calls and unsupported types require explicit diagnostics
-until implemented.
+error paths. Function-value indirect calls are implemented for supported
+signatures; every other unsupported IR shape still requires an explicit
+diagnostic.
 
 Integer widths keep their value in a normalized Wasm local: `i8`, `i16`, `i32`
 as sign-extended `i32`, `u8`, `u16`, `u32` as zero-extended `i32`, and `i64`,

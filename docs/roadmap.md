@@ -1,7 +1,7 @@
 # Memobits roadmap and status
 
 Status as of 2026-11-26. Development is paused; this page is the restart point.
-Branch `launch/manifest-completion` (not pushed) holds all work since `main`.
+The `launch/manifest-completion` branch holds the recorded work since `main`.
 Binding language rules live in [design/decisions.md](design/decisions.md); the
 feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 

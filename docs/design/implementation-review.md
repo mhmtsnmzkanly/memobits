@@ -1,7 +1,10 @@
 # Implementation review
 
-Review date: 2026-11-16. This is a point-in-time review of the current working
-tree against the accepted design, not a certification of memory safety.
+Review date: 2026-11-16, with subsequent checkpoints recorded below. This is a
+historical point-in-time review, not a statement of current implementation
+status or a certification of memory safety. Later dated checkpoints supersede
+earlier findings where stated; see the [roadmap](../roadmap.md) for current
+status and limits.
 No compiler or runtime implementation changes were made during this review.
 
 ## Confirmed findings

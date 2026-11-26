@@ -1,8 +1,12 @@
 # Accepted Design Decisions
 
-This document records accepted language and project direction. It describes the
-target design, not features already implemented. Syntax examples are normative
-only where explicitly stated; unresolved API spellings remain proposals.
+This document records accepted language and project direction, including the
+dated decisions and implementation checkpoints below. It is not the status
+catalog: for shipped behavior and current limits, use the
+[roadmap](../roadmap.md). Older sections are retained as decision history;
+later dated checkpoints supersede earlier wording when they conflict. Syntax
+examples are normative only where explicitly stated; unresolved API spellings
+remain proposals.
 
 ## Project and build
 

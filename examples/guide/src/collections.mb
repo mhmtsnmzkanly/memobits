@@ -295,9 +295,9 @@ test fn primitive_lists() {
 // An element is a place. Use it in place as a borrow or share receiver or
 // argument, in an in-place match, or through a projection such as
 // items[i].text.len(). Moving an element out (let t := items[0];) is rejected
-// with TE022 (`replace` and `swap` are planned; `pop` takes the last element
-// of a List), and so is repeating an owner ([name; 2]) or overwriting an
-// owning element in place.
+// with TE022; use `replace` or `swap` to exchange an element, or `pop` to
+// remove the last List element. Repeating an owner ([name; 2]) is rejected;
+// overwriting an owning element releases its previous value.
 type Entry {
     label: string,
     weight: u32,
