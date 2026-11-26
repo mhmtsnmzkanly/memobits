@@ -85,8 +85,16 @@ struct FunctionParameter {
     access: IrAccess,
     ty: Ty,
 }
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExtensionIdentity {
+    package: String,
+    module: String,
+    span: Span,
+}
+
 #[derive(Clone)]
 struct ExtensionCandidate {
+    identity: ExtensionIdentity,
     module: String,
     span: Span,
     visible: bool,
@@ -133,6 +141,7 @@ struct GenericSpecialization {
 
 #[derive(Clone)]
 struct GenericMethodSpecialization {
+    identity: ExtensionIdentity,
     module: String,
     extension_span: Span,
     method: memobits_syntax::InterfaceMethod,
@@ -1415,9 +1424,13 @@ impl Checker {
                 .map(|ty| type_checker.type_path(ty))
                 .unwrap_or(UNIT);
             let base_id = candidate.methods.get(&method.name).map(|entry| entry.4)?;
+            let evidence_key: Vec<_> = type_evidence
+                .iter()
+                .map(|e| (&e.parameter, &e.candidate.identity))
+                .collect();
             let identity = format!(
-                "{}:{}:{}:{receiver:?}",
-                candidate.module, candidate.span.start, method.name
+                "{:?}:{}:{receiver:?}:{evidence_key:?}",
+                candidate.identity, method.name
             );
             let id = if let Some(registry) = &self.specialization_registry {
                 let mut registry = registry.borrow_mut();
@@ -1428,6 +1441,7 @@ impl Checker {
                     registry.next_id += 1;
                     registry.method_by_key.insert(identity.clone(), id);
                     registry.method_requests.push(GenericMethodSpecialization {
+                        identity: candidate.identity.clone(),
                         module: candidate.module.clone(),
                         extension_span: candidate.span,
                         method: method.clone(),
@@ -8116,7 +8130,7 @@ fn extension_candidates_for(
     project: &Project,
     resolution: &Resolution,
     table: &Rc<TypeTable>,
-    extension_ids: &HashMap<(String, usize, String), FunctionId>,
+    extension_ids: &HashMap<(ExtensionIdentity, String), FunctionId>,
 ) -> Vec<ExtensionCandidate> {
     let mut candidates = Vec::new();
     let direct_imports = resolution.module_imports.get(caller);
@@ -8126,6 +8140,7 @@ fn extension_candidates_for(
             .into_iter()
             .map(|candidate| {
                 (
+                    candidate.package,
                     candidate.module,
                     candidate.public,
                     candidate.span,
@@ -8144,6 +8159,7 @@ fn extension_candidates_for(
             let generic_target =
                 (!candidate.generic_parameters.is_empty()).then(|| candidate.target.clone());
             (
+                candidate.package,
                 candidate.module,
                 candidate.public,
                 candidate.span,
@@ -8156,6 +8172,7 @@ fn extension_candidates_for(
             )
         });
     for (
+        declaration_package,
         declaration_module,
         public,
         declaration_span,
@@ -8167,6 +8184,11 @@ fn extension_candidates_for(
         generic_target,
     ) in interface_declarations.chain(inherent_declarations)
     {
+        let identity = ExtensionIdentity {
+            package: declaration_package,
+            module: declaration_module.clone(),
+            span: declaration_span,
+        };
         let local = declaration_module == caller;
         let direct = direct_imports.is_some_and(|imports| imports.contains(&declaration_module));
         if !local && !direct {
@@ -8228,11 +8250,7 @@ fn extension_candidates_for(
                             Ty::Error,
                             method.span,
                             extension_ids
-                                .get(&(
-                                    declaration_module.clone(),
-                                    declaration_span.start,
-                                    method.name.clone(),
-                                ))
+                                .get(&(identity.clone(), method.name.clone()))
                                 .copied()
                                 .unwrap_or(FunctionId(0)),
                         ),
@@ -8259,11 +8277,7 @@ fn extension_candidates_for(
                         result,
                         method.span,
                         extension_ids
-                            .get(&(
-                                declaration_module.clone(),
-                                declaration_span.start,
-                                method.name.clone(),
-                            ))
+                            .get(&(identity.clone(), method.name.clone()))
                             .copied()
                             .unwrap_or(FunctionId(0)),
                     ),
@@ -8280,6 +8294,7 @@ fn extension_candidates_for(
             })
             .collect();
         candidates.push(ExtensionCandidate {
+            identity,
             module: declaration_module,
             span: declaration_span,
             visible: local || public,
@@ -8770,7 +8785,14 @@ fn check_resolved_mode_once(
                         continue;
                     }
                     extension_ids.insert(
-                        (module_name.clone(), item.span.start, method.name.clone()),
+                        (
+                            ExtensionIdentity {
+                                package: resolution.package.clone(),
+                                module: module_name.clone(),
+                                span: item.span,
+                            },
+                            method.name.clone(),
+                        ),
                         FunctionId(next_id),
                     );
                     next_id += 1;
@@ -8991,8 +9013,14 @@ fn check_resolved_mode_once(
                 if !method.generic_parameters.is_empty() {
                     continue;
                 }
-                let function =
-                    extension_ids[&(module_name.clone(), item.span.start, method.name.clone())];
+                let function = extension_ids[&(
+                    ExtensionIdentity {
+                        package: resolution.package.clone(),
+                        module: module_name.clone(),
+                        span: item.span,
+                    },
+                    method.name.clone(),
+                )];
                 let mut parameters = vec![Parameter {
                     span: method.span,
                     mutable: false,
@@ -9225,6 +9253,14 @@ fn check_resolved_mode_once(
             }
             method_index += 1;
             made_progress = true;
+            if request.identity.package != resolution.package {
+                diagnostics.push(diagnostic(
+                    7,
+                    request.method.span,
+                    "generic inherent method package is unavailable",
+                ));
+                continue;
+            }
             let Some(source) = resolution.modules.get(&request.module) else {
                 diagnostics.push(diagnostic(
                     7,
@@ -9529,6 +9565,149 @@ mod access_tests {
     use super::*;
     use memobits_diagnostics::SourceId;
     use memobits_syntax::{parse, StatementKind};
+
+    #[test]
+    fn generic_receiver_specialization_distinguishes_declaring_packages() {
+        let parsed = parse(SourceId(0), "type Wrap<T> { value: T } extend { fn size(borrow self) -> i32 { 1 } } fn use_wrap(value: Wrap<i32>) {}");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let (table, diagnostics) = TypeTable::build(&[("main", &parsed.module)], HashMap::new());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (target, generic_parameters, methods, span) = parsed
+            .module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::InherentExtension {
+                    target,
+                    generic_parameters,
+                    methods,
+                    ..
+                } => Some((target, generic_parameters, methods, item.span)),
+                _ => None,
+            })
+            .unwrap();
+        let receiver_type = parsed
+            .module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Function { parameters, .. } => Some(&parameters[0].ty),
+                _ => None,
+            })
+            .unwrap();
+        let receiver = table.resolve("main", receiver_type).unwrap();
+        let method = &methods[0];
+        let candidate = |package: &str| ExtensionCandidate {
+            identity: ExtensionIdentity {
+                package: package.into(),
+                module: "main".into(),
+                span,
+            },
+            module: "main".into(),
+            span,
+            visible: true,
+            local: true,
+            target: Ty::Error,
+            interface: None,
+            associated_types: HashMap::new(),
+            methods: HashMap::from([(
+                method.name.clone(),
+                (
+                    method.receiver,
+                    Vec::new(),
+                    Ty::Error,
+                    method.span,
+                    FunctionId(0),
+                ),
+            )]),
+            public_methods: HashSet::new(),
+            generic_target: Some(target.clone()),
+            generic_parameters: generic_parameters.clone(),
+            generic_methods: methods.clone(),
+            declaration_imports: HashMap::new(),
+            substitution: HashMap::new(),
+            const_substitution: HashMap::new(),
+            evidence: Vec::new(),
+        };
+        let mut c = checker();
+        c.table = Rc::new(table);
+        c.specialization_registry = Some(Rc::new(RefCell::new(SpecializationRegistry::default())));
+        let first = candidate("package-a");
+        let second = candidate("package-b");
+        let run = |c: &mut Checker, candidate: &ExtensionCandidate| {
+            c.specialize_inherent_candidate(candidate, &receiver)
+                .unwrap()
+                .methods[&method.name]
+                .4
+        };
+        let id = run(&mut c, &first);
+        assert_eq!(id, run(&mut c, &first));
+        assert_ne!(id, run(&mut c, &second));
+        assert_eq!(
+            c.specialization_registry
+                .unwrap()
+                .borrow()
+                .method_requests
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn resolver_candidates_keep_package_in_method_lookup() {
+        let manifest =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/guide");
+        let project = Project::load(&manifest, None).unwrap();
+        let mut resolution = memobits_resolve::resolve(&project, memobits_resolve::Target::Test);
+        assert!(
+            resolution.diagnostics.is_empty(),
+            "{:?}",
+            resolution.diagnostics
+        );
+        let table = Rc::new(TypeTable::empty());
+        for (module, inherent) in [("generics", false), ("functions", true)] {
+            let mut results = Vec::new();
+            for (package, function) in
+                [("package-a", FunctionId(41)), ("package-b", FunctionId(42))]
+            {
+                resolution.package = package.into();
+                let declarations: Vec<_> = if inherent {
+                    resolution
+                        .all_inherent_extension_candidates()
+                        .into_iter()
+                        .filter(|c| c.module == module)
+                        .map(|c| (c.module, c.span, c.methods))
+                        .collect()
+                } else {
+                    resolution
+                        .all_extension_candidates()
+                        .into_iter()
+                        .filter(|c| c.module == module)
+                        .map(|c| (c.module, c.span, c.methods))
+                        .collect()
+                };
+                let (name, span, methods) = declarations
+                    .into_iter()
+                    .find(|(_, _, m)| !m.is_empty())
+                    .unwrap();
+                let identity = ExtensionIdentity {
+                    package: package.into(),
+                    module: name,
+                    span,
+                };
+                let method = methods[0].name.clone();
+                let ids = HashMap::from([((identity.clone(), method.clone()), function)]);
+                let candidates =
+                    extension_candidates_for(module, &project, &resolution, &table, &ids);
+                let found = candidates.iter().find(|c| c.identity == identity).unwrap();
+                assert_eq!(found.methods[&method].4, function);
+                results.push(found.identity.clone());
+            }
+            assert_eq!(results[0].module, results[1].module);
+            assert_eq!(results[0].span, results[1].span);
+            assert_ne!(results[0], results[1]);
+        }
+    }
 
     #[test]
     fn generic_parameter_inference_uses_semantic_types_and_rejects_conflicts() {

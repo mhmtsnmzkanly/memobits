@@ -502,15 +502,7 @@ impl Checker {
         };
         let evidence_key = evidence
             .iter()
-            .map(|evidence| {
-                format!(
-                    "{}:{}@{}..{}",
-                    evidence.parameter,
-                    evidence.candidate.module,
-                    evidence.candidate.span.start,
-                    evidence.candidate.span.end
-                )
-            })
+            .map(|evidence| format!("{}:{:?}", evidence.parameter, evidence.candidate.identity))
             .collect::<Vec<_>>()
             .join(",");
         let mut types = bindings
@@ -1189,21 +1181,12 @@ impl Checker {
         consts.sort();
         let evidence_key = evidence
             .iter()
-            .map(|found| {
-                format!(
-                    "{}:{}@{}..{}",
-                    found.parameter,
-                    found.candidate.module,
-                    found.candidate.span.start,
-                    found.candidate.span.end
-                )
-            })
+            .map(|found| format!("{}:{:?}", found.parameter, found.candidate.identity))
             .collect::<Vec<_>>()
             .join(",");
         let key = format!(
-            "{}:{}:{}:{:?}<{function_ty:?}>[{evidence_key}]{{{}|{}}}",
-            candidate.module,
-            candidate.span.start,
+            "{:?}:{}:{:?}<{function_ty:?}>[{evidence_key}]{{{}|{}}}",
+            candidate.identity,
             method.name,
             candidate.target,
             types.join(","),
@@ -1218,6 +1201,7 @@ impl Checker {
             registry.next_id += 1;
             registry.method_by_key.insert(key.clone(), id);
             registry.method_requests.push(GenericMethodSpecialization {
+                identity: candidate.identity.clone(),
                 module: candidate.module.clone(),
                 extension_span: candidate.span,
                 method: method.clone(),
@@ -1428,5 +1412,135 @@ impl Checker {
                 Ty::Error
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    fn candidate(package: &str, span: Span) -> ExtensionCandidate {
+        ExtensionCandidate {
+            identity: ExtensionIdentity {
+                package: package.into(),
+                module: "same".into(),
+                span,
+            },
+            module: "same".into(),
+            span,
+            visible: true,
+            local: true,
+            target: Ty::Primitive("i32"),
+            interface: Some("I".into()),
+            associated_types: HashMap::new(),
+            methods: HashMap::new(),
+            public_methods: HashSet::new(),
+            generic_target: None,
+            generic_parameters: Vec::new(),
+            generic_methods: Vec::new(),
+            declaration_imports: HashMap::new(),
+            substitution: HashMap::new(),
+            const_substitution: HashMap::new(),
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn forwarded_evidence_distinguishes_package_and_reuses_registration() {
+        let span = Span {
+            source: SourceId(0),
+            start: 1,
+            end: 9,
+        };
+        let template = GenericFunctionTemplate {
+            module: "same".into(),
+            name: "f".into(),
+            span,
+            generic_parameters: Vec::new(),
+            bounds: Vec::new(),
+            bound_interfaces: Vec::new(),
+            parameters: Vec::new(),
+            result: None,
+        };
+        let mut c = checker();
+        c.specialization_registry = Some(Rc::new(RefCell::new(SpecializationRegistry::default())));
+        let evidence = |package| {
+            vec![GenericEvidence {
+                parameter: "T".into(),
+                interface: "I".into(),
+                candidate: candidate(package, span),
+            }]
+        };
+        let register = |c: &mut Checker, package| {
+            c.register_specialization(
+                &template,
+                &Bindings::default(),
+                evidence(package),
+                Vec::new(),
+                UNIT,
+                span,
+            )
+            .unwrap()
+            .0
+        };
+        let first = register(&mut c, "first");
+        assert_eq!(first, register(&mut c, "first"));
+        assert_ne!(first, register(&mut c, "second"));
+        assert_eq!(
+            c.specialization_registry.unwrap().borrow().requests.len(),
+            2
+        );
+    }
+    #[test]
+    fn inherent_method_registry_distinguishes_package() {
+        let parsed = memobits_syntax::parse(
+            SourceId(0),
+            "type A {} extend A { fn foo(borrow self) -> i32 { 1 } } fn f() -> i32 { 0 }",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let method = parsed
+            .module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::InherentExtension { methods, .. } => methods.first(),
+                _ => None,
+            })
+            .unwrap();
+        let expr = parsed
+            .module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Function { body, .. } => body.tail.as_deref(),
+                _ => None,
+            })
+            .unwrap();
+        let span = Span {
+            source: SourceId(0),
+            start: 1,
+            end: 9,
+        };
+        let mut c = checker();
+        c.specialization_registry = Some(Rc::new(RefCell::new(SpecializationRegistry::default())));
+        let first = candidate("first", span);
+        let second = candidate("second", span);
+        let run = |c: &mut Checker, candidate: &ExtensionCandidate| {
+            c.generic_method_call(expr, candidate, method, &[], None)
+                .unwrap()
+                .2
+        };
+        let a = run(&mut c, &first);
+        assert_eq!(a, run(&mut c, &first));
+        assert_ne!(a, run(&mut c, &second));
+        assert_eq!(
+            c.specialization_registry
+                .unwrap()
+                .borrow()
+                .method_requests
+                .len(),
+            2
+        );
     }
 }
