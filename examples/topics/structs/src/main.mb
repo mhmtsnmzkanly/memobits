@@ -1,0 +1,97 @@
+// Structs with primitive fields: a constructor function, a function that
+// mutates its argument through `share`, a function that reads through `borrow`,
+// field reads and writes, and a public struct from another module. Aggregates
+// nest: a struct inside a struct and an array of structs. Whole-value
+// destructuring and field-disjoint borrows close the struct package.
+use geom::Point;
+
+type Size {
+    width: i32,
+    height: i32,
+    square: bool,
+    scale: u8,
+}
+
+// A constructor: a struct result is an owned value.
+fn make_size(width: i32, height: i32) -> Size {
+    Size { scale: 2, square: true, height: height, width: width }
+}
+
+// `share` gives exclusive mutable access: the caller sees the writes.
+fn grow(s: share Size, by: i32) {
+    s.width += by;
+    s.height += by;
+}
+
+// `borrow` is read-only; fields are read through the reference.
+fn area(s: borrow Size) -> i32 {
+    let bonus := if s.scale == 2 { 1 } else { 0 };
+    if s.square {
+        s.width * s.height + bonus
+    } else {
+        0
+    }
+}
+
+// A struct inside a struct: `Segment` holds two `Point`s by value.
+type Segment {
+    from: Point,
+    to: Point,
+}
+
+// A sub-aggregate is lent like a whole value: `seg.to.borrow()`.
+fn manhattan(p: borrow Point) -> i32 {
+    p.x + p.y
+}
+
+// An array of structs is read through a `borrow` parameter, level by level.
+fn total_area(sizes: borrow array<Size, 2>) -> i32 {
+    area(sizes[0].borrow()) + area(sizes[1].borrow())
+}
+
+fn main() -> i32 ! Error {
+    var s := make_size(3, 4);
+    grow(s.share(), 2);
+    s.scale = 2;
+
+    let p := Point { y: 5, x: 2 };
+    let offset := p.x * p.y;
+
+    // Nested writes: `seg.to.x` is a field of a field.
+    var seg := Segment { from: Point { x: 0, y: 0 }, to: p };
+    seg.to.x += 1;
+    seg.from = Point { x: 1, y: 1 };
+    let reach := manhattan(seg.to.borrow()) + seg.from.x;
+
+    // An array of structs: element 0 is built by a call, element 1 by a literal.
+    var sizes := [make_size(1, 1), Size { width: 2, height: 2, square: true, scale: 2 }];
+    sizes[1].width = 3;
+    let extra := total_area(sizes.borrow());
+
+    // Disjoint loans: `seg.from` and `seg.to` are different locations, so a
+    // live borrow of one does not block a write to the other.
+    let first := seg.from.borrow();
+    seg.to.y += 1;
+    let flat := first.x + first.y;
+
+    // Destructuring consumes the whole value (`seg` is unusable afterwards) and
+    // binds every field to a new local, aggregates included.
+    let Segment { from: start, to: end } := seg;
+    let spread := end.x - start.x;
+
+    // `s` is borrowed for the call and stays usable afterwards.
+    Ok(area(s.borrow()) + offset + reach + extra + flat + spread)
+}
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn grow_is_visible_to_the_caller() {
+    var size := make_size(3, 4);
+    grow(size.share(), 2);
+    assert(size.width == 5);
+    assert(size.height == 6);
+}
+
+test fn area_includes_the_scale_bonus() {
+    let size := make_size(3, 4);
+    assert(area(size.borrow()) == 13);
+}

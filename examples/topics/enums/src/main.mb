@@ -1,0 +1,117 @@
+// A shape calculator and a small state machine, both built on `match`.
+type Shape [Empty, Circle(f64), Rect(f64, f64)]
+
+type Job [Waiting, Running(i32), Finished(i32)]
+
+// An alias of an enum type names its variants too: `Figure::Circle(..)`.
+type Figure = Shape;
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Empty => 0.0,
+        Shape::Circle(r) => 3.0 * r * r,
+        Shape::Rect(w, h) => { w * h }
+    }
+}
+
+// `match` is an expression, so each arm yields the same result type.
+fn corners(s: Shape) -> i32 {
+    match s {
+        Shape::Empty => 0,
+        Shape::Circle(_) => 1,
+        Shape::Rect(_, _) => 4,
+    }
+}
+
+// Matching consumes the job, so each arm builds the next one.
+fn advance(j: Job) -> Job {
+    match j {
+        Job::Waiting => Job::Running(1),
+        Job::Running(done) => {
+            if done >= 3 {
+                Job::Finished(done * 100)
+            } else {
+                Job::Running(done + 1)
+            }
+        }
+        Job::Finished(total) => Job::Finished(total),
+    }
+}
+
+fn total(j: Job) -> i32 {
+    match j {
+        Job::Finished(total) => total,
+        _ => -1,
+    }
+}
+
+// A `borrow Shape` parameter is matched in place: nothing is consumed and a
+// primitive payload (`w`, `h`) is copied out.
+fn is_wide(s: borrow Shape) -> bool {
+    match s {
+        Shape::Rect(w, h) => w > h,
+        _ => false,
+    }
+}
+
+// An array element is a place that cannot be moved, so `match tiles[i]` is a
+// borrowing match: the array stays whole and usable, and can be matched again.
+fn count_corners(tiles: borrow array<Shape, 4>) -> i32 {
+    var total := 0;
+    var i := 0;
+    loop {
+        if i == 4 {
+            break;
+        }
+        total += match tiles[i] {
+            Shape::Empty => 0,
+            Shape::Circle(_) => 1,
+            Shape::Rect(_, _) => 4,
+        };
+        i += 1;
+    }
+    total
+}
+
+fn main() -> i32 ! Error {
+    let rect := area(Figure::Rect(2.0, 4.0));
+    let disc := area(Figure::Circle(2.0));
+    let shapes := if rect + disc == 20.0 { corners(Shape::Rect(1.0, 1.0)) } else { 0 };
+
+    var job := Job::Waiting;
+    var steps := 0;
+    loop {
+        job = advance(job);
+        steps += 1;
+        if steps == 5 {
+            break;
+        }
+    }
+    let tiles: array<Shape, 4> = [
+        Shape::Rect(3.0, 2.0),
+        Shape::Empty,
+        Shape::Circle(1.0),
+        Shape::Rect(1.0, 5.0),
+    ];
+    let wide := if is_wide(tiles[0].borrow()) { 1 } else { 0 };
+    let borrowed := count_corners(tiles.borrow()) + wide * 100;
+    Ok(total(job) + shapes * 1000 + corners(Shape::Empty) + borrowed * 10000)
+}
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn corners_of_each_shape() {
+    assert(corners(Shape::Empty) == 0);
+    assert(corners(Shape::Circle(1.0)) == 1);
+    assert(corners(Shape::Rect(1.0, 2.0)) == 4);
+}
+
+test fn a_job_runs_to_completion() {
+    var job := Job::Waiting;
+    var steps := 0;
+    loop {
+        job = advance(job);
+        steps += 1;
+        if steps == 5 { break; }
+    }
+    assert(total(job) == 300);
+}

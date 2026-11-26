@@ -1,0 +1,4 @@
+[package]
+name = "language-guide"
+version = "0.1.0"
+entry = "main::main"

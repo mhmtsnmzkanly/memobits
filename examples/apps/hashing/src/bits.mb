@@ -1,0 +1,122 @@
+// Bit manipulation and wrapping arithmetic primitives for 32-bit hashing.
+
+pub fn u8_to_u32(byte: u8) -> u32 {
+    var rem: u8 = byte;
+    var res: u32 = 0;
+    if rem >= 128 { rem -= 128; res += 128; }
+    if rem >= 64 { rem -= 64; res += 64; }
+    if rem >= 32 { rem -= 32; res += 32; }
+    if rem >= 16 { rem -= 16; res += 16; }
+    if rem >= 8 { rem -= 8; res += 8; }
+    if rem >= 4 { rem -= 4; res += 4; }
+    if rem >= 2 { rem -= 2; res += 2; }
+    if rem >= 1 { rem -= 1; res += 1; }
+    res
+}
+
+// In Memobits, arithmetic on integers traps on overflow.
+// wrapping_add performs addition modulo 2^32 without triggering traps.
+pub fn wrapping_add(a: u32, b: u32) -> u32 {
+    let max: u32 = 4_294_967_295;
+    let diff: u32 = max - a;
+    if b > diff {
+        // (a + b) - 2^32 = (b - diff) - 1
+        (b - diff) - 1
+    } else {
+        a + b
+    }
+}
+
+// wrapping_mul performs multiplication modulo 2^32 using shift-and-add.
+pub fn wrapping_mul(var a: u32, var b: u32) -> u32 {
+    var res: u32 = 0;
+    loop {
+        if b == 0 { break; }
+        if (b % 2) == 1 {
+            res = wrapping_add(res, a);
+        }
+        a = wrapping_add(a, a);
+        b /= 2;
+    }
+    res
+}
+
+// bit_xor computes bitwise XOR (a ^ b) without native operator support.
+pub fn bit_xor(var a: u32, var b: u32) -> u32 {
+    var res: u32 = 0;
+    var bit_val: u32 = 1;
+    var step: i32 = 0;
+    loop {
+        if step == 32 || (a == 0 && b == 0) { break; }
+        if (a % 2) != (b % 2) {
+            res += bit_val;
+        }
+        a /= 2;
+        b /= 2;
+        step += 1;
+        if step < 32 {
+            bit_val += bit_val;
+        }
+    }
+    res
+}
+
+// bit_and computes bitwise AND (a & b).
+pub fn bit_and(var a: u32, var b: u32) -> u32 {
+    var res: u32 = 0;
+    var bit_val: u32 = 1;
+    var step: i32 = 0;
+    loop {
+        if step == 32 || a == 0 || b == 0 { break; }
+        if (a % 2) == 1 && (b % 2) == 1 {
+            res += bit_val;
+        }
+        a /= 2;
+        b /= 2;
+        step += 1;
+        if step < 32 {
+            bit_val += bit_val;
+        }
+    }
+    res
+}
+
+// bit_or computes bitwise OR (a | b).
+pub fn bit_or(var a: u32, var b: u32) -> u32 {
+    var res: u32 = 0;
+    var bit_val: u32 = 1;
+    var step: i32 = 0;
+    loop {
+        if step == 32 || (a == 0 && b == 0) { break; }
+        if (a % 2) == 1 || (b % 2) == 1 {
+            res += bit_val;
+        }
+        a /= 2;
+        b /= 2;
+        step += 1;
+        if step < 32 {
+            bit_val += bit_val;
+        }
+    }
+    res
+}
+
+// shl shifts a 32-bit integer left by shift bits, wrapping mod 2^32.
+pub fn shl(var val: u32, var shift: u32) -> u32 {
+    loop {
+        if shift == 0 { break; }
+        val = wrapping_add(val, val);
+        shift -= 1;
+    }
+    val
+}
+
+// shr shifts a 32-bit unsigned integer right by shift bits.
+pub fn shr(var val: u32, var shift: u32) -> u32 {
+    loop {
+        if shift == 0 { break; }
+        val /= 2;
+        shift -= 1;
+    }
+    val
+}

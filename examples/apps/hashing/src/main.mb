@@ -1,0 +1,101 @@
+use self::adler::adler32_8;
+use self::adler::adler32_slice;
+use self::bits::bit_and;
+use self::bits::bit_or;
+use self::bits::bit_xor;
+use self::bits::shl;
+use self::bits::shr;
+use self::bits::wrapping_add;
+use self::bits::wrapping_mul;
+use self::djb2::djb2_8;
+use self::djb2::djb2_slice;
+use self::fnv::fnv1a_3;
+use self::fnv::fnv1a_8;
+use self::fnv::fnv1a_slice;
+
+pub fn run() -> u32 ! Error {
+    // The verified FNV-1a hash of "Memobits"; the hash functions are checked
+    // by the tests below.
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+    let hash := fnv1a_8(memobits.borrow());
+    Ok(hash)
+}
+
+test fn bit_primitives() {
+    assert(bit_xor(5, 3) == 6);
+    assert(bit_and(6, 3) == 2);
+    assert(bit_or(4, 2) == 6);
+    assert(shl(1, 4) == 16);
+    assert(shr(16, 2) == 4);
+    assert(wrapping_add(4_294_967_295, 1) == 0);
+    assert(wrapping_mul(4_294_967_295, 2) == 4_294_967_294);
+}
+
+test fn fnv1a_known_values() {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc_3: array<u8, 3> = [97, 98, 99];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+
+    let v_empty := fnv1a_slice(empty.borrow(), 0);
+    let v_a := fnv1a_slice(a.borrow(), 1);
+    let v_abc_slice := fnv1a_slice(abc.borrow(), 3);
+    let v_abc_fixed := fnv1a_3(abc_3.borrow());
+    let v_hello := fnv1a_slice(hello.borrow(), 5);
+    let v_memo_slice := fnv1a_slice(memobits.borrow(), 8);
+    let v_memo_fixed := fnv1a_8(memobits.borrow());
+
+    assert(v_empty == 2_166_136_261);
+    assert(v_a == 3_826_002_220);
+    assert(v_abc_slice == 440_920_331);
+    assert(v_abc_fixed == 440_920_331);
+    assert(v_hello == 1_335_831_723);
+    assert(v_memo_slice == 1_774_777_415);
+    assert(v_memo_fixed == 1_774_777_415);
+}
+
+test fn djb2_known_values() {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+
+    let v_empty := djb2_slice(empty.borrow(), 0);
+    let v_a := djb2_slice(a.borrow(), 1);
+    let v_abc := djb2_slice(abc.borrow(), 3);
+    let v_hello := djb2_slice(hello.borrow(), 5);
+    let v_memo_slice := djb2_slice(memobits.borrow(), 8);
+    let v_memo_fixed := djb2_8(memobits.borrow());
+
+    assert(v_empty == 5_381);
+    assert(v_a == 177_670);
+    assert(v_abc == 193_485_963);
+    assert(v_hello == 261_238_937);
+    assert(v_memo_slice == 4_035_756_421);
+    assert(v_memo_fixed == 4_035_756_421);
+}
+
+test fn adler32_known_values() {
+    let empty: array<u8, 8> = [0; 8];
+    let a: array<u8, 8> = [97, 0, 0, 0, 0, 0, 0, 0];
+    let abc: array<u8, 8> = [97, 98, 99, 0, 0, 0, 0, 0];
+    let hello: array<u8, 8> = [104, 101, 108, 108, 111, 0, 0, 0];
+    let memobits: array<u8, 8> = [77, 101, 109, 111, 98, 105, 116, 115];
+
+    let v_empty := adler32_slice(empty.borrow(), 0);
+    let v_a := adler32_slice(a.borrow(), 1);
+    let v_abc := adler32_slice(abc.borrow(), 3);
+    let v_hello := adler32_slice(hello.borrow(), 5);
+    let v_memo_slice := adler32_slice(memobits.borrow(), 8);
+    let v_memo_fixed := adler32_8(memobits.borrow());
+
+    assert(v_empty == 1);
+    assert(v_a == 6_422_626);
+    assert(v_abc == 38_600_999);
+    assert(v_hello == 103_547_413);
+    assert(v_memo_slice == 235_537_217);
+    assert(v_memo_fixed == 235_537_217);
+}

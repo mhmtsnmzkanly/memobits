@@ -1,0 +1,378 @@
+// HISTORICAL PROPOSAL: this file is not a current-language guide. Current
+// rules and limits are in docs/design/decisions.md and docs/roadmap.md; runnable
+// examples and executable checks are in examples/guide/.
+// Memobits language design guide
+// =============================
+// STATUS: design reference, NOT an executable program or a conformance test.
+// The current compiler implements some features illustrated here and rejects
+// others. This file has not been reconciled feature-by-feature and must not be
+// used to infer current support. The roadmap and runnable guide are authoritative.
+// Sections are independent examples, not a single shared scope. Definitions may
+// be repeated to compare alternatives. Commented ERROR examples must be rejected
+// by the future compiler once their associated feature is implemented.
+//
+// ACCEPTED describes agreed semantics. PROPOSED marks illustrative syntax/API
+// spelling that still needs specification. Ordinary punctuation follows the
+// existing language where possible; this is not a complete formal grammar.
+// No example requires a globally available print function or an embedded stdlib.
+
+// 01. Bindings and type inference
+// -------------------------------
+// ACCEPTED: explicit annotations use ':' and inferred bindings use ':='.
+// A binding's type never changes. let forbids mutation; var permits mutation.
+// Unconstrained integer literals default to i32; floating literals to f64.
+
+let age := 18;
+let pi := 3.14;
+let enabled: bool = true;
+var score: i32 = 0;
+score = 10;
+score += 5;
+
+// ERROR: age = 19;
+// ERROR: score = "fifteen";
+// ERROR: var uninitialized: i32;
+
+// ACCEPTED: shadowing creates a new binding; it does not mutate the old one.
+let needle := 15;
+var needle := needle;
+needle += 1;
+
+// 02. Numeric types and overflow
+// ------------------------------
+// ACCEPTED initial types: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64.
+// i128/u128, SIMD and target-width integer types are deferred.
+
+let small: u8 = 200;
+let wide: i64 = 1000000;
+let fraction: f32 = 0.5;
+
+// ACCEPTED: integer overflow is checked in every build profile. Proven overflow
+// is a compile-time error; dynamic overflow is a controlled execution error.
+// ERROR: let impossible: u8 = 256;
+// ERROR: let overflow: u8 = 255 + 1;
+// PROPOSED method spellings for explicit alternatives:
+// value.wrapping_add(1)    -> wrap within the integer width.
+// value.saturating_add(1)  -> clamp at the representable bound.
+// value.checked_add(1)     -> return an explicit success/failure result.
+// The checked-result type and numeric conversion APIs are not selected yet.
+// Floating-point NaN/infinity policy is not settled by integer overflow rules.
+
+// 03. Ownership transfer and numeric reading
+// ------------------------------------------
+// ACCEPTED: primitives copy implicitly. Owned aggregate assignment moves.
+
+let original := 18;
+let copied := original;
+let again := original;
+
+// ACCEPTED: basic numeric arithmetic and comparisons READ their operands.
+// They do not consume their input bindings.
+let age := 18;
+let next_age := age + 1;
+let is_young := age >= 18 && age <= 30;
+
+// 04. Function parameter access modes
+// -----------------------------------
+// ACCEPTED: signatures fix access rights. The caller cannot override them.
+// ACCEPTED parameter spelling: `borrow T` and `share T`. Calls use explicit
+// access conversions.
+
+type Player {
+    score: i32,
+}
+
+fn inspect(player: borrow Player) -> bool {
+    player.score >= 0
+}
+
+// share grants exclusive mutable access. No extra var parameter is required.
+fn increment(player: share Player) {
+    player.score += 1;
+}
+
+// Owned parameters are immutable unless explicitly declared var.
+fn improve(var player: Player) -> Player {
+    player.score += 1;
+    player
+}
+
+fn consume(player: Player) {
+    // Ownership belongs to this function. If it is not transferred elsewhere,
+    // the value is released when its owner is dropped on normal exit.
+}
+
+var player := Player { score: 10 };
+let valid := inspect(player.borrow());
+increment(player.share());
+let improved := improve(player);
+// ERROR: inspect(player.borrow()); // player was moved into improve.
+
+let fixed_player := Player { score: 10 };
+// ERROR: increment(fixed_player.share()); // Cannot mutably borrow a let owner.
+// ERROR: consume(fixed_player.borrow()); // Borrowed access is not ownership.
+
+// 05. Exclusive access and the end of a borrow
+// -------------------------------------------
+var player := Player { score: 10 };
+var editor := player.share();
+editor.score += 1;
+// editor is not used again, so its borrow can end here.
+let valid := inspect(player.borrow());
+
+// ERROR example: a later use keeps the exclusive borrow live.
+// var editor := player.share();
+// let valid := inspect(player.borrow()); // Conflicting owner access.
+// editor.score += 1;
+
+// ACCEPTED: local stored mutable access requires a var binding for mutation.
+// A share parameter grants that capability directly through its signature.
+// let editor := player.share();
+// ERROR: editor.score += 1;
+
+// 06. Explicit copying and copy-on-write
+// --------------------------------------
+// Only copyable types provide copying. Files/connections are not assumed to.
+// CoW may share physical storage internally, but copies behave independently.
+// CoW is not the same operation as an exclusive mutable share borrow.
+
+// (List lives in the alloc layer: `use alloc::List;` at the top of the module.)
+let source: List<i32> = [1, 2, 3];
+var duplicate := source.copy();
+duplicate[0] = 9;
+// source remains unchanged.
+
+// 07. Fixed and dynamic collections
+// ---------------------------------
+// ACCEPTED: homogeneous elements; fixed length and dynamic length are distinct
+// from mutability. array<T, N> and List<T> are the selected names.
+// Contextual literal typing is still being specified.
+// The default type of an unannotated collection literal remains unspecified.
+
+let offsets: array<i32, 3> = [0, 1, 2];
+var cells: array<i32, 3> = [0, 0, 0];
+var scores: List<i32> = [10, 20, 30];
+
+cells[0] = 5;
+// ERROR: offsets[0] = 5;
+// ERROR: let mixed: List<i32> = [1, "two"];
+
+// ACCEPTED: repetition evaluates its expression once for each element, in
+// order. It copies primitives implicitly and does not clone aggregates.
+let board: array<array<i32, 3>, 3> = [[0; 3]; 3];
+let generated: array<i32, 3> = [make_value(); 3]; // Calls three times.
+// ERROR: [owned_value; 3]; // repeated moves are invalid; copy explicitly.
+type UserId = i64;
+
+// 08. Element access, borrowing, copying and removal
+// -------------------------------------------------
+// ACCEPTED: an index identifies an element location. Numeric operations read it.
+let total := scores[0] + scores[1];
+let positive := scores[0] > 0;
+scores[0] = 11;
+
+// Primitive elements can be copied into a binding directly.
+// Extracting an aggregate requires an explicit ownership choice.
+let view := scores[0].borrow();
+// view refers to the element; it is not an independent i32 owner.
+let independent := scores[0];
+
+// PROPOSED collection API spellings, shown as independent usage patterns:
+// var editor := scores[index].share();  // Exclusive element access.
+// let owned := scores.remove(index);   // Remove and transfer ownership.
+// let old := cells.replace(index, 42); // Preserve fixed-array initialization.
+// ERROR: let implicit := scores[0];    // Extraction mode must be explicit.
+
+// ACCEPTED: [] checks bounds. Proven invalid access is a compile-time error;
+// other invalid access is a controlled execution error.
+// ERROR: let impossible := offsets[100].copy();
+
+// ACCEPTED: get represents absence with Option and can return a tracked borrow.
+// PROPOSED result spelling: (borrow i32)?.
+// match scores.get(index) {
+//     Some(value) => { /* Read value while the collection remains valid. */ };
+//     None => { /* Handle missing element. */ };
+// }
+// Exact get/share/remove signatures and nested borrow syntax are still open.
+
+// 09. Borrowed return values and lifetimes
+// ---------------------------------------
+// ACCEPTED DIRECTION: named source relationships and independently owned results.
+// Exact StringView and 'from' syntax remain illustrative.
+
+// fn first_word(text: borrow string) -> StringView from text
+// fn owned_first_word(text: borrow string) -> string
+
+// The first result depends on text; the second owns its data independently.
+// A relationship annotation does not keep an owner alive automatically.
+
+// ERROR:
+// fn invalid_view() -> StringView {
+//     let text := load_text();
+//     first_word(text.borrow()) // Would outlive its local owner.
+// }
+
+// Borrowed payloads in Option and similar result types are supported in the
+// planned model. User-defined structs with borrowed fields are initially deferred.
+
+// 10. Strings and interpolation
+// -----------------------------
+// ACCEPTED: UTF-8; distinguish byte length from Unicode scalar iteration.
+// A Unicode scalar is not necessarily a complete user-perceived character.
+// String indexing by a single integer is unsupported.
+
+let name := "Ada";
+let message := `Hello {name}`;
+// PROPOSED detail: interpolation reads values without consuming them.
+// ERROR: let letter := name[0];
+// ERROR in the initial revision: `First: {scores[0]}`;
+// Initial interpolation accepts identifiers only. Compute expressions separately.
+// Byte/character API names and string literal ownership details remain open.
+
+// 11. Conditions and value-producing branches
+// -------------------------------------------
+let age := 21;
+let category := if age < 18 {
+    "child"
+} else {
+    "adult"
+};
+
+// ACCEPTED: only loop/break/continue are initial loop forms; while is omitted.
+// ACCEPTED: conditions are bool; value-producing branches have one compatible
+// result type. Use an enum explicitly when payload types differ.
+// ERROR: let mixed := if true { 1 } else { "one" };
+
+// 12. Enums and exhaustive matching
+// ---------------------------------
+// ACCEPTED: payload-carrying enums with Rust-inspired semantics.
+// ACCEPTED declaration form: `type Name [ variants... ]`.
+
+type Value [
+    Integer(i32),
+    Text(String),
+]
+
+let value := Value::Integer(7);
+// PROPOSED: matching an owned value consumes it; bindings own extracted payloads.
+// Borrowed matching and pattern access modes need a separate precise rule.
+let is_number := match value {
+    Value::Integer(number) => true,
+    Value::Text(text) => false,
+};
+
+// ERROR: omit a possible variant without a covering alternative.
+// Guards with arbitrary expressions do not necessarily prove exhaustiveness.
+
+// 13. Common three-way outcome
+// ----------------------------
+// SUPERSEDED (2026-11-23): there is no separate three-state type. The three
+// states are the type `T ?! E` (exactly `T? ! E`): Ok(Some(v)) for success,
+// Ok(None) for "not performed" and Err(e) for failure.
+// An operation that succeeds but finds no record uses a nested optional
+// payload (`T? ?! E`), which keeps that case distinct from Ok(None).
+
+// let selected := match get_user_choice() {
+//     Ok(Some(value)) => value,
+//     Ok(None) => 0,
+//     Err(reason) => {
+//         report(reason);
+//         0
+//     },
+// };
+
+// ACCEPTED: try is optional Result-match sugar. An else block handles Err;
+// without else, it discards the Result error. It never catches traps. Ok(None)
+// is not a Result error and is not implicitly converted.
+// Illustrative sugar:
+let new_text := try build_text() else (reason) {
+    report(reason);
+    old_text.copy()
+};
+// `try build_text()` without else discards its Result error.
+
+// ACCEPTED: defaults handles normal completion without a result, not errors.
+fn choose_score(eligible: bool) -> i32 defaults 0 {
+    if eligible { 10 } else { return; }
+}
+// Explicit returns and tail values win; bare return and normal valueless
+// completion use the default. Errors and traps do not trigger it.
+
+// 14. Modules, visibility and source imports
+// ------------------------------------------
+// src/utils/version.mb corresponds to the utils::version module.
+// PROPOSED self:: spelling denotes the current package root.
+
+// In src/utils/version.mb:
+pub type Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+pub fn current_version() -> Version {
+    Version { major: 0, minor: 1, patch: 0 }
+}
+
+fn private_helper() {
+    // No pub: accessible only inside the defining module.
+}
+
+// In another source file:
+// use self::utils::version::Version;
+// use self::utils::version::current_version;
+// use enf::Parser;
+// ACCEPTED alias form:
+// use enf::Parser as EventParser;
+
+// No source-level export keyword is required. pub permits cross-module access;
+// the manifest chooses which public items form the external package interface.
+// Fields default to module-private. External construction cannot bypass private
+// fields; use a public constructor function when necessary.
+
+// 15. Manifest example (configuration, not Memobits source)
+// --------------------------------------------------------
+// `project.toml` is the default manifest; `--project PATH` selects another.
+// TOML is the selected initial configuration direction. No build/CLI spelling
+// below should be interpreted as already implemented.
+//
+// [package]
+// name = "Example"
+// version = "0.1.0-beta"
+// entry = "main::main"
+//
+// [export]
+// Version = "utils::version::Version"
+// version = "utils::version::current_version"
+//
+// [dependencies.enf]
+// type = "binary"
+// src = "./libs/enf.wasm"
+// import = []
+// external = true
+//
+// [prelude]
+// Parser = "enf::Parser"
+//
+// import is mandatory; [] makes all public exports eligible for import.
+// Prelude names are automatically in scope: no 'use Parser;' is required.
+// Missing external or external=false means internal distribution.
+// external=true means a separate dependency artifact, not automatic hot reload.
+// Local source-package dependencies have their own manifest.
+// Package cycles are rejected. Imports determine the reachable source graph.
+// Library output starts from exports and excludes unrelated main code.
+// Public signatures must expose valid public types or supported opaque resources.
+
+// 16. Extensions and properties: deferred
+// -----------------------------------------
+// Earlier extension and property syntax is not accepted. Ordinary fields and
+// functions provide the initial interface.
+
+// 17. Suggested small implementation exercises
+// --------------------------------------------
+// First implementation milestone: project loading/configuration and
+// diagnostics. Then lexer/parser, name and type analysis, IR, Wasm generation
+// and validation, ownership analysis/lowering, runtime and libraries, A*/ENF,
+// and measured optimization.
+// This file is a design guide; executable tests should be separate, isolated
+// fixtures with explicit expected output or diagnostic codes.

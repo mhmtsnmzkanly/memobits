@@ -1,0 +1,119 @@
+> Historical working document, moved from the local design folder on 2026-11-26.
+> This is a dated snapshot, not a current work plan. Its pending items,
+> approval requests, paths, commands, and status describe the original report
+> checkpoint; do not treat them as current instructions. Current status is in
+> [../design/decisions.md](../design/decisions.md) and status in [../roadmap.md](../roadmap.md).
+
+# Memobits launch report (historical draft, 2026-11-23)
+
+Status at the time: draft for the parent audit. No commits, staging, stashes, formatting or source/test/example edits were made by this report run. All launch manifest rows are accepted by the architect (PLAN.md, last sections). Scoped commits for every row: 554e0d1 (bulk) + 5a58b35 (fmt) on branch launch/manifest-completion.
+
+## 1. Starting and ending status
+
+- Start: HEAD `c41b624c691995bd0c294e3313a95566034dfde3` (branch `main`) plus large uncommitted WIP. Ending HEAD is unchanged: `c41b624c691995bd0c294e3313a95566034dfde3`. Nothing staged (`git diff --cached` empty).
+- Ending inventory: 35 modified tracked files, 30 new untracked files, 0 removed files, 65 paths total (+12,193 / -4,479 lines on tracked files).
+- Hash file (sha256 of every modified and new file, 65 lines): `.local-design/final/hashes.txt`. Verify with `sha256sum -c .local-design/final/hashes.txt` from the repo root.
+- `.local-design/` and `legacy/` are ignored by git and not part of any commit.
+- Modified tracked files: analysis (constants, lib, lower, lower/operations, types, types/arrays, types/typetable, 4 test files), cli (README, src/main.rs, tests/cli.rs, tests/trap_reports_cli.rs), diagnostics, ir (lib, scoped_string, tests/validation), ownership (lib, loans), project (lib, tests/discovery), resolve (lib, names, tests/roots), runtime lib, syntax (items, lib, tests/parser), wasm src/lib.rs, docs/design/{decisions,implementation-plan,utf8-text-slice}.md, examples/projects/language-guide/src/main.mb.
+- New files (30):
+  - analysis: `src/lower/calls.rs`, `src/types/interfaces.rs` (M1), `tests/anonymous_shapes.rs`
+  - wasm: `src/layout.rs`, `src/validation.rs` (M1)
+  - syntax tests: `d1_anonymous_forms.rs`, `d1_nominal_forms.rs`, `host_declaration.rs`, `migration_warnings.rs`
+  - cli tests (18): `c1_text_traversal`, `check_cli`, `d1_anonymous_shapes`, `d1_nested_generics`, `d2_nested_owner_transport`, `d2_nested_result_storage`, `d2_owned_struct_transport`, `d2_owner_placement`, `d2_record_owner_transport`, `d2_tuple_acceptance`, `d3_optional_warnings`, `generic_const_evidence_cli`, `host_capability_cli`, `tuple_destructure_memory_stress`, `tuple_nested_arrays`, `tuple_owned_temporaries`, `wp20_s_gaps`, `wp22_residual_fixes` (all under `crates/memobits-cli/tests/`)
+  - example: `examples/projects/host-capability/{README.md,project.toml,src/main.mb}` (H1 fixture, new, not a protected example)
+- Under `examples/`: only the language guide is modified; the only other change is the new `host-capability` directory. No other example, README or example artifact changed. Protected README hashes recorded in launch-progress still match (`README.md` 284197d1..., calculator a960ca4b..., computation d4ac92f2..., hashing f2b32b32..., strings 4fad0ec6...; re-checked now).
+- Cargo manifests and `Cargo.lock` unchanged (no new dependencies).
+- Temporary artifacts (not in repo): `/tmp/memobits-final/` (guide.wasm, guide-run/wasm-run/build outputs and stderr captures, fmt lists), plus earlier `/tmp/memobits-guide-casts.wasm` and `/tmp/memobits-hashing*.wasm` from N4. Not disposed; safe to delete. Cargo `target/` is the shared workspace build dir (unchanged policy). `.local-design/m1/{before,after}` hold the M1 equivalence captures.
+- No Cargo process of mine is running.
+
+## 2. Final verification (this run)
+
+| Check | Result |
+| --- | --- |
+| `cargo test -j1 --workspace --no-fail-fast -- --test-threads=1` | 1,214 passed, 0 failed, 0 ignored, 104 result suites; log `.local-design/logs/final-workspace-test.log` |
+| Guide source `mb run --project examples/projects/language-guide/project.toml` | stdout `Result: Ok(i32(42))` (20 bytes), stderr 0 bytes, exit 0 |
+| Guide Wasm build (`mb build ... --output /tmp/memobits-final/guide.wasm`) | `Built /tmp/memobits-final/guide.wasm: 1 export(s), 184642 bytes`; stderr 0 bytes; sha256 `480fab43ce6930ae283c96cd5f7f16f8f3633db3c2d73bcba5612188bb0fa718` |
+| Standalone Wasm `mb run /tmp/memobits-final/guide.wasm` | stdout `Result: Ok(i32(42))` (20 bytes), stderr 0 bytes, exit 0 |
+| Wasm validation | `mb check --project ...language-guide/project.toml`: `Check passed: 1 export(s), 184642 bytes of Wasm validated; no artifact written`. Build also validates before writing (CLI `RunError::Validate`). |
+| H1 fixture `mb run --project examples/projects/host-capability/project.toml` | `Host i32: 42` then `Result: i32(7)` |
+| `git diff --check` | clean (exit 0, no output) |
+| `cargo fmt --all -- --check` | FAILS: 18 files with diffs (list below); NOT applied |
+
+Baseline failures: none observed. The workspace run is fully green. (One pre-existing non-test defect: `examples/projects/strings` uses bare `String` and fails with TE001; it also failed at HEAD. Listed under unresolved gates.)
+
+### fmt differences (`.local-design/final/fmt-files.txt`)
+- Changed in WIP vs HEAD (13 modified tracked): analysis `src/lower.rs`, `src/types.rs`, `src/types/typetable.rs`, `tests/types.rs`; cli `tests/cli.rs`; ir `src/lib.rs`, `src/scoped_string.rs`, `tests/validation.rs`; resolve `src/lib.rs`, `src/names.rs`, `tests/roots.rs`; syntax `tests/parser.rs`; wasm `src/lib.rs`.
+- New files with diffs (3): `crates/memobits-cli/tests/tuple_destructure_memory_stress.rs`, `crates/memobits-syntax/tests/d1_nominal_forms.rs`, `crates/memobits-syntax/tests/migration_warnings.rs`.
+- Untouched in WIP (2, formatting debt present at HEAD): `crates/memobits-analysis/src/types/lists.rs`, `crates/memobits-analysis/src/types/templates.rs`.
+- Note: some "WIP" diffs may be pre-existing at the transfer snapshot rather than from this launch; a sweep would also reformat unmoved code (M1 requires no graph-wide churn), so formatting is left for the user's decision.
+
+## 3. Per-manifest-row evidence
+
+At the time of this draft, scoped commits were still pending. Paths cite `crates/memobits-cli/tests/` unless noted. Full clause-by-clause tables were in the local-only `.local-design/PLAN.md` ("D2 acceptance reconciliation", "D3 acceptance reconciliation", "C1 acceptance reconciliation", "Reconciliation of M1, I1, G1, G2, OP1, H1, D1", "M1 acceptance reconciliation") and checkpoint entries in `.local-design/launch-progress.md`. Exact diagnostics/outputs were asserted inside the cited tests; the guide result was `Result: Ok(i32(42))` for source and standalone Wasm at accepted checkpoints.
+
+| Row | Activated syntax / limits | Focused tests (positive / negative) | Verification record |
+| --- | --- | --- | --- |
+| S1/S2 | Direct exclusive String-owning struct parameter, field replacement through it; caller owns cleanup. Stored/forwarded shares and whole-record replacement stay gated | `cli.rs`: `string_struct_share_reads_keep_caller_ownership_and_artifact_parity`, `string_struct_share_replaces_fields_with_caller_cleanup_and_parity`, `string_struct_call_borrow_blocks_moves_and_field_replacement`, `string_struct_share_keeps_storage_alias_and_mutation_gates`, `wasm_gates_unsupported_string_struct_uses`; wasm `tests/stack.rs`: `string_struct_share_replacement_reuses_heap_and_keeps_sibling_loan_live`, `string_struct_share_later_argument_exit_reuses_heap`, `string_field_replacement_reuses_blocks_without_overwriting_live_fields` | launch-progress; pre-existing at launch start |
+| N1-N4 | u8->u32 widening (`as u32`, `.to_u32()`), `wrapping_add/mul`, u32 `^ & \|` and zero-filling `>>`/truncating `<<` (counts >=32 rejected/trapped), `as` for all 100 scalar pairs. Signed/other-width shifts, operator aliases for wrapping stay gated | `cli.rs`: `numeric_cast*` (3 tests, all 100 pairs + boundaries, const/dynamic parity), `u32_bitwise_and_shifts_match_source_and_standalone_wasm`; `wp20_s_gaps::signed_shifts_of_every_width_are_rejected`, `::all_five_primitive_u32_compound_operators_match_source_and_wasm`; `generic_const_evidence_cli::primitive_signed_shifts_are_rejected`; hashing FNV/DJB2/Adler vectors via copied native fixture | launch-progress "Numeric consumer verification", "N4 implementation checkpoint" (hashing `Result: Ok(u32(1774777415))` in /tmp copies; checked overflow stays `LE001`/`RE007`) |
+| M1 | Private modules added: wasm `validation.rs`, `layout.rs`; analysis `lower/calls.rs`, `types/interfaces.rs`; pre-existing array/list/operations seams. Mechanical moves, no logic edits, public entry points unchanged | before/after harness `.local-design/m1/equivalence.sh`; `diff -r m1/before m1/after` empty (14 example projects: check/run/build/run-wasm/syntax/analyze/ownership stdout, stderr, exit); 13 Wasm sha256 identical incl. guide; sorted pass lists equal (1,214); `.local-design/m1/equivalence-report.md` | PLAN.md "M1 -- ACCEPTED"; backend dependency review accepted by architect |
+| I1 | `interface`/`extend`/`pub`, `fn draw(borrow self)`, `x.draw() of m::Draw`, grouped chains, grouped/scoped imports, receivers only, direct-edge activation, package-identity at semantic boundary | `cli.rs`: `explicit_interface_selector_resolves_a_unique_candidate`, `explicit_interface_selection_reports_all_ambiguous_candidates`, `..._reports_private_imported_extension`, `..._reports_missing_implementation`, `imported_extensions_from_two_modules_are_ambiguous`, `extension_receiver_loans_reject_conflicting_later_argument_access`, `symbol_import_loads_but_does_not_activate_an_extension`, `interface_selection_requires_a_receiver_method_call`; `wp20_s_gaps::grouped_selector_chain_runs_in_source_and_wasm`, `::grouped_symbol_import_does_not_activate_an_extension`, `::transitive_and_prelude_references_do_not_activate_an_interface_extension`; `wp22_residual_fixes` (field-place receivers); resolve `tests/roots.rs::extension_candidate_identity_includes_independent_package_name` | PLAN reconciliation: no MISSING |
+| G1 | Generic types/functions/const params, interface constraints, specialization with forwarded evidence; limit 256 specializations; multiple bounds and borrowed/compound generic params gated (TE007) | `cli.rs`: `generic_nominal_structs_specialize_types_and_const_lengths_in_source_and_wasm`, `generic_nominal_enums_*`, `generic_functions_forward_array_type_and_const_arguments_in_source_and_wasm`, `generic_interface_evidence_specializations_keep_caller_selections_distinct`, `generic_interface_evidence_rejects_missing_and_ambiguous_candidates`, `generic_functions_reject_conflicting_types_and_preserve_owned_moves`, `generic_array_function_rejects_conflicting_const_arguments`; `generic_const_evidence_cli`; analysis `typetable.rs::generic_type_layout_cycles_and_unbounded_specialization_are_diagnosed`; `wp20_s_gaps::generic_function_specialization_limit_is_reported` | no MISSING |
+| G2 | Associated `Rhs`/`Output` through selected impl, forwarding under constraint | `cli.rs`: `user_defined_add_selects_core_ops_interface_in_source_and_wasm`, `generic_heterogeneous_add_forwards_each_callers_selected_evidence`, `heterogeneous_add_rejects_wrong_rhs_missing_bindings_and_unresolved_projection`; `wp20_s_gaps::wrong_annotated_output_type_is_rejected_directly_and_through_generics` | no MISSING |
+| OP1 | User-defined `+ - * / % & \| ^ << >>`, unary `-`, `== != < <= > >=`, compound `+= -= *= /= %= &= \|= ^= <<= >>=`, generic forwarding; built-in `=`/`&&`/`\|\|` not overloadable; primitive u32 compounds enabled; signed shifts gated; no unary `+ ! ~`, range, update or optional overload | `cli.rs`: `user_defined_{add,sub,mul,div,rem,bitand,bitor,bitxor,shl,shr}_*` (positive, wrong-RHS, ambiguous/missing, left-to-right, early-return unwinding), `user_defined_equality_*`, `user_defined_ordering_*`, `user_defined_neg_*`, `user_defined_*_assign_mutates_nominal_target_in_source_and_wasm`; `generic_const_evidence_cli`: `generic_compound_*`, `assignment_and_short_circuit_operators_resist_user_overloads`, `short_circuit_skips_rhs_effects_in_source_and_wasm`; `wp20_s_gaps`: `mixed_type_primitive_arithmetic_is_not_coerced`, `unary_plus_not_complement_range_update_and_optional_have_no_overload` | launch-progress "OP1 final matrix reconciliation"; audit disposition in `interface-architecture-plan.md` |
+| D1 | Optional/empty/field/enum bodies with trailing `extend`, direct `extend Type {}`, bodyless nominal identity, structural records, inline anonymous enums, generic nominal trailing methods, bounded nested generic type args (unbounded hits 256 cap), const params forwarded into nested nominal args, projected-field receivers (borrow/share; owned self on field = TE022) | syntax `d1_nominal_forms.rs`, `d1_anonymous_forms.rs`; analysis `anonymous_shapes.rs`; `d1_anonymous_shapes.rs` (13), `d1_nested_generics.rs` (3), `wp22_residual_fixes.rs` (12), `wp20_s_gaps::bodyless_and_empty_nominal_types_run_trailing_methods_in_source_and_wasm`, `::named_enum_and_struct_reference_payloads_stay_rejected` | no MISSING |
+| D2 | Tuples (labels as sugar, labeled init) in args/results/fields/payloads/nested; owned String tuples, flat/nested String-owning structs and anonymous records, owner arrays, enum payloads, nested `Result<string,E>` literal payloads; internal signatures only. Partial moves out of nested storage stay rejected | `d2_tuple_acceptance.rs` (4), `tuple_owned_temporaries.rs`, `tuple_nested_arrays.rs`, `d2_owned_struct_transport.rs`, `d2_owner_placement.rs`, `d2_nested_owner_transport.rs`, `d2_record_owner_transport.rs`, `d2_nested_result_storage.rs`; `cli.rs`: `tuple_*`, `labeled_tuple_malformed_forms_are_rejected`, `tuple_reference_elements_are_gated_before_ir_validation`; ir `tests/validation.rs` | PLAN "D2 acceptance reconciliation": no MISSING |
+| D3 | `T?` spelling, `(borrow T)?` vs `borrow T?` distinct, non-failing warning channel, MW001 on legacy `Option<T>`; reference transport unchanged | `d3_optional_warnings.rs` (9), `cli.rs::postfix_optional_*`, syntax `parser.rs::postfix_optional_type_preserves_grouped_reference_precedence`, `migration_warnings.rs` | PLAN "D3 acceptance reconciliation": no MISSING |
+| C1 | `char` literals, `loop ch in text` over named/borrowed `string` (fields/calls/literals rejected TE017; mutation inside loop BE005), MW003 for `Bytes<N>`; bare `String` stays TE001 (restored 2026-11-23); no allocator change; Bytes outside core | `c1_text_traversal.rs` (scalar counts vs bytes for ASCII/multibyte/supplementary, loan negatives, capped early-exit, guide spelling, MW003), syntax `migration_warnings.rs`, `parser.rs::malformed_character_literals_report_scalar_errors_and_recover`, ir `rejects_non_scalar_char_constants` | PLAN "C1" and "String restore" entries |
+| H1 | Wasm-only; `[host] profile = "cli"`; one capability `memobits:console.write_i32(i32) -> unit`; root `extern fn write_i32(value: i32);`; manifest-selected source/artifact execution; undeclared/mismatched imports rejected pre-run | `host_capability_cli.rs`, syntax `host_declaration.rs`, project `tests/discovery.rs::manifest_host_profile_is_parsed_and_validated`, `cli.rs::cli_host_profile_is_validated_before_import_free_execution`; fixture `examples/projects/host-capability` prints `Host i32: 42` / `Result: i32(7)` (re-run now) | other profiles/capabilities/non-CLI hosts not delivered |
+
+## 4. Source/Wasm parity, validated Wasm, capped reuse
+
+- Parity: every row's positive tests above run both source (`mb run`) and standalone Wasm and compare; guide parity re-confirmed now (identical `Result: Ok(i32(42))`, both stderr empty). Wasm artifact `/tmp/memobits-final/guide.wasm` validated by `mb check` and by `mb build`.
+- Capped same-instance reuse for changed heap paths (repeated iterations on one Wasm instance under a memory cap, normal and early exits): `d2_owned_struct_transport::{repeated_owned_string_struct_arguments_*, repeated_owned_string_struct_results_*}`, `d2_owner_placement::repeated_string_owner_elements_*`, `d2_nested_owner_transport::repeated_nested_string_owners_*`, `d2_record_owner_transport::repeated_string_owning_records_*`, `tuple_destructure_memory_stress` (5 tests: multi-string destructuring, owned temporaries, enum payloads, later-argument returns, nested tuple calls; 8,192 iterations in the earlier stress suite), `c1_text_traversal::early_exits_with_heap_text_release_it_under_a_capped_wasm_memory` (8,192 iterations), wasm `tests/struct_calls.rs::owned_string_tuple_calls_reuse_heap_under_a_memory_cap`, wasm `tests/stack.rs` string-struct/field/temporary reuse tests (e.g. `string_struct_share_replacement_reuses_heap_and_keeps_sibling_loan_live`). All pass in the final run.
+- No unconditional behavior regression through changed compiler modules: M1 harness (identical stdout/stderr/exit and Wasm bytes across 14 examples) plus the full green workspace run. (The harness predates this run; it was not re-run here.)
+
+## 5. Docs and guide updates
+
+- Guide `examples/projects/language-guide/src/main.mb` (+940/-35): checked examples for each integrated group; uses `string`, `Array<u8, N>`, `T?`; no legacy spellings outside comments; runs warning-free.
+- Docs: `docs/design/decisions.md` (2026-11-23 sections: ownership direction, Optional spelling migration, Text traversal and spelling migration, Shipped C1 receiver rules, String correction), `docs/design/implementation-plan.md`, `docs/design/utf8-text-slice.md`, `crates/memobits-cli/README.md` (`mb check`, MW001/MW003 table, H1 host section).
+- Local-only: `.local-design/` files (ignored).
+
+## 6. Unresolved gates (not blocking acceptance; recorded in PLAN.md)
+
+- Element-borrow limits: `grid[i][j].borrow()`, `bag.items[0].borrow()` (field-held arrays), `d.title.size()` on a String-owning nested field (LE900) deferred to roadmap stage 2.
+- Direct temporaries as owned call arguments for String-owning structs remain rejected.
+- Generic functions returning a nested const nominal (`fn mk<T, const N: u32>(..) -> Tag<N>`) outside the specialization subset (TE007); only `Array<T, N>`/`T` results.
+- `examples/projects/strings` fails with TE001 (bare `String`); also failed at HEAD; protected, untouched.
+- Formatting debt: 18 fmt-diff files above (2 are HEAD debt).
+- Other recorded gates: partial moves out of nested storage (swap/replace is a post-launch candidate), exported tuple/struct signatures (LE900), reference-bearing aggregate payloads, empty anonymous shapes, signed/other-width shifts, `Bytes` outside core, MW warnings only for parsed source, `mb run FILE.wasm` has no source warnings, actual package loading, non-CLI hosts.
+- Possible lost WIP (needs owner check): the archived 15-path transfer snapshot (`.local-design/archive/superseded/transfer-handoff.md`) listed `types/lists.rs` and `types/templates.rs` as modified; they now show no diff against HEAD and hashes differ from the snapshot. Their pre-launch WIP is no longer in the tree (reverted or folded elsewhere). Not investigated further and nothing was changed.
+
+## 7. Decisions under delegated defaults and questions recorded at the time
+
+Delegated (docs/design/decisions.md, 2026-11-23, and PLAN.md architect decisions):
+- Composition allowed by default through one shared String-owner transport predicate; references stay second-class; no implicit partial moves; `Array<T, N>` target spelling (`array(T; N)` withdrawn); anonymous records use the same predicate.
+- `T?` is the optional spelling; `Option<T>` stays accepted with non-failing warning MW001; warning prefix `MW` accepted.
+- `loop ch in text` scalar traversal; `Bytes<N>` alias with MW003; bare `String` stays TE001 (MW002 not used).
+- D2 accepted without partial moves out of nested storage; swap/replace deferred; struct-literal field owners staged in hidden locals accepted; direct temporaries as owned args and element-borrow reads deferred; Error-ancestry negative uses generic LE900 message.
+- Residual bugs fixed as bugs not rules (const params in nested type args; projected-field receivers); M1 accepted by named seams with byte-identical Wasm, not line counts.
+
+The following questions were open when this draft was written; they are
+historical and do not request a decision now:
+1. (a) Commit packaging plan (section 8).
+2. (b) Whether to run a repo-wide `cargo fmt` (18 files; 2 are HEAD debt) and whether in its own commit.
+3. (c) `examples/projects/strings` migration (bare `String`, TE001 at HEAD and now) and the other legacy-spelling examples (`hashing`, `utf8-validator`, `strings`) that now print MW003/other warnings.
+4. (d) Whether the MW001 warning for `Option<T>` stays on by default (every use warns; migrate-then-keep vs opt-in).
+5. Confirm the status of the `lists.rs`/`templates.rs` pre-launch WIP (section 6).
+
+## 8. Proposed commit packaging (no co-author trailers per requirements; explicit paths only, never `git add -A`)
+
+Pre-existing user WIP: HEAD already contains earlier launch work (commit 5538e9e). The only record of WIP predating this contractor run is the 15-path snapshot (hashes in the transfer handoff). Compared now: 3 paths are byte-identical to the snapshot (`crates/memobits-analysis/src/lower/operations.rs`, `crates/memobits-cli/tests/trap_reports_cli.rs`, `docs/design/implementation-plan.md`), 10 were modified further (constants.rs, lower.rs, types.rs, typetable.rs, cli.rs, resolve/lib.rs, syntax/lib.rs, parser.rs, decisions.md, language-guide main.mb), 2 are now clean (lists.rs, templates.rs; see section 6). Pre-launch and launch edits are interleaved in the 10 files, so they cannot be separated by file. Treat the whole tree as one owner's WIP and confirm with the user.
+
+Hunk-level splitting by row is not realistic: the mixed files are huge and shared by every row (`crates/memobits-cli/tests/cli.rs` +5,497/-3,064, `crates/memobits-analysis/src/types.rs` +1,629, `crates/memobits-wasm/src/lib.rs`, `crates/memobits-analysis/src/lower.rs`, `crates/memobits-ir/src/lib.rs` and `scoped_string.rs`, `crates/memobits-syntax/src/lib.rs`, `crates/memobits-resolve/src/{lib,names}.rs`, `crates/memobits-cli/src/main.rs`, the guide `main.mb`, `decisions.md`, cli README), and intermediate states would not be verified green. Recommended: integrated commits by layer, each verified with the full workspace run, in this order:
+
+1. Compiler integration (everything under `crates/`, all 29 modified + 29 new crate files; one commit, covers S/N/M1/I1/G1/G2/OP1/D1/D2/D3/C1/H1 code and tests). Explicit paths: all `crates/**` entries listed in `.local-design/final/hashes.txt`. Optionally split off first, because they compile independently of feature code: none (new files depend on the integrated compiler). If the user insists on per-row history, do it as ordered `git add -p` sessions and run the workspace tests at each step, expecting many intermediate failures.
+2. Guide, example and docs (depend on 1): `examples/projects/language-guide/src/main.mb`, `examples/projects/host-capability/README.md`, `.../project.toml`, `.../src/main.mb`, `docs/design/decisions.md`, `docs/design/implementation-plan.md`, `docs/design/utf8-text-slice.md`, `crates/memobits-cli/README.md` (the README lives in crates/ but could be placed here instead).
+3. Optional separate commit afterwards: `cargo fmt` of agreed files only (formatting-only, kept out of 1-2).
+
+A finer but still green-checkable alternative (more work): (1a) M1 pure moves first (`crates/memobits-wasm/src/{layout,validation}.rs`, `crates/memobits-analysis/src/{lower/calls,types/interfaces}.rs` need their hunks removed from the large files, so also not clean); not recommended.
+Excluded from all commits: `.local-design/`, `legacy/`, `target/`, `/tmp` artifacts, any other example or README.

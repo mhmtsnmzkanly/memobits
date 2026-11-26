@@ -1,0 +1,640 @@
+use collections::{Row, total};
+use alloc::List;
+
+type Signal [Start, Stop] extend {
+    fn is_active(borrow self) -> bool {
+        match self {
+            Signal::Start => true,
+            Signal::Stop => false,
+        }
+    }
+}
+
+test fn trailing_enum_extension() {
+    let signal := Signal::Start;
+    assert(signal.is_active());
+}
+
+// Postfix `T?` is the preferred spelling of an optional type. The legacy
+// `T?` spelling is still accepted silently with identical meaning;
+// this guide uses `T?` throughout. Grouping matters for
+// references: `(borrow T)?` is an optional borrow, while `borrow T?` borrows
+// an optional value. Contextual Some and None construction keeps the existing
+// Option representation and match behavior.
+test fn optional_sugar() {
+    let present: i32? = Some(40);
+    let absent: i32? = None;
+    let present_value := match present {
+        Some(value) => value == 40,
+        None => false,
+    };
+    let absent_value := match absent {
+        Some(_) => false,
+        None => true,
+    };
+    assert(present_value);
+    assert(absent_value);
+}
+
+// A `string ! E` may be stored in a struct field or a fixed-array element
+// while its Ok payload is a String literal. Heap Ok payloads are rejected
+// there (TE018); they must be matched immediately as shown above.
+type Outcome { text: string ! Error, tag: u32 }
+
+fn failure_code(items: array<string ! Error, 2>) -> u32 {
+    match items[1] { Ok(_) => 0 as u32, Err(error) => error.code }
+}
+
+test fn nested_result_storage() {
+    let ok: string ! Error = Ok("é");
+    let stored := Outcome { text: ok, tag: 3 };
+    let failed: string ! Error = Err(Error { code: 8 });
+    let failed_outcome := Outcome { text: failed, tag: 4 };
+    let from_field := match failed_outcome.text { Ok(_) => 0 as u32, Err(error) => error.code };
+    let first: string ! Error = Ok("x");
+    let second: string ! Error = Err(Error { code: 9 });
+    let items := [first, second];
+    assert(stored.tag == 3);
+    assert(from_field == 8);
+    assert(failure_code(items) == 9);
+}
+
+// Nested patterns. A variant or tuple pattern may hold further patterns at any
+// depth, with `_` and bindings in any position. The compiler checks the whole
+// pattern matrix: a missing case such as `Ok(None)` is reported with an example
+// pattern, and an arm that earlier arms already cover is an error. An owned
+// match consumes the value, moves the bound parts out and releases the rest;
+// a borrowed match copies primitives and lends aggregates.
+type Spot [Empty, At(i32, i32)]
+type Link [Direct(Spot), Via(Spot, Spot), Lost]
+
+fn probe(reading: u32? ! Error) -> u32 {
+    match reading {
+        Ok(Some(value)) => value,
+        Ok(None) => 100,
+        Err(error) => 200 + error.code,
+    }
+}
+
+fn route(link: borrow Link) -> i32 {
+    match link {
+        Link::Direct(Spot::At(x, y)) => x + y,
+        Link::Via(Spot::Empty, Spot::At(x, _)) => x,
+        Link::Via(_, _) => -1,
+        Link::Direct(Spot::Empty) => 0,
+        Link::Lost => -2,
+    }
+}
+
+fn join(first: i32?, second: i32?) -> i32 {
+    match (first, second) {
+        (Some(a), Some(b)) => a + b,
+        (Some(a), None) => a,
+        (None, other) => match other { Some(b) => b, None => 0 }
+    }
+}
+
+test fn nested_patterns() {
+    let found: u32? ! Error = Ok(Some(5));
+    let absent: u32? ! Error = Ok(None);
+    let failed: u32? ! Error = Err(Error { code: 3 });
+    let direct := Link::Direct(Spot::At(2, 3));
+    let via := Link::Via(Spot::Empty, Spot::At(7, 8));
+    assert(probe(found) == 5);
+    assert(probe(absent) == 100);
+    assert(probe(failed) == 203);
+    assert(route(direct.borrow()) == 5);
+    assert(route(via.borrow()) == 7);
+    assert(join(Some(1), Some(2)) == 3);
+    assert(join(None, Some(4)) == 4);
+}
+
+// Enums and exhaustive matching. An alias can also qualify variants.
+type Reading [Missing, Single(i32), Batch(Row, bool)]
+type Sample = Reading;
+
+fn inspect(sample: borrow Reading) -> i32 {
+    // Borrow matching copies primitive payloads and lends aggregate payloads.
+    match sample {
+        Sample::Missing => 0,
+        Sample::Single(value) => value,
+        Sample::Batch(row, _) => total(row),
+    }
+}
+
+fn take(sample: Reading) -> i32 {
+    // Owned matching consumes the enum. Here row is an owned array.
+    match sample {
+        Reading::Batch(row, valid) => {
+            if valid { total(row.borrow()) } else { 0 }
+        }
+        _ => 0, // A wildcard covers the remaining variants.
+    }
+}
+
+test fn enums() {
+    let readings := [Reading::Missing, Sample::Single(6)];
+    // Matching an array element also borrows in place.
+    let single := match readings[1] { Sample::Single(value) => value, _ => 0 };
+    let batch := Reading::Batch([2, 3, 4], true);
+    assert(inspect(readings[0].borrow()) == 0);
+    assert(single == 6);
+    assert(inspect(batch.borrow()) == 9);
+    assert(take(batch) == 9);
+}
+
+// References and a function-local `(borrow T)?`.
+fn read(value: borrow i32) -> i32 {
+    value.copy()
+}
+
+test fn optional_borrow() {
+    var owner := 7;
+    var editor := owner.share(); // A stored mutable handle uses var.
+    editor += 1;
+    let saved := read(editor); // Reborrow the share for read-only access.
+    // The share ended at its last use. The annotation supplies the borrow
+    // payload type. Moving the wrapper transfers the handle and its loan.
+    let wrapped: (borrow i32)? = Some(owner.borrow());
+    let moved := wrapped;
+    let snapshot := match moved { Some(view) => read(view), None => 0 };
+    owner = 9; // The consuming match and the last use of view release the loan.
+
+    let empty: (borrow i32)? = None;
+    let fallback := match empty { Some(view) => view.copy(), None => owner };
+    assert(saved == 8);
+    assert(snapshot == 8);
+    assert(fallback == 9);
+}
+
+// Borrow optionals support direct annotations on immutable locals and consuming
+// matches. Aliases, fields, nesting, signatures and branch results are gated.
+// Reference returns, rebinding and loans of primitive projections such as
+// row[0].borrow() are also outside the current subset.
+// Owned outcomes and nominal errors.
+type ReadingError: Error {
+    pub station_id: u32,
+}
+
+type RangeError: ReadingError {
+    observed: i32,
+}
+
+type Checked = Row ! RangeError;
+// `T ?! E` is exactly `T? ! E`: Ok(Some(v)), Ok(None) or Err(e).
+type Poll = i32? ?! RangeError;
+
+fn replace_context(context: share ReadingError) {
+    // A whole write through an ancestor share updates its visible fields.
+    // The descendant keeps its concrete type and its observed field.
+    context = ReadingError { code: 12, station_id: 7 };
+}
+
+fn error_code(error: borrow Error) -> u32 {
+    error.code
+}
+
+fn check(value: i32) -> Checked {
+    if value < 0 {
+        // Every inherited field needs an initializer, including Error.code.
+        Err(RangeError { code: 1, station_id: 0, observed: value })
+    } else {
+        Ok([value, value + 1, value + 2])
+    }
+}
+
+fn poll(enabled: bool, value: i32) -> Poll {
+    // Ok(None) means the operation was skipped.
+    if !enabled { return Ok(None); }
+    // `try ... else` unwraps the Ok value and hands the error to its handler;
+    // this handler returns it unchanged (see "try ... else" below).
+    let row := try check(value) else error { return Err(error); };
+    // Some can infer an owned Option from its payload. Bare None needs an
+    // expected type, here supplied by the Poll return type.
+    if row[0] == 0 {
+        Ok(Some(None))
+    } else {
+        let reading := Some(total(row.borrow()));
+        Ok(Some(reading))
+    }
+}
+
+test fn outcomes() {
+    // Nested patterns match through all three layers.
+    let done := match poll(true, 2) {
+        Ok(Some(Some(value))) => value == 9,
+        _ => false,
+    };
+    // Ok(Some(None)) means the operation ran and found no reading.
+    let empty := match poll(true, 0) {
+        Ok(Some(None)) => true,
+        _ => false,
+    };
+    let skipped := match poll(false, 2) { Ok(None) => true, _ => false };
+    let failed := match poll(true, -4) {
+        Err(error) => {
+            var error := error;
+            replace_context(error.share()); // RangeError to ReadingError.
+            error_code(error.borrow()) == 12 && error.station_id == 7 && error.observed == -4 // RangeError to its root Error.
+        }
+        _ => false,
+    };
+    assert(done);
+    assert(empty);
+    assert(skipped);
+    assert(failed);
+}
+
+// try ... else. `try expr else name { handler }` is matching sugar. On a
+// `T ! E` value, `Ok(v)` yields `v` and `Err(e)` binds `e` (owned) in the
+// handler, whose value must have the success type or which must leave with
+// `return`, `break` or `continue`. The name may be omitted (`else { ... }`).
+// On a `T?` value the handler runs for `None` and takes no name. On a
+// `T ?! E` value `try` unwraps only the `!` layer and yields a `T?`. The
+// operand is a unary-level expression: `try a.b(c) else e { ... }`, and an
+// `else` belongs to the nearest `try`. Without `else`, `target = try expr;`
+// leaves the target unchanged on failure and `try expr;` discards a failure.
+// Every other position needs an `else`. `try` never catches traps, evaluates
+// its operand once, and releases an unused owned value exactly once.
+fn row_head(value: i32) -> i32 {
+    let row := try check(value) else error { return error.observed; };
+    row[0]
+}
+
+fn row_fallback(value: i32) -> i32 {
+    // The handler yields a value of the success type instead of exiting.
+    let row := try check(value) else error { [error.observed, 0, 0] };
+    row[0] + row[1]
+}
+
+fn row_unnamed(value: i32) -> i32 {
+    let row := try check(value) else { return 99; };
+    row[2]
+}
+
+fn first_or(items: borrow List<u32>, fallback: u32) -> u32 {
+    let first := try items.get(0) else { return fallback; };
+    first
+}
+
+fn skipped_or_value(enabled: bool, value: i32) -> i32 {
+    // `T ?! E`: `try` handles the error layer only; the optional layers stay.
+    let reading := try poll(enabled, value) else { return -1; };
+    match reading {
+        Some(Some(reading)) => reading,
+        Some(None) => 0,
+        None => -2,
+    }
+}
+
+fn words_len(label: string, flag: bool) -> u32 {
+    let owned := label.concat("!");
+    var target := "x".concat("");
+    // On a failure the target keeps its previous value; on success the old
+    // value is released and the new one moves in.
+    target = try owned_text(flag, owned);
+    target.len()
+}
+
+fn owned_text(ok: bool, text: string) -> string ! Error {
+    if !ok { return Err(Error { code: 3 }); }
+    Ok(text)
+}
+
+test fn try_else() {
+    assert(row_head(5) == 5);
+    assert(row_head(-4) == -4);
+    assert(row_fallback(5) == 11);
+    assert(row_fallback(-4) == -4);
+    assert(row_unnamed(5) == 7);
+    assert(row_unnamed(-4) == 99);
+    var items: List<u32> = [];
+    assert(first_or(items.borrow(), 7) == 7);
+    items.push(3);
+    assert(first_or(items.borrow(), 7) == 3);
+    assert(skipped_or_value(true, 2) == 9);
+    assert(skipped_or_value(true, 0) == 0);
+    assert(skipped_or_value(false, 2) == -2);
+    assert(skipped_or_value(true, -4) == -1);
+}
+
+// A branch that cannot fall through (`return`, `break`, `continue`) joins with
+// the other branch's type, so `if` and `match` can yield an owner or a number
+// while another path leaves early. This is what `try ... else { return ...; }`
+// relies on.
+fn diverging_branch(flag: bool) -> u32 {
+    let text := "abc".concat("");
+    let chosen := if flag { text } else { return 0; };
+    let probe: u32? = Some(chosen.len());
+    let size: u32 = match probe { Some(n) => n, None => { return 1; } };
+    size
+}
+
+test fn diverging_branches() {
+    assert(diverging_branch(true) == 3);
+    assert(diverging_branch(false) == 0);
+}
+
+test fn try_without_else() {
+    // Assignment context: a failure leaves the target alone.
+    var best: i32 = 1;
+    best = try Some(5);
+    assert(best == 5);
+    let none: i32? = None;
+    best = try none;
+    assert(best == 5);
+    assert(words_len("ab", true) == 3);
+    assert(words_len("ab", false) == 1);
+    // Statement context: a failure, or an unused success value, is discarded.
+    try check(-1);
+    try check(1);
+}
+
+// Ancestor reference conversion works at direct internal calls. Owned
+// conversion to an ancestor is unavailable. `T ! E` and `T ?! E` require Error
+// or a nominal descendant as their error argument.
+// Literal patterns match integers (negative ones too), bool, char and string
+// values by equality, at any depth. Their domains are infinite (except bool),
+// so a `_` or a binding arm is required; `true` and `false` cover bool. A
+// string scrutinee is compared byte by byte in place and is not moved.
+fn literal_kind(n: i32, flag: bool, letter: char, word: string) -> i32 {
+    let a := match n { 0 => 1, -1 => 2, 7 => 3, _ => 4 };
+    let b := match flag { true => 10, false => 20 };
+    let c := match letter { 'a' => 100, '😀' => 200, _ => 300 };
+    let d := match word { "hi" => 1000, "" => 2000, other => 3000 + other.len() as i32 };
+    a + b + c + d
+}
+
+fn literal_in_payload(r: i32? ! Error, t: (i32, bool)) -> i32 {
+    let first := match r { Ok(Some(7)) => 1, Ok(Some(_)) => 2, Ok(None) => 3, Err(_) => 4 };
+    let second := match t {
+        (0, true) => 10,
+        (0, _) => 20,
+        (_, flag) => if flag { 30 } else { 40 }
+    };
+    first + second
+}
+
+test fn literal_patterns() {
+    assert(literal_kind(0, true, 'a', "hi") == 1111);
+    assert(literal_kind(-1, false, '😀', "") == 2222);
+    assert(literal_kind(5, true, 'z', "abcd") == 3318);
+    let ok: i32? ! Error = Ok(Some(7));
+    let other: i32? ! Error = Ok(Some(8));
+    let nothing: i32? ! Error = Ok(None);
+    assert(literal_in_payload(ok, (0, true)) == 11);
+    assert(literal_in_payload(other, (0, false)) == 22);
+    assert(literal_in_payload(nothing, (5, false)) == 43);
+    let heap := "hel".concat("lo");
+    let tag := match heap { "hello" => 1, _ => 2 };
+    assert(tag == 1);
+    // The match only read `heap`.
+    assert(heap.len() == 5);
+}
+
+// A bare name that is a visible `const` (or `module::NAME`) is a constant
+// pattern: it matches the constant's value. A variant of the matched enum
+// wins over a constant of the same name; any other bare name is a binding.
+// Repeat counts accept any u32 constant name too: `[0; width]`.
+const LIMIT: i32 = 10;
+const ANSWER: string = "42";
+const width: u32 = 3;
+
+fn limit_state(n: i32) -> i32 {
+    match n { LIMIT => 1, 0 => 0, other => other }
+}
+
+test fn constant_patterns() {
+    assert(limit_state(10) == 1);
+    assert(limit_state(0) == 0);
+    assert(limit_state(5) == 5);
+    let reply := match "42" { ANSWER => true, _ => false };
+    assert(reply);
+    let cells := [7; width];
+    assert(cells[2] == 7);
+}
+
+// `p | q` matches when either alternative does, at any depth. Every
+// alternative must bind the same names with the same types; the arm body
+// exists once.
+type Shape [Circle(i32), Square(i32), Rect(i32, i32), Dot]
+
+fn shape_size(shape: Shape) -> i32 {
+    match shape {
+        Shape::Circle(n) | Shape::Square(n) => n,
+        Shape::Rect(w, 1) | Shape::Rect(1, w) => w,
+        Shape::Rect(w, h) => w * h,
+        Shape::Dot => 0,
+    }
+}
+
+fn small(o: i32?) -> bool {
+    match o { Some(1 | 2 | 3) => true, _ => false }
+}
+
+test fn or_patterns() {
+    assert(shape_size(Shape::Circle(4)) == 4);
+    assert(shape_size(Shape::Square(5)) == 5);
+    assert(shape_size(Shape::Rect(6, 1)) == 6);
+    assert(shape_size(Shape::Rect(1, 7)) == 7);
+    assert(shape_size(Shape::Rect(2, 3)) == 6);
+    assert(shape_size(Shape::Dot) == 0);
+    assert(small(Some(2)));
+    assert(!small(Some(9)));
+    assert(!small(None));
+}
+
+// `pattern if condition => body`: the guard is a bool that sees the pattern's
+// bindings. When it fails, matching continues with the next arms (their
+// patterns are tested as usual). A guarded arm never counts toward
+// exhaustiveness, so an unguarded arm must still cover its values. In an owned
+// match the guard only reads its bindings (primitives by copy, everything
+// else through a read-only reference); the payload moves into the arm only
+// once the guard has held, so a failed guard consumes nothing. A guard cannot
+// see a binding of an aggregate that owns Strings (TE017).
+fn ranked(n: i32, m: i32) -> i32 {
+    match (n, m) {
+        (a, b) if a > b => 1,
+        (a, _) if a < 0 => 2,
+        (0, _) => 3,
+        (a, b) if 10 / a == b => 4,
+        _ => 5,
+    }
+}
+
+fn guarded_text(shape: Shape, limit: i32) -> i32 {
+    match shape {
+        Shape::Circle(r) if r > limit => r,
+        Shape::Circle(_) => -1,
+        _ => 0,
+    }
+}
+
+fn guarded_word(word: string?) -> u32 {
+    match word {
+        Some(w) if w.len() > 3 => w.len(),
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
+test fn guards() {
+    assert(ranked(5, 3) == 1);
+    assert(ranked(-1, 3) == 2);
+    assert(ranked(0, 3) == 3);
+    assert(ranked(2, 5) == 4);
+    assert(ranked(3, 9) == 5);
+    assert(guarded_text(Shape::Circle(9), 5) == 9);
+    assert(guarded_text(Shape::Circle(2), 5) == -1);
+    assert(guarded_text(Shape::Dot, 5) == 0);
+    let long_text := "abcdef".concat("");
+    let short_text := "ab".concat("");
+    let long: string? = Some(long_text);
+    let short: string? = Some(short_text);
+    let none: string? = None;
+    assert(guarded_word(long) == 6);
+    assert(guarded_word(short) == 1);
+    assert(guarded_word(none) == 0);
+}
+
+// Heap values compose inside `T ! E`, `T?` and user variants. `Ok(Some(x))`,
+// `Ok(list)`, a struct literal inside `Ok(..)` / `Some(..)` / a variant,
+// `Some(list)` and an enum with a List payload all move the value in and
+// release it exactly once, including on early returns.
+fn heap_text(base: string) -> string {
+    let text := base.concat("");
+    text
+}
+
+type Tag { name: string, n: i32 }
+type Holder [Many(List<i32>), Named(Tag), Nothing]
+fn tag() -> Tag { Tag { name: heap_text("abcd"), n: 3 } }
+
+fn numbers(n: i32) -> List<i32> {
+    var out: List<i32> = [];
+    var i := 0;
+    loop {
+        if i == n { break; }
+        out.push(i);
+        i += 1;
+    }
+    out
+}
+
+fn maybe_tag() -> Tag? ! Error { Ok(Some(tag())) }
+
+fn tag_result(ok: bool) -> Tag ! Error {
+    if ok { Ok(Tag { name: heap_text("xy"), n: 1 }) } else { Err(Error { code: 5 }) }
+}
+
+fn number_result() -> List<i32> ! Error { Ok(numbers(3)) }
+fn some_numbers() -> List<i32>? { Some(numbers(2)) }
+
+fn holder(kind: i32) -> Holder {
+    if kind == 0 {
+        Holder::Many(numbers(4))
+    } else if kind == 1 {
+        Holder::Named(tag())
+    } else {
+        Holder::Nothing
+    }
+}
+
+test fn heap_payload_composition() {
+    assert(match maybe_tag() {
+        Ok(Some(t)) => t.name.len() == 4,
+        Ok(None) => false,
+        Err(_) => false,
+    });
+    assert(match tag_result(true) { Ok(t) => t.n == 1, Err(_) => false });
+    assert(match tag_result(false) { Ok(_) => false, Err(e) => e.code == 5 });
+    assert(match number_result() { Ok(list) => list.len() == 3, Err(_) => false });
+    assert(match some_numbers() { Some(list) => list.len() == 2, None => false });
+    assert(match holder(0) { Holder::Many(list) => list.len() == 4, _ => false });
+    assert(match holder(1) { Holder::Named(t) => t.n == 3, _ => false });
+    assert(match holder(2) { Holder::Nothing => true, _ => false });
+}
+
+// A `string ! E` (or any heap-success `T ! E` / `T?`) call result is an
+// ordinary owner: bind it, pass it, return it, store it in a field, element or
+// tuple, or `try` it. A literal pattern may test the `Ok` payload in place.
+type Slot { text: string ! Error, n: i32 }
+
+fn word(ok: bool) -> string ! Error {
+    if ok { Ok(heap_text("abcd")) } else { Err(Error { code: 3 }) }
+}
+
+fn word_len(r: string ! Error) -> i32 {
+    match r { Ok(s) => s.len() as i32, Err(e) => 100 + e.code as i32 }
+}
+
+fn word_again(ok: bool) -> string ! Error { word(ok) }
+
+fn word_bang(ok: bool) -> string ! Error {
+    let s := try word(ok) else e { return Err(e); };
+    let bang := s.concat("!");
+    Ok(bang)
+}
+
+fn word_kind(ok: bool) -> i32 {
+    match word(ok) { Ok("abcd") => 1, Ok("zz" | "yy") => 2, Ok(_) => 3, Err(_) => 4 }
+}
+
+test fn string_results_everywhere() {
+    assert(word_len(word(true)) == 4);
+    assert(word_len(word(false)) == 103);
+    assert(word_len(word_again(true)) == 4);
+    assert(word_len(word_bang(true)) == 5);
+    let kept := word(true);
+    assert(word_len(kept) == 4);
+    let slot := Slot { text: word(true), n: 2 };
+    assert(match slot.text { Ok(s) => s.len() as i32 + slot.n == 6, Err(_) => false });
+    let pair := (word(true), 5);
+    assert(match pair { (Ok(s), n) => s.len() as i32 + n == 9, (Err(_), _) => false });
+    var all: List<string ! Error> = [];
+    all.push(word(true));
+    all.push(word(false));
+    assert(match all[1] { Ok(_) => false, Err(e) => e.code == 3 });
+    assert(word_kind(true) == 1);
+    assert(word_kind(false) == 4);
+}
+
+// A variant that mixes a String with other payloads may leave the String
+// unbound; it is released with the rest of the owner.
+type Mixed [Two(string, string), One(string, i32), Zero]
+
+fn mixed(n: i32) -> Mixed {
+    if n == 0 {
+        Mixed::Zero
+    } else if n == 1 {
+        Mixed::One(heap_text("abcd"), 5)
+    } else {
+        Mixed::Two(heap_text("ab"), heap_text("cde"))
+    }
+}
+
+test fn unbound_string_payloads() {
+    assert(match mixed(2) { Mixed::Two(_, b) => b.len() == 3, _ => false });
+    assert(match mixed(2) { Mixed::Two(a, _) => a.len() == 2, _ => false });
+    assert(match mixed(1) { Mixed::One(_, n) => n == 5, _ => false });
+    assert(match mixed(2) { Mixed::Two(_, _) => true, _ => false });
+}
+
+// Guards of an owned `match` and literal patterns reach into a tuple that owns
+// Strings inside an enum payload (the guard only borrows; nothing moves until
+// the arm is taken).
+type Boxed [Pair((string, i32)), Nope]
+fn boxed() -> Boxed { Boxed::Pair((heap_text("abcd"), 3)) }
+
+test fn guards_in_string_tuples() {
+    let picked := match boxed() {
+        Boxed::Pair((s, n)) if s.len() > 9 => n,
+        Boxed::Pair((s, n)) if n > 5 => 7,
+        Boxed::Pair(("abcd", n)) if n == 3 => 11,
+        Boxed::Pair(_) => 0,
+        Boxed::Nope => 9,
+    };
+    assert(picked == 11);
+    assert(match boxed() { Boxed::Pair(pair) if pair.1 > 2 => true, _ => false });
+    assert(match boxed() { Boxed::Pair(("abcd", n)) => n == 3, _ => false });
+}

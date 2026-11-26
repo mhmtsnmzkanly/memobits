@@ -1,0 +1,9 @@
+use arithmetic;
+use loops;
+use text;
+
+// Adds the three topic results: 265 + 175 + 22. Each module checks its own
+// facts with `test fn` items (run them with `mb test`).
+fn main() -> i32 ! Error {
+    Ok(arithmetic::order_total() + loops::combined() + text::combined_length())
+}

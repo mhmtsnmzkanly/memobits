@@ -1,0 +1,25 @@
+use math;
+
+pub type Point { pub x: i32 }
+
+pub interface Draw {
+    fn draw(borrow self) -> i32;
+}
+
+fn exercise<T>(point: T) -> T {
+    let doubled := point.doubled();
+    let drawn := point.draw() of Draw;
+    point
+}
+
+pub fn run() -> i32 ! Error {
+    let point := Point { x: math::add(19, 23) };
+    let drawn := (exercise(point).draw() of Draw).copy();
+    Ok(drawn)
+}
+
+test fn run_draws_the_added_point() {
+    let point := Point { x: math::add(19, 23) };
+    let drawn := (exercise(point).draw() of Draw).copy();
+    assert(drawn == 42);
+}

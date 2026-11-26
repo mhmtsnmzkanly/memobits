@@ -1,0 +1,19 @@
+// Check with `mb ownership examples/analysis/references.mb`.
+// Internal primitive references also execute through project build/run.
+fn increment(value: share i32) {
+    value += 1;
+}
+
+fn read_twice(value: borrow i32) -> i32 {
+    value + value
+}
+
+fn main() -> i32 {
+    var score := 20;
+    increment(score.share());
+    let view := score.borrow();
+    let total := read_twice(view);
+    // The borrow ends after its last use, so the owner can change again.
+    score = 22;
+    total + score
+}

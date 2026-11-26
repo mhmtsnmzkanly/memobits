@@ -1,0 +1,103 @@
+use core::ops::{Add, Sub, PartialEq};
+
+type Vec2 { x: i32, y: i32 }
+
+// User-defined operators select the compiler-provided core::ops interfaces.
+// Add and Sub consume both owned operands and produce an owned Vec2.
+extend Vec2 of Add {
+    type Rhs = Vec2;
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x + rhs.x, y: self.y + rhs.y }
+    }
+}
+
+extend Vec2 of Sub {
+    type Rhs = Vec2;
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x - rhs.x, y: self.y - rhs.y }
+    }
+}
+
+// Equality borrows its left receiver and consumes the right operand.
+extend Vec2 of PartialEq {
+    type Rhs = Vec2;
+    fn eq(borrow self, rhs: Vec2) -> bool { self.x == rhs.x && self.y == rhs.y }
+}
+
+// A user interface that a generic function can require.
+interface Weigh { fn weight(borrow self) -> i32; }
+
+extend Vec2 of Weigh {
+    fn weight(borrow self) -> i32 { self.x + self.y }
+}
+
+interface Scale { fn scale(borrow self) -> i32; }
+
+// One owned T parameter with one interface bound.
+fn weigh_twice<T>(value: T) -> i32 where T: Weigh {
+    value.weight() of Weigh + 1
+}
+
+// The caller-selected Add evidence projects Rhs and Output.
+fn combine<T>(left: T, right: T::Rhs) -> T::Output where T: Add {
+    left + right
+}
+
+extend Vec2 of Scale {
+    fn scale(borrow self) -> i32 { 2 }
+}
+
+// Two type parameters, two bounds on `T` and one on `U`: the call selects one
+// implementation per bound, and `of Interface` picks the interface per call.
+fn weigh_scaled<T, U>(value: T, factor: U) -> i32 where T: Weigh + Scale, U: Scale {
+    value.weight() of Weigh * factor.scale() of Scale + value.scale() of Scale
+}
+
+// A generic higher-order helper: `T` and the function type are inferred from
+// the arguments, and the anonymous function takes its types from them.
+fn apply_twice<T>(value: T, step: borrow fn(T) -> T) -> T {
+    step(step(value))
+}
+
+fn main() -> i32 ! Error {
+    let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
+    let diff := sum - Vec2 { x: 1, y: 2 };
+    let merged := combine(diff, Vec2 { x: 5, y: 5 });
+    Ok(weigh_twice(merged))
+}
+
+// The checks are `test fn` items: `mb check` and `mb test` compile them and
+// `mb test` runs them; `mb build` and `mb run` leave them out.
+test fn addition_adds_each_component() {
+    let sum := Vec2 { x: 1, y: 2 } + Vec2 { x: 10, y: 20 };
+    assert(sum.x == 11);
+    assert(sum.y == 22);
+}
+
+test fn subtraction_and_equality() {
+    let diff := Vec2 { x: 11, y: 22 } - Vec2 { x: 1, y: 2 };
+    assert(diff == (Vec2 { x: 10, y: 20 }));
+    assert(diff != (Vec2 { x: 0, y: 0 }));
+}
+
+test fn combine_uses_the_selected_add_evidence() {
+    let merged := combine(Vec2 { x: 10, y: 20 }, Vec2 { x: 5, y: 5 });
+    assert(merged.x == 15);
+    assert(merged.y == 25);
+}
+
+test fn weigh_twice_adds_one_to_the_weight() {
+    assert(weigh_twice(Vec2 { x: 15, y: 25 }) == 41);
+}
+
+test fn weigh_scaled_selects_each_bound() {
+    assert(weigh_scaled(Vec2 { x: 15, y: 25 }, Vec2 { x: 0, y: 0 }) == 82);
+}
+
+test fn apply_twice_infers_types_from_the_arguments() {
+    let moved := apply_twice(Vec2 { x: 1, y: 2 }, fn(v) => v + Vec2 { x: 1, y: 1 });
+    assert(moved.x == 3);
+    assert(moved.y == 4);
+}

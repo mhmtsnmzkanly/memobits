@@ -1,0 +1,361 @@
+type Box<T> { value: T } extend {
+    fn read_value(borrow self) -> T { self.value }
+}
+
+type Buffer<T, const N: u32> { data: array<T, N> }
+// Generic nominal methods may name nested instances of the receiver's type
+// parameter, such as Twin<Nest<T>>. Bounded nesting specializes per receiver;
+// unbounded polymorphic recursion stops at the 256-specialization diagnostic.
+type Twin<T> { first: T, second: T }
+
+type Nest<T> { value: T } extend {
+    fn twin(borrow self) -> Twin<Nest<T>> {
+        Twin<Nest<T>> {
+            first: Nest<T> { value: self.value },
+            second: Nest<T> { value: self.value },
+        }
+    }
+}
+
+// A const parameter in scope can be forwarded as a nested type argument
+// (Lane<N> inside a method of Gauge<const N: u32>). A method call on a field
+// or element place (`self.lane.span()`, `gauges[0].span()`) addresses the place
+// in place: `borrow self` reads it, `share self` needs a mutable owner and
+// respects field-level loans, and an owned `self` would be a partial move.
+type Lane<const N: u32> { width: i32 } extend {
+    fn span(borrow self) -> i32 { self.width }
+    fn widen(share self) { self.width += 1; }
+}
+
+type Gauge<const N: u32> { width: i32 } extend {
+    fn lane(borrow self) -> Lane<N> { Lane<N> { width: self.width } }
+}
+
+type GaugePair { first: Lane<2>, second: Lane<3> }
+type Maybe<T> [Empty, Present(T)]
+type Packet<const N: u32> [Data(array<u8, N>)]
+// Generic functions take any number of type parameters and `const N: u32`
+// parameters. Every argument is inferred from the call: from the written
+// arguments (in order, function literals last) and from the expected result.
+// A parameter type may use them anywhere: `array<T, N>`, `List<T>`, `T?`,
+// `T ! E`, tuples, nominal generics (`Pair<A, B>`) and function types
+// (`fn(T) -> U`), with `borrow` / `share` access. `where T: A + B, U: C`
+// gives each bound its own evidence, selected at the call (the evidence the
+// enclosing generic function received is forwarded); a method call selects the
+// interface with `of`. Each body is checked for its concrete specialization;
+// a specialization is keyed by every type, const and evidence. `T::Name` names
+// an associated type of the evidence for one bound; when several bounds
+// define `Name`, write `T::Interface::Name`. Nested projections stay gated.
+fn identity<T>(value: T) -> T { value }
+
+fn select<T>(value: T, enabled: bool, fallback: T) -> T {
+    if enabled { value } else { fallback }
+}
+
+test fn generic_functions() {
+    let number := 40;
+    let selected: i32 = select(number, true, 0);
+    let flag: bool = identity(true);
+    let again: i32 = identity(selected);
+    assert(flag);
+    assert(again + identity(2) == 42);
+}
+
+fn echo_array<T, const N: u32>(value: array<T, N>) -> array<T, N> { value }
+
+fn relay_array<T, const N: u32>(value: array<T, N>) -> array<T, N> {
+    echo_array(value)
+}
+
+test fn generic_array_forwarding() {
+    let one: array<i32, 1> = [40];
+    let two: array<i32, 2> = [1, 1];
+    let first := relay_array(one);
+    let second := relay_array(two);
+    assert(first[0] + second[0] + second[1] == 42);
+}
+
+// A generic bound uses the caller-visible interface implementation. A nested
+// generic call forwards that selected evidence to the constrained function.
+type RenderPoint { value: i32 }
+interface Render { fn render(borrow self) -> i32; }
+
+extend RenderPoint of Render {
+    fn render(borrow self) -> i32 { self.value }
+}
+
+fn render_value<T>(value: T) -> i32 where T: Render {
+    value.render() of Render
+}
+
+fn relay_render<T>(value: T) -> i32 where T: Render {
+    render_value(value)
+}
+
+test fn generic_interface_forwarding() {
+    let point := RenderPoint { value: 42 };
+    assert(relay_render(point) == 42);
+}
+
+test fn nested_generic_methods() {
+    let signed := Nest<i32> { value: 40 };
+    let unsigned := Nest<u32> { value: 2 };
+    let pair := signed.twin();
+    let other := unsigned.twin();
+    let gauge := Gauge<3> { width: 40 }.lane();
+    var pair_lanes := GaugePair { first: Lane<2> { width: 1 }, second: gauge };
+    let first_view := pair_lanes.first.borrow();
+    pair_lanes.second.widen();
+    assert(pair.first.value + pair.second.value == 80);
+    assert(other.second.value == 2);
+    assert(first_view.span() == 1);
+    assert(pair_lanes.second.span() == 41);
+}
+
+// Generic nominal structs and enums specialize by type arguments. Const
+// arguments substitute into admitted fixed-array fields. Enum construction
+// uses the expected concrete enum type.
+test fn generic_structs() {
+    let signed := Box<i32> { value: 41 };
+    let unsigned := Box<u32> { value: 42 };
+    let bytes := Buffer<u8, 2> { data: [0, 42] };
+    let maybe_i32: Maybe<i32> = Maybe::Present(42);
+    let maybe_u32: Maybe<u32> = Maybe::Empty;
+    let packet_one: Packet<1> = Packet::Data([1]);
+    let packet_two: Packet<2> = Packet::Data([20, 21]);
+    let unwrapped := match maybe_i32 {
+        Maybe::Present(value) => value,
+        Maybe::Empty => 0,
+    };
+    let empty := match maybe_u32 {
+        Maybe::Present(_) => false,
+        Maybe::Empty => true,
+    };
+    let packet_values := match packet_one {
+        Packet::Data(bytes) => bytes[0] as i32,
+    } + match packet_two {
+        Packet::Data(bytes) => bytes[0] as i32 + bytes[1] as i32,
+    };
+    assert(signed.read_value() + 1 == 42);
+    assert(unsigned.read_value() == 42);
+    assert(bytes.data[1] == 42);
+    assert(unwrapped == 42);
+    assert(empty);
+    assert(packet_values == 42);
+}
+
+// Inside an `extend` block (inherent, trailing, or `extend T of Interface`)
+// `Self` names the extended type, with its generic and const arguments:
+// `Self` in `extend Pair<T>` is `Pair<T>`. It works in parameter and result
+// types, `let` annotations, struct literals (`Self { ... }`) and enum variant
+// paths (`Self::Variant`, also in patterns). Outside `extend` blocks, and in
+// interface declarations (not supported yet), `Self` is a compile error.
+type SwapPair<T> { left: T, right: T } extend {
+    fn swapped(self) -> Self { Self { left: self.right, right: self.left } }
+    fn left_value(borrow self) -> T { self.left }
+}
+
+type Doubler<const N: u32> { width: i32 } extend {
+    fn doubled(self) -> Self {
+        let result: Self = Self { width: self.width * 2 };
+        result
+    }
+    fn size(borrow self) -> i32 { self.width }
+}
+
+type SelfSlot<T> [Vacant, Held(T)] extend {
+    fn or_hold(self, fallback: T) -> Self {
+        match self {
+            Self::Vacant => Self::Held(fallback),
+            Self::Held(value) => Self::Held(value),
+        }
+    }
+}
+
+test fn self_in_extend_blocks() {
+    let pair := SwapPair<i32> { left: 1, right: 41 };
+    let flipped := pair.swapped();
+    assert(flipped.left_value() == 41);
+    let doubler := Doubler<8> { width: 21 };
+    let twice := doubler.doubled();
+    assert(twice.size() == 42);
+    let slot: SelfSlot<i32> = SelfSlot::Vacant;
+    let held := slot.or_hold(42);
+    assert(match held { SelfSlot::Held(value) => value == 42, SelfSlot::Vacant => false });
+}
+
+// Several type parameters and several bounds: one evidence per bound.
+interface Weigh { fn weigh(borrow self) -> i32; }
+interface Mark { fn mark(borrow self) -> i32; }
+type Crate { n: i32 }
+extend Crate of Weigh { fn weigh(borrow self) -> i32 { self.n } }
+extend Crate of Mark { fn mark(borrow self) -> i32 { self.n * 100 } }
+
+fn total<T, U, const N: u32>(first: T, rest: borrow array<U, N>) -> i32
+    where T: Weigh + Mark, U: Weigh {
+    first.weigh() of Weigh + first.mark() of Mark + rest[0].borrow().weigh() of Weigh
+}
+
+fn relay_total<A, B, const N: u32>(first: A, rest: borrow array<B, N>) -> i32
+    where A: Weigh + Mark, B: Weigh {
+    total(first, rest)
+}
+
+test fn generic_multiple_parameters_and_bounds() {
+    let rest: array<Crate, 2> = [Crate { n: 2 }, Crate { n: 3 }];
+    assert(relay_total(Crate { n: 1 }, rest.borrow()) == 1 + 100 + 2);
+}
+
+// Generic parameters inside compound types, borrowed and shared parameters.
+fn put<T>(slots: share array<T, 2>, value: T) { slots[0] = value; }
+fn first_of<A, B>(pair: (A, B)) -> A { let (a, _) := pair; a }
+fn wrap<T>(value: T) -> T? { Some(value) }
+
+fn unwrap_or<T>(value: T?, fallback: T) -> T {
+    match value { Some(found) => found, None => fallback }
+}
+
+fn pick<T, E>(value: T ! E, fallback: T) -> T {
+    match value { Ok(found) => found, Err(_) => fallback }
+}
+
+test fn generic_compound_parameter_types() {
+    var slots: array<i32, 2> = [1, 2];
+    put(slots.share(), 40);
+    let made: i32? = wrap(1);
+    let fine: i32 ! Error = Ok(1);
+    assert(slots[0] == 40);
+    assert(first_of((1, true)) == 1);
+    assert(unwrap_or(made, 0) + pick(fine, 0) == 2);
+}
+
+// Generic higher-order helpers: `U` is fixed by the function's result.
+fn apply<T, U>(value: T, step: borrow fn(T) -> U) -> U { step(value) }
+
+fn fold3<T, A>(items: array<T, 3>, init: A, step: borrow fn(A, T) -> A) -> A {
+    var acc := init;
+    loop item in items { acc = step(acc, item); }
+    acc
+}
+
+fn square(x: i32) -> i32 { x * x }
+
+test fn generic_higher_order_helpers() {
+    let offset := 1;
+    assert(apply(6, square) == 36);
+    assert(apply(20, fn(x) => x * 2 + offset) == 41);
+    assert(fold3([1, 2, 3], 0, fn(sum, x) => sum + x + offset) == 9);
+    assert(fold3([1, 2, 3], false, fn(any, x) => any || x == 2));
+}
+
+// A generic function named where a function type is expected is specialized
+// from that type (several parameters work the same way).
+fn pair_of<A, B>(a: A, b: B) -> (A, B) { (a, b) }
+fn drop_second<A, B>(a: A, b: B) -> A { a }
+fn apply2<A, B, R>(f: fn(A, B) -> R, a: A, b: B) -> R { f(a, b) }
+
+test fn generic_function_values_with_several_parameters() {
+    let make: fn(i32, bool) -> (i32, bool) = pair_of;
+    let made := make(1, true);
+    let (one, _) := made;
+    assert(one == 1);
+    assert(apply2(drop_second, 41, false) == 41);
+}
+
+// Several bounds that define the same associated name: qualify the interface.
+interface Producer { type Output; fn produce(borrow self) -> i32; }
+interface Consumer { type Output; fn consume(borrow self) -> i32; }
+type Valve { n: i32 }
+extend Valve of Producer { type Output = i32; fn produce(borrow self) -> i32 { self.n } }
+extend Valve of Consumer { type Output = bool; fn consume(borrow self) -> i32 { 0 - self.n } }
+
+fn flow<T>(valve: T) -> T::Producer::Output where T: Producer + Consumer {
+    valve.produce() of Producer + valve.consume() of Consumer + 42
+}
+
+test fn generic_projection_through_several_bounds() {
+    assert(flow(Valve { n: 5 }) == 42);
+}
+
+// A const parameter in scope is a `u32` value: usable in arithmetic,
+// comparisons, `0..N` ranges, `[x; N]` repeat counts, casts, interpolation and
+// closures, with the value of the specialization being checked. A local of the
+// same name shadows it, and it is not assignable.
+fn weigh_all<const N: u32>(items: borrow array<u32, N>) -> u32 {
+    var sum: u32 = 0;
+    loop i in 0..N { sum += items[i]; }
+    sum + N
+}
+
+fn filled<const N: u32>(value: u32) -> array<u32, N> { [value; N] }
+
+fn describe<const N: u32>(items: borrow array<u32, N>) -> u32 {
+    let shift := fn(x: u32) -> u32 => x + N;
+    let text := "N={N}";
+    let big: bool = N > 2;
+    shift(text.len()) + (if big { 100 } else { 0 }) + (N as u8) as u32
+}
+
+type Grid<const W: u32, const H: u32> { cells: array<u32, 4> } extend {
+    fn area(borrow self) -> u32 { W * H }
+}
+
+test fn const_parameters_are_values() {
+    let three: array<u32, 3> = [1, 2, 3];
+    let five: array<u32, 5> = [1, 1, 1, 1, 1];
+    assert(weigh_all(three.borrow()) == 9);
+    assert(weigh_all(five.borrow()) == 10);
+    let made: array<u32, 4> = filled(7);
+    assert(made[3] == 7);
+    assert(describe(three.borrow()) == 3 + 3 + 100 + 3);
+    assert(describe(five.borrow()) == 3 + 5 + 100 + 5);
+    let grid := Grid<2, 3> { cells: [1, 2, 3, 4] };
+    assert(grid.area() == 6);
+}
+
+// An inherent method may have type and const parameters of its own, in
+// addition to its type's: `fn m<U>(self, x: U) -> (T, U)`. They are inferred at
+// the call like a function's (arguments, then the expected result), may have
+// `where` bounds, and the method is specialized on the receiver's arguments and
+// its own. Methods of interface implementations and interface declarations
+// cannot take their own parameters yet.
+type Cell<T> { value: T } extend {
+    fn with<U>(self, extra: U) -> (T, U) { (self.value, extra) }
+    fn map<U>(self, step: fn(T) -> U) -> Cell<U> { Cell<U> { value: step(self.value) } }
+    fn weight_with<U>(borrow self, other: borrow U) -> i32 where U: Weigh { other.weigh() of Weigh }
+    fn lanes<const K: u32>(borrow self, lane: borrow array<i32, K>) -> u32 { K * 2 }
+}
+
+test fn methods_with_their_own_parameters() {
+    let cell := Cell<i32> { value: 40 };
+    let pair := cell.with(true);
+    assert(pair.0 == 40 && pair.1);
+    let again := Cell<i32> { value: 5 };
+    let doubled := again.map(fn(x: i32) -> i32 => x * 2);
+    assert(doubled.value == 10);
+    let truth := Cell<i32> { value: 1 };
+    let flag := truth.map(fn(x: i32) -> bool => x == 1);
+    assert(flag.value);
+    let crate := Crate { n: 7 };
+    let holder := Cell<i32> { value: 0 };
+    assert(holder.weight_with(crate.borrow()) == 7);
+    let lane: array<i32, 4> = [0, 0, 0, 0];
+    let lanes := Cell<i32> { value: 0 };
+    assert(lanes.lanes(lane.borrow()) == 8);
+}
+
+// A generic type may carry `where` bounds on its parameters: every
+// instantiation (annotation, signature, field, payload, nested type, or a
+// generic function's specialization) needs a visible implementation of each
+// bound, and the type's methods use that evidence (`T::Output`, operators).
+type Pail<T> where T: Weigh { item: T } extend {
+    fn grams(borrow self) -> i32 {
+        let w := self.item.weigh() of Weigh;
+        w * 10
+    }
+}
+
+test fn type_declarations_with_where_bounds() {
+    let pail := Pail<Crate> { item: Crate { n: 4 } };
+    assert(pail.grams() == 40);
+}

@@ -1,0 +1,95 @@
+# memobits-wasm
+
+This crate contains an experimental Wasm backend for validated typed IR.
+`compile(&Program, &BTreeMap<String, FunctionId>)` first validates IR and
+rejects move-analysis errors, then emits a Wasm module. The caller chooses the
+application entry export or library export aliases; the backend does not infer
+project visibility or roots.
+
+`compile_application_traced` exports the selected entry as `main`. A zero-argument
+entry returning `T ! E` or `T ?! E` with a primitive success payload uses
+the private [outcome entry adapter](../../docs/design/outcome-implementation.md).
+It exports an address/size wrapper and its backing memory, and records decoding
+metadata in `memobits.entry`. Library exports use scalar signatures.
+
+The current backend supports primitive signatures, constants, captures,
+assignments, direct calls, returns, branches, and arbitrary basic-block edges.
+It uses a dispatcher loop for control flow and stages edge arguments before
+copying block parameters. Integer arithmetic checks overflow, division by zero,
+and signed minimum divided by negative one. Floating operations use Wasm IEEE
+behavior. Invalid bool, Unit, and narrow integer parameters trap at function
+entry. Indirect calls and non-primitive types are reported with LE900.
+
+The current ABI is experimental: bool and 8/16/32-bit integers use Wasm i32;
+64-bit integers use i64; f32/f64 map directly; Unit has no external result.
+Internal Unit values use a zero-valued i32 slot. No ABI stability or source
+mapping guarantee is implied.
+
+Runtime checks trap with Wasm `unreachable` after storing a reason code and
+location id in the exported `__mb_trap` global; `compile_traced` also returns the
+source span of each location id so a driver can emit the `memobits.traps` custom
+section. The protocol is described in `docs/design/wasm-backend.md` ("Trap
+reporting").
+
+Internal primitive references execute using private linear-memory addresses.
+Address-taken owner locals use authoritative frame cells for reads and writes;
+reference reborrows reuse addresses. Typed loads preserve integer signedness and
+width. Per-invocation frames are restored on normal and early returns. The private
+stack starts at byte 16 and uses the configured `[build].stack_size` bytes
+(1 MiB by default). Exhaustion traps, and the runtime discards the instance.
+
+Reference parameters are supported only for internal calls. Fixed arrays of
+primitive elements and nested arrays execute as locals, as owned, `borrow` and
+`share` parameters of internal calls (an owned array is copied from caller
+storage into the callee's own frame cell; a reference is the owner's cell
+address), as array-valued `if`/block results (array block parameters are frame
+cells; a join edge copies the argument) and as call results (struct-return: a
+hidden trailing pointer parameter addresses the call's own cell in the caller's
+frame, and `return` copies into it). Element access is bounds-checked on every
+index and traps out of range. Exported signatures that use arrays or references
+(parameters or results), reference returns, and indirect calls remain
+unsupported. The private pointer representation is not a stable ABI.
+
+A struct local or value also owns an inline frame cell. Fields are laid out in
+declaration order at natural alignment (size and alignment of the struct are those of
+its largest field, size rounded up) using checked arithmetic; the cell shares the
+configured stack size (`[build].stack_size`) limit with arrays, and an oversized struct is a backend diagnostic.
+`StructNew` stores each field at its offset, in place in the destination local's cell
+when it is bound immediately (the array construction mechanism), and `FieldAddr` adds
+the constant field offset to the cell address (a struct owner's cell or a struct
+reference's pointer), so `Load` is unchanged. Structs reuse the array aggregate paths:
+owned struct parameters are copied into the callee's cell, `borrow`/`share` parameters
+are the owner's address, results go through the hidden trailing pointer, struct block
+parameters are frame cells, and whole-struct `Assign`/`Capture`/`Store` are
+`memory.copy`. `main` and `[export]` signatures with structs or struct references are
+rejected with LE900 (no external struct ABI). Aggregates nest (A3): a struct or array field
+is stored inline at its own natural alignment (written with `memory.copy` from the field
+operand's cell), arrays of structs stride by the struct size, and layout is computed
+dependencies first with checked arithmetic (overflow is a diagnostic, an oversized frame
+the usual stack-size diagnostic). Chained `ElementAddr`/`FieldAddr` add runtime-checked
+element offsets and constant field offsets to the root cell address. `Extract` (A4
+destructuring) loads a primitive field at its constant offset, or `memory.copy`s an
+aggregate field into the output value's own frame cell.
+
+Enums (B1) are frame-cell aggregates like structs: `EnumNew` stores the payload fields at
+the variant's offsets and then the tag at offset 0 (`u8` up to 256 variants, `u16` up to
+65536, else `u32`; the tag value is the variant index). The payload area starts at the tag
+size aligned to the largest payload alignment of any variant, the size is the largest
+variant extent rounded to the enum alignment, nested aggregates are inline, and all
+arithmetic is checked. The layout is internal. User-defined enums in application entry or library
+export signatures are rejected with LE900. An enum frame over
+`[build].stack_size` triggers the usual stack diagnostic. In-crate tests read the tag and payload bytes through the
+test-only `__test_memory` export.
+
+`match` on owned enums (B2): `EnumTag` loads the tag with its own width (`u8`/`u16`/`u32`,
+zero-extended) from the enum cell, `VariantExtract` loads a payload primitive at
+`base + variant offset` or `memory.copy`s an aggregate payload into the output's cell, and
+`Switch` compiles to a compare chain inside the `pc` dispatcher (one `if` per listed variant;
+the default, or the last listed variant when every variant is listed, is the fallthrough).
+
+Borrowing `match` (B3): `VariantAddr` is `base + variant payload offset` (the base operand is
+the enum cell address, or the reference value), the same layout data as `VariantExtract`;
+`EnumTag` through a reference loads the tag from the referenced cell.
+
+`cargo test --offline -p memobits-wasm` validates generated modules with
+wasmparser and executes representative exports with wasmi.

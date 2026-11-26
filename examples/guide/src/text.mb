@@ -1,0 +1,458 @@
+// Character literals contain exactly one Unicode scalar. `char` remains a
+// distinct type from `u32`, though both use a 32-bit Wasm value.
+fn character_roundtrip(value: char) -> bool { value == '😀' }
+
+test fn character_literals() {
+    let ascii: char = 'A';
+    let accented: char = 'é';
+    assert(ascii == 'A');
+    assert(accented == 'é');
+    assert(character_roundtrip('😀'));
+    assert('\n' == '\n');
+    assert('\\' == '\\');
+    assert('\'' == '\'');
+}
+
+// String literals are owned UTF-8. The empty literal is also a String.
+fn text() -> string {
+    "café 😀"
+}
+
+// The only source type spelling is lowercase `string`. Bare `String` is
+// rejected with TE001 and migration guidance.
+fn lowercase_text() -> string {
+    "café 😀"
+}
+
+pub fn byte_length(value: borrow string) -> u32 {
+    value.len()
+}
+
+test fn fixed_text() {
+    let caption := text();
+    let view := caption.borrow();
+    // A shared read-only loan allows the owner to be read too.
+    let while_borrowed := caption.len();
+    let borrowed := byte_length(view);
+    let moved := caption; // The borrow ended at its last use.
+    // Length counts UTF-8 bytes. The accented letter takes two and the
+    // emoji takes four. Reading the length does not consume the String.
+    assert(while_borrowed == 10);
+    assert(borrowed == 10);
+    assert(moved.len() == 10);
+    assert(lowercase_text().len() == 10);
+    assert(byte_length(lowercase_text().borrow()) == 10);
+    assert(moved.len() == text().len());
+    assert("".len() == 0);
+    assert("abc".len() == 3);
+    assert("é".len() == 2);
+    assert("😀".len() == 4);
+}
+
+pub fn byte_is(byte: u8?, expected: u8) -> bool {
+    match byte { Some(value) => value == expected, None => false }
+}
+
+pub fn no_byte(byte: u8?) -> bool {
+    match byte { Some(_) => false, None => true }
+}
+
+test fn text_bytes() {
+    let value := "é😀";
+    let view := value.borrow();
+    // byte_at reads raw UTF-8, including continuation bytes.
+    let lead := value.byte_at(0);
+    let continuation := view.byte_at(1);
+    let moved := value; // The last byte read through view released its loan.
+    assert(byte_is(lead, 195));
+    assert(byte_is(continuation, 169));
+    assert(byte_is(moved.byte_at(2), 240));
+    assert(byte_is(moved.byte_at(3), 159));
+    assert(byte_is(moved.byte_at(4), 152));
+    assert(byte_is(moved.byte_at(5), 128));
+    assert(no_byte(moved.byte_at(6)));
+    assert(no_byte(moved.byte_at(4_294_967_295)));
+    assert(no_byte("".byte_at(0)));
+}
+
+fn scalar_is(scalar: u32?, expected: u32) -> bool {
+    match scalar { Some(value) => value == expected, None => false }
+}
+
+fn no_scalar(scalar: u32?) -> bool {
+    match scalar { Some(_) => false, None => true }
+}
+
+test fn text_scalars() {
+    let value := "aé€😀";
+    let ascii_text := "abc";
+    let supplementary_text := "😀";
+    let empty_text := "";
+    let view := value.borrow();
+    // scalar_at takes byte offsets and returns Unicode scalar values. A walk
+    // visits four scalars, while len() reports ten UTF-8 bytes.
+    let ascii := value.scalar_at(0);
+    let accent := view.scalar_at(1);
+    let moved := value;
+    assert(scalar_is(ascii, 97));
+    assert(scalar_is(accent, 233));
+    assert(scalar_is(moved.scalar_at(3), 8_364));
+    assert(scalar_is(moved.scalar_at(6), 128_512));
+    assert(scalar_count(moved.borrow()) == 4);
+    assert(moved.len() == 10);
+    assert(scalar_count(ascii_text.borrow()) == 3);
+    assert(ascii_text.len() == 3);
+    assert(scalar_count(supplementary_text.borrow()) == 1);
+    assert(supplementary_text.len() == 4);
+    assert(scalar_count(empty_text.borrow()) == 0);
+    assert(empty_text.len() == 0);
+    assert(no_scalar(moved.scalar_at(2)));
+    assert(no_scalar(moved.scalar_at(4)));
+    assert(no_scalar(moved.scalar_at(5)));
+    assert(no_scalar(moved.scalar_at(7)));
+    assert(no_scalar(moved.scalar_at(8)));
+    assert(no_scalar(moved.scalar_at(9)));
+    assert(no_scalar(moved.scalar_at(10)));
+    assert(no_scalar(moved.scalar_at(11)));
+    assert(no_scalar(moved.scalar_at(4_294_967_295)));
+    assert(no_scalar("".scalar_at(0)));
+}
+
+fn scalar_width(value: u32) -> u32 {
+    // scalar_at returns valid scalar values, so the numeric range determines
+    // how many UTF-8 bytes to advance.
+    if value <= 127 { 1 } else if value <= 2_047 { 2 } else if value <= 65_535 { 3 } else { 4 }
+}
+
+// Traverse valid UTF-8 by byte offset, decoding one Unicode scalar each time.
+// String.len() remains the byte length; this loop counts scalar values.
+fn scalar_count(value: borrow string) -> u32 {
+    let byte_length := value.len();
+    var offset: u32 = 0;
+    var count: u32 = 0;
+    loop {
+        if offset == byte_length { break; }
+        let scalar := match value.scalar_at(offset) {
+            Some(decoded) => decoded,
+            None => { return count; }
+        };
+        offset += scalar_width(scalar);
+        count += 1;
+    }
+    count
+}
+
+fn walk_text(value: borrow string) {
+    let starts: array<u32, 4> = [0, 1, 3, 6];
+    let scalars: array<u32, 4> = [97, 233, 8_364, 128_512];
+    let end := value.len();
+    var offset: u32 = 0;
+    var visited := 0;
+    loop {
+        if offset == end { break; }
+        assert(visited != 4);
+        let scalar := match value.scalar_at(offset) {
+            Some(decoded) => decoded,
+            None => { assert(false); return; }
+        };
+        assert(offset == starts[visited]);
+        assert(scalar == scalars[visited]);
+        offset += scalar_width(scalar);
+        visited += 1;
+    }
+    assert(visited == 4);
+    assert(offset == 10);
+}
+
+// Walking "aé€😀" by scalar offsets visits starts 0, 1, 3 and 6.
+test fn text_walk() {
+    let sample := "aé€😀";
+    walk_text(sample.borrow());
+}
+
+// `loop ch in text` visits each Unicode scalar in order and binds it as an
+// immutable `char`. It works on a named `string` local or a borrowed
+// parameter, evaluates the text once, and borrows it for the whole loop, so the
+// body cannot mutate or move it. `.len()` still counts bytes: this text has
+// four scalars in ten bytes. The removed spellings `String`, `Char` and
+// `Bytes<N>` are rejected; this guide uses `string`, `char` and `array<u8, N>`.
+fn count_wide(value: borrow string) -> u32 {
+    var wide: u32 = 0;
+    loop ch in value {
+        if ch == '€' || ch == '😀' { wide += 1; }
+    }
+    wide
+}
+
+fn first_wide(value: borrow string) -> u32 {
+    var position: u32 = 0;
+    loop ch in value {
+        position += 1;
+        if ch == '😀' { return position; } // Early return releases the loan.
+    }
+    0
+}
+
+test fn text_loop() {
+    let sample := "aé€😀";
+    var scalars: u32 = 0;
+    var last := 'a';
+    loop ch in sample {
+        scalars += 1;
+        if ch == 'é' { continue; }
+        last = ch;
+        if ch == '€' { break; }
+    }
+    let heap := sample.concat("é"); // Heap text is released after the loop.
+    var total: u32 = 0;
+    loop ch in heap { total += 1; }
+    let empty := "";
+    var none: u32 = 0;
+    loop ch in empty { none += 1; }
+    assert(scalars == 3);
+    assert(last == '€');
+    assert(sample.len() == 10);
+    assert(total == 5);
+    assert(heap.len() == 12);
+    assert(none == 0);
+    assert(count_wide(heap.borrow()) == 2);
+    assert(first_wide(heap.borrow()) == 4);
+}
+
+test fn text_boundaries() {
+    let value := "aé€😀";
+    let view := value.borrow();
+    // Byte offsets 0, 1, 3 and 6 start scalars. The byte length, 10,
+    // is also a boundary. Continuation bytes and past-end offsets are not.
+    assert(value.is_char_boundary(0));
+    assert(view.is_char_boundary(1));
+    assert(view.is_char_boundary(3));
+    assert(view.is_char_boundary(6));
+    assert(view.is_char_boundary(10));
+    assert(!view.is_char_boundary(2));
+    assert(!view.is_char_boundary(4));
+    assert(!view.is_char_boundary(5));
+    assert(!view.is_char_boundary(7));
+    assert(!view.is_char_boundary(8));
+    assert(!view.is_char_boundary(9));
+    assert(!view.is_char_boundary(11));
+    assert(!view.is_char_boundary(4_294_967_295));
+    assert("".is_char_boundary(0));
+    assert(!"".is_char_boundary(1));
+}
+
+fn add_suffix(value: borrow string) -> string {
+    let text := value.concat("!");
+    text // Ownership moves out before this scope ends.
+}
+
+fn add_question_mark(value: share string) {
+    value.push_str("?");
+}
+
+fn combined_byte_length(first: string, second: string, extra: u32) -> u32 {
+    first.len() + second.len() + extra
+}
+
+test fn text_concat() {
+    let left := "café";
+    let right := "😀";
+    // concat borrows both inputs. The new String owns its bytes until this
+    // binding leaves scope. Moving to a new let transfers that obligation.
+    let joined := left.concat(right.borrow());
+    let left_moved := left;
+    // These standalone statements release their unused results immediately.
+    joined.concat("?");
+    add_suffix(joined.borrow());
+    // A read-only method can use an owned call result for just that read.
+    let temporary_reads := "é".concat("!").len() == 3
+        && byte_is(add_suffix(joined.borrow()).byte_at(9), 33);
+    // An explicit borrow keeps the temporary alive through the direct call.
+    let temporary_borrows := byte_length("é".concat("!").borrow()) == 3
+        && byte_length(add_suffix(joined.borrow()).borrow()) == 10;
+    var with_suffix := add_suffix(joined.borrow());
+    // push_str appends through a mutable local or an exclusive parameter.
+    add_question_mark(with_suffix.share());
+    with_suffix.push_str(".");
+    let empty := "".concat("");
+    let moved := joined;
+    let suffix_ok := byte_is(with_suffix.byte_at(9), 33)
+        && byte_is(with_suffix.byte_at(10), 63)
+        && byte_is(with_suffix.byte_at(11), 46);
+    let empty_ok := empty.len() == 0 && no_byte(empty.byte_at(0));
+    // An owned argument can be built inline. Arguments move in order and
+    // the callee releases both Strings.
+    let count := combined_byte_length(with_suffix, "".concat(""), moved.len());
+    assert(byte_length(moved.borrow()) == 9);
+    assert(left_moved.len() == 5);
+    assert(byte_is(moved.byte_at(4), 169));
+    assert(scalar_is(moved.scalar_at(5), 128_512));
+    assert(suffix_ok);
+    assert(empty_ok);
+    assert(temporary_reads);
+    assert(temporary_borrows);
+    assert(count == 21);
+}
+
+// Internal Results can return static text. The match moves the String out
+// of Ok. Exported String results remain gated.
+fn static_label(found: bool) -> string ! Error {
+    if found { return Ok("é"); }
+    Err(Error { code: 7 })
+}
+
+test fn static_text_result() {
+    let found := match static_label(true) {
+        Ok(text) => text.len() == 2,
+        Err(_) => false,
+    };
+    let missing := match static_label(false) {
+        Ok(_) => false,
+        Err(error) => error.code == 7,
+    };
+    assert(found);
+    assert(missing);
+}
+
+fn owned_label() -> string ! Error {
+    let text := "é".concat("!");
+    Ok(text)
+}
+
+test fn heap_text_result() {
+    // A heap Ok must be matched immediately in the same function, with an
+    // explicit Err arm and a binding for the owned String.
+    let text := "é".concat("!");
+    let result: string ! Error = Ok(text);
+    let local_ok := match result {
+        Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
+        Err(_) => false,
+    };
+    assert(local_ok);
+    // A direct internal return can also hand ownership to a match (or to any other
+    // owner position since F2: a binding, an argument, a field).
+    let direct_ok := match owned_label() {
+        Ok(value) => value.len() == 3 && byte_is(value.byte_at(2), 33),
+        Err(_) => false,
+    };
+    assert(direct_ok);
+}
+
+// Source-level tests. A top-level `test fn name() { ... }` takes no
+// parameters, has no result and is never `pub`. It is type-checked like any
+// function (and may call this module's private items) but is left out of the
+// application artifact, so `mb run` and `mb build` ignore it. `assert(cond)`
+// takes a bool and traps with "assertion failed" and its source location when
+// the condition is false; it also works in ordinary code. From the repository
+// root, `mb test --project examples/guide/project.toml` runs every test in a
+// fresh instance and prints `test text::name ... ok`; add a filter such as
+// `concat` to run only matching tests. `mb build --tests --output X.wasm`
+// writes the test artifact and `mb test X.wasm` runs it with the same report.
+test fn text_length_and_concat() {
+    let joined := "é".concat("!");
+    assert(joined.len() == 3);
+    assert(text().len() == 10);
+    assert(character_roundtrip('😀'));
+}
+
+// String interpolation. In a string literal, `{name}` inserts the value of an
+// identifier that is in scope: a local, a parameter, or a `borrow`/`share`
+// parameter. Supported values are every integer width (decimal, `-` for a
+// negative number), floats (Rust's `Display` text: the shortest digits that
+// read back as the same value, never an exponent, `1` for 1.0, `-0`, `NaN`,
+// `inf`, `-inf`), `bool` (`true` / `false`), `char` (its UTF-8 bytes) and
+// `string` (its bytes). Structs, enums, lists and other types are
+// rejected with a diagnostic; only a plain identifier may appear between the
+// braces (no expressions, field access or calls). A literal with a
+// placeholder builds an owned heap `string` in one allocation (the alloc
+// layer: `[build] alloc = false` rejects it with TE033). The identifiers are
+// read, not moved: a String stays usable and a number is copied. A literal
+// without placeholders is still a static literal.
+fn byte_at_is(value: borrow string, offset: u32, expected: u8) -> bool {
+    byte_is(value.byte_at(offset), expected)
+}
+
+fn interpolate_parts(count: u32, label: borrow string, ok: bool) -> string {
+    "{label}: {count} ({ok})"
+}
+
+test fn string_interpolation() {
+    let count: u32 = 42;
+    let label := "answer";
+    let line := "{label} = {count}";
+    // "answer = 42" is eleven bytes; text, a String and an integer are joined.
+    assert(line.len() == 11);
+    assert(byte_at_is(line.borrow(), 0, 97));
+    assert(byte_at_is(line.borrow(), 9, 52));
+    assert(byte_at_is(line.borrow(), 10, 50));
+    // The values are only read: `label` is still available, and a number
+    // keeps its value.
+    assert(label.len() == 6);
+    assert(count == 42);
+    let negative: i64 = -9_223_372_036_854_775_808;
+    assert("{negative}".len() == 20);
+    let flag := true;
+    let ch: char = '😀';
+    // `true` is 4 bytes, the emoji is 4 UTF-8 bytes.
+    assert("{flag}{ch}".len() == 8);
+    assert(interpolate_parts(7, label.borrow(), false).len() == 17);
+}
+
+// Float placeholders are exact: `f32` and `f64` use their own shortest text.
+// The guest carries the float formatter only when a float placeholder is
+// reachable; constants fold at compile time with the same text.
+const HALF_SUM: f64 = 0.1 + 0.2;
+
+test fn float_interpolation() {
+    let third: f64 = 1.0 / 3.0;
+    let small: f32 = 0.1;
+    let widened: f64 = 0.1 as f32 as f64;
+    let big: f64 = 1e20;
+    let tiny: f64 = 1e-7;
+    let whole: f64 = 3.0;
+    let negative_zero: f64 = -0.0;
+    let nan: f64 = 0.0 / 0.0;
+    let infinity: f64 = 1.0 / 0.0;
+    // "0.3333333333333333" is 18 bytes; the f32 0.1 is "0.1" but widened to
+    // f64 it shows its binary value "0.10000000149011612" (19 bytes).
+    assert("{third}".len() == 18);
+    assert("{small}".len() == 3);
+    assert("{widened}".len() == 19);
+    // No exponent: 1e20 is 21 digits, 1e-7 is "0.0000001".
+    assert("{big}".len() == 21);
+    assert("{tiny}".len() == 9);
+    // Integral values have no ".0"; special values use Rust's words.
+    assert("{whole}".len() == 1);
+    assert("{negative_zero}".len() == 2);
+    assert("{nan}".len() == 3);
+    assert("{infinity}".len() == 3);
+    // A constant folds at compile time: 0.1 + 0.2 is "0.30000000000000004".
+    assert("{HALF_SUM}".len() == 19);
+}
+
+// `{{` and `}}` write literal braces. A literal that only escapes braces has
+// no placeholder and stays a static literal.
+test fn interpolation_braces() {
+    let n: u8 = 5;
+    let braced := "{{{n}}}";
+    assert(braced.len() == 3);
+    assert(byte_at_is(braced.borrow(), 0, 123));
+    assert(byte_at_is(braced.borrow(), 1, 53));
+    assert(byte_at_is(braced.borrow(), 2, 125));
+    assert("{{}}".len() == 2);
+    // Empty strings are valid parts, even when every part is empty.
+    let empty := "";
+    assert("{empty}{empty}".len() == 0);
+}
+
+// Reading an identifier for interpolation follows the loan rules of any read:
+// while an exclusive `share` of the value is alive the read is rejected
+// (BE005), and a moved String cannot be read (BE001).
+test fn interpolation_follows_loans() {
+    var title := "ab".concat("cd");
+    let view := title.share();
+    let size := view.len(); // the last use of the share
+    let copy := "{title}!"; // allowed after the share ended
+    assert(size == 4);
+    assert(copy.len() == 5);
+}

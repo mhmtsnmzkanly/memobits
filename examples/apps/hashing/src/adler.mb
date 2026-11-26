@@ -1,0 +1,31 @@
+use self::bits::bit_or;
+use self::bits::shl;
+use self::bits::u8_to_u32;
+
+pub fn adler32_slice(bytes: borrow array<u8, 8>, length: i32) -> u32 {
+    let mod_adler: u32 = 65_521;
+    var a: u32 = 1;
+    var b: u32 = 0;
+    var i: i32 = 0;
+    loop {
+        if i == length { break; }
+        let byte := u8_to_u32(bytes[i]);
+        a = (a + byte) % mod_adler;
+        b = (b + a) % mod_adler;
+        i += 1;
+    }
+    // (b * 65536) + a is identical to (b << 16) | a
+    bit_or(shl(b, 16), a)
+}
+
+pub fn adler32_8(bytes: borrow array<u8, 8>) -> u32 {
+    let mod_adler: u32 = 65_521;
+    var a: u32 = 1;
+    var b: u32 = 0;
+    loop byte in bytes {
+        let val := u8_to_u32(byte);
+        a = (a + val) % mod_adler;
+        b = (b + a) % mod_adler;
+    }
+    bit_or(shl(b, 16), a)
+}

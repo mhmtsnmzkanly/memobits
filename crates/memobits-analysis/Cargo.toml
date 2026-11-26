@@ -1,0 +1,14 @@
+[package]
+name = "memobits-analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memobits-diagnostics = { path = "../memobits-diagnostics" }
+memobits-syntax = { path = "../memobits-syntax" }
+memobits-project = { path = "../memobits-project" }
+memobits-resolve = { path = "../memobits-resolve" }
+memobits-ir = { path = "../memobits-ir" }
+
+[dev-dependencies]
+memobits-ownership = { path = "../memobits-ownership" }

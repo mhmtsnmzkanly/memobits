@@ -1,0 +1,9 @@
+[package]
+name = "memobits-resolve"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memobits-project = { path = "../memobits-project" }
+memobits-syntax = { path = "../memobits-syntax" }
+memobits-diagnostics = { path = "../memobits-diagnostics" }

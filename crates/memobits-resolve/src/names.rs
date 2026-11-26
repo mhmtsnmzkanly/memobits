@@ -1,0 +1,1084 @@
+use memobits_diagnostics::{Category, Diagnostic, DiagnosticCode, Severity, Span};
+use memobits_syntax::{
+    templates, Block, Expr, ExprKind, InterpolationPart, ItemKind, Module, PatternKind,
+    StatementKind, TupleBinding, Type, TypeArgument, TypeDefinition,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// What kind of definition a qualified reference must name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Requires {
+    Any,
+    Type,
+    /// A single-name type argument: a type, or a `const` used as a length.
+    TypeOrConst,
+}
+
+/// Check unqualified expression names. Qualified paths are returned to the
+/// module loader for visibility checking and dependency discovery.
+pub(crate) fn check(
+    module: &Module,
+    prelude: impl Iterator<Item = (String, String)>,
+    allow_self_type: bool,
+    alloc_enabled: bool,
+) -> (Vec<Diagnostic>, Vec<(String, Span, Requires)>) {
+    let prelude: BTreeMap<String, String> = prelude.collect();
+    let mut imports = prelude.clone();
+    let mut globals: BTreeSet<String> = prelude.keys().cloned().collect();
+    let mut test_names = BTreeSet::new();
+    for item in &module.items {
+        match &item.kind {
+            // Test functions are never callable, so they bind no global name.
+            ItemKind::Function {
+                name, test: true, ..
+            } => {
+                test_names.insert(name.clone());
+            }
+            ItemKind::Function { name, .. }
+            | ItemKind::Type { name, .. }
+            | ItemKind::Interface { name, .. }
+            | ItemKind::Const { name, .. } => {
+                globals.insert(name.clone());
+            }
+            ItemKind::Use { path, alias, .. } => {
+                if path.len() == 1 {
+                    continue;
+                }
+                if let Some(name) = alias.as_ref().or(path.last()) {
+                    globals.insert(name.clone());
+                    imports.insert(name.clone(), path.join("::"));
+                }
+            }
+            ItemKind::Extension { .. } | ItemKind::InherentExtension { .. } => {}
+        }
+    }
+    let mut types: BTreeSet<String> = [
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "String",
+        "string", "char",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if allow_self_type {
+        types.insert("Self".to_owned());
+    }
+    types.extend(prelude.keys().cloned());
+    let mut variants = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
+    for item in &module.items {
+        match &item.kind {
+            ItemKind::Type {
+                name, definition, ..
+            } => {
+                types.insert(name.clone());
+                if let TypeDefinition::Alias(target) = definition {
+                    aliases.insert(name.clone(), target);
+                    collect_anonymous_enum_variants(target, &mut variants);
+                }
+                if let TypeDefinition::Enum(v) = definition {
+                    variants.insert(
+                        name.clone(),
+                        v.iter().map(|v| v.name.clone()).collect::<BTreeSet<_>>(),
+                    );
+                }
+            }
+            ItemKind::Interface { name, .. } => {
+                types.insert(name.clone());
+            }
+            // Imported annotation targets are verified after graph loading.
+            ItemKind::Use { path, alias, .. } => {
+                if path.len() == 1 {
+                    continue;
+                }
+                if let Some(n) = alias.as_ref().or(path.last()) {
+                    types.insert(n.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in &module.items {
+        match &item.kind {
+            ItemKind::Type { definition, .. } => match definition {
+                TypeDefinition::Struct(fields) => {
+                    for field in fields {
+                        collect_anonymous_enum_variants(&field.ty, &mut variants);
+                    }
+                }
+                TypeDefinition::Enum(enum_variants) => {
+                    for variant in enum_variants {
+                        for payload in &variant.payload {
+                            collect_anonymous_enum_variants(payload, &mut variants);
+                        }
+                    }
+                }
+                TypeDefinition::Alias(_) | TypeDefinition::Bodyless => {}
+            },
+            _ => {}
+        }
+    }
+    let alloc_module_imported = module.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Use { path, .. } if path.as_slice() == [templates::ALLOC_MODULE])
+    });
+    let mut checker = Checker {
+        alloc_enabled,
+        alloc_module_imported,
+        types,
+        imports,
+        variants,
+        aliases,
+        generic_types: Vec::new(),
+        const_parameters: Vec::new(),
+        scopes: vec![globals],
+        variant_scopes: Vec::new(),
+        diagnostics: vec![],
+        qualified: vec![],
+        local_consts: module
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Const { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        test_names,
+    };
+    for item in &module.items {
+        // A const initializer is checked for unknown and qualified names here;
+        // its evaluation happens in the const pass after module loading.
+        if let ItemKind::Const { value, .. } = &item.kind {
+            checker.variant_scopes.push(BTreeSet::new());
+            checker.expr(value);
+            checker.variant_scopes.pop();
+        }
+        if let ItemKind::Function {
+            generic_parameters,
+            bounds,
+            parameters,
+            body,
+            result,
+            ..
+        } = &item.kind
+        {
+            checker.variant_scopes.push(BTreeSet::new());
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
+            for bound in bounds {
+                checker.ty(&bound.interface);
+            }
+            if let Some(ty) = result {
+                checker.ty(ty);
+            }
+            checker.scopes.push(BTreeSet::new());
+            for parameter in parameters {
+                checker.ty(&parameter.ty);
+                if !checker
+                    .scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(parameter.name.clone())
+                {
+                    checker.error(
+                        2,
+                        parameter.span,
+                        format!("duplicate parameter '{}'", parameter.name),
+                    );
+                }
+            }
+            checker.block(body);
+            checker.scopes.pop();
+            checker.variant_scopes.pop();
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
+        }
+    }
+    for item in &module.items {
+        if let ItemKind::Type {
+            definition,
+            base,
+            generic_parameters,
+            bounds,
+            ..
+        } = &item.kind
+        {
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
+            for bound in bounds {
+                checker.ty(&bound.interface);
+            }
+            if let Some(base) = base {
+                checker.ty(base);
+            }
+            match definition {
+                TypeDefinition::Alias(ty) => checker.ty(ty),
+                TypeDefinition::Bodyless => {}
+                TypeDefinition::Struct(fields) => {
+                    let mut names = BTreeSet::new();
+                    for field in fields {
+                        if !names.insert(&field.name) {
+                            checker.error(
+                                5,
+                                field.span,
+                                format!("duplicate field '{}'", field.name),
+                            );
+                        }
+                        checker.ty(&field.ty);
+                    }
+                }
+                TypeDefinition::Enum(variants) => {
+                    let mut names = BTreeSet::new();
+                    for variant in variants {
+                        if !names.insert(&variant.name) {
+                            checker.error(
+                                6,
+                                variant.span,
+                                format!("duplicate variant '{}'", variant.name),
+                            );
+                        }
+                        for ty in &variant.payload {
+                            checker.ty(ty);
+                        }
+                    }
+                }
+            }
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
+        }
+    }
+    for item in &module.items {
+        let method_owner = match &item.kind {
+            ItemKind::Interface { .. } => "interface",
+            ItemKind::Extension { .. } | ItemKind::InherentExtension { .. } => "extension",
+            _ => continue,
+        };
+        if let ItemKind::Interface {
+            associated_types, ..
+        } = &item.kind
+        {
+            checker
+                .generic_types
+                .push(associated_types.iter().cloned().collect());
+        }
+        if let ItemKind::InherentExtension {
+            generic_parameters, ..
+        } = &item.kind
+        {
+            checker.generic_types.push(
+                generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker
+                .const_parameters
+                .push(const_names(generic_parameters));
+        }
+        let (target, interface, methods) = match &item.kind {
+            ItemKind::Interface { methods, .. } => (None, None, methods.as_slice()),
+            ItemKind::Extension {
+                target,
+                interface,
+                methods,
+                ..
+            } => (Some(target), Some(interface), methods.as_slice()),
+            ItemKind::InherentExtension {
+                target, methods, ..
+            } => (Some(target), None, methods.as_slice()),
+            _ => continue,
+        };
+        if let Some(target) = target {
+            checker.variant_scopes.push(BTreeSet::new());
+            checker.ty(target);
+        } else {
+            checker.variant_scopes.push(BTreeSet::new());
+        }
+        if let Some(interface) = interface {
+            checker.ty(interface);
+        }
+        let mut names = BTreeSet::new();
+        for method in methods {
+            if !names.insert(&method.name) {
+                checker.error(
+                    5,
+                    method.span,
+                    format!("duplicate {method_owner} method '{}'", method.name),
+                );
+            }
+            checker.variant_scopes.push(BTreeSet::new());
+            // The method's own type and const parameters.
+            checker.generic_types.push(
+                method
+                    .generic_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        matches!(parameter.kind, memobits_syntax::GenericParameterKind::Type)
+                    })
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            );
+            checker
+                .const_parameters
+                .push(const_names(&method.generic_parameters));
+            for bound in &method.bounds {
+                checker.ty(&bound.interface);
+            }
+            checker.scopes.push(BTreeSet::from(["self".to_owned()]));
+            for parameter in &method.parameters {
+                checker.ty(&parameter.ty);
+                if !checker
+                    .scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(parameter.name.clone())
+                {
+                    checker.error(
+                        2,
+                        parameter.span,
+                        format!("duplicate parameter '{}'", parameter.name),
+                    );
+                }
+            }
+            if let Some(result) = &method.result {
+                checker.ty(result);
+            }
+            if let Some(body) = &method.body {
+                checker.block(body);
+            }
+            checker.scopes.pop();
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
+            checker.variant_scopes.pop();
+        }
+        checker.variant_scopes.pop();
+        if matches!(&item.kind, ItemKind::Interface { .. }) {
+            checker.generic_types.pop();
+        }
+        if matches!(&item.kind, ItemKind::InherentExtension { .. }) {
+            checker.generic_types.pop();
+            checker.const_parameters.pop();
+        }
+    }
+    (checker.diagnostics, checker.qualified)
+}
+
+fn collect_anonymous_enum_variants(ty: &Type, variants: &mut BTreeMap<String, BTreeSet<String>>) {
+    if ty.path.first().is_some_and(|head| head == "\0enum") {
+        let key = format!("\0anonymous-enum:{}:{}", ty.span.source.0, ty.span.start);
+        variants.insert(key, ty.path.iter().skip(1).cloned().collect());
+    }
+    for argument in &ty.arguments {
+        match argument {
+            TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
+                collect_anonymous_enum_variants(ty, variants);
+            }
+            TypeArgument::TupleField { ty, .. } => {
+                collect_anonymous_enum_variants(ty, variants);
+            }
+            TypeArgument::Integer(_) | TypeArgument::Const(_) => {}
+        }
+    }
+}
+
+struct Checker<'a> {
+    /// `[build] alloc`; only changes the wording of the missing-import note.
+    alloc_enabled: bool,
+    /// The module contains `use alloc;`, which permits `alloc::List<T>`.
+    alloc_module_imported: bool,
+    types: BTreeSet<String>,
+    imports: BTreeMap<String, String>,
+    variants: BTreeMap<String, BTreeSet<String>>,
+    /// Local `type Name = path;` aliases, followed when a variant path starts
+    /// with an alias name.
+    aliases: BTreeMap<String, &'a Type>,
+    generic_types: Vec<BTreeSet<String>>,
+    /// Const generic parameters in scope; they may appear as nominal type
+    /// arguments (`Tag<N>`) and resolve to values during specialization.
+    const_parameters: Vec<BTreeSet<String>>,
+    scopes: Vec<BTreeSet<String>>,
+    variant_scopes: Vec<BTreeSet<String>>,
+    diagnostics: Vec<Diagnostic>,
+    qualified: Vec<(String, Span, Requires)>,
+    /// Names of the module's own `const` items.
+    local_consts: BTreeSet<String>,
+    /// Names of the module's `test fn` items, for a better unknown-name hint.
+    test_names: BTreeSet<String>,
+}
+fn const_names(parameters: &[memobits_syntax::GenericParameter]) -> BTreeSet<String> {
+    parameters
+        .iter()
+        .filter(|parameter| {
+            matches!(
+                parameter.kind,
+                memobits_syntax::GenericParameterKind::Const(_)
+            )
+        })
+        .map(|parameter| parameter.name.clone())
+        .collect()
+}
+impl Checker<'_> {
+    fn is_const_parameter(&self, ty: &Type) -> bool {
+        ty.path.len() == 1
+            && ty.arguments.is_empty()
+            && self
+                .const_parameters
+                .iter()
+                .any(|names| names.contains(&ty.path[0]))
+    }
+    /// A lone name used as a type argument may be a module `const` (an array
+    /// length or const argument): a local one needs no further check here;
+    /// an imported one is verified by the loader as a type or a const, and
+    /// the const pass substitutes it.
+    fn const_argument(&mut self, ty: &Type) -> bool {
+        if ty.path.len() != 1 || !ty.arguments.is_empty() {
+            return false;
+        }
+        let name = &ty.path[0];
+        if self.local_consts.contains(name) {
+            return true;
+        }
+        if let Some(path) = self.imports.get(name).cloned() {
+            self.qualified.push((path, ty.span, Requires::TypeOrConst));
+            return true;
+        }
+        false
+    }
+    fn ty(&mut self, ty: &Type) {
+        for argument in &ty.arguments {
+            match argument {
+                TypeArgument::Type(ty) if self.is_const_parameter(ty) => {}
+                TypeArgument::Type(ty) if self.const_argument(ty) => {}
+                TypeArgument::Type(ty) | TypeArgument::Reference { referent: ty, .. } => {
+                    self.ty(ty)
+                }
+                TypeArgument::TupleField { ty, .. } => self.ty(ty),
+                TypeArgument::Integer(_) => {}
+                TypeArgument::Const(_) => {}
+            }
+        }
+        if ty.path.is_empty() {
+            self.error(3, ty.span, "type path cannot be empty".into());
+            return;
+        }
+        if ty.path.first().is_some_and(|part| part == "\0enum") {
+            if let Some(scope) = self.variant_scopes.last_mut() {
+                scope.extend(ty.path.iter().skip(1).cloned());
+            }
+            return;
+        }
+        if ty.path.as_slice() == ["\0tuple"]
+            || ty.path.as_slice() == ["\0record"]
+            || ty.path.first().is_some_and(|part| part == "\0fn")
+            || ty.path.as_slice() == ["\0unit"]
+        {
+            return;
+        }
+        if let Some(template) = templates::lookup_type(ty) {
+            let alloc_type = match template.id {
+                templates::TemplateId::List => Some("List"),
+                templates::TemplateId::Box => Some("Box"),
+                _ => None,
+            };
+            if let Some(type_name) =
+                alloc_type.filter(|name| !self.alloc_type_is_imported(ty, name))
+            {
+                let note = if self.alloc_enabled {
+                    format!("add `use alloc::{type_name};` to use {type_name}")
+                } else {
+                    format!("{type_name} is part of the alloc layer, which `[build] alloc = false` disables")
+                };
+                let mut d = Diagnostic::new(
+                    DiagnosticCode::new(Category::Name, 3).unwrap(),
+                    Severity::Error,
+                    format!("unknown type '{type_name}'"),
+                );
+                d.span = Some(ty.span);
+                self.diagnostics.push(d.with_label(ty.span, note));
+            }
+            return;
+        }
+        if ty.path.len() > 1 {
+            if self
+                .generic_types
+                .iter()
+                .any(|parameters| parameters.contains(&ty.path[0]))
+            {
+                // Projection validity is resolved by type analysis against the
+                // unique selected generic interface evidence.
+                // `T::Name` and the qualified `T::Interface::Name` are allowed.
+                if ty.path.len() > 3 {
+                    self.error(
+                        8,
+                        ty.span,
+                        format!(
+                            "nested associated type projection '{}' is not supported",
+                            ty.path.join("::")
+                        ),
+                    );
+                }
+                return;
+            }
+            self.qualified
+                .push((ty.path.join("::"), ty.span, Requires::Type));
+        } else if let Some(path) = self.imports.get(&ty.path[0]) {
+            self.qualified.push((path.clone(), ty.span, Requires::Type));
+        } else if !self.types.contains(&ty.path[0])
+            // A misplaced `Self` is already reported as SE002 at this span.
+            && ty.path[0] != "Self"
+            && !templates::is_removed_spelling(&ty.path[0])
+            && !self
+                .generic_types
+                .iter()
+                .any(|parameters| parameters.contains(&ty.path[0]))
+        {
+            let box_note = ty.path[0] == "Box" && !ty.arguments.is_empty();
+            self.error(3, ty.span, format!("unknown type '{}'", ty.path[0]));
+            if box_note {
+                let note = if self.alloc_enabled {
+                    "add `use alloc::Box;` to use Box".to_owned()
+                } else {
+                    "Box is part of the alloc layer, which `[build] alloc = false` disables"
+                        .to_owned()
+                };
+                if let Some(last) = self.diagnostics.pop() {
+                    self.diagnostics.push(last.with_label(ty.span, note));
+                }
+            }
+        }
+    }
+    /// A path of two or more segments: a local enum variant (possibly through
+    /// local aliases) is checked here, anything else goes to the module loader.
+    fn qualified_path(&mut self, path: &[String], span: Span) {
+        let mut head = vec![path[0].clone()];
+        let mut seen = BTreeSet::new();
+        while head.len() == 1 && seen.insert(head[0].clone()) {
+            match self.aliases.get(&head[0]) {
+                Some(target) => {
+                    if templates::lookup_type(target)
+                        .is_some_and(|template| template.id == templates::TemplateId::List)
+                    {
+                        self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+                        return;
+                    }
+                    if target.path.first().is_some_and(|part| part == "\0enum") {
+                        let valid = path.len() == 2
+                            && target
+                                .path
+                                .iter()
+                                .skip(1)
+                                .any(|variant| variant == &path[1]);
+                        if !valid {
+                            self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+                        }
+                        return;
+                    }
+                    head = target.path.clone();
+                }
+                None => break,
+            }
+        }
+        let mut full = head;
+        full.extend(path[1..].iter().cloned());
+        if let [head, _] = full.as_slice() {
+            if !self.imports.contains_key(head)
+                && templates::lookup(std::slice::from_ref(head))
+                    .is_some_and(|template| !template.variants.is_empty())
+            {
+                // Local aliases expanded to a built-in template have no module to load.
+                return;
+            }
+        }
+        if full.len() == 2 && self.variants.contains_key(&full[0]) {
+            if !self.variants[&full[0]].contains(&full[1]) {
+                self.error(4, span, format!("unknown variant '{}'", path.join("::")));
+            }
+        } else {
+            let expanded = if let Some(import) = self.imports.get(&full[0]) {
+                format!("{}::{}", import, full[1..].join("::"))
+            } else {
+                full.join("::")
+            };
+            self.qualified.push((expanded, span, Requires::Any));
+        }
+    }
+    /// `List<T>` needs `use alloc::List;` (any alias-free symbol import or the
+    /// prelude) or `use alloc;` with the path `alloc::List<T>`.
+    fn alloc_type_is_imported(&self, ty: &Type, type_name: &str) -> bool {
+        match ty.path.as_slice() {
+            [name] => self
+                .imports
+                .get(name)
+                .is_some_and(|path| path == &format!("alloc::{type_name}")),
+            // `Box<T>` is spelled `alloc::Box<T>` after its import was seen.
+            _ => {
+                self.alloc_module_imported
+                    || (type_name == "Box"
+                        && self
+                            .imports
+                            .get("Box")
+                            .is_some_and(|path| path == "alloc::Box"))
+            }
+        }
+    }
+    fn error(&mut self, number: u16, span: Span, message: String) {
+        let mut d = Diagnostic::new(
+            DiagnosticCode::new(Category::Name, number).unwrap(),
+            Severity::Error,
+            message,
+        );
+        d.span = Some(span);
+        self.diagnostics.push(d);
+    }
+    fn block(&mut self, block: &Block) {
+        self.scopes.push(BTreeSet::new());
+        self.variant_scopes.push(BTreeSet::new());
+        for statement in &block.statements {
+            match &statement.kind {
+                StatementKind::Binding {
+                    name,
+                    value,
+                    annotation,
+                    ..
+                } => {
+                    if let Some(ty) = annotation {
+                        self.ty(ty);
+                    }
+                    self.expr(value);
+                    // Shadowing starts after the initializer is evaluated.
+                    self.scopes.last_mut().unwrap().insert(name.clone());
+                }
+                StatementKind::Destructure {
+                    path,
+                    fields,
+                    value,
+                    ..
+                } => {
+                    self.ty(&Type {
+                        span: statement.span,
+                        path: path.clone(),
+                        arguments: Vec::new(),
+                    });
+                    self.expr(value);
+                    for field in fields {
+                        self.scopes
+                            .last_mut()
+                            .unwrap()
+                            .insert(field.binding.clone());
+                    }
+                }
+                StatementKind::TupleDestructure {
+                    elements, value, ..
+                } => {
+                    self.expr(value);
+                    for element in elements {
+                        self.bind_tuple_pattern_name(element);
+                    }
+                }
+                StatementKind::Assign { target, value, .. } => {
+                    self.expr(target);
+                    self.expr(value);
+                }
+                StatementKind::Expression(e) => self.expr(e),
+                StatementKind::Return(Some(e)) => self.expr(e),
+                StatementKind::Loop(b) => self.block(b),
+                StatementKind::ForEach {
+                    binding,
+                    items,
+                    body,
+                } => {
+                    self.expr(items);
+                    self.scopes.push(BTreeSet::from([binding.clone()]));
+                    self.block(body);
+                    self.scopes.pop();
+                }
+                StatementKind::RangeLoop {
+                    binding,
+                    start,
+                    end,
+                    body,
+                    ..
+                } => {
+                    self.expr(start);
+                    self.expr(end);
+                    self.scopes.push(BTreeSet::from([binding.clone()]));
+                    self.block(body);
+                    self.scopes.pop();
+                }
+                _ => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.expr(tail);
+        }
+        self.scopes.pop();
+        self.variant_scopes.pop();
+    }
+    fn bind_tuple_pattern_name(&mut self, element: &TupleBinding) {
+        if let Some(nested) = &element.nested {
+            for element in nested {
+                self.bind_tuple_pattern_name(element);
+            }
+        } else if element.binding != "_" {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(element.binding.clone());
+        }
+    }
+    /// Names every binding of a match pattern in the current arm scope and
+    /// checks qualified variant paths at any depth.
+    fn pattern(&mut self, pattern: &memobits_syntax::Pattern) {
+        match &pattern.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Binding(name) => {
+                self.scopes.last_mut().unwrap().insert(name.clone());
+            }
+            PatternKind::Variant { path, slots } => {
+                if path.len() > 1 {
+                    self.qualified_path(path, pattern.span);
+                }
+                for slot in slots {
+                    self.pattern(slot);
+                }
+            }
+            PatternKind::Tuple(elements) | PatternKind::Or(elements) => {
+                for element in elements {
+                    self.pattern(element);
+                }
+            }
+            PatternKind::Literal(_) | PatternKind::Constant { .. } => {}
+        }
+    }
+    fn expr(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Path(path) if path.len() == 1 => {
+                if !self.scopes.iter().rev().any(|s| s.contains(&path[0]))
+                    && !self
+                        .const_parameters
+                        .iter()
+                        .any(|names| names.contains(&path[0]))
+                    && templates::variant(&path[0]).is_none()
+                    && !self
+                        .variants
+                        .values()
+                        .any(|variants| variants.contains(&path[0]))
+                    && !self
+                        .variant_scopes
+                        .iter()
+                        .rev()
+                        .any(|variants| variants.contains(&path[0]))
+                {
+                    let hint = if self.test_names.contains(&path[0]) {
+                        " (test functions cannot be called or used as values)"
+                    } else if path[0] == "Box" {
+                        " (add `use alloc::Box;` to construct a Box)"
+                    } else {
+                        ""
+                    };
+                    self.error(1, expr.span, format!("unknown name '{}'{hint}", path[0]));
+                }
+            }
+            ExprKind::Path(path) => self.qualified_path(path, expr.span),
+            ExprKind::Interpolation(parts) => {
+                for part in parts {
+                    if let InterpolationPart::Value(value) = part {
+                        self.expr(value);
+                    }
+                }
+            }
+            ExprKind::Array(elements) => {
+                for element in elements {
+                    self.expr(element);
+                }
+            }
+            ExprKind::RepeatArray { value, .. } => self.expr(value),
+            ExprKind::Index { base, index } => {
+                self.expr(base);
+                self.expr(index);
+            }
+            ExprKind::Unary { operand, .. } => self.expr(operand),
+            ExprKind::Binary { left, right, .. } => {
+                self.expr(left);
+                self.expr(right);
+            }
+            ExprKind::Call {
+                callee,
+                arguments,
+                interface,
+            } => {
+                // An unbound `drop` or `assert` is a built-in only in call position.
+                if !matches!(&callee.kind, ExprKind::Path(path)
+                    if (path.as_slice() == ["drop"]
+                        || path.as_slice() == ["assert"]
+                        || path.as_slice() == ["replace"]
+                        || path.as_slice() == ["swap"]
+                        || path.as_slice() == ["unbox"])
+                    && !self.scopes.iter().rev().any(|scope| scope.contains(&path[0])))
+                {
+                    self.expr(callee);
+                }
+                for arg in arguments {
+                    self.expr(arg);
+                }
+                if let Some(interface) = interface {
+                    self.ty(interface);
+                }
+            }
+            ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Struct {
+                path,
+                type_arguments,
+                fields,
+            } => {
+                // The literal names a type: resolve it like a type annotation.
+                if !path.is_empty() {
+                    self.ty(&Type {
+                        span: expr.span,
+                        path: path.clone(),
+                        arguments: type_arguments.clone(),
+                    });
+                }
+                for field in fields {
+                    self.expr(&field.value);
+                }
+            }
+            ExprKind::Block(b) => self.block(b),
+            ExprKind::Function(function) => {
+                for parameter in &function.parameters {
+                    if let Some(ty) = &parameter.ty {
+                        self.ty(ty);
+                    }
+                }
+                if let Some(result) = &function.result {
+                    self.ty(result);
+                }
+                self.scopes.push(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                );
+                self.block(&function.body);
+                self.scopes.pop();
+            }
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.expr(condition);
+                self.block(then_branch);
+                if let Some(e) = else_branch {
+                    self.expr(e);
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.scopes.push(BTreeSet::new());
+                    self.pattern(&arm.pattern);
+                    if let Some(guard) = &arm.guard {
+                        self.expr(guard);
+                    }
+                    self.expr(&arm.body);
+                    self.scopes.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    #[test]
+    fn duplicate_members_report_the_second_member() {
+        for (source, code, member) in [
+            ("type Point { x: i32, x: i32 }", "NE005", "x: i32"),
+            ("type State [ Idle, Idle ]", "NE006", "Idle"),
+        ] {
+            let parsed = memobits_syntax::parse(SourceId(0), source);
+            assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+            let (errors, _) = check(&parsed.module, std::iter::empty(), false, true);
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].code.to_string(), code);
+            assert_eq!(errors[0].span.unwrap().start, source.rfind(member).unwrap());
+        }
+    }
+
+    #[test]
+    fn local_inline_enum_annotation_registers_variants_for_its_initializer() {
+        let source = "fn main() { let phase: enum [Ready, Waiting] = Ready; }";
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let (errors, qualified) = check(&parsed.module, std::iter::empty(), false, true);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn local_inline_enum_variant_names_do_not_escape_their_block() {
+        let source =
+            "fn main() { { let phase: enum [Ready, Waiting] = Ready; } let other := Ready; }";
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let (errors, _) = check(&parsed.module, std::iter::empty(), false, true);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code.to_string(), "NE001");
+        assert!(errors[0].message.contains("unknown name 'Ready'"));
+        assert_eq!(
+            errors[0].span.unwrap().start,
+            source.rfind("Ready").unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod alias_variant_tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    fn run(source: &str) -> (Vec<Diagnostic>, Vec<(String, Span, Requires)>) {
+        let parsed = memobits_syntax::parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        check(&parsed.module, std::iter::empty(), false, true)
+    }
+
+    #[test]
+    fn aliases_of_local_enums_resolve_variant_paths_in_expressions_and_patterns() {
+        let (diagnostics, qualified) = run(
+            "type Shape [ Empty, Circle(f64) ] type S = Shape; type T = S; \
+             fn f(s: S) -> f64 { let a := T::Circle(1.0); let b := S::Empty; \
+             match s { S::Empty => 0.0, T::Circle(r) => r } }",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+
+        let (diagnostics, _) =
+            run("fn f() -> i32 { let pair := (1, 2); let (_, value) := pair; _ }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code.to_string(), "NE001");
+        assert!(diagnostics[0].message.contains("unknown name '_'"));
+    }
+
+    #[test]
+    fn alias_of_inline_payload_enum_resolves_qualified_constructors_and_patterns() {
+        let (diagnostics, qualified) = run("type Choice = enum [Number(i32), Empty]; \
+             fn make() -> Choice { Choice::Number(42) } \
+             fn read(value: Choice) -> i32 { match value { \
+                 Choice::Number(number) => number, Choice::Empty => 0 } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn an_unknown_variant_through_an_inline_enum_alias_is_ne004() {
+        let (diagnostics, qualified) = run("type Choice = enum [Number(i32), Empty]; \
+             fn make() -> Choice { Choice::Missing(42) }");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code.to_string(), "NE004");
+        assert!(diagnostics[0].message.contains("Choice::Missing"));
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+
+    #[test]
+    fn an_unknown_variant_through_an_alias_is_ne004() {
+        let (diagnostics, _) = run("type Shape [ Empty ] type S = Shape; \
+             fn f(s: S) -> i32 { let a := S::Missing; match s { S::Gone => 0, _ => 1 } }");
+        let codes: Vec<String> = diagnostics.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["NE004", "NE004"], "{diagnostics:?}");
+    }
+
+    #[test]
+    fn an_alias_of_an_imported_enum_is_checked_by_the_module_loader() {
+        let (diagnostics, qualified) =
+            run("type S = shapes::Shape; fn f() { let a := S::Circle(1.0); }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            qualified
+                .iter()
+                .any(|(path, _, _)| path == "shapes::Shape::Circle"),
+            "{qualified:?}"
+        );
+    }
+
+    #[test]
+    fn pattern_bindings_are_scoped_to_their_arm() {
+        let (diagnostics, _) =
+            run("type E [ A(i32), B ] fn f(e: E) -> i32 { match e { E::A(n) => n, E::B => n } }");
+        let codes: Vec<String> = diagnostics.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["NE001"], "{diagnostics:?}");
+    }
+
+    #[test]
+    fn nested_tuple_pattern_names_are_bound_and_wildcards_are_not_names() {
+        let (diagnostics, qualified) = run("fn f() -> i32 { let pair := ((40, true), 2); \
+             let ((number, enabled), _) := pair; if enabled { number } else { 0 } }");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(qualified.is_empty(), "{qualified:?}");
+    }
+}
+
+#[cfg(test)]
+mod array_tests {
+    use super::*;
+    use memobits_diagnostics::SourceId;
+
+    #[test]
+    fn array_element_types_and_expression_children_are_resolved() {
+        let parsed = memobits_syntax::parse(
+            SourceId(0),
+            "fn f(a: array<array<Missing, 2>, 3>) { [unknown]; [other; 2]; a[index]; }",
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let (diagnostics, _) = check(&parsed.module, std::iter::empty(), false, true);
+        for name in ["Missing", "unknown", "other", "index"] {
+            assert!(
+                diagnostics.iter().any(|d| d.message.contains(name)),
+                "{name}: {diagnostics:?}"
+            );
+        }
+        assert_eq!(diagnostics.len(), 4);
+    }
+
+    #[test]
+    fn nested_array_elements_discover_qualified_type_dependencies() {
+        let parsed = memobits_syntax::parse(
+            SourceId(0),
+            "fn f(a: array<array<self::model::Value, 2>, 3>) {}",
+        );
+        let (diagnostics, qualified) = check(&parsed.module, std::iter::empty(), false, true);
+        assert!(diagnostics.is_empty());
+        assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0].0, "self::model::Value");
+        assert_eq!(qualified[0].2, Requires::Type);
+    }
+}

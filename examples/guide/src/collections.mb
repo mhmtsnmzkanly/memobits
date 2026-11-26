@@ -1,0 +1,670 @@
+use text::{byte_is, no_byte};
+use numbers::DAYS_PER_WEEK;
+use alloc;
+use alloc::List;
+use alloc::Box;
+
+// `List<T>` is a library type in the compiler-provided `alloc` module, so it
+// must be imported with `use alloc::List;`. Without the import, `List` is an
+// unknown type. `use alloc;` also admits the qualified spelling
+// `alloc::List<T>`. A project that sets `[build] alloc = false` has no `alloc`
+// module and no heap at all (see examples/topics/core-only).
+//
+// `Box<T>` lives in the same module (`use alloc::Box;`): a single-owner heap
+// box. `Box(value)` moves a value into it, `unbox(b)` moves it back out, and
+// the box and everything it owns are released exactly once. See
+// `boxes_hold_recursive_types` below and examples/apps/tree.
+
+// Fixed arrays, structs, and ownership.
+pub type Row = array<i32, 3>;
+
+type Station {
+    id: u32,
+    readings: Row,
+}
+
+fn station(id: u32) -> Station {
+    // Every field must be initialized. The order here can differ from the type.
+    Station { readings: [0; 3], id: id }
+}
+
+fn record(row: share Row, index: i32, reading: i32) {
+    // share grants exclusive write access. The caller sees the update.
+    row[index] = reading;
+    return;
+}
+
+pub fn total(row: borrow Row) -> i32 {
+    // borrow grants read-only access. Primitive values copy implicitly;
+    // .copy() makes the same read explicit.
+    let first := row[0];
+    first + row[1].copy() + row[2]
+}
+
+fn calibrate(var row: Row) -> Row {
+    // An owned parameter takes the caller's array. var lets this function edit it.
+    row[0] -= 1;
+    row[1] *= 2;
+    row[2] /= 2;
+    row[2] %= 3;
+    row
+}
+
+test fn stations() {
+    // Repetition calls station once per element.
+    var pair := [station(7); 2];
+    pair[0].readings = [4, 5, 8];
+    let left := pair[0].borrow();
+    // Constant indices 0 and 1 are disjoint. A dynamic index can overlap both.
+    record(pair[1].readings.share(), 2, 9);
+    let before := total(left.readings.borrow());
+    pair[0] = station(8); // The loan ended at the last use of left.
+
+    var sample := station(7);
+    sample.readings = if before == 17 { [4, 5, 8] } else { [0; 3] };
+    let readings := sample.readings.borrow();
+    sample.id = 8; // A different field is also disjoint.
+    let recorded := total(readings);
+    let moved := sample; // Moving an aggregate consumes its old binding.
+    let Station { id, readings: row } := moved;
+    // Destructuring consumes the whole struct. Moving a single aggregate
+    // field or element out of its owner is unsupported.
+    let adjusted := calibrate(row);
+    let grid := [[1, 2, 3], adjusted];
+    assert(id == 8);
+    assert(recorded == 17);
+    assert(total(grid[1].borrow()) == 14);
+    assert(pair[1].readings[2] == 9);
+}
+
+// array<u8, N> is the fixed-byte representation.
+fn set_first_byte(buffer: share array<u8, 2>) {
+    buffer[0] = 42;
+}
+
+fn first_byte(buffer: borrow array<u8, 2>) -> u8 {
+    buffer[0]
+}
+
+fn return_bytes(buffer: array<u8, 2>) -> array<u8, 2> {
+    buffer
+}
+
+test fn fixed_bytes() {
+    var bytes: array<u8, 2> = [0; 2];
+    set_first_byte(bytes.share());
+    let array: array<u8, 2> = return_bytes(bytes); // Moves the whole buffer.
+    // Validation borrows the prefix and returns its Unicode scalar count.
+    // The utf8-validator project checks malformed bytes and error offsets.
+    let valid := match array.validate_utf8(1) {
+        Ok(count) => count == 1,
+        Err(_) => false,
+    };
+    // Construction copies just the validated prefix into an owned String.
+    let copied := match array.to_utf8_string(1) {
+        Ok(text) => text.len() == 1 && byte_is(text.byte_at(0), 42),
+        Err(_) => false,
+    };
+    // contains and index_of read without moving the array. Numeric and bool
+    // arrays use == for comparisons, including nested rows.
+    // index_of returns the first zero-based match, or None for a miss.
+    let first := match [0, 42, 42].index_of(42) {
+        Some(index) => index == 1,
+        None => false,
+    };
+    assert(valid);
+    assert(copied);
+    assert(first);
+    assert(array.contains(42));
+    assert(!array.contains(255));
+    assert(first_byte(array.borrow()) == 42);
+}
+
+// Fixed arrays iterate in index order. Each iteration binds an immutable
+// primitive copy. The read loan ends when the loop exits.
+test fn fixed_iteration() {
+    var bytes: array<u8, 4> = [1, 0, 3, 9];
+    var digits: u8 = 0;
+    loop byte in bytes {
+        if byte == 0 { continue; }
+        if byte == 9 { break; }
+        digits = digits * 10 + byte;
+    }
+    bytes[0] = 7;
+
+    let empty: array<bool, 0> = [];
+    loop flag in empty { assert(false); }
+    assert(digits == 13);
+    assert(bytes[0] == 7);
+}
+
+fn list_word_at(items: borrow List<u32>, index: u32) -> u32? {
+    items.get(index)
+}
+
+fn list_has_word(items: borrow List<u32>, value: u32) -> bool {
+    items.contains(value)
+}
+
+fn append_word(items: share List<u32>, value: u32) {
+    items.push(value);
+}
+
+fn owned_list_length(items: List<u32>) -> u32 {
+    items.len()
+}
+
+pub fn make_words(first: u32) -> List<u32> {
+    var words: List<u32> = [];
+    words.push(first);
+    words
+}
+
+fn replace_words(items: share List<u32>, value: u32) {
+    items = make_words(value);
+}
+
+// List iteration visits immutable copies in insertion order. An empty List
+// skips the body. A direct call result stays alive until the loop exits.
+// The read loan prevents writes and moves of the receiver during the body.
+test fn list_iteration() {
+    var bytes: List<u8> = [];
+    loop value in bytes { assert(false); }
+    bytes.push(9);
+    bytes.push(4);
+    bytes.push(2);
+    var digits: u8 = 0;
+    loop value in bytes {
+        if value == 9 { continue; }
+        digits = digits * 10 + value;
+    }
+    bytes.clear();
+
+    var first: u32 = 0;
+    loop value in make_words(1000) {
+        first = value;
+        break;
+    }
+    assert(digits == 42);
+    assert(bytes.len() == 0);
+    assert(first == 1000);
+}
+
+test fn qualified_list_path() {
+    var bytes: alloc::List<u8> = [];
+    bytes.push(7);
+    assert(bytes.len() == 1);
+}
+
+// An annotation selects an empty List. push appends to a whole var local.
+// Moving into a new binding transfers ownership of the backing storage.
+test fn primitive_lists() {
+    var bytes: List<u8> = [];
+    let before := bytes.len();
+    let empty := !bytes.contains(42);
+    bytes.push(42);
+    // Bind a direct internal List result to take ownership of its block.
+    let words := make_words(1000);
+    // A standalone call releases an ignored List result at the statement.
+    make_words(999);
+    // Read a direct internal List result with len or get. The call runs
+    // before the index, and the temporary is released after the read or
+    // on a normal early exit from the index expression.
+    let temporary_length := make_words(999).len();
+    // List<u8> and List<u32> support both searches on locals, borrow and
+    // share bindings, and direct internal call results. The receiver runs
+    // first and stays borrowed while the value runs once, even if empty.
+    let temporary_contains := make_words(1234).contains(1234);
+    let borrowed_contains := list_has_word(words.borrow(), 1000);
+    let missing_index := match make_words(1234).index_of(999) {
+        Some(_) => false,
+        None => true,
+    };
+    let temporary_word := match make_words(1234).get(0) {
+        Some(value) => value == 1234,
+        None => false,
+    };
+    // A direct borrow parameter also accepts an explicit borrow of a direct
+    // List call result. The owner lives through the call and is released
+    // afterward or on a normal early exit from a later argument.
+    let borrowed_word := match list_word_at(make_words(2345).borrow(), 0) {
+        Some(value) => value == 2345,
+        None => false,
+    };
+    // A direct owned parameter takes a direct List call result. Arguments
+    // run left to right. The caller releases the temporary if a later
+    // argument exits early, and the callee owns it once invoked.
+    let owned_temporary_length := owned_list_length(make_words(3456));
+    var moved := words;
+    // An exclusive call can grow the List that the caller owns.
+    append_word(moved.share(), 2000);
+    // A direct call borrows the List. get copies the element out.
+    let word := match list_word_at(moved.borrow(), 1) {
+        Some(value) => value == 2000,
+        None => false,
+    };
+    let old_length := moved.len();
+    // Replacement releases the old block after the RHS finishes.
+    moved = make_words(3000);
+    // A direct share parameter can replace the caller's whole List too.
+    replace_words(moved.share(), 4000);
+    // Stored share handles need var for a whole replacement.
+    var handle := moved.share();
+    handle = make_words(5000);
+    // Push through the same handle updates the owner's length and storage.
+    handle.push(6000);
+    // Pop removes the last element and keeps the backing storage for reuse.
+    let popped := match handle.pop() {
+        Some(value) => value == 6000,
+        None => false,
+    };
+    let replacement := match handle.get(0) {
+        Some(value) => value == 5000,
+        None => false,
+    };
+    // Clear removes every element and keeps the storage for subsequent pushes.
+    handle.clear();
+    let cleared := moved.len() == 0;
+    moved.push(7000);
+    // An owned parameter takes the whole List and releases it at scope exit.
+    let final_length := owned_list_length(moved);
+    assert(before == 0);
+    assert(bytes.len() == 1);
+    assert(old_length == 2);
+    assert(final_length == 1);
+    assert(word);
+    assert(replacement);
+    assert(popped);
+    assert(cleared);
+    assert(temporary_length == 1);
+    assert(temporary_word);
+    assert(borrowed_word);
+    assert(owned_temporary_length == 1);
+    assert(empty);
+    assert(temporary_contains);
+    assert(borrowed_contains);
+    assert(missing_index);
+    assert(bytes.contains(42));
+    assert(byte_is(bytes.get(0), 42));
+    assert(no_byte(bytes.get(1)));
+}
+
+// Owned elements. array<string, N> and arrays of String-owning structs own
+// their elements: leaving the scope (or returning early) releases every
+// element exactly once, and an owned parameter or result moves the whole array.
+// An element is a place. Use it in place as a borrow or share receiver or
+// argument, in an in-place match, or through a projection such as
+// items[i].text.len(). Moving an element out (let t := items[0];) is rejected
+// with TE022; use `replace` or `swap` to exchange an element, or `pop` to
+// remove the last List element. Repeating an owner ([name; 2]) is rejected;
+// overwriting an owning element releases its previous value.
+type Entry {
+    label: string,
+    weight: u32,
+}
+
+fn size_of(text: borrow string) -> u32 {
+    text.len()
+}
+
+fn entry_weight(entry: borrow Entry) -> u32 {
+    entry.label.len() + entry.weight
+}
+
+test fn owned_array_elements() {
+    let first := "alpha".concat("");
+    let second := "be".concat("ta");
+    let names: array<string, 2> = [first, second];
+    let at: u32 = 1;
+    // Constant and dynamic indices are bounds-checked places.
+    assert(names[0].len() == 5);
+    assert(names[at].len() == 4);
+    assert(size_of(names[at].borrow()) == 4);
+
+    let head := Entry { label: "head".concat(""), weight: 1 };
+    let tail := Entry { label: "tail!".concat(""), weight: 2 };
+    let entries := [head, tail];
+    // Projections and borrows reach through the element.
+    assert(entries[at].label.len() == 5);
+    assert(entry_weight(entries[0].borrow()) == 5);
+    let row := [entries];
+    // Nested element places: grid[i][j].
+    assert(entry_weight(row[0][1].borrow()) == 7);
+}
+
+// General List<T>. A List holds any admitted element type: primitives of every
+// width, bool, char, string, structs, tuples, enums and arrays. A non-empty
+// literal with an expected List<T> builds the list: elements run once, in
+// written order, and owners move in. Growth moves the elements bitwise; the
+// list releases every element exactly once when it is dropped, cleared,
+// reassigned or goes out of scope (also on early returns). A nested
+// List<List<T>> is not supported yet and is rejected with TE017.
+fn word_total(words: borrow List<string>) -> u32 {
+    var total: u32 = 0;
+    loop word in words {
+        total += word.len();
+    }
+    total
+}
+
+fn add_word(words: share List<string>, word: string) {
+    words.push(word);
+}
+
+fn take_words(words: List<string>) -> u32 {
+    words.len() + words[0].len()
+}
+
+fn two_words() -> List<string> {
+    let first := "one".concat("");
+    let words: List<string> = [first, "two"];
+    words
+}
+
+test fn list_element_types() {
+    // Every width, bool and char; indexing copies a primitive element.
+    var wide: List<u64> = [5_000_000_000];
+    wide.push(7);
+    var signed: List<i16> = [-3, 4];
+    var flags: List<bool> = [true, false];
+    var marks: List<char> = ['a'];
+    marks.push('z');
+    signed[1] = 40;
+    assert(wide[0] == 5_000_000_000);
+    assert(wide.len() == 2);
+    assert(signed[0] + signed[1] == 37);
+    assert(flags[0] && !flags[1]);
+    assert(marks[1] == 'z');
+    // contains and index_of work for primitive elements of any width.
+    assert(wide.contains(7));
+    let found: u32 = match wide_index(wide.borrow(), 7) {
+        Some(position) => position,
+        None => 99,
+    };
+    assert(found == 1);
+}
+
+fn wide_index(items: borrow List<u64>, value: u64) -> u32? {
+    items.index_of(value)
+}
+
+test fn list_of_strings() {
+    var words: List<string> = two_words();
+    let more := "three".concat("");
+    add_word(words.share(), more);
+    let at: u32 = 2;
+    // items[i] is a bounds-checked place used in place; get stays primitive-only.
+    assert(words[0].len() == 3);
+    assert(size_of(words[at].borrow()) == 5);
+    assert(word_total(words.borrow()) == 11);
+    // pop moves the last element out; the shortened list no longer owns it.
+    let last := words.pop();
+    let last_length: u32 = match last {
+        Some(word) => word.len(),
+        None => 0,
+    };
+    assert(last_length == 5);
+    assert(words.len() == 2);
+    assert(take_words(words) == 5);
+    var scratch: List<string> = two_words();
+    scratch.clear();
+    assert(scratch.len() == 0);
+    scratch.push("again");
+    assert(scratch[0].len() == 5);
+    // Reassignment releases the old elements.
+    scratch = two_words();
+    assert(scratch.len() == 2);
+}
+
+test fn list_of_owner_structs() {
+    let head := Entry { label: "head".concat(""), weight: 1 };
+    var entries: List<Entry> = [head];
+    let tail := Entry { label: "tail!".concat(""), weight: 2 };
+    entries.push(tail);
+    // Projections, borrows and loop lending reach through the element.
+    assert(entries[1].label.len() == 5);
+    assert(entry_weight(entries[0].borrow()) == 5);
+    var weights: u32 = 0;
+    loop entry in entries {
+        weights += entry.weight + entry.label.len();
+    }
+    assert(weights == 12);
+    let taken := entries.pop();
+    let taken_weight: u32 = match taken {
+        Some(entry) => entry.weight,
+        None => 0,
+    };
+    assert(taken_weight == 2);
+    assert(entries.len() == 1);
+}
+
+test fn list_of_tuples_and_arrays() {
+    let name := "pair".concat("");
+    var pairs: List<(string, u32)> = [];
+    pairs.push((name, 5));
+    assert(pairs[0].1 + pairs[0].0.len() == 9);
+    let rows: List<array<u32, 2>> = [[1, 2], [3, 4]];
+    assert(rows[1][0] + rows[0][1] == 5);
+}
+
+// `loop x in array` over non-copyable elements binds read-only borrows, as for
+// a List. The array cannot be mutated inside the loop (BE005).
+test fn loop_over_an_array_of_strings() {
+    let first := "abc".concat("");
+    let second := "de".concat("");
+    let words: array<string, 2> = [first, second];
+    var total: u32 = 0;
+    loop word in words {
+        total += word.len();
+    }
+    assert(total == 5);
+}
+
+// List elements are places too: replace and swap work on them, and `xs[i] = v`
+// releases the old element once.
+test fn replace_and_swap_list_elements() {
+    let first := "one".concat("");
+    let second := "three".concat("");
+    var words: List<string> = [first, second];
+    let old := replace(words[0], "x".concat(""));
+    assert(old.len() == 3);
+    swap(words[0], words[1]);
+    assert(words[0].len() == 5);
+    words[1] = "yy".concat("");
+    assert(words[1].len() == 2);
+}
+
+// `List<List<T>>`: an outer List owns inner Lists. `outer.push(inner)` moves
+// the inner List in, `outer[i]` is a List place (`outer[i][j]` reads, and
+// `push`, `pop`, `clear`, `len`, `replace`, `swap` and `outer[i] = v` work on
+// it), and `outer.pop()` moves an inner List out. Every inner List is released
+// exactly once with the outer List.
+test fn nested_lists() {
+    var outer: List<List<u32>> = [];
+    var first: List<u32> = [];
+    first.push(5);
+    first.push(6);
+    outer.push(first);
+    outer.push([9]);
+    outer[0].push(7);
+    assert(outer.len() == 2);
+    assert(outer[0].len() == 3);
+    assert(outer[0][2] == 7);
+    outer[1][0] = 8;
+    assert(outer[1][0] == 8);
+    let old := replace(outer[1], [1, 2]);
+    assert(old.len() == 1);
+    assert(outer[1].len() == 2);
+    match outer.pop() {
+        Some(last) => { assert(last.len() == 2); }
+        None => { assert(false); }
+    }
+    assert(outer.len() == 1);
+    outer[0].clear();
+    assert(outer[0].len() == 0);
+    var words: List<List<string>> = [];
+    var row: List<string> = [];
+    row.push("hello");
+    words.push(row);
+    assert(words[0][0].len() == 5);
+}
+
+// A List is an ordinary owner, so it composes with the other aggregates: a
+// struct or record field, a tuple element, an array element, and the payload
+// of `Some(..)`, `Ok(..)` or a user enum variant. Field and element places work
+// like a List local: `s.l.push(1)`, `s.l[0] = 5`, `loop x in s.l`, `replace`
+// and `swap`. A call that returns a List can be used in any value position
+// (a tail, `return`, an argument, a field, an element, a receiver). Moving a
+// List out of a field or element is still a partial move (TE022): use
+// `replace`, `swap` or `pop`.
+fn heap_text(base: string) -> string {
+    let text := base.concat("");
+    text
+}
+
+type Bag { items: List<i32>, label: string }
+
+fn count_to(n: i32) -> List<i32> {
+    var out: List<i32> = [];
+    var i := 0;
+    loop {
+        if i == n { break; }
+        out.push(i);
+        i += 1;
+    }
+    out
+}
+
+fn count_tail() -> List<i32> { count_to(3) }
+
+fn count_either(first: bool) -> List<i32> {
+    if first { return count_to(4); }
+    count_tail()
+}
+
+fn bag_total(bag: Bag) -> i32 { bag.items.len() as i32 + bag.label.len() as i32 }
+
+test fn list_call_results() {
+    let a := count_either(true);
+    let b := count_either(false);
+    assert(a.len() == 4);
+    assert(b.len() == 3);
+    assert(count_to(5).len() == 5);
+    var outer: List<List<i32>> = [];
+    outer.push(count_to(2));
+    outer.push(count_tail());
+    assert(outer[1].len() == 3);
+}
+
+test fn lists_inside_aggregates() {
+    var bag := Bag { items: count_to(3), label: heap_text("abcd") };
+    bag.items.push(10);
+    assert(bag.items.len() == 4);
+    bag.items[0] = 50;
+    assert(bag.items[0] == 50);
+    let old := replace(bag.items, count_to(2));
+    assert(old.len() == 4);
+    assert(bag.items.len() == 2);
+    var total_items := 0;
+    loop x in bag.items { total_items += x; }
+    assert(total_items == 1);
+    assert(bag_total(Bag { items: count_to(4), label: heap_text("abc") }) == 7);
+    var pair := (count_to(2), 9);
+    pair.0.push(1);
+    assert(pair.0.len() == 3);
+    var grid: array<List<i32>, 2> = [count_to(1), count_to(4)];
+    swap(grid[0], grid[1]);
+    grid[0].push(1);
+    assert(grid[0].len() == 5);
+    assert(grid[1].len() == 1);
+    grid[1] = count_to(7);
+    assert(grid[1].len() == 7);
+}
+
+test fn constant_array_length() {
+    // An imported `u32` constant can be an array length or a repeat count.
+    let week: array<u32, DAYS_PER_WEEK> = [1; DAYS_PER_WEEK];
+    var total: u32 = 0;
+    loop i in 0..DAYS_PER_WEEK { total += week[i]; }
+    assert(total == 7);
+}
+
+// A type may contain itself only through a Box (here, directly; a `T?` of a
+// Box or a List of Boxes works too). Direct recursion is rejected.
+type Chain [End, Link(i32, Box<Chain>)]
+
+fn chain_of(count: i32) -> Chain {
+    if count == 0 { Chain::End } else { Chain::Link(count, Box(chain_of(count - 1))) }
+}
+
+fn chain_len(chain: borrow Chain) -> i32 {
+    // A bound child is a borrowed Box; `.borrow()` lends the Chain inside it.
+    match chain {
+        End => 0,
+        Link(_, rest) => 1 + chain_len(rest.borrow()),
+    }
+}
+
+fn chain_total(chain: Chain) -> i32 {
+    // An owned `match` moves the Box out of the payload; `unbox` takes its value.
+    match chain {
+        End => 0,
+        Link(value, rest) => value + chain_total(unbox(rest)),
+    }
+}
+
+type Pixel { x: i32, y: i32 }
+
+extend Pixel {
+    fn sum(borrow self) -> i32 { self.x + self.y }
+}
+
+test fn boxes_hold_recursive_types() {
+    let chain := chain_of(4);
+    assert(chain_len(chain.borrow()) == 4);
+    assert(chain_total(chain) == 10);
+}
+
+test fn boxes_see_through_for_fields_and_methods() {
+    // Fields, methods and indexing work on the boxed value; writes need `var`.
+    var pixel := Box(Pixel { x: 1, y: 2 });
+    pixel.x = 40;
+    assert(pixel.x == 40);
+    assert(pixel.sum() == 42);
+    let cells := Box([5, 6, 7]);
+    assert(cells[1] == 6);
+    // `replace` and `swap` work on places inside boxes; `unbox` consumes one.
+    let old := replace(pixel.y, 9);
+    assert(old == 2);
+    let inner := unbox(pixel);
+    assert(inner.y == 9);
+}
+
+test fn boxes_forward_builtin_string_and_list_methods() {
+    // `len`, `push`, `pop`, `get`, `contains` and the like act on the value in
+    // the box; mutation needs a `var` box or a `share` parameter.
+    var names: Box<List<i32>> = Box([1, 2]);
+    names.push(3);
+    assert(names.len() == 3);
+    assert(names.contains(2));
+    let last := match names.pop() { Some(v) => v, None => 0 };
+    assert(last == 3);
+    let word := Box("héllo");
+    assert(word.len() == 6);
+}
+
+type Links { head: Chain }
+
+test fn releasing_a_long_chain_does_not_recurse() {
+    // Releasing a recursive owner is iterative, so a chain of any length drops
+    // without growing the call stack. (Building uses `replace` in a loop.)
+    var links := Links { head: Chain::End };
+    var i: i32 = 0;
+    loop {
+        if i == 50000 { break; }
+        links.head = Chain::Link(i, Box(replace(links.head, Chain::End)));
+        i += 1;
+    }
+    // (Walking it would recurse in user code; only the release is iterative.)
+    assert(match links.head { End => false, Link(top, _) => top == 49999 });
+}

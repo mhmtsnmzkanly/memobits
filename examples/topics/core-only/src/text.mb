@@ -1,0 +1,29 @@
+// String literals are static data, and read-only operations (`len`,
+// `byte_at`) never allocate. `concat`, `push_str` and `to_utf8_string` do, so
+// they are compile errors in this project.
+fn is_digit(byte: u8?) -> bool {
+    match byte {
+        Some(value) => value >= 48 && value <= 57,
+        None => false,
+    }
+}
+
+// Count the ASCII digits of a literal by walking its bytes.
+pub fn digits(text: borrow string) -> u32 {
+    var count: u32 = 0;
+    var index: u32 = 0;
+    loop {
+        if index >= text.len() { break; }
+        if is_digit(text.byte_at(index)) { count = count + 1; }
+        index = index + 1;
+    }
+    count
+}
+
+test fn digits_of_a_literal() {
+    let mixed := "a1b22c333";
+    let accents := "é😀";
+    assert(digits(mixed.borrow()) == 6);
+    assert(digits(accents.borrow()) == 0);
+    assert("é😀".len() == 6);
+}

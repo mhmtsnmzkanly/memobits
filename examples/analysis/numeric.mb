@@ -1,0 +1,19 @@
+// This example is accepted by `mb analyze`; copied to `src/main.mb` of a project, `mb run` prints `Result: i64(16)`.
+fn clamp(value: i64, lower: i64, upper: i64) -> i64 {
+    if value < lower {
+        lower
+    } else if value > upper {
+        upper
+    } else {
+        value
+    }
+}
+
+fn main() -> i64 {
+    let minimum: i64 = -9223372036854775808;
+    let maximum: u64 = 18446744073709551615;
+    var score: i64 = 10;
+    score += 5;
+    let score := clamp(score, 0, 100);
+    score + 1
+}

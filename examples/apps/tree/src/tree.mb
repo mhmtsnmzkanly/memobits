@@ -1,0 +1,50 @@
+use alloc::Box;
+
+// A binary search tree. A node owns its children through `Box`, the only way
+// a type can contain itself.
+pub type Tree [Leaf, Node(Box<Tree>, i32, Box<Tree>)]
+
+// Insert `value`; the tree moves in and the grown tree moves out. A bound
+// child box is taken out with `unbox`.
+pub fn insert(tree: Tree, value: i32) -> Tree {
+    match tree {
+        Leaf => Node(Box(Leaf), value, Box(Leaf)),
+        Node(left, item, right) => {
+            if value < item {
+                Node(Box(insert(unbox(left), value)), item, right)
+            } else {
+                Node(left, item, Box(insert(unbox(right), value)))
+            }
+        }
+    }
+}
+
+// Read-only walks borrow the tree. A bound child is a borrowed box;
+// `.borrow()` lends the tree inside it.
+pub fn sum(tree: borrow Tree) -> i32 {
+    match tree {
+        Leaf => 0,
+        Node(left, item, right) => sum(left.borrow()) + item + sum(right.borrow()),
+    }
+}
+
+pub fn depth(tree: borrow Tree) -> i32 {
+    match tree {
+        Leaf => 0,
+        Node(left, _, right) => {
+            let a := depth(left.borrow());
+            let b := depth(right.borrow());
+            1 + if a > b { a } else { b }
+        }
+    }
+}
+
+// A pattern sees through a box in an in-place match: the left child of the
+// left child, without binding the boxes.
+pub fn leftmost_pair(tree: borrow Tree) -> i32 {
+    match tree {
+        Node(Node(_, inner, _), item, _) => inner * 100 + item,
+        Node(Leaf, item, _) => item,
+        Leaf => 0,
+    }
+}

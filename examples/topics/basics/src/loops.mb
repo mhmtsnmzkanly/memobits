@@ -1,0 +1,29 @@
+fn factorial(count: i32) -> i32 {
+    var result: i32 = 1;
+    // `1..=count` is inclusive; `1..count` would stop before `count`.
+    loop step in 1..=count {
+        result = result * step;
+    }
+    result
+}
+
+fn sum_to(count: i32) -> i32 {
+    var total: i32 = 0;
+    loop step in 1..=count {
+        total = total + step;
+    }
+    total
+}
+
+// The factorial of 5 plus the sum of 1 to 10: 120 + 55 = 175.
+pub fn combined() -> i32 {
+    factorial(5) + sum_to(10)
+}
+
+test fn factorial_of_five() {
+    assert(factorial(5) == 120);
+}
+
+test fn sum_to_ten() {
+    assert(sum_to(10) == 55);
+}

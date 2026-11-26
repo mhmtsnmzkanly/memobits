@@ -1,0 +1,320 @@
+/* Numbers and control flow. Block comments can /* nest */. */
+test fn numbers() {
+    // An annotation supplies the literal type. Without context, integers
+    // default to i32 and floats to f64.
+    let a: i8 = -8;
+    let b: i16 = -160;
+    let c := 3_200;
+    let d: i64 = 6_400;
+    let e: u8 = 8;
+    let f: u16 = 160;
+    let g: u32 = 320;
+    let h: u64 = 640;
+    let half: f32 = 5e-1;
+    let negative_half: f32 = -5e-1;
+    let quarter := 0.25;
+
+    // var permits assignment. let creates an immutable binding.
+    var step := 0;
+    var sum := 0;
+    loop {
+        step += 1;
+        if step > 5 { break; }
+        if step % 2 == 0 { continue; }
+        sum += step;
+    }
+    // A new binding can shadow the old one. A tail expression yields a value.
+    let sum := { let offset := 1; sum + offset };
+    assert(sum == 10);
+    let divisor := step - 6;
+    // Short-circuit evaluation skips the division when divisor is zero.
+    assert(divisor == 0 || sum / divisor > 0);
+    assert(a < 0);
+    assert(b <= -160);
+    assert(c >= 3_200);
+    assert(d != 0);
+    assert(e * 2 == 16);
+    assert(f - 10 == 150);
+    assert(g / 2 == 160);
+    assert(h % 3 == 1);
+    assert(half + 0.5 == 1.0);
+    assert(negative_half == -0.5);
+    assert(quarter * 4.0 == 1.0);
+}
+
+// Numeric `as` casts are explicit across supported integer and float types.
+// Integer casts keep low bits; float-to-int truncates and saturates, with NaN
+// becoming zero. The byte convenience method is equivalent to `as u32`.
+fn widen_byte(value: u8) -> u32 {
+    value as u32
+}
+
+fn widen_byte_method(value: u8) -> u32 {
+    value.to_u32()
+}
+
+test fn widenings() {
+    let bytes: array<u8, 4> = [0, 127, 128, 255];
+    assert(widen_byte(bytes[0]) == 0);
+    assert(widen_byte_method(bytes[1]) == 127);
+    assert(bytes[2] as u32 == 128);
+    assert(bytes[3].to_u32() == 255);
+}
+
+test fn numeric_casts() {
+    let all_bits: u32 = 4294967295;
+    let signed: i32 = all_bits as i32;
+    let fraction: i32 = (-1.9) as i32;
+    let nan: u32 = (0.0 / 0.0) as u32;
+    let saturated: u64 = 1e300 as u64;
+    let rounded: u64 = 16777217 as f32 as u64;
+    assert(signed == -1);
+    assert(fraction == -1);
+    assert(nan == 0);
+    assert(saturated == 18446744073709551615);
+    assert(rounded == 16777216);
+}
+
+// Explicit arithmetic methods exist for every integer width (i8..i64, u8..u64).
+// `wrapping_*` computes modulo 2^width, `saturating_*` clamps to the type's
+// minimum or maximum, and `checked_*` returns `T?` (`None` on overflow, on a
+// zero divisor, and for `MIN / -1`; `MIN % -1` is `Some(0)`). Plain `+` and `*`
+// keep their checked behavior (a trap on overflow).
+test fn wrapping_arithmetic() {
+    let max: u32 = 4294967295;
+    assert(max.wrapping_add(1) == 0);
+    assert(max.wrapping_mul(2) == 4294967294);
+    assert(max.wrapping_sub(max).wrapping_sub(1) == max);
+    let byte: u8 = 200;
+    assert(byte.wrapping_add(100) == 44);
+    assert(byte.wrapping_mul(2) == 144);
+    let low: i8 = -128;
+    assert(low.wrapping_neg() == -128);
+    assert(low.wrapping_sub(1) == 127);
+    let wide: i64 = -9223372036854775808;
+    assert(wide.wrapping_sub(1) == 9223372036854775807);
+}
+
+test fn saturating_arithmetic() {
+    let byte: u8 = 200;
+    assert(byte.saturating_add(100) == 255);
+    assert(byte.saturating_sub(250) == 0);
+    assert(byte.saturating_mul(2) == 255);
+    let low: i16 = -32768;
+    assert(low.saturating_sub(1) == -32768);
+    assert(low.saturating_add(-1) == -32768);
+    let high: i64 = 9223372036854775807;
+    assert(high.saturating_add(1) == high);
+    assert(high.saturating_mul(-2) == -9223372036854775808);
+}
+
+test fn checked_arithmetic() {
+    let byte: u8 = 200;
+    assert(match byte.checked_add(55) { Some(v) => v == 255, None => false });
+    assert(match byte.checked_add(56) { Some(_) => false, None => true });
+    assert(match byte.checked_sub(201) { Some(_) => false, None => true });
+    let low: i32 = -2147483648;
+    assert(match low.checked_div(-1) { Some(_) => false, None => true });
+    assert(match low.checked_rem(-1) { Some(v) => v == 0, None => false });
+    assert(match low.checked_neg() { Some(_) => false, None => true });
+    let zero: i32 = 0;
+    assert(match low.checked_div(zero) { Some(_) => false, None => true });
+    let wide: u64 = 18446744073709551615;
+    assert(match wide.checked_mul(2) { Some(_) => false, None => true });
+    // Shifts return None when the count is not below the bit width.
+    let one: u16 = 1;
+    assert(match one.checked_shl(15) { Some(v) => v == 32768, None => false });
+    assert(match one.checked_shl(16) { Some(_) => false, None => true });
+    assert(one.wrapping_shl(17) == 2);
+}
+
+// Integer literals can be written in hexadecimal (`0xFF`, `0XFF`), binary
+// (`0b1010`) or octal (`0o17`), and `_` may separate the digits of any integer
+// or float literal (`1_000`, `0xFF_FF`, `1_0.5_0`, `1e1_0`). A separator sits
+// between digits: not first, not last and not right after a radix prefix;
+// doubled `__` is allowed. They take their type from context and are range
+// checked exactly like decimal literals, also in constants and in patterns.
+// Literal suffixes such as `0xFFu8` do not exist; annotate the binding.
+const RADIX_MASK: u32 = 0xFF_00;
+
+fn radix_class(value: u8) -> u32 {
+    match value { 0x00 => 1, 0b1 => 2, 0o10 => 3, 0xF0 | 0xF5 | 0xFF => 4, _ => 0 }
+}
+
+test fn radix_literals() {
+    let hex: u8 = 0xFF;
+    let binary: u8 = 0b1010_0101;
+    let octal: i32 = 0o755;
+    let smallest: i8 = -0x80;
+    let largest: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    let spaced := 1__000;
+    assert(hex == 255);
+    assert(binary == 165);
+    assert(octal == 493);
+    assert(smallest == -128);
+    assert(largest == 18_446_744_073_709_551_615);
+    assert(spaced == 1_000);
+    assert(0XfF == 255);
+    assert(RADIX_MASK >> 8 == 0xFF);
+    assert(1_000.5_0 > 1000.49);
+    assert(1e1_0 > 9.9e9);
+    assert(radix_class(0) == 1);
+    assert(radix_class(1) == 2);
+    assert(radix_class(8) == 3);
+    assert(radix_class(0xF5) == 4);
+    assert(radix_class(2) == 0);
+}
+
+// Bitwise operators `& | ^` and shifts `<< >>` work on every integer width
+// (operands share one type; the shift count is always u32), and so do the
+// compound forms `&= |= ^= <<= >>=` and the methods `bit_and`, `bit_or`,
+// `bit_xor`. A shift count at or above the bit width is a compile error when
+// constant and a trap otherwise. `<<` discards high bits; `>>` fills with
+// zeroes for unsigned types and copies the sign bit for signed types.
+test fn bit_operations() {
+    let high: u32 = 2147483648;
+    let pattern: u32 = 2863311530;
+    assert(1 | 2 ^ 3 & 7 == 1);
+    assert(pattern.bit_xor(1431655765) == 4294967295);
+    assert(pattern.bit_and(15) == 10);
+    assert(pattern.bit_or(5) == 2863311535);
+    assert(1 << 31 == high);
+    assert(high >> 31 == 1);
+}
+
+test fn bit_operations_on_every_width() {
+    let negative: i8 = -128;
+    assert(negative >> 7 == -1);
+    assert(negative >> 1 == -64);
+    assert(negative & 127 == 0);
+    assert(negative | 1 == -127);
+    assert(negative ^ -1 == 127);
+    let narrow: u8 = 255;
+    assert(narrow << 4 == 240);
+    assert(narrow >> 4 == 15);
+    let wide: i64 = -9223372036854775808;
+    assert(wide >> 63 == -1);
+    assert(wide << 1 == 0);
+    assert(wide.bit_xor(-1) == 9223372036854775807);
+    var flags: u16 = 1;
+    flags <<= 15;
+    flags |= 1;
+    flags ^= 32768;
+    assert(flags == 1);
+    var signed: i32 = -16;
+    signed >>= 2;
+    signed &= -2;
+    assert(signed == -4);
+}
+
+// `~x` is the bitwise complement of an integer at the operand's own width
+// (Rust's `!x`): `~0u8` is 255, `~(-128i8)` is 127. It is a prefix operator
+// with the precedence of unary `-` and `!`, applies to integers only
+// (floats, bool and nominal types are TE007; there is no overloading) and
+// folds in `const` items and static expressions like the other operators.
+// An untyped literal operand without type context takes u32 like the other
+// bitwise operators.
+const LOW_NIBBLE_MASK: u8 = ~240;
+
+test fn bitwise_complement() {
+    let zero: u8 = 0;
+    let top: u8 = 255;
+    let low: i8 = -128;
+    let high: i8 = 127;
+    let word: u32 = 0;
+    let wide: i64 = -9223372036854775808;
+    assert(~zero == 255);
+    assert(~top == 0);
+    assert(~low == 127);
+    assert(~high == -128);
+    assert(~word == 4294967295);
+    assert(~wide == 9223372036854775807);
+    assert(~~top == top);
+    let value: i32 = 7;
+    assert(~value == -8);
+    assert(-~value == 8);
+    assert(~value & 255 == 248);
+    assert(~zero as u32 == 255);
+    assert(LOW_NIBBLE_MASK == 15);
+}
+
+// `loop i in a..b` counts from `a` up to but not including `b`; `a..=b`
+// includes `b`. Both bounds are evaluated once, left to right, before the
+// first iteration, and must have one integer type (an untyped literal takes
+// the other bound's type, otherwise i32). The variable `i` is immutable. An
+// empty range (`a >= b`, or `a > b` for `..=`) runs zero times and there are no
+// reverse ranges or steps. `..=` ending at the type's maximum terminates
+// without overflow. Ranges are not values: they only appear in this header.
+test fn range_loops() {
+    var sum := 0;
+    loop i in 0..5 { sum += i; }
+    assert(sum == 10);
+    loop i in 0..=5 { sum += i; }
+    assert(sum == 25);
+    var negative := 0;
+    loop i in -3..=-1 { negative += i; }
+    assert(negative == -6);
+    var runs := 0;
+    loop i in 5..0 { runs += 1; }
+    loop i in 3..=2 { runs += 1; }
+    assert(runs == 0);
+    // Bounds are evaluated once: changing `limit` in the body does not extend
+    // the loop. Other loop forms (`break`, `continue`) work as usual.
+    var limit: u8 = 3;
+    var seen := 0;
+    loop i in 0..limit {
+        limit = 200;
+        if i == 1 { continue; }
+        seen += 1;
+    }
+    assert(seen == 2);
+    // An inclusive range up to the maximum of its type visits every value.
+    let top: u8 = 255;
+    var count: u32 = 0;
+    loop i in 0..=top { count += 1; }
+    assert(count == 256);
+    var last: u8 = 0;
+    loop i in 250..=top { last = i; }
+    assert(last == 255);
+}
+
+// Integer arithmetic and array indexing are checked. Proven invalid cases
+// can fail compilation. Dynamic overflow, zero divisors and invalid indices
+// trap at runtime. Floats use IEEE arithmetic.
+// Module constants: `const NAME: T = expr;` (`pub const` to share). The type
+// is required and is an integer type, f32, f64, bool, char or string. The
+// value is computed at compile time from literals, other constants (in this
+// or an imported module, declared in any order) and the built-in operators,
+// with the same overflow and zero-divisor errors as other static expressions.
+// A cycle, a call or any non-constant name is a compile error. Constants have
+// no storage: every use is replaced by the value. A local name shadows a
+// constant. `array<u32, DAYS_PER_WEEK>` in collections.mb uses an imported one.
+const SECONDS_PER_DAY: u32 = SECONDS_PER_HOUR * HOURS_PER_DAY;
+const SECONDS_PER_HOUR: u32 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_MINUTE: u32 = 60;
+const HOURS_PER_DAY: u32 = 24;
+pub const DAYS_PER_WEEK: u32 = 7;
+const HALF: f32 = 0.5;
+const SHORT_WEEK: bool = DAYS_PER_WEEK < 7;
+const INITIAL: char = 'm';
+const UNIT: string = "seconds";
+
+test fn module_constants() {
+    assert(SECONDS_PER_DAY == 86_400);
+    assert(DAYS_PER_WEEK * HOURS_PER_DAY == 168);
+    assert(HALF * 4.0 == 2.0);
+    assert(!SHORT_WEEK);
+    assert(INITIAL == 'm');
+    assert(UNIT.len() == 7);
+    // A constant keeps its declared type; a binding takes it.
+    let day := SECONDS_PER_DAY;
+    let wide: u64 = day as u64 * 365;
+    assert(wide == 31_536_000);
+    // A constant works as a range bound.
+    var days: u32 = 0;
+    loop day in 0..DAYS_PER_WEEK { days += 1; }
+    assert(days == 7);
+    // A local binding with the same name shadows the constant.
+    let HOURS_PER_DAY: u32 = 12;
+    assert(HOURS_PER_DAY == 12);
+}

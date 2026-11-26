@@ -1,0 +1,4 @@
+[package]
+name = "utf8-validator-demo"
+version = "0.1.0"
+entry = "main::main"

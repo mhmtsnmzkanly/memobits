@@ -1,0 +1,120 @@
+// A direct share parameter can replace a String field. The caller retains
+// ownership and cleanup; the callee only has exclusive access during the call.
+type TextRecord { text: string, tag: u32 }
+// Inline anonymous enum declarations keep their nominal identity by source
+// site; unit and payload variants can be selected by an expected type.
+// Reference-bearing payloads are rejected; String payloads are supported
+// (see the enum-array example).
+type GuidePhase = enum [Ready, Waiting];
+type OtherGuidePhase = enum [Ready, Waiting];
+// Bodyless declarations preserve a nominal type identity but have no value
+// constructor in this slice. An empty struct below remains a distinct type.
+type EmptyRecord {}
+
+// A trailing `extend` attaches methods to its nominal declaration; methods
+// use ordinary receiver calls. Generic nominal methods specialize with their
+// receiver, as Box<T>::read_value above demonstrates.
+type OpaqueHandle; extend {
+    fn opaque_kind(borrow self) -> bool { true }
+}
+
+type GuideCounter { value: i32 } extend {
+    fn doubled(borrow self) -> i32 { self.value * 2 }
+}
+
+fn guide_counter() -> GuideCounter { GuideCounter { value: 21 } }
+
+fn replace_record_text(record: share TextRecord) {
+    record.text = "updated";
+}
+
+fn accept_opaque_handle(handle: OpaqueHandle) {}
+
+test fn shared_string_field_replacement() {
+    var record := TextRecord { text: "before", tag: 7 };
+    replace_record_text(record.share());
+    assert(record.text.len() == 7);
+    assert(record.tag == 7);
+}
+
+// Anonymous records use exact field-name/type shapes. Reordering fields does
+// not change the shape, while initializer effects still run in written order.
+fn record_total(value: { right: u32, left: u32 }) -> u32 {
+    value.left + value.right
+}
+
+// An anonymous record that owns a String moves by value like a nominal struct:
+// into owned internal arguments and results from a named local, into a struct
+// field, tuple, array or enum payload, and out of scope with exact cleanup.
+// Annotate the binding so the field types are fixed; temporaries as arguments,
+// field or element move-out, and exported signatures stay rejected.
+type RecordSlot [NoRecord, HasRecord({ name: string, size: u32 })]
+
+fn record_name_total(value: { name: string, size: u32 }, early: bool) -> u32 {
+    if early { return 1; }
+    value.name.len() + value.size
+}
+
+fn make_named_record() -> { name: string, size: u32 } {
+    let heap := "é".concat("!");
+    let made: { name: string, size: u32 } = { name: heap, size: 4 };
+    made
+}
+
+fn record_slot_total(slot: RecordSlot) -> u32 {
+    match slot {
+        RecordSlot::HasRecord(value) => value.name.len() + value.size,
+        RecordSlot::NoRecord => 0,
+    }
+}
+
+test fn string_owning_records() {
+    let heap := "é".concat("!");
+    let named: { name: string, size: u32 } = { name: heap, size: 9 };
+    let spare_heap := "é".concat("!");
+    let spare: { name: string, size: u32 } = { name: spare_heap, size: 1 };
+    let made := make_named_record();
+    let slot_heap := "é".concat("!");
+    let slot_value: { name: string, size: u32 } = { name: slot_heap, size: 2 };
+    let slot := RecordSlot::HasRecord(slot_value);
+    assert(record_name_total(named, false) == 12);
+    assert(record_name_total(spare, true) == 1);
+    assert(record_name_total(made, false) == 7);
+    assert(record_slot_total(slot) == 5);
+}
+
+fn guide_phase() -> GuidePhase { Ready }
+fn other_guide_phase() -> OtherGuidePhase { Ready }
+
+test fn anonymous_shapes() {
+    var order: u32 = 0;
+    let first := {
+        right: { order += 1; order },
+        left: { order += 1; order },
+    };
+    let reordered := {
+        left: { order += 1; order },
+        right: { order += 1; order },
+    };
+    let selected := if true { first } else { reordered };
+    let phase: GuidePhase = guide_phase();
+    let other: OtherGuidePhase = other_guide_phase();
+    let counter := guide_counter();
+    let payload: enum [GuideNumber(i32), GuideFlag(bool), GuideAbsent] = GuideNumber(40);
+    let payload_value := match payload {
+        GuideNumber(value) => value,
+        GuideFlag(enabled) => if enabled { 1 } else { 0 }
+        GuideAbsent => 0,
+    };
+    let matching := match phase {
+        Ready => match other { Ready => true, Waiting => false }
+        Waiting => false,
+    };
+    assert(selected.right == 1);
+    assert(selected.left == 2);
+    assert(order == 4);
+    assert(record_total({ left: 40, right: 2 }) == 42);
+    assert(matching);
+    assert(counter.doubled() == 42);
+    assert(payload_value == 40);
+}

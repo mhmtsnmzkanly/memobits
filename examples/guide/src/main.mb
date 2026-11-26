@@ -1,0 +1,75 @@
+// Start at main, then read the topic modules. `mb run` prints
+// Result: Ok(i32(42)) and `mb test` runs the checks described below.
+// For a source declaration that calls a typed host import, see
+// ../topics/host-capability/README.md. It requires the CLI profile in project.toml;
+// the current source ABI supports only write_i32(i32) -> unit.
+//
+// The guide is split into topic modules next to this file. Each topic module
+// documents its feature with comments and checks it with `test fn` items that
+// use `assert`. Tests are type-checked by `mb check` and run by `mb test`;
+// `mb build` and `mb run` leave them out of the artifact. This `main` is a
+// small program that uses a few guide features and returns Ok(42).
+//   numbers.mb         integers, floats, casts, wrapping and bit operations
+//   text.mb            char, string literals, bytes, scalars, loops, concat
+//   tuples.mb          tuple values, destructuring, tuples with owned strings
+//   aggregates.mb      records, anonymous shapes, opaque types, share fields
+//   ownership.mb       string-owning structs, borrow/share calls, drop
+//   collections.mb     fixed arrays, byte arrays, lists, iteration
+//   enums_outcomes.mb  enums, match, optionals, references, `T ! E` and `T ?! E`
+//   generics.mb        generic functions, structs, methods, interface bounds
+//   functions.mb       function types, anonymous functions, `=>` bodies, calls
+//   operators.mb       user-defined core::ops operators and compound assignment
+
+use collections::{Row, total, make_words};
+use text::byte_length;
+
+// Project features to try from the repository root:
+// - examples/topics/module-imports is the runnable multi-module setup for
+//   `use math;` and explicit `point.draw() of Draw` selection. From the repo
+//   root, run `mb run --project examples/topics/module-imports/project.toml`
+//   or build that project and run its Wasm artifact. The grouped
+//   `use self::main::{Point, Draw};` import loads symbols; only the direct
+//   module edge activates public extensions. Transitive imports and prelude
+//   aliases do not activate extensions, and external package loading is not
+//   implemented yet. Its `exercise<T>` wrapper calls both an inherent method
+//   and a selected interface method. Constrained generic evidence is selected
+//   from the caller's visible extensions and forwarded through nested calls.
+// - examples/topics/numeric imports a public function via self::math and
+//   exports it as add in project.toml. Use its manifest with mb resolve --lib,
+//   mb build --lib, or mb build --output PATH.
+// - examples/topics/structs imports a public type and uses public fields.
+//   Imports support qualified paths and as aliases. Items and fields are
+//   module-private by default. A manifest prelude can supply local names.
+// - examples/topics/arrays and examples/topics/enums extend the aggregate
+//   examples. examples/analysis has standalone analyze and ownership inputs.
+// - crates/memobits-cli/README.md covers project, syntax, resolve, analyze,
+//   ownership, analyze-project, ownership-project, build, and run. See it
+//   for stack_size, fuel limits, and selecting a Wasm export with --entry.
+//   The runner calls zero-argument exports. Library exports use scalar
+//   signatures. Source host linking is limited to the CLI profile's typed
+//   memobits:console.write_i32(i32) -> unit import; see the host-capability
+//   example. Type exports and mb check are unsupported.
+// - docs/design/proposed-language-guide.mb (a historical proposal) explores target syntax. String slicing,
+//   scalar iteration, lists, try, defaults and
+//   aggregate .copy() are gated. Generic function calls and interface evidence
+//   forwarding are limited to the examples above; generic nominal structs are
+//   demonstrated above.
+
+// A zero-argument application entry can return `T ! E` or `T ?! E` with a
+// primitive success payload. Both runners show the variant and typed value
+// or the concrete error type and code.
+//
+// This main combines three guide features: a fixed array summed through a
+// borrow (collections), the UTF-8 byte length of a string (text), and the
+// first element of a List built by a helper (collections).
+fn main() -> i32 ! Error {
+    let row: Row = [10, 12, 8];
+    let readings := total(row.borrow()); // 30
+    let label := "aé€";
+    let label_bytes := byte_length(label.borrow()); // 1 + 2 + 3 = 6
+    let words := make_words(6);
+    // `try x else { ... }` unwraps a `T?` or `T ! E`; the handler yields a
+    // fallback value or exits, as `return` does here.
+    let first := try words.get(0) else { return Err(Error { code: 1 }); };
+    Ok(readings + label_bytes as i32 + first as i32)
+}

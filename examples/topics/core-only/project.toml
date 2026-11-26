@@ -1,0 +1,8 @@
+[package]
+name = "core-only"
+version = "0.1.0"
+entry = "main::main"
+
+# The core layer only: no guest allocator and no heap in the artifact.
+[build]
+alloc = false

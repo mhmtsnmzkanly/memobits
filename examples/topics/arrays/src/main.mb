@@ -1,0 +1,71 @@
+// Fixed arrays of primitive elements: repetition, element assignment,
+// compound updates, implicit element copies, whole-array moves, arrays through
+// functions (`borrow`, `share`, an array result) and a small nested array.
+
+// Read-only access through a `borrow` parameter.
+fn sum(a: borrow array<i32, 3>) -> i32 {
+    var total := 0;
+    loop i in 0..3 {
+        total += a[i];
+    }
+    total
+}
+
+// Mutation through a `share` parameter is visible to the caller.
+fn scale(a: share array<i32, 3>, k: i32) {
+    loop i in 0..3 {
+        a[i] *= k;
+    }
+}
+
+// An array result is built by the callee and moved to the caller.
+fn make(base: i32) -> array<i32, 3> {
+    [base + 1, base + 2, base + 3]
+}
+
+fn main() -> i32 ! Error {
+    var squares: array<i32, 8> = [0; 8];
+    loop i in 0..8 {
+        squares[i] = i * i;
+    }
+    squares[3] += 100;
+
+    var total := 0;
+    loop j in 0..8 {
+        total = total + squares[j];
+    }
+
+    // A primitive element is copied implicitly into a binding; `squares` stays intact.
+    let peak := squares[7];
+    let moved := squares;
+    let seed := [1, 2, 3];
+    let first := total + moved[3] + seed[2] + peak;
+
+    // Arrays through functions.
+    var made := make(10);
+    scale(made.share(), 2);
+    let through_calls := sum(made.borrow());
+
+    // A 2 x 3 nested array: element writes, a whole-row replacement and a row
+    // lent to `sum`.
+    var grid := [[0; 3]; 2];
+    grid[0][1] = 5;
+    grid[1][2] += 7;
+    grid[1] = [4, 5, 6];
+    let nested := grid[0][1] + sum(grid[1].borrow());
+
+    Ok(first + through_calls + nested)
+}
+
+// `test fn` items check helpers; `mb test` runs them and `mb run` ignores them.
+test fn sum_reads_through_a_borrow() {
+    let values := [1, 2, 3];
+    assert(sum(values.borrow()) == 6);
+}
+
+test fn scale_writes_through_a_share() {
+    var values := make(1);
+    scale(values.share(), 3);
+    assert(values[0] == 6);
+    assert(values[2] == 12);
+}

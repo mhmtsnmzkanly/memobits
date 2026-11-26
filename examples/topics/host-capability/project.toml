@@ -1,0 +1,12 @@
+[package]
+name = "host-capability"
+entry = "main::main"
+
+[host]
+profile = "cli"
+
+[[host.imports]]
+module = "memobits:console"
+name = "write_i32"
+params = ["i32"]
+result = "unit"
