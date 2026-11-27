@@ -4,6 +4,12 @@
 // ../topics/host-capability/README.md. It requires the CLI profile in project.toml;
 // the current source ABI supports only write_i32(i32) -> unit.
 //
+// For an import-free scalar component, see ../topics/component/README.md:
+// `mb build --component` produces an application component for `mb exec`;
+// `--lib --component` exposes selected scalar library functions. Outcome
+// entries such as this guide's main are not supported. The console host
+// import is supported via WIT; see ../topics/host-capability/README.md.
+//
 // The guide is split into topic modules next to this file. Each topic module
 // documents its feature with comments and checks it with `test fn` items that
 // use `assert`. Tests are type-checked by `mb check` and run by `mb test`;

@@ -87,6 +87,7 @@ project from source and as standalone Wasm and compares the output to it. See
 | [basics](examples/topics/basics/README.md) | Arithmetic, loops and `string` basics as modules of one project | `cargo run -p memobits-cli -- run --project examples/topics/basics/project.toml` | `Result: Ok(i32(462))` |
 | [arrays](examples/topics/arrays/README.md) | Fixed arrays: locals, calls, results, nested arrays | `cargo run -p memobits-cli -- run --project examples/topics/arrays/project.toml` | `Result: Ok(i32(493))` |
 | [core-only](examples/topics/core-only/README.md) | `[build] alloc = false`, literals, arrays, `match`, and core string operations | `cargo run -p memobits-cli -- run --project examples/topics/core-only/project.toml` | `Result: Ok(i32(57911))` |
+| [component](examples/topics/component/README.md) | Import-free scalar WebAssembly Component | `cargo run -p memobits-cli -- run --project examples/topics/component/project.toml` | `Result: i32(42)` |
 | [enums](examples/topics/enums/README.md) | Variants, `match`, exhaustiveness, aliases, state machine | `cargo run -p memobits-cli -- run --project examples/topics/enums/project.toml` | `Result: Ok(i32(1094300))` |
 | [generics-operators](examples/topics/generics-operators/README.md) | `core::ops` Add/Sub/PartialEq on a `Vec2`, multi-bound and higher-order generic functions | `cargo run -p memobits-cli -- run --project examples/topics/generics-operators/project.toml` | `Result: Ok(i32(41))` |
 | [host-capability](examples/topics/host-capability/README.md) | CLI host import declared in the manifest, bound with `extern fn` | `cargo run -p memobits-cli -- run --project examples/topics/host-capability/project.toml` | `Host i32: 42` and `Result: i32(7)` |
@@ -112,9 +113,10 @@ The default CLI also runs a built core Wasm artifact with Wasmtime:
 cargo run -p memobits-cli -- exec examples/guide/target/memobits/app.wasm
 ```
 
-`mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts, with
+`mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts and scalar/Unit components, with
 `--entry`, `--project`, and the same fuel options as artifact `run`. Build the
-CLI with `--no-default-features` to omit Wasmtime and `mb exec`.
+CLI with `--no-default-features` to omit Wasmtime and `mb exec`. Component
+building and its current limits are demonstrated by the [component example](examples/topics/component/README.md).
 
 ## Language notes
 

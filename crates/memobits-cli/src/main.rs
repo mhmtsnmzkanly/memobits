@@ -1,3 +1,5 @@
+mod component;
+
 use memobits_diagnostics::{
     render, render_with, write_location, Category, Diagnostic, DiagnosticCode, Severity,
     SourceFile, SourceId, Span,
@@ -17,7 +19,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb fmt [--check] [--project PATH | FILE...]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  fmt              Format source modules in place to the canonical style (see docs/design/formatting.md)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --check          fmt: list files that would change and exit 1 without writing\n  --lib            Resolve library exports instead of the application entry\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact; unlike build and run it also checks every project module, reachable or not, and every test. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check and test but never included in the application or library artifact, and build and run ignore tests. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
+const HELP: &str = "Memobits project tools\n\nUsage: mb project [--project PATH]\n       mb syntax FILE\n       mb analyze FILE\n       mb ownership FILE\n       mb resolve [--project PATH] [--lib]\n       mb analyze-project [--project PATH] [--lib]\n       mb ownership-project [--project PATH] [--lib]\n       mb build [--project PATH] [--lib] [--component] [--output PATH]\n       mb check [--project PATH] [--lib]\n       mb build --tests [--project PATH] [--output PATH]\n       mb check --tests [--project PATH]\n       mb run [--project PATH] [--fuel N | --no-fuel-limit]\n       mb run FILE.wasm [--entry NAME] [--project PATH] [--fuel N | --no-fuel-limit]\n       mb test [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb test FILE.wasm [--project PATH] [--fuel N | --no-fuel-limit] [FILTER]\n       mb fmt [--check] [--project PATH | FILE...]\n       mb --help\n\nCommands:\n  syntax FILE      Parse one source file (no semantic checking)\n  analyze FILE     Check standalone types and loop control (no ownership)\n  ownership FILE   Check supported typed IR moves and loans\n  analyze-project  Check types across reachable local modules (no ownership)\n  ownership-project Check supported typed IR moves and loans across modules\n  build            Compile the selected target to WebAssembly\n  check            Run every build stage without writing an artifact\n  run              Run the application entry or a Wasm artifact\n  test             Run the project's `test fn` items (or those in a test artifact)\n  fmt              Format source modules in place to the canonical style (see docs/design/formatting.md)\n  project          Display the manifest and sorted source-module inventory\n  resolve          Resolve reachable local modules and names from the target root\n\nOptions:\n  --project PATH   Select a manifest file (default: ./project.toml)\n  --check          fmt: list files that would change and exit 1 without writing\n  --lib            Resolve library exports instead of the application entry\n  --component      Build a scalar application or library component\n  --tests          Build or check the test artifact (every `test fn`) instead of the app or library\n  FILTER           Run only tests whose qualified name (module::name) contains FILTER\n  --output PATH    Write the Wasm artifact at PATH\n  --entry NAME     Select an export in a Wasm artifact (default: main)\n  --fuel N         Run with at most N fuel units (positive integer; default 10000000000)\n  --no-fuel-limit  Run without an execution fuel limit\n  -h, --help       Show this help\n\nBuild defaults to target/memobits/app.wasm or target/memobits/library.wasm beside the selected manifest. It supports the implemented primitive, fixed-array, struct and enum subset, internal calls and internal primitive/aggregate references; application entries can return `T ! E` or `T ?! E` with primitive success payloads (rendered Ok(v), Ok(Some(v)), Ok(None) or Err(...)). Library exports use scalar signatures. The CLI host profile supports one typed source-declared Wasm import, memobits:console.write_i32(i32) -> unit; other external signatures are unsupported. Run compiles source and artifacts through the same WebAssembly runtime with a fuel budget and prints results without using them as the process exit code. Ownership commands check the supported typed IR subset; success is not a complete language safety guarantee. Check runs the same stages as build (resolve, types, lowering, IR validation, Wasm layout gates) and reports the same diagnostics, but writes no artifact; unlike build and run it also checks every project module, reachable or not, and every test. A top-level `test fn name() { ... }` (no parameters, no result, never `pub`) is type-checked by check and test but never included in the application or library artifact, and build and run ignore tests. `mb test` compiles every test of every project module into a test artifact (exports named `test::<module>::<name>`), runs each test in a fresh instance under the normal fuel and stack limits, prints `test <module>::<name> ... ok` or `... FAILED` (with the trap reason and source location; a false `assert(condition)` traps with `assertion failed`), prints a summary line, and exits 1 if any test failed or the project did not compile (0 when all pass, including zero tests). `mb build --tests` writes the test artifact (default target/memobits/tests.wasm) and `mb test FILE.wasm` runs it with the same report.\n";
 
 fn help() -> String {
     let help = HELP.to_owned();
@@ -927,6 +929,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     let mut selected = None;
     let mut library = false;
     let mut tests = false;
+    let mut component_output = false;
     let mut output = None;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -953,6 +956,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 return Err(diagnostic(4, "--tests may only be specified once"));
             }
             tests = true;
+            continue;
+        }
+        if arg == "--component" && command == "build" {
+            if component_output {
+                return Err(diagnostic(4, "--component may only be specified once"));
+            }
+            component_output = true;
             continue;
         }
         if arg == "--output" && command == "build" {
@@ -986,6 +996,9 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     }
     if tests && library {
         return Err(diagnostic(4, "--tests cannot be combined with --lib"));
+    }
+    if component_output && tests {
+        return Err(diagnostic(4, "--component cannot be combined with --tests"));
     }
     let project = Project::load(".", selected.as_deref()).map_err(project_error)?;
     if tests {
@@ -1058,6 +1071,28 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
             let exports = build_exports(&project, &result, &program, library)?;
             let options = backend_options(&project);
             let bytes = compile_with_locations(&program, &exports, &options, &result, library)?;
+            let bytes = if component_output {
+                let function = &program.functions[exports
+                    .values()
+                    .next()
+                    .ok_or_else(|| diagnostic(6, "component requires an exported function"))?
+                    .0 as usize];
+                let component_error = |error: component::ComponentError| {
+                    let mut diag = Diagnostic::new(
+                        DiagnosticCode::new(Category::Project, 6).expect("static PE code"),
+                        Severity::Error,
+                        error.message,
+                    );
+                    diag.span = Some(error.spans.first().copied().unwrap_or(function.span));
+                    for span in error.spans.iter().skip(1) {
+                        diag = diag.with_label(*span, "other conflicting declaration");
+                    }
+                    render_source_diagnostics(&[diag], &result)
+                };
+                component::encode(&bytes, &program, &exports, library).map_err(component_error)?
+            } else {
+                bytes
+            };
             if command == "check" {
                 // `check` covers the whole project: every module (reachable
                 // from the roots or not) and every test. `build` only
@@ -1071,9 +1106,18 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                     bytes.len()
                 ));
             }
-            let output_path = output
-                .clone()
-                .unwrap_or_else(|| default_build_output(&project, library));
+            let output_path = output.clone().unwrap_or_else(|| {
+                let path = default_build_output(&project, library);
+                if component_output {
+                    path.with_file_name(if library {
+                        "library-component.wasm"
+                    } else {
+                        "component.wasm"
+                    })
+                } else {
+                    path
+                }
+            });
             write_atomically(&output_path, &bytes)?;
             return Ok(format!(
                 "Built {}: {} export(s), {} bytes\n",

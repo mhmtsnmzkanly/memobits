@@ -3,9 +3,22 @@
 //! also carry a versioned adapter for compiler-known outcomes.
 
 #[cfg(feature = "wasmtime")]
+mod component_engine;
+#[cfg(feature = "wasmtime")]
 mod wasmtime_engine;
 #[cfg(feature = "wasmtime")]
-pub use wasmtime_engine::run_with_capabilities as exec_with_capabilities;
+pub fn exec_with_capabilities(
+    bytes: &[u8],
+    export: &str,
+    options: &RunOptions,
+    capabilities: &[HostCapability],
+) -> Result<RunValue, RunError> {
+    if bytes.starts_with(b"\0asm\x0d\0\x01\0") {
+        component_engine::run(bytes, export, options, capabilities)
+    } else {
+        wasmtime_engine::run_with_capabilities(bytes, export, options, capabilities)
+    }
+}
 
 mod entry;
 pub use entry::{EntryOutcome, EntrySuccess, ReturnedError};

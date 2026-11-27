@@ -58,3 +58,7 @@ Source, standalone Wasm, and Wasmtime `exec` runs print exactly the following on
 ```text
 Result: Ok(i32(42))
 ```
+
+For the currently supported scalar/Unit component setup and its limits, see
+the [component example](../topics/component/README.md). The guide entry returns
+an outcome and therefore cannot yet be built as a component.

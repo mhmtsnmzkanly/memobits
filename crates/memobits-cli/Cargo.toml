@@ -21,6 +21,9 @@ memobits-ownership = { path = "../memobits-ownership" }
 memobits-wasm = { path = "../memobits-wasm" }
 memobits-ir = { path = "../memobits-ir" }
 memobits-runtime = { path = "../memobits-runtime" }
+wasm-encoder = "0.263.0"
+wasmparser = "0.263.0"
 
 [dev-dependencies]
-wasmparser = "0.263.0"
+wasmtime = { version = "38.0.4", default-features = false, features = ["cranelift", "runtime", "std", "component-model"] }
+wit-parser = "0.239.0"

@@ -14,10 +14,12 @@ entry returning `T ! E` or `T ?! E` with a primitive success payload uses
 the private [outcome entry adapter](outcome-implementation.md). Other aggregate
 application signatures and aggregate library exports are rejected with LE900.
 
-The output is an experimental core Wasm module. It does not yet carry a stable
-Memobits ABI, dependency packaging, WIT Component Model support, or a
+The default output is an experimental core Wasm module. `mb build --component`
+can also produce application and library components with scalar
+parameters and scalar or Unit results; see the [component contract](component-model-contract.md) for gates.
+Neither form carries a stable Memobits ABI, dependency packaging, or a
 compatibility promise. Typed host imports are supported through the current
-experimental `extern` interface; the Stage 5 WIT mapping is still pending.
+experimental `extern` interface and the WIT console import. Other component host imports remain pending.
 Relative explicit output paths are interpreted from the invoking directory.
 Default paths must remain inside the project's build output directory and must
 not use unchecked package metadata as path segments.

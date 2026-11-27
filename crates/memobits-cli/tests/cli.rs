@@ -10698,3 +10698,332 @@ fn user_defined_shr_assign_mutates_nominal_target_in_source_and_wasm() {
     assert!(custom_rhs.status.success(), "{custom_rhs:?}");
     assert_eq!(custom_rhs.stdout, b"Result: u32(2)\n");
 }
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn scalar_application_components_validate_and_execute() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-scalar'\nentry='main::main'\n",
+    );
+    for (source, expected) in [
+        ("fn main() -> i32 { 42 }", "Result: i32(42)\n"),
+        ("fn main() -> bool { true }", "Result: i32(1)\n"),
+        ("fn main() -> u8 { 255 }", "Result: i32(255)\n"),
+        ("fn main() -> i8 { -128 }", "Result: i32(-128)\n"),
+        ("fn main() -> u16 { 65535 }", "Result: i32(65535)\n"),
+        ("fn main() -> i16 { -32768 }", "Result: i32(-32768)\n"),
+        ("fn main() -> u32 { 4294967295 }", "Result: i32(-1)\n"),
+        (
+            "fn main() -> u64 { 18446744073709551615 }",
+            "Result: i64(-1)\n",
+        ),
+        ("fn main() -> char { 'é' }", "Result: i32(233)\n"),
+        ("fn main() -> f32 { 1.5 }", "Result: f32(1.5)\n"),
+        ("fn main() -> f64 { 1.5 }", "Result: f64(1.5)\n"),
+        ("fn main() -> i64 { -7 }", "Result: i64(-7)\n"),
+        ("fn main() {}", "Result: Unit\n"),
+    ] {
+        f.write("src/main.mb", source);
+        let build = f.run(&["build", "--component", "--output", "component.wasm"]);
+        assert!(build.status.success(), "{source}: {build:?}");
+        let bytes = fs::read(f.0.join("component.wasm")).unwrap();
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
+        let second_build = f.run(&["build", "--component", "--output", "component-again.wasm"]);
+        assert!(second_build.status.success(), "{source}: {second_build:?}");
+        assert_eq!(
+            bytes,
+            fs::read(f.0.join("component-again.wasm")).unwrap(),
+            "{source}"
+        );
+        let wit_parser::decoding::DecodedWasm::Component(wit, world) =
+            wit_parser::decoding::decode(&bytes).unwrap()
+        else {
+            panic!("expected executable component")
+        };
+        let world = &wit.worlds[world];
+        assert!(world.imports.is_empty());
+        assert_eq!(world.exports.len(), 1);
+        let export = world.exports.values().next().unwrap();
+        let wit_parser::WorldItem::Function(function) = export else {
+            panic!("expected function export")
+        };
+        assert_eq!(function.name, "main");
+        assert!(function.params.is_empty());
+        let expected_type = match source {
+            "fn main() -> i32 { 42 }" => Some(wit_parser::Type::S32),
+            "fn main() -> bool { true }" => Some(wit_parser::Type::Bool),
+            "fn main() -> u8 { 255 }" => Some(wit_parser::Type::U8),
+            "fn main() -> i8 { -128 }" => Some(wit_parser::Type::S8),
+            "fn main() -> u16 { 65535 }" => Some(wit_parser::Type::U16),
+            "fn main() -> i16 { -32768 }" => Some(wit_parser::Type::S16),
+            "fn main() -> u32 { 4294967295 }" => Some(wit_parser::Type::U32),
+            "fn main() -> u64 { 18446744073709551615 }" => Some(wit_parser::Type::U64),
+            "fn main() -> char { 'é' }" => Some(wit_parser::Type::Char),
+            "fn main() -> f32 { 1.5 }" => Some(wit_parser::Type::F32),
+            "fn main() -> f64 { 1.5 }" => Some(wit_parser::Type::F64),
+            "fn main() -> i64 { -7 }" => Some(wit_parser::Type::S64),
+            _ => None,
+        };
+        assert_eq!(function.result, expected_type);
+        let component = f.run(&["exec", "component.wasm"]);
+        assert!(component.status.success(), "{source}: {component:?}");
+        assert_eq!(component.stdout, expected.as_bytes(), "{source}");
+        assert!(component.stderr.is_empty());
+        let core_build = f.run(&["build", "--output", "core.wasm"]);
+        assert!(core_build.status.success(), "{source}: {core_build:?}");
+        let core = f.run(&["run", "core.wasm"]);
+        assert!(core.status.success(), "{source}: {core:?}");
+        assert_eq!(core.stdout, component.stdout, "{source}");
+        assert_eq!(core.stderr, component.stderr, "{source}");
+    }
+}
+
+#[test]
+fn component_build_rejects_unsupported_targets_without_replacing_output() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-gates'\nentry='main::main'\n",
+    );
+    f.write("component.wasm", "preserve this artifact");
+    f.write("src/main.mb", "fn main() -> i32 ! Error { Ok(42) }");
+    let result = f.run(&["build", "--component", "--output", "component.wasm"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("scalar or Unit"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("src/main.mb:1:"));
+    assert_eq!(
+        fs::read(f.0.join("component.wasm")).unwrap(),
+        b"preserve this artifact"
+    );
+    let result = f.run(&["build", "--component", "--tests"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be combined with --tests"));
+}
+
+#[test]
+fn component_host_import_uses_wit_and_requires_the_manifest_capability() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='component-host'\nentry='main::main'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i32']\nresult='unit'\n");
+    f.write(
+        "src/main.mb",
+        "extern fn write_i32(value: i32); fn main() -> i32 { write_i32(42); 7 }",
+    );
+    let output = f.run(&["build", "--component", "--output", "component.wasm"]);
+    assert!(output.status.success(), "{output:?}");
+    let bytes = fs::read(f.0.join("component.wasm")).unwrap();
+    let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
+        wit_parser::decoding::decode(&bytes).unwrap()
+    else {
+        panic!("expected component")
+    };
+    let world = &resolve.worlds[world];
+    assert_eq!(world.imports.len(), 1);
+    let wit_parser::WorldItem::Interface { id, .. } = world.imports.values().next().unwrap() else {
+        panic!("expected WIT interface")
+    };
+    let interface = &resolve.interfaces[*id];
+    let write = &interface.functions["write-i32"];
+    assert_eq!(
+        write.params,
+        vec![("value".to_owned(), wit_parser::Type::S32)]
+    );
+    assert_eq!(write.result, None);
+    #[cfg(feature = "wasmtime")]
+    {
+        let missing = f.run(&["exec", "component.wasm"]);
+        assert!(!missing.status.success());
+        assert!(missing.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("memobits:console/console"));
+        let exec = f.run(&["exec", "component.wasm", "--project", "project.toml"]);
+        assert!(exec.status.success(), "{exec:?}");
+        assert!(exec.stderr.is_empty());
+        assert_eq!(exec.stdout, b"Host i32: 42\nResult: i32(7)\n");
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn scalar_components_report_missing_exports_traps_and_fuel_exhaustion() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-failures'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() { assert(false); }");
+    let build = f.run(&["build", "--component", "--output", "component.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let missing = f.run(&["exec", "component.wasm", "--entry", "missing"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("missing function export"));
+    let trap = f.run(&["exec", "component.wasm"]);
+    assert!(!trap.status.success());
+    assert!(
+        String::from_utf8_lossy(&trap.stderr).contains("assertion failed"),
+        "{trap:?}"
+    );
+    let build_core = f.run(&["build", "--output", "core.wasm"]);
+    assert!(build_core.status.success());
+    let core_trap = f.run(&["run", "core.wasm"]);
+    assert_eq!(trap.status.code(), core_trap.status.code());
+    assert_eq!(trap.stderr, core_trap.stderr);
+    f.write("src/main.mb", "fn main() { loop {} }");
+    let build = f.run(&["build", "--component", "--output", "loop.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let fuel = f.run(&["exec", "loop.wasm", "--fuel", "100"]);
+    assert!(!fuel.status.success());
+    assert!(String::from_utf8_lossy(&fuel.stderr).contains("fuel exhausted"));
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_checked_traps_and_stack_overflow_match_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-traps'\nentry='main::main'\n[build]\nstack_size=65536\n",
+    );
+    for (source, expected) in [
+        ("fn main() -> i32 { var divisor := 0; 7 / divisor }", "division by zero"),
+        ("fn main() -> i32 { var index := 3; let values: array<i32, 2> = [1, 2]; values[index] }", "array index out of bounds"),
+        ("fn r(n: i32) -> i32 { let a := [n; 1000]; if n == 0 { 0 } else { r(n - 1) + a[0] } } fn main() -> i32 { r(100000) }", "stack overflow"),
+    ] {
+        f.write("src/main.mb", source);
+        for args in [
+            &["build", "--output", "core.wasm"][..],
+            &["build", "--component", "--output", "component.wasm"][..],
+        ] {
+            let build = f.run(args);
+            assert!(build.status.success(), "{source}: {build:?}");
+        }
+        let core = f.run(&["run", "core.wasm"]);
+        let component = f.run(&["exec", "component.wasm"]);
+        assert!(!core.status.success(), "{source}: {core:?}");
+        assert_eq!(component.status.code(), core.status.code(), "{source}");
+        assert_eq!(component.stdout, core.stdout, "{source}");
+        assert_eq!(component.stderr, core.stderr, "{source}: {component:?}");
+        assert!(String::from_utf8_lossy(&component.stderr).contains(expected));
+    }
+}
+
+#[cfg(not(feature = "wasmtime"))]
+#[test]
+fn component_build_remains_available_without_wasmtime_execution() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-no-engine'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() -> i32 { 42 }");
+    let build = f.run(&["build", "--component", "--output", "component.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    wasmparser::Validator::new()
+        .validate_all(&fs::read(f.0.join("component.wasm")).unwrap())
+        .unwrap();
+    let exec = f.run(&["exec", "component.wasm"]);
+    assert!(!exec.status.success());
+    assert!(String::from_utf8_lossy(&exec.stderr).contains("without the wasmtime feature"));
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn scalar_library_component_exports_selected_functions_with_wit_names() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='component-lib'\n[export]\naddNumbers='math::add'\nthe_answer='math::answer'\n");
+    f.write("src/math.mb", "pub fn add(left_value: i32, right_value: i32) -> i32 { left_value + right_value } pub fn answer() -> i32 { 42 } pub fn private_to_component() -> i32 { 99 }");
+    let build = f.run(&["build", "--lib", "--component", "--output", "library.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bytes = fs::read(f.0.join("library.wasm")).unwrap();
+    wasmparser::Validator::new().validate_all(&bytes).unwrap();
+    let wit_parser::decoding::DecodedWasm::Component(wit, world) =
+        wit_parser::decoding::decode(&bytes).unwrap()
+    else {
+        panic!("expected component")
+    };
+    let world = &wit.worlds[world];
+    assert!(world.imports.is_empty());
+    assert_eq!(world.exports.len(), 2);
+    let mut functions = world
+        .exports
+        .values()
+        .map(|item| match item {
+            wit_parser::WorldItem::Function(f) => (f.name.as_str(), f),
+            _ => panic!("expected function"),
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let add = functions.remove("add-numbers").unwrap();
+    assert_eq!(
+        add.params,
+        vec![
+            ("left-value".to_owned(), wit_parser::Type::S32),
+            ("right-value".to_owned(), wit_parser::Type::S32)
+        ]
+    );
+    assert_eq!(add.result, Some(wit_parser::Type::S32));
+    assert!(functions.contains_key("the-answer"));
+    let engine = wasmtime::Engine::default();
+    let compiled = wasmtime::component::Component::new(&engine, &bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let linker = wasmtime::component::Linker::new(&engine);
+    let instance = linker.instantiate(&mut store, &compiled).unwrap();
+    let add = instance
+        .get_typed_func::<(i32, i32), (i32,)>(&mut store, "add-numbers")
+        .unwrap();
+    assert_eq!(add.call(&mut store, (19, 23)).unwrap(), (42,));
+    add.post_return(&mut store).unwrap();
+    let exec = f.run(&["exec", "library.wasm", "--entry", "the-answer"]);
+    assert!(exec.status.success(), "{exec:?}");
+    assert_eq!(exec.stdout, b"Result: i32(42)\n");
+    assert!(exec.stderr.is_empty());
+    let rejected = f.run(&["exec", "library.wasm", "--entry", "add-numbers"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("takes parameters"));
+}
+
+#[test]
+fn library_component_rejects_normalized_name_collisions_without_overwrite() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='component-collision'\n[export]\nvalueOne='math::first'\nvalue_one='math::second'\n");
+    f.write(
+        "src/math.mb",
+        "pub fn first() -> i32 { 1 } pub fn second() -> i32 { 2 }",
+    );
+    f.write("library.wasm", "preserve");
+    let output = f.run(&["build", "--lib", "--component", "--output", "library.wasm"]);
+    assert!(!output.status.success(), "{output:?}");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        message.contains("valueOne")
+            && message.contains("value_one")
+            && message.contains("value-one"),
+        "{message}"
+    );
+    assert_eq!(fs::read(f.0.join("library.wasm")).unwrap(), b"preserve");
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_host_then_trap_preserves_core_output_and_diagnostic() {
+    let f = Fixture::new();
+    f.write("project.toml", "[package]\nname='component-host-trap'\nentry='main::main'\n[host]\nprofile='cli'\n[[host.imports]]\nmodule='memobits:console'\nname='write_i32'\nparams=['i32']\nresult='unit'\n");
+    f.write(
+        "src/main.mb",
+        "extern fn write_i32(value: i32); fn main() -> i32 { write_i32(42); assert(false); 7 }",
+    );
+    for args in [
+        &["build", "--output", "core.wasm"][..],
+        &["build", "--component", "--output", "component.wasm"][..],
+    ] {
+        let build = f.run(args);
+        assert!(build.status.success(), "{build:?}");
+    }
+    let core = f.run(&["run", "core.wasm", "--project", "project.toml"]);
+    let component = f.run(&["exec", "component.wasm", "--project", "project.toml"]);
+    assert!(!core.status.success());
+    assert_eq!(component.status.code(), core.status.code());
+    assert_eq!(component.stdout, b"Host i32: 42\n");
+    assert_eq!(component.stdout, core.stdout);
+    assert_eq!(component.stderr, core.stderr);
+    assert!(String::from_utf8_lossy(&component.stderr).contains("assertion failed"));
+}

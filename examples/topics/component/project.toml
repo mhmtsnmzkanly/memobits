@@ -1,0 +1,6 @@
+[package]
+name = "component-example"
+entry = "main::main"
+
+[export]
+library_answer = "main::answer"

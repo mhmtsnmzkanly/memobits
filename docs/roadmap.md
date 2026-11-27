@@ -16,6 +16,7 @@ feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 | Backend | size-class guest allocator |
 | Stage 5 step 1 | `mb fmt` |
 | Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime; Wasmi remains the `run`/`test` engine |
+| Stage 5 step 2b, first slice | Scalar application and library components with Wasmtime execution; aggregate mappings remain gated |
 
 Verification at pause: 1,615 workspace tests passing, 0 failing; every
 example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns
@@ -24,8 +25,10 @@ example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns
 ## Next: Stage 5 (outside world)
 
 1. **S5-2b/c Component Model** — see the 2026-11-26 decision in
-   [design/decisions.md](design/decisions.md): WIT mapping and
-   `mb build --component`, then host capabilities as WIT imports.
+   [design/decisions.md](design/decisions.md) and the
+   [component interface design](design/component-model-contract.md). Scalar
+   components and the WIT console import are implemented; aggregate mappings,
+   other capabilities and broader Component Model support remain open.
 2. **S5-3 packages** — dependencies in `project.toml`, package identity,
    cross-package extensions (see PKG-03/PKG-04 in the inventory).
 3. **S5-4 LSP** — diagnostics, go-to-definition, completion.

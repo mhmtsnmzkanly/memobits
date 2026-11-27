@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-wasmtime = ["dep:wasmtime"]
+wasmtime = ["dep:wasmtime", "dep:wasmparser"]
 
 [dependencies]
 memobits-entry-abi = { path = "../memobits-entry-abi" }
 wasmi = "2.0.0"
-wasmtime = { version = "38.0.4", optional = true, default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmparser = { version = "0.263.0", optional = true }
+wasmtime = { version = "38.0.4", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "component-model"] }
 
 [dev-dependencies]
 wasm-encoder = "0.263.0"

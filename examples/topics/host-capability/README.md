@@ -12,14 +12,18 @@ target/debug/mb run --project examples/topics/host-capability/project.toml
 target/debug/mb build --project examples/topics/host-capability/project.toml --output target/host-capability.wasm
 target/debug/mb run target/host-capability.wasm --project examples/topics/host-capability/project.toml
 target/debug/mb exec target/host-capability.wasm --project examples/topics/host-capability/project.toml
+artifact_dir=$(mktemp -d)
+target/debug/mb build --component --project examples/topics/host-capability/project.toml --output "$artifact_dir/host-component.wasm"
+target/debug/mb exec "$artifact_dir/host-component.wasm" --project examples/topics/host-capability/project.toml
 ```
 
 Each invocation calls the typed host import, prints `Host i32: 42`, and reports
 `Result: i32(7)`. This project is exempt from the `i32 ! Error` convention
 used by the other examples: `main` returns a bare `i32` because the H1 host
 capability acceptance evidence pins that exact `Result: i32(7)` output. The current source declaration supports this one owned `i32`
-argument and unit result. The CLI profile rejects undeclared, unknown, or
-signature-mismatched imports before guest code starts. Both the source run and the artifact run (with `--project` for the profile) print the output below. Other hosts, reference
+argument and unit result. The component imports the WIT interface `memobits:console/console`, whose
+`write-i32` takes `s32` and returns no value. The CLI profile rejects undeclared,
+unknown, or signature-mismatched imports before guest code starts. Both the source run and the artifact run (with `--project` for the profile) print the output below. Other hosts, reference
 parameters, and source-level multi-module host declarations are not supported.
 
 ## Tests

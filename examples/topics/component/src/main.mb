@@ -1,0 +1,8 @@
+// A scalar entry can be lifted into an import-free WebAssembly Component.
+pub fn answer() -> i32 { 42 }
+
+test fn answer_is_42() {
+    assert(answer() == 42);
+}
+
+fn main() -> i32 { answer() }
