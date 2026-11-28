@@ -17,7 +17,7 @@ application signatures and aggregate library exports are rejected with LE900.
 The default output is an experimental core Wasm module. `mb build --component`
 can also produce application and library components with scalar
 parameters and scalar or Unit results, as well as `T ! Error` or `T ?! Error`
-application outcomes with bool, integer or float `T` and exact
+application outcomes with bool, char, integer or float `T` and exact
 root `Error`; see the [component contract](component-model-contract.md) for
 gates. Outcome signatures remain unsupported for library exports.
 Neither form carries a stable Memobits ABI, dependency packaging, or a

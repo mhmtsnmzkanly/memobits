@@ -8,7 +8,7 @@
 // `mb build --component` produces an application component for `mb exec`;
 // `--lib --component` exposes selected scalar library functions. This guide's
 // `i32 ! Error` entry also supports components; `bool ?! Error` is supported
-// for application entries too. Derived errors and Unit/char outcome payloads
+// for application entries too. Derived errors and Unit outcome payloads
 // remain gated. The console host
 // import is supported via WIT; see ../topics/host-capability/README.md.
 //

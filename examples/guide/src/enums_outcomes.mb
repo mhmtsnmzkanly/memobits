@@ -173,7 +173,7 @@ test fn optional_borrow() {
 // row[0].borrow() are also outside the current subset.
 // Root Error outcomes can also cross an application Component Model boundary.
 // See ../topics/component/README.md and build this guide with `--component`;
-// this outcome adapter supports bool, integer or float successes and exact
+// this outcome adapter supports bool, char, integer or float successes and exact
 // root Error for both `T ! Error` and `T ?! Error`.
 fn root_error_result(ok: bool) -> i32 ! Error {
     if ok { Ok(42) } else { Err(Error { code: 9 }) }
@@ -187,7 +187,7 @@ test fn root_error_outcome() {
 }
 
 // `T ?! Error` (the same type as `T? ! Error`) crosses the application
-// Component Model boundary for bool, integer and float payloads. Its three
+// Component Model boundary for bool, char, integer and float payloads. Its three
 // outcomes are `Ok(Some(value))`, `Ok(None)` and `Err(Error)`.
 fn component_optional_bool(state: u32) -> bool ?! Error {
     match state {
@@ -201,6 +201,20 @@ test fn component_optional_outcome_facts() {
     assert(match component_optional_bool(0) { Ok(Some(value)) => value, _ => false });
     assert(match component_optional_bool(1) { Ok(None) => true, _ => false });
     assert(match component_optional_bool(2) { Err(error) => error.code == 11, _ => false });
+}
+
+// The same application Component setup accepts char successes for both result
+// forms. The core entry adapter also supports char with nominal Error types.
+fn component_char_result() -> char ! Error { Ok('é') }
+
+fn component_optional_char(present: bool) -> char ?! Error {
+    if present { Ok(Some('🦀')) } else { Ok(None) }
+}
+
+test fn component_char_outcome_facts() {
+    assert(match component_char_result() { Ok(value) => value == 'é', Err(_) => false });
+    assert(match component_optional_char(true) { Ok(Some(value)) => value == '🦀', _ => false });
+    assert(match component_optional_char(false) { Ok(None) => true, _ => false });
 }
 
 // Owned outcomes and nominal errors.

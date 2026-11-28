@@ -11269,6 +11269,100 @@ fn component_optional_root_outcomes_match_source_and_core() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
+fn component_char_outcomes_match_source_and_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-char-outcome'\nentry='main::main'\n",
+    );
+    for (source, expected, optional) in [
+        (
+            "fn main() -> char ! Error { Ok('é') }",
+            "Result: Ok(char('é'))\n",
+            false,
+        ),
+        (
+            "fn main() -> char ! Error { Ok('🦀') }",
+            "Result: Ok(char('🦀'))\n",
+            false,
+        ),
+        (
+            "fn main() -> char ! Error { Err(Error { code: 7 }) }",
+            "Result: Err(Error, code=7)\n",
+            false,
+        ),
+        (
+            "fn main() -> char ?! Error { Ok(Some('🦀')) }",
+            "Result: Ok(Some(char('🦀')))\n",
+            true,
+        ),
+        (
+            "fn main() -> char ?! Error { Ok(None) }",
+            "Result: Ok(None)\n",
+            true,
+        ),
+        (
+            "fn main() -> char ?! Error { Err(Error { code: 9 }) }",
+            "Result: Err(Error, code=9)\n",
+            true,
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let source_run = f.run(&["run"]);
+        assert!(source_run.status.success(), "{source}: {source_run:?}");
+        for args in [
+            &["build", "--output", "core.wasm"][..],
+            &["build", "--component", "--output", "component.wasm"][..],
+        ] {
+            let build = f.run(args);
+            assert!(build.status.success(), "{source}: {build:?}");
+        }
+        let bytes = fs::read(f.0.join("component.wasm")).unwrap();
+        let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
+            wit_parser::decoding::decode(&bytes).unwrap()
+        else {
+            panic!("expected component")
+        };
+        let main = resolve.worlds[world]
+            .exports
+            .values()
+            .find_map(|item| match item {
+                wit_parser::WorldItem::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let Some(wit_parser::Type::Id(result_id)) = main.result else {
+            panic!("expected result")
+        };
+        let wit_parser::TypeDefKind::Result(result) = &resolve.types[result_id].kind else {
+            panic!("expected result")
+        };
+        let success = if optional {
+            let Some(wit_parser::Type::Id(option_id)) = result.ok else {
+                panic!("expected option")
+            };
+            let wit_parser::TypeDefKind::Option(success) = resolve.types[option_id].kind else {
+                panic!("expected option")
+            };
+            success
+        } else {
+            result.ok.unwrap()
+        };
+        assert_eq!(success, wit_parser::Type::Char);
+        let core = f.run(&["run", "core.wasm"]);
+        let component = f.run(&["exec", "component.wasm"]);
+        assert!(core.status.success(), "{source}: {core:?}");
+        assert!(component.status.success(), "{source}: {component:?}");
+        assert!(source_run.stderr.is_empty());
+        assert_eq!(component.stderr, core.stderr);
+        assert_eq!(component.stdout, expected.as_bytes(), "{source}");
+        assert_eq!(component.stdout, source_run.stdout, "{source}");
+        assert_eq!(component.stdout, core.stdout, "{source}");
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
 fn component_root_outcome_checked_traps_match_core() {
     let f = Fixture::new();
     f.write(

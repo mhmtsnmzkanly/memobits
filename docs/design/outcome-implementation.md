@@ -123,8 +123,8 @@ fn main() -> i32 {
 
 ## Application entry adapter
 
-- The supported success payloads are `bool`, integers through 64 bits, and
-  `f32` and `f64`. The application adapter accepts zero-argument
+- The supported success payloads are `bool`, `char`, integers through 64 bits,
+  and `f32` and `f64`. The application adapter accepts zero-argument
   `T ! E` and `T ?! E` entries, including aliases. `T?`
   entries, outcomes with aggregate success payloads, other aggregate
   application signatures, and aggregate library exports get LE900.

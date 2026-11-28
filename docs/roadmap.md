@@ -16,7 +16,7 @@ feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 | Backend | size-class guest allocator |
 | Stage 5 step 1 | `mb fmt` |
 | Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime; Wasmi remains the `run`/`test` engine |
-| Stage 5 step 2b, first slice | Scalar application and library components, plus `T ! Error` and `T ?! Error` application outcomes with bool, integer or float `T` and exact root `Error`; derived errors, Unit/char outcome payloads, library outcome exports and other aggregate mappings remain gated |
+| Stage 5 step 2b, first slice | Scalar application and library components, plus `T ! Error` and `T ?! Error` application outcomes with bool, char, integer or float `T` and exact root `Error`; derived errors, Unit outcome payloads, library outcome exports and other aggregate mappings remain gated |
 
 Verification at pause: 1,615 workspace tests passing, 0 failing; every
 example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns

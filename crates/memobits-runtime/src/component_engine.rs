@@ -57,6 +57,7 @@ pub fn run(
                 | Type::U64
                 | Type::Float32
                 | Type::Float64
+                | Type::Char
         )
     };
     let mut outcome_sections = traps::custom_sections(bytes, "memobits.component.outcome");
@@ -204,6 +205,7 @@ fn component_success(value: Val) -> Result<EntrySuccess, RunError> {
         Val::U64(v) => EntrySuccess::U64(v),
         Val::Float32(v) => EntrySuccess::F32(v),
         Val::Float64(v) => EntrySuccess::F64(v),
+        Val::Char(v) => EntrySuccess::Char(v),
         _ => return Err(entry::invalid("invalid component outcome success")),
     })
 }

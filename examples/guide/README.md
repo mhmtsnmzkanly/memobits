@@ -43,7 +43,7 @@ The report lists every test as `test <module>::<name> ... ok` and ends with the
 summary line below (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
 ```text
-test result: ok. 156 passed; 0 failed; 0 filtered out
+test result: ok. 157 passed; 0 failed; 0 filtered out
 ```
 
 `mb test` runs each test in a fresh instance and exits 1 if any fails. Add a
@@ -63,7 +63,7 @@ Result: Ok(i32(42))
 
 For the currently supported component setup and its limits, see
 the [component example](../topics/component/README.md). The guide documents
-application entries returning `T ! Error` or `T ?! Error` with bool, integer
+application entries returning `T ! Error` or `T ?! Error` with bool, char, integer
 or float success payloads and exact root `Error`; the optional form's `Some`,
 `None` and `Err` outcomes have executable facts in `enums_outcomes.mb`. Derived
-errors, Unit and char payloads, and library outcome exports remain gated.
+errors, Unit payloads, and library outcome exports remain gated.

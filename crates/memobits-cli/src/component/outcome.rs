@@ -58,6 +58,7 @@ pub(super) fn prepare(
         Scalar::U64 => (wasm_encoder::PrimitiveValType::U64, 8),
         Scalar::F32 => (wasm_encoder::PrimitiveValType::F32, 4),
         Scalar::F64 => (wasm_encoder::PrimitiveValType::F64, 8),
+        Scalar::Char => (wasm_encoder::PrimitiveValType::Char, 4),
     };
     if u32::from(meta.payload_offset) != align {
         return Err("incompatible outcome layout for component adapter".into());

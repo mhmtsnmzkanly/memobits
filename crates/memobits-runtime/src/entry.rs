@@ -7,6 +7,7 @@ use crate::RunError;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EntrySuccess {
     Bool(bool),
+    Char(char),
     I8(i8),
     I16(i16),
     I32(i32),
@@ -23,6 +24,7 @@ impl fmt::Display for EntrySuccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bool(value) => write!(f, "bool({value})"),
+            Self::Char(value) => write!(f, "char({value:?})"),
             Self::I8(value) => write!(f, "i8({value})"),
             Self::I16(value) => write!(f, "i16({value})"),
             Self::I32(value) => write!(f, "i32({value})"),
@@ -115,6 +117,10 @@ fn read_success(kind: Scalar, payload: &[u8]) -> Result<EntrySuccess, RunError> 
             1 => true,
             _ => return Err(invalid("invalid bool success payload")),
         }),
+        Scalar::Char => EntrySuccess::Char(
+            char::from_u32(u32::from_le_bytes(payload.try_into().unwrap()))
+                .ok_or_else(|| invalid("invalid char success payload"))?,
+        ),
         Scalar::I8 => EntrySuccess::I8(payload[0] as i8),
         Scalar::U8 => EntrySuccess::U8(payload[0]),
         Scalar::I16 => EntrySuccess::I16(i16::from_le_bytes(payload.try_into().unwrap())),
@@ -320,6 +326,78 @@ mod tests {
             run(&with_custom_section(&module, SECTION, &bad), ENTRY_EXPORT),
             Err(invalid("invalid or unsupported entry metadata"))
         );
+    }
+
+    #[test]
+    fn validates_char_outcome_payloads() {
+        for (family, inner) in [(Family::Result, 0), (Family::OptionalResult, 4)] {
+            let metadata = Metadata {
+                family,
+                success: Scalar::Char,
+                payload_offset: 4,
+                inner_offset: inner,
+                size: 12,
+                error_id: 1,
+                error_name: "Error",
+            }
+            .encode()
+            .unwrap();
+            for (value, expected) in [
+                (0, Some('\0')),
+                (0xE9, Some('é')),
+                (0x10FFFF, char::from_u32(0x10FFFF)),
+                (0xD800, None),
+                (0xDFFF, None),
+                (0x110000, None),
+            ] {
+                let mut result = [0; 12];
+                let offset = 4 + usize::from(inner);
+                result[offset..offset + 4].copy_from_slice(&u32::to_le_bytes(value));
+                let bytes = with_custom_section(&guest(16, 12, result, true), SECTION, &metadata);
+                let expected = match expected {
+                    Some(value) => Ok(crate::RunValue::Outcome(match family {
+                        Family::Result => EntryOutcome::Ok(EntrySuccess::Char(value)),
+                        Family::OptionalResult => EntryOutcome::OkSome(EntrySuccess::Char(value)),
+                    })),
+                    None => Err(invalid("invalid char success payload")),
+                };
+                assert_eq!(run(&bytes, ENTRY_EXPORT), expected);
+                #[cfg(feature = "wasmtime")]
+                assert_eq!(
+                    crate::exec_with_capabilities(
+                        &bytes,
+                        ENTRY_EXPORT,
+                        &crate::RunOptions::default(),
+                        &[]
+                    ),
+                    expected
+                );
+            }
+            // Inactive success storage is not a character and must not be validated.
+            let mut error = [0; 12];
+            error[0] = 1;
+            error[4..8].copy_from_slice(&1_u32.to_le_bytes());
+            error[8..12].copy_from_slice(&0xD800_u32.to_le_bytes());
+            let bytes = with_custom_section(&guest(16, 12, error, true), SECTION, &metadata);
+            assert_eq!(
+                run(&bytes, ENTRY_EXPORT),
+                Ok(crate::RunValue::Outcome(EntryOutcome::Err(ReturnedError {
+                    type_name: "Error".into(),
+                    code: 0xD800
+                })))
+            );
+            if family == Family::OptionalResult {
+                let mut none = [0; 12];
+                none[4] = 1;
+                none[8..12].copy_from_slice(&0xD800_u32.to_le_bytes());
+                let bytes = with_custom_section(&guest(16, 12, none, true), SECTION, &metadata);
+                assert_eq!(
+                    run(&bytes, ENTRY_EXPORT),
+                    Ok(crate::RunValue::Outcome(EntryOutcome::OkNone))
+                );
+            }
+        }
+        assert_eq!(EntrySuccess::Char('é').to_string(), "char('é')");
     }
 
     #[test]

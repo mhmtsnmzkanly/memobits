@@ -1294,7 +1294,8 @@ fn outcome_entry(
         Primitive::U64 => Some(entry_abi::Scalar::U64),
         Primitive::F32 => Some(entry_abi::Scalar::F32),
         Primitive::F64 => Some(entry_abi::Scalar::F64),
-        Primitive::Unit | Primitive::Char => None,
+        Primitive::Char => Some(entry_abi::Scalar::Char),
+        Primitive::Unit => None,
     };
     // `T ! E` carries a primitive; `T ?! E` carries an optional primitive.
     let (success, inner_offset, family) = match variants[0].payload.as_slice() {
@@ -1335,7 +1336,7 @@ fn outcome_entry(
         _ => (None, 0, entry_abi::Family::Result),
     };
     let success = success.ok_or(
-        "application entry outcomes require a primitive success payload (bool, integer, or float), or an optional one for `T ?! E`",
+        "application entry outcomes require a primitive success payload (bool, char, integer, or float), or an optional one for `T ?! E`",
     )?;
     let failure_variant = outcome.variants().len() - 1;
     let [Type::Struct(error)] = variants[failure_variant].payload.as_slice() else {

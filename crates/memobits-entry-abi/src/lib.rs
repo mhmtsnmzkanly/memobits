@@ -34,6 +34,7 @@ pub enum Scalar {
     U64 = 9,
     F32 = 10,
     F64 = 11,
+    Char = 12,
 }
 
 impl Scalar {
@@ -50,6 +51,7 @@ impl Scalar {
             9 => Self::U64,
             10 => Self::F32,
             11 => Self::F64,
+            12 => Self::Char,
             _ => return None,
         })
     }
@@ -58,7 +60,7 @@ impl Scalar {
         match self {
             Self::Bool | Self::I8 | Self::U8 => 1,
             Self::I16 | Self::U16 => 2,
-            Self::I32 | Self::U32 | Self::F32 => 4,
+            Self::I32 | Self::U32 | Self::F32 | Self::Char => 4,
             Self::I64 | Self::U64 | Self::F64 => 8,
         }
     }
