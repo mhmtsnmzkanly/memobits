@@ -38,11 +38,23 @@ the ranges to produce a delivery date: work overlaps, can be split or run in
 parallel, and may change after design. Estimates for ownership, packaging, and
 LSP are especially uncertain.
 
+## Next task
+
+Add support for exactly the two-layer `(i32?)?` result of an application entry.
+The Component export must have WIT result type `option<option<s32>>`. Source,
+core Wasm, and Component execution must each preserve all three distinct
+values: `None`, `Some(None)`, and `Some(Some(42))`. Compare their observable
+results in tests, including successful exit status and empty stderr.
+
+This task does not include library returns, other primitive types, deeper option
+nesting, or other composed results. Those are separate follow-on work. Continue
+to reject unsupported forms clearly rather than emitting a lossy interface.
+
 ## Prioritized work
 
 | Priority | Work | Purpose and benefit | Estimate | Dependencies and risks |
 | --- | --- | --- | --- | --- |
-| P1 | Nested options and simple composed results | Represent values such as `i32??` at the Component boundary without confusing `None` with `Some(None)`. | 3–6 days | Each option layer needs correct WIT tags, alignment, and source/core/component parity tests. The current standalone application adapter supports only primitive `T?`. |
+| P1 | Two-layer `(i32?)?` application entry | Preserve `None`, `Some(None)`, and `Some(Some(42))` across source, core Wasm, and Component execution. See [Next task](#next-task) for the exact boundary. | 3–6 days | The two layers need correct WIT tags, alignment, and parity tests. Other nested types and composed results are separate follow-on work. |
 | P1 | Library option and outcome exports | Let explicitly exported library functions return supported `T?`, `T ! Error`, and `T ?! Error` values to other hosts. | 5–10 days | Unlike the application entry, library exports may have parameters and multiple functions. Export naming, canonical adapters, and unsupported signatures need tests. |
 | P1 | Component boundary hardening | Close gaps in WIT name and collision handling, independent type validation, diagnostics, traps, fuel, determinism, and failure atomicity. This makes later mappings safer to build on. | 3–7 days | Some checks already exist; audit coverage first. This does not by itself make the external ABI stable. |
 | P2 | WIT `string` mapping | Exchange text across Component boundaries and support more useful host interactions. | 8–15 days | Requires UTF-8 validation, canonical allocation and transfer, post-return cleanup, and tests for leaks, invalid input, and repeated calls. |
@@ -57,8 +69,9 @@ LSP are especially uncertain.
 
 ## Suggested sequence
 
-1. Extend Components in small slices: nested options, library results, and the
-   boundary checks required by those changes.
+1. Implement the [next task](#next-task), then address library results, other
+   composed values, and the boundary checks required by those changes as
+   separate slices.
 2. Agree on memory ownership and cleanup for external values. Implement `string`
    first, then lists and other aggregates as separate changes.
 3. Settle package identity and local linking, then implement local dependencies.
