@@ -15,20 +15,22 @@ feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 | Stage 4 | function values, anonymous functions, `borrow fn` / `share fn` closures, owned closures, `var fn`, multi-parameter generics with `where`, method generics, `Box<T>` with iterative release, whole-owner reassignment |
 | Backend | size-class guest allocator |
 | Stage 5 step 1 | `mb fmt` |
-| Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime; Wasmi remains the `run`/`test` engine |
-| Stage 5 step 2b, first slice | Scalar application and library components, plus `T ! Error` and `T ?! Error` application outcomes with bool, char, integer or float `T` and exact root `Error`; derived errors, Unit outcome payloads, library outcome exports and other aggregate mappings remain gated |
+| Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime, with tested engine parity for supported artifacts; Wasmi remains the `run`/`test` engine |
+| Stage 5 step 2b, first slice | Scalar application and library components, plus application `T ! Error` and `T ?! Error` outcomes with bool, char, integer or float `T` and exact root `Error`; derived errors, Unit outcome payloads, library outcome exports and other aggregate mappings remain gated |
+| Stage 5 step 2c, first slice | CLI console capability through a WIT import |
 
-Verification at pause: 1,615 workspace tests passing, 0 failing; every
-example passes `mb check`, `mb test` and `mb fmt --check`; the guide returns
-`Result: Ok(i32(42))` from source and standalone Wasm with empty stderr.
+Verification at pause: 1,645 workspace tests passing, 0 failing, and 801 tests
+passing in the CLI with default features disabled. The guide passes 157 tests; its source, core
+Wasm and Component runs each return `Result: Ok(i32(42))` with empty stderr.
 
 ## Next: Stage 5 (outside world)
 
-1. **S5-2b/c Component Model** — see the 2026-11-26 decision in
-   [design/decisions.md](design/decisions.md) and the
-   [component interface design](design/component-model-contract.md). Scalar
-   components and the WIT console import are implemented; aggregate mappings,
-   other capabilities and broader Component Model support remain open.
+1. **S5-2b/c Component Model** — continue from the shipped first slices; see
+   the 2026-11-26 decision in [design/decisions.md](design/decisions.md) and the
+   [component interface design](design/component-model-contract.md). Other aggregate
+   mappings, derived errors, Unit outcome payloads, library outcome exports,
+   additional WIT host capabilities and broader Component Model support remain
+   open.
 2. **S5-3 packages** — dependencies in `project.toml`, package identity,
    cross-package extensions (see PKG-03/PKG-04 in the inventory).
 3. **S5-4 LSP** — diagnostics, go-to-definition, completion.

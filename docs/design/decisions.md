@@ -1932,25 +1932,33 @@ R1 owning overwrite and the H3 generics step).
 - Known limit: dense inline block comments can push a line across the width limit between the
   first and second pass; the self-check then reports PE008 and leaves the file untouched.
 
-## Execution engines and the Component Model (2026-11-26, user decision; not implemented yet)
+<a id="execution-engines-and-the-component-model-2026-11-26-user-decision-not-implemented-yet"></a>
 
-> The core-module `mb exec` portion is implemented; Component Model and WIT work remain future stages. See the [roadmap](../roadmap.md).
+## Execution engines and the Component Model (2026-11-26, user decision)
+
+> Implementation status: S5-2a is complete. S5-2b and S5-2c have shipped first slices; other aggregate mappings and additional host capabilities remain future work. See the [roadmap](../roadmap.md) for current limits.
 
 - Two engines are used, selected by command rather than by a flag:
   - `mb run` and `mb test` use **wasmi** (interpreter: instant start, fuel
     limits, detailed trap reports) for the development loop;
-  - `mb build` produces artifacts (`--component` will produce a WebAssembly
-    Component with its WIT world);
-  - a new `mb exec` runs built artifacts and Components with **wasmtime**
-    (Cranelift JIT, near-native speed, Component Model and WASI 0.2).
-  The same `.wasm` must produce the same results under `mb run` and
-  `mb exec`; a parity test suite will enforce it. wasmtime is built behind a
+  - `mb build` produces core artifacts and, with `--component`, supported
+    WebAssembly Components with their WIT world;
+  - `mb exec` runs built artifacts and supported Components with **wasmtime**
+    (Cranelift JIT and the Component Model).
+  Core `.wasm` behavior is covered by engine parity tests for `mb run` and
+  `mb exec`. wasmtime is built behind a
   Cargo feature that is enabled by default for `mb`.
-- The Component Model is the external ABI direction: exported signatures map
-  `string`→`string`, `List<T>`→`list<T>`, `T?`→`option<T>`, `T ! E`→
-  `result<T, E>`, structs→`record`, enums→`variant`, tuples→`tuple`, names
-  in kebab-case; host capabilities (including today's `console.write_i32`)
-  move to WIT imports mapped from `[host] profile`.
-- Planned order: (1) `mb exec` with wasmtime + engine parity tests,
-  (2) WIT type mapping and `mb build --component`, (3) host capabilities as
-  WIT imports.
+- The Component Model is the external ABI direction: supported exported
+  signatures map scalar types and selected error outcomes; the broader mapping
+  plan includes `string`→`string`, `List<T>`→`list<T>`, `T?`→`option<T>`,
+  `T ! E`→`result<T, E>`, structs→`record`, enums→`variant`, tuples→`tuple`,
+  with names in kebab-case. This broader mapping is not fully implemented.
+- The CLI console capability is available through a WIT import. Additional
+  host capabilities mapped from `[host] profile` remain future work.
+- Original planned order and current status: (1) `mb exec` with wasmtime and
+  engine parity tests — complete; (2) WIT type mapping and
+  `mb build --component` — partial, with scalar components and a limited
+  application outcome slice shipped; (3) host capabilities as WIT imports —
+  partial, with the CLI console import shipped. Other aggregate mappings, derived
+  errors, Unit outcome payloads, library outcome exports and additional
+  capabilities remain gated.
