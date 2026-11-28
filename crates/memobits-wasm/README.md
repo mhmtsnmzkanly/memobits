@@ -7,7 +7,7 @@ application entry export or library export aliases; the backend does not infer
 project visibility or roots.
 
 `compile_application_traced` exports the selected entry as `main`. A zero-argument
-entry returning `T ! E` or `T ?! E` with a primitive success payload uses
+entry returning primitive `T?`, `T ! E` or `T ?! E` with a primitive success payload uses
 the private [outcome entry adapter](../../docs/design/outcome-implementation.md).
 It exports an address/size wrapper and its backing memory, and records decoding
 metadata in `memobits.entry`. Library exports use scalar signatures.

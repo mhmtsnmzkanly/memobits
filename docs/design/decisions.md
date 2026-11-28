@@ -1949,7 +1949,7 @@ R1 owning overwrite and the H3 generics step).
   `mb exec`. wasmtime is built behind a
   Cargo feature that is enabled by default for `mb`.
 - The Component Model is the external ABI direction: supported exported
-  signatures map scalar types and selected error outcomes; the broader mapping
+  signatures map scalar types, primitive application options and selected error outcomes; the broader mapping
   plan includes `string`→`string`, `List<T>`→`list<T>`, `T?`→`option<T>`,
   `T ! E`→`result<T, E>`, structs→`record`, enums→`variant`, tuples→`tuple`,
   with names in kebab-case. This broader mapping is not fully implemented.
@@ -1957,8 +1957,8 @@ R1 owning overwrite and the H3 generics step).
   host capabilities mapped from `[host] profile` remain future work.
 - Original planned order and current status: (1) `mb exec` with wasmtime and
   engine parity tests — complete; (2) WIT type mapping and
-  `mb build --component` — partial, with scalar components and a limited
+  `mb build --component` — partial, with scalar components, primitive application options and a limited
   application outcome slice shipped; (3) host capabilities as WIT imports —
   partial, with the CLI console import shipped. Other aggregate mappings, derived
-  errors, Unit outcome payloads, library outcome exports and additional
+  errors, Unit outcome payloads, library option and outcome exports and additional
   capabilities remain gated.

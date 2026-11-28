@@ -125,7 +125,7 @@ fn main() -> i32 {
 
 - The supported success payloads are `bool`, `char`, integers through 64 bits,
   and `f32` and `f64`. The application adapter accepts zero-argument
-  `T ! E` and `T ?! E` entries, including aliases. `T?`
+  `T?`, `T ! E` and `T ?! E` entries, including aliases. Nested `T?`
   entries, outcomes with aggregate success payloads, other aggregate
   application signatures, and aggregate library exports get LE900.
 - The internal version 2 adapter exports `main` with two Wasm `i32` results
@@ -134,20 +134,22 @@ fn main() -> i32 {
   retains the full configured stack budget.
 - The `memobits.entry` custom section carries a version byte, outcome family,
   success primitive tag, payload offset, optional inner offset (zero for
-  `T ! E`; for `T ?! E` the offset of the scalar inside the `Option` cell, whose
-  tag byte at the payload offset is 0 for `Some` and 1 for `None`), and the
-  little-endian result size
-  and declared Error ID. A bounded UTF-8 name follows the header. Version 2
-  (it replaced the three-state family of version 1 with `T ?! E`) records only the declared `E`. Owning a concrete error through an ancestor
-  type requires a separate conversion feature. The host checks the stored tag
-  against the declared ID before displaying the qualified concrete name and
+  `T ! E` and `T?`; for `T ?! E` the scalar offset inside the `Option` cell),
+  the little-endian result size and declared Error ID. Option tags are 0 for
+  `Some` and 1 for `None`. A bounded UTF-8 error name follows the header;
+  standalone `T?` uses error ID 0 and an empty name. For outcomes, version 2
+  (which replaced the three-state family of version 1 with `T ?! E`) records
+  only the declared `E`. Owning a concrete error through an ancestor type
+  requires a separate conversion feature. The host checks the stored error
+  identity against the declared ID before displaying the qualified concrete name and
   `code`.
 - The runner checks metadata size and values, rejects duplicate sections and
   control characters in names, and checks the adapter signature, memory,
   returned size, address alignment, bounds, and active variant before
-  rendering. Source and standalone artifact runs share the decoder. `Ok(v)`,
-  `Ok(Some(v))`, `Ok(None)` and `Err` are normal returns printed on stdout
-  (`Result: Ok(i32(42))`, `Result: Ok(Some(bool(true)))`, `Result: Ok(None)`,
+  rendering. Source and standalone artifact runs share the decoder. `Some(v)`,
+  `None`, `Ok(v)`, `Ok(Some(v))`, `Ok(None)` and `Err` are normal returns printed on stdout
+  (`Result: Some(i32(42))`, `Result: None`, `Result: Ok(i32(42))`,
+  `Result: Ok(Some(bool(true)))`, `Result: Ok(None)`,
   `Result: Err(Error, code=5)`). Guest traps use runtime
   diagnostics. This adapter is private to the current backend and runner.
 

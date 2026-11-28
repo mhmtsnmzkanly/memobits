@@ -7,7 +7,7 @@ representation. Standalone scalar results carry no source-level signedness
 or narrow integer type.
 
 For `main` with a `memobits.entry` custom section, the runner validates the
-private adapter and decodes its return cell as `RunValue::Outcome(EntryOutcome)` (`Ok`, `OkSome`, `OkNone` or `Err`).
+private adapter and decodes its return cell as `RunValue::Option` (`Some` or `None`) or `RunValue::Outcome(EntryOutcome)` (`Ok`, `OkSome`, `OkNone` or `Err`).
 Success payloads retain their Memobits primitive types. `Err`
 carries the qualified concrete error name (or `Error` for the root) and its
 `u32` code. Malformed adapter metadata, signatures, or return cells report

@@ -16,19 +16,19 @@ feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
 | Backend | size-class guest allocator |
 | Stage 5 step 1 | `mb fmt` |
 | Stage 5 step 2a | `mb exec` for core Wasm via Wasmtime, with tested engine parity for supported artifacts; Wasmi remains the `run`/`test` engine |
-| Stage 5 step 2b, first slice | Scalar application and library components, plus application `T ! Error` and `T ?! Error` outcomes with bool, char, integer or float `T` and exact root `Error`; derived errors, Unit outcome payloads, library outcome exports and other aggregate mappings remain gated |
+| Stage 5 step 2b, first slice | Scalar application and library components, plus application `T?`, `T ! Error` and `T ?! Error` with bool, char, integer or float `T`; outcome forms require exact root `Error`. Nested options, aggregate payloads, derived errors, Unit outcome payloads, library option/outcome exports and other aggregate mappings remain gated |
 | Stage 5 step 2c, first slice | CLI console capability through a WIT import |
 
-Verification at pause: 1,645 workspace tests passing, 0 failing, and 801 tests
-passing in the CLI with default features disabled. The guide passes 157 tests; its source, core
+Verification at pause: 1,653 workspace tests passing, 0 failing, and 802 tests
+passing in the CLI with default features disabled. The guide passes 158 tests; its source, core
 Wasm and Component runs each return `Result: Ok(i32(42))` with empty stderr.
 
 ## Next: Stage 5 (outside world)
 
 1. **S5-2b/c Component Model** — continue from the shipped first slices; see
    the 2026-11-26 decision in [design/decisions.md](design/decisions.md) and the
-   [component interface design](design/component-model-contract.md). Other aggregate
-   mappings, derived errors, Unit outcome payloads, library outcome exports,
+   [component interface design](design/component-model-contract.md). Nested options, other aggregate
+   mappings, derived errors, Unit outcome payloads, library option and outcome exports,
    additional WIT host capabilities and broader Component Model support remain
    open.
 2. **S5-3 packages** — dependencies in `project.toml`, package identity,

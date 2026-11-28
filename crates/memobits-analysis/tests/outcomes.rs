@@ -28,6 +28,31 @@ fn option_aliases_construct_match_and_cross_calls() {
 }
 
 #[test]
+fn option_template_provenance_survives_lowering_without_marking_lookalikes() {
+    let program = lower(
+        "type Fake [Some(i32), None]
+         type Maybe = i32?;
+         fn main() -> Maybe {
+             let fake := Fake::Some(1);
+             let nested: Maybe? = Some(Some(2));
+             Some(7)
+         }",
+    );
+    let fake = program
+        .types
+        .iter()
+        .find(|ty| ty.path.name == "Fake")
+        .unwrap();
+    assert_eq!(fake.entry_outcome, None);
+    let marked = program
+        .types
+        .iter()
+        .filter(|ty| ty.entry_outcome == Some(memobits_ir::EntryOutcome::Option))
+        .count();
+    assert_eq!(marked, 2);
+}
+
+#[test]
 fn option_aggregate_payload_moves_remain_checked() {
     let program = lower(
         "type Maybe = array<i32, 2>?;

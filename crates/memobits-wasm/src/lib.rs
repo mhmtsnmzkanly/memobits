@@ -1276,7 +1276,9 @@ fn outcome_entry(
         return Ok(None);
     };
     if !function.signature.parameters.is_empty() {
-        return Err("`T ! E` and `T ?! E` application entries must take no parameters".into());
+        return Err(
+            "`T?`, `T ! E` and `T ?! E` application entries must take no parameters".into(),
+        );
     }
 
     let TypeDefKind::Enum { variants } = &definition.kind else {
@@ -1297,6 +1299,42 @@ fn outcome_entry(
         Primitive::Char => Some(entry_abi::Scalar::Char),
         Primitive::Unit => None,
     };
+    if outcome == memobits_ir::EntryOutcome::Option {
+        let success = match variants[0].payload.as_slice() {
+            [Type::Primitive(kind)] => scalar(kind),
+            _ => None,
+        }
+        .ok_or(
+            "application entry option requires a primitive payload (bool, char, integer, or float)",
+        )?;
+        let layout = &layouts[id.0 as usize];
+        let payload_offset =
+            layout.enum_layout.as_ref().expect("laid out enum").variants[0].offsets[0];
+        let size = layout.size;
+        let metadata = entry_abi::Metadata {
+            family: entry_abi::Family::Option,
+            success,
+            payload_offset: payload_offset
+                .try_into()
+                .map_err(|_| "invalid entry payload offset")?,
+            inner_offset: 0,
+            size,
+            error_id: 0,
+            error_name: "",
+        }
+        .encode()
+        .ok_or("application entry option does not fit the version 2 metadata format")?;
+        let address = static_layout.reserve(size).map_err(|error| match error {
+            LayoutError::AddressOverflow => "application entry result exceeds the 32-bit memory",
+            LayoutError::PageLimit => "application entry result exceeds the supported memory size",
+        })?;
+        return Ok(Some(EntryAdapter {
+            address,
+            size,
+            metadata,
+            static_layout,
+        }));
+    }
     // `T ! E` carries a primitive; `T ?! E` carries an optional primitive.
     let (success, inner_offset, family) = match variants[0].payload.as_slice() {
         [Type::Primitive(kind)] => (scalar(kind), 0, entry_abi::Family::Result),
@@ -1305,7 +1343,8 @@ fn outcome_entry(
             let optional = match &definition.kind {
                 TypeDefKind::Enum { variants } => match variants.as_slice() {
                     [some, none]
-                        if some.name == "Some"
+                        if definition.entry_outcome == Some(memobits_ir::EntryOutcome::Option)
+                            && some.name == "Some"
                             && none.name == "None"
                             && none.payload.is_empty()
                             && definition.error_ancestry.is_none() =>

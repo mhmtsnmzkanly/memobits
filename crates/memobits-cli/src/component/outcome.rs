@@ -9,6 +9,7 @@ use wasm_encoder::{
 pub(super) struct Adapter {
     pub success: wasm_encoder::PrimitiveValType,
     pub optional: bool,
+    pub standalone: bool,
     pub module: Vec<u8>,
 }
 
@@ -19,30 +20,37 @@ pub(super) fn prepare(
 ) -> Result<Option<Adapter>, String> {
     let Type::Enum(id) = ty else { return Ok(None) };
     let def = &program.types[id.0 as usize];
-    if def.entry_outcome.is_none() {
-        return Ok(None);
-    }
-    let TypeDefKind::Enum { variants } = &def.kind else {
-        return Ok(None);
+    let standalone = match def.entry_outcome {
+        Some(memobits_ir::EntryOutcome::Option) => true,
+        Some(memobits_ir::EntryOutcome::Result) => false,
+        None => return Ok(None),
     };
-    let [Type::Struct(error)] = variants[1].payload.as_slice() else {
-        return Ok(None);
-    };
-    let error = &program.types[error.0 as usize];
-    let TypeDefKind::Struct { fields } = &error.kind else {
-        return Ok(None);
-    };
-    if error.error_ancestry != Some(ErrorAncestry::Root)
-        || fields.len() != 1
-        || fields[0].name != "code"
-        || fields[0].ty != Type::Primitive(Primitive::U32)
-    {
-        return Err("component outcomes currently require the exact root Error type".into());
+    if !standalone {
+        let TypeDefKind::Enum { variants } = &def.kind else {
+            return Ok(None);
+        };
+        let [Type::Struct(error)] = variants[1].payload.as_slice() else {
+            return Ok(None);
+        };
+        let error = &program.types[error.0 as usize];
+        let TypeDefKind::Struct { fields } = &error.kind else {
+            return Ok(None);
+        };
+        if error.error_ancestry != Some(ErrorAncestry::Root)
+            || fields.len() != 1
+            || fields[0].name != "code"
+            || fields[0].ty != Type::Primitive(Primitive::U32)
+        {
+            return Err("component outcomes currently require the exact root Error type".into());
+        }
     }
     let data = memobits_runtime::custom_section(core, memobits_entry_abi::SECTION)
         .ok_or("missing outcome metadata")?;
     let meta = Metadata::decode(data).ok_or("invalid outcome metadata")?;
-    if meta.error_name != "Error" {
+    if standalone != (meta.family == Family::Option) {
+        return Err("incompatible component option metadata".into());
+    }
+    if !standalone && meta.error_name != "Error" {
         return Err("component outcomes currently require the exact root Error type".into());
     }
     let optional = meta.family == Family::OptionalResult;
@@ -59,6 +67,11 @@ pub(super) fn prepare(
         Scalar::F32 => (wasm_encoder::PrimitiveValType::F32, 4),
         Scalar::F64 => (wasm_encoder::PrimitiveValType::F64, 8),
         Scalar::Char => (wasm_encoder::PrimitiveValType::Char, 4),
+    };
+    let align = if standalone {
+        meta.success.width()
+    } else {
+        align
     };
     if u32::from(meta.payload_offset) != align {
         return Err("incompatible outcome layout for component adapter".into());
@@ -116,70 +129,85 @@ pub(super) fn prepare(
     body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
     body.instruction(&Instruction::Unreachable);
     body.instruction(&Instruction::End);
-    body.instruction(&Instruction::LocalGet(0));
-    body.instruction(&Instruction::I32Load8U(MemArg {
-        offset: 0,
-        align: 0,
-        target: wasm_encoder::MemArgTarget::Memory(0),
-        ordering: None,
-    }));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::I32Eq);
-    body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-    let payload = u64::from(meta.payload_offset);
-    body.instruction(&Instruction::LocalGet(0));
-    body.instruction(&Instruction::I32Load(MemArg {
-        offset: payload,
-        align: 2,
-        target: wasm_encoder::MemArgTarget::Memory(0),
-        ordering: None,
-    }));
-    body.instruction(&Instruction::I32Const(meta.error_id as i32));
-    body.instruction(&Instruction::I32Ne);
-    body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-    body.instruction(&Instruction::Unreachable);
-    body.instruction(&Instruction::End);
-    // The private layout prefixes Error.code with an internal identity word.
-    // Canonical `record { code: u32 }` has only the code word.
-    body.instruction(&Instruction::LocalGet(0));
-    body.instruction(&Instruction::LocalGet(0));
-    body.instruction(&Instruction::I32Load(MemArg {
-        offset: payload + 4,
-        align: 2,
-        target: wasm_encoder::MemArgTarget::Memory(0),
-        ordering: None,
-    }));
-    body.instruction(&Instruction::I32Store(MemArg {
-        offset: payload,
-        align: 2,
-        target: wasm_encoder::MemArgTarget::Memory(0),
-        ordering: None,
-    }));
-    if optional {
-        body.instruction(&Instruction::Else);
-        // Private option tags are Some=0, None=1, the reverse of canonical
-        // option tags. The scalar payload itself is already correctly aligned.
-        let option = MemArg {
-            offset: payload,
+    if standalone {
+        let tag = MemArg {
+            offset: 0,
             align: 0,
             target: wasm_encoder::MemArgTarget::Memory(0),
             ordering: None,
         };
         body.instruction(&Instruction::LocalGet(0));
-        body.instruction(&Instruction::I32Load8U(option));
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::I32Load8U(tag));
         body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::I32GtU);
+        body.instruction(&Instruction::I32Xor);
+        body.instruction(&Instruction::I32Store8(tag));
+    } else {
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::I32Load8U(MemArg {
+            offset: 0,
+            align: 0,
+            target: wasm_encoder::MemArgTarget::Memory(0),
+            ordering: None,
+        }));
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        let payload = u64::from(meta.payload_offset);
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::I32Load(MemArg {
+            offset: payload,
+            align: 2,
+            target: wasm_encoder::MemArgTarget::Memory(0),
+            ordering: None,
+        }));
+        body.instruction(&Instruction::I32Const(meta.error_id as i32));
+        body.instruction(&Instruction::I32Ne);
         body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
         body.instruction(&Instruction::Unreachable);
         body.instruction(&Instruction::End);
+        // The private layout prefixes Error.code with an internal identity word.
+        // Canonical `record { code: u32 }` has only the code word.
         body.instruction(&Instruction::LocalGet(0));
         body.instruction(&Instruction::LocalGet(0));
-        body.instruction(&Instruction::I32Load8U(option));
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::I32Xor);
-        body.instruction(&Instruction::I32Store8(option));
+        body.instruction(&Instruction::I32Load(MemArg {
+            offset: payload + 4,
+            align: 2,
+            target: wasm_encoder::MemArgTarget::Memory(0),
+            ordering: None,
+        }));
+        body.instruction(&Instruction::I32Store(MemArg {
+            offset: payload,
+            align: 2,
+            target: wasm_encoder::MemArgTarget::Memory(0),
+            ordering: None,
+        }));
+        if optional {
+            body.instruction(&Instruction::Else);
+            // Private option tags are Some=0, None=1, the reverse of canonical
+            // option tags. The scalar payload itself is already correctly aligned.
+            let option = MemArg {
+                offset: payload,
+                align: 0,
+                target: wasm_encoder::MemArgTarget::Memory(0),
+                ordering: None,
+            };
+            body.instruction(&Instruction::LocalGet(0));
+            body.instruction(&Instruction::I32Load8U(option));
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32GtU);
+            body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            body.instruction(&Instruction::Unreachable);
+            body.instruction(&Instruction::End);
+            body.instruction(&Instruction::LocalGet(0));
+            body.instruction(&Instruction::LocalGet(0));
+            body.instruction(&Instruction::I32Load8U(option));
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Xor);
+            body.instruction(&Instruction::I32Store8(option));
+        }
+        body.instruction(&Instruction::End);
     }
-    body.instruction(&Instruction::End);
     body.instruction(&Instruction::LocalGet(0));
     body.instruction(&Instruction::End);
     let mut code = CodeSection::new();
@@ -193,6 +221,7 @@ pub(super) fn prepare(
     Ok(Some(Adapter {
         success,
         optional,
+        standalone,
         module: module.finish(),
     }))
 }

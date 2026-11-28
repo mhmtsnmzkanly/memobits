@@ -10,16 +10,16 @@ Application output exposes the selected package entry as `main`. Library output
 uses the external aliases from the manifest export table and starts resolution
 from those exports. It must not introduce the application entry automatically.
 Library function exports use scalar signatures. A zero-argument application
-entry returning `T ! E` or `T ?! E` with a primitive success payload uses
+entry returning primitive `T?`, `T ! E` or `T ?! E` with a primitive success payload uses
 the private [outcome entry adapter](outcome-implementation.md). Other aggregate
 application signatures and aggregate library exports are rejected with LE900.
 
 The default output is an experimental core Wasm module. `mb build --component`
 can also produce application and library components with scalar
-parameters and scalar or Unit results, as well as `T ! Error` or `T ?! Error`
-application outcomes with bool, char, integer or float `T` and exact
-root `Error`; see the [component contract](component-model-contract.md) for
-gates. Outcome signatures remain unsupported for library exports.
+parameters and scalar or Unit results, as well as application `T?`, `T ! Error`
+or `T ?! Error` with bool, char, integer or float `T`; result forms require
+exact root `Error`; see the [component contract](component-model-contract.md) for
+gates. Option and outcome signatures remain unsupported for library exports.
 Neither form carries a stable Memobits ABI, dependency packaging, or a
 compatibility promise. Typed host imports are supported through the current
 experimental `extern` interface and the WIT console import. Other component host imports remain pending.

@@ -65,14 +65,20 @@ pub fn run(
     if outcome_sections.next().is_some() {
         return Err(entry::invalid("duplicate component outcome metadata"));
     }
-    if marker.is_some_and(|value| value != b"root-error-v1" && value != b"root-optional-error-v1") {
+    if marker.is_some_and(|value| {
+        value != b"root-error-v1"
+            && value != b"root-optional-error-v1"
+            && value != b"root-option-v1"
+    }) {
         return Err(entry::invalid(
             "invalid or unsupported component outcome metadata",
         ));
     }
     let optional_outcome = marker == Some(&b"root-optional-error-v1"[..]);
+    let root_option = marker == Some(&b"root-option-v1"[..])
+        && matches!(results.as_slice(), [Type::Option(option)] if scalar(&option.ty()));
     let root_outcome = match results.as_slice() {
-        [Type::Result(result)] if marker.is_some() => {
+        [Type::Result(result)] if marker.is_some() && marker != Some(&b"root-option-v1"[..]) => {
             (if optional_outcome {
                 matches!(result.ok(), Some(Type::Option(ref option)) if scalar(&option.ty()))
             } else {
@@ -82,7 +88,13 @@ pub fn run(
         }
         _ => false,
     };
+    if marker == Some(&b"root-option-v1"[..]) && !root_option {
+        return Err(entry::invalid(
+            "component option metadata does not match its result",
+        ));
+    }
     if !root_outcome
+        && !root_option
         && !matches!(
             results.as_slice(),
             [] | [Type::Bool
@@ -160,6 +172,9 @@ pub fn run(
         Some(Val::U64(v)) => RunValue::I64(v as i64),
         Some(Val::Float32(v)) => RunValue::F32(v),
         Some(Val::Float64(v)) => RunValue::F64(v),
+        Some(Val::Option(value)) if root_option => {
+            RunValue::Option(value.map(|v| component_success(*v)).transpose()?)
+        }
         Some(Val::Result(Ok(Some(value)))) if root_outcome => {
             let outcome = if optional_outcome {
                 match *value {
@@ -187,7 +202,9 @@ pub fn run(
                 code: *code,
             }))
         }
-        _ if root_outcome => return Err(entry::invalid("invalid component outcome")),
+        _ if root_outcome || root_option => {
+            return Err(entry::invalid("invalid component outcome"))
+        }
         _ => unreachable!("validated scalar component result"),
     })
 }

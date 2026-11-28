@@ -148,8 +148,7 @@ pub fn run_with_capabilities(
         let memory = instance
             .get_memory(&mut store, entry_abi::MEMORY_EXPORT)
             .ok_or_else(|| entry::invalid("missing entry memory"))?;
-        return entry::decode(metadata, memory.data(&store), *address as u32, *size as u32)
-            .map(RunValue::Outcome);
+        return entry::decode(metadata, memory.data(&store), *address as u32, *size as u32);
     }
     match results.into_iter().next() {
         None => Ok(RunValue::Unit),

@@ -18,6 +18,8 @@ pub enum Family {
     /// `T ?! E` (`Result<Option<T>, E>`): the `Ok` payload is an optional cell
     /// whose tag (0 = `Some`, 1 = `None`) sits at `payload_offset`.
     OptionalResult,
+    /// `T?`: tag 0 is `Some(T)`, tag 1 is `None`.
+    Option,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +73,7 @@ pub struct Metadata<'a> {
     pub family: Family,
     pub success: Scalar,
     pub payload_offset: u8,
-    /// Offset of the scalar from `payload_offset` for `OptionalResult`; zero for `Result`.
+    /// Offset of the scalar from `payload_offset` for `OptionalResult`; zero otherwise.
     pub inner_offset: u8,
     pub size: u32,
     pub error_id: u32,
@@ -86,6 +88,7 @@ impl<'a> Metadata<'a> {
         let family = match self.family {
             Family::Result => 1,
             Family::OptionalResult => 2,
+            Family::Option => 3,
         };
         let mut bytes = vec![
             VERSION,
@@ -101,7 +104,7 @@ impl<'a> Metadata<'a> {
     }
 
     pub fn decode(bytes: &'a [u8]) -> Option<Self> {
-        if !(HEADER_BYTES + 1..=HEADER_BYTES + MAX_NAME_BYTES).contains(&bytes.len()) {
+        if !(HEADER_BYTES..=HEADER_BYTES + MAX_NAME_BYTES).contains(&bytes.len()) {
             return None;
         }
         let [VERSION, family, scalar, payload_offset, inner_offset] = bytes[..5] else {
@@ -111,6 +114,7 @@ impl<'a> Metadata<'a> {
             family: match family {
                 1 => Family::Result,
                 2 => Family::OptionalResult,
+                3 => Family::Option,
                 _ => return None,
             },
             success: Scalar::from_tag(scalar)?,
@@ -125,6 +129,14 @@ impl<'a> Metadata<'a> {
 
     fn valid(self) -> bool {
         let offset = u32::from(self.payload_offset);
+        if self.family == Family::Option {
+            return offset == self.success.width()
+                && self.inner_offset == 0
+                && self.size >= offset + self.success.width()
+                && self.size.is_multiple_of(offset)
+                && self.error_id == 0
+                && self.error_name.is_empty();
+        }
         matches!(offset, 4 | 8)
             && offset >= self.success.width()
             && match self.family {
@@ -133,6 +145,7 @@ impl<'a> Metadata<'a> {
                     u32::from(self.inner_offset) == self.success.width()
                         && self.size >= offset + u32::from(self.inner_offset) + self.success.width()
                 }
+                Family::Option => unreachable!("handled above"),
             }
             && self.size >= offset + ERROR_ID_BYTES + 4
             && self.size.is_multiple_of(offset)
@@ -142,5 +155,87 @@ impl<'a> Metadata<'a> {
                 .error_name
                 .chars()
                 .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_option_metadata_round_trips_and_rejects_invalid_shapes() {
+        for scalar in [Scalar::Bool, Scalar::I16, Scalar::Char, Scalar::I64] {
+            let width = scalar.width();
+            let metadata = Metadata {
+                family: Family::Option,
+                success: scalar,
+                payload_offset: width as u8,
+                inner_offset: 0,
+                size: width * 2,
+                error_id: 0,
+                error_name: "",
+            };
+            let encoded = metadata.encode().unwrap();
+            assert_eq!(encoded.len(), HEADER_BYTES);
+            assert_eq!(Metadata::decode(&encoded), Some(metadata));
+            assert!(Metadata {
+                error_id: 1,
+                ..metadata
+            }
+            .encode()
+            .is_none());
+            assert!(Metadata {
+                error_name: "Error",
+                ..metadata
+            }
+            .encode()
+            .is_none());
+            assert!(Metadata {
+                inner_offset: 1,
+                ..metadata
+            }
+            .encode()
+            .is_none());
+            assert!(Metadata {
+                size: width,
+                ..metadata
+            }
+            .encode()
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn error_outcome_metadata_still_requires_error_identity_and_name() {
+        for family in [Family::Result, Family::OptionalResult] {
+            let metadata = Metadata {
+                family,
+                success: Scalar::I32,
+                payload_offset: 4,
+                inner_offset: if family == Family::OptionalResult {
+                    4
+                } else {
+                    0
+                },
+                size: 12,
+                error_id: 1,
+                error_name: "Error",
+            };
+            let encoded = metadata.encode().unwrap();
+            assert_eq!(Metadata::decode(&encoded), Some(metadata));
+            assert!(Metadata {
+                error_id: 0,
+                ..metadata
+            }
+            .encode()
+            .is_none());
+            assert!(Metadata {
+                error_name: "",
+                ..metadata
+            }
+            .encode()
+            .is_none());
+            assert!(Metadata::decode(&encoded[..HEADER_BYTES]).is_none());
+        }
     }
 }

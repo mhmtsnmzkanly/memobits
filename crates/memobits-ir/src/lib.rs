@@ -76,16 +76,18 @@ pub enum ErrorAncestry {
     Derived(TypeId),
 }
 
-/// Compiler-known outcome families permitted at an application entry.
+/// Compiler-known enum templates that may be used at an application entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryOutcome {
     Result,
+    Option,
 }
 
 impl EntryOutcome {
     pub fn variants(self) -> &'static [&'static str] {
         match self {
             Self::Result => &["Ok", "Err"],
+            Self::Option => &["Some", "None"],
         }
     }
 }
@@ -103,7 +105,7 @@ impl TypeDef {
     fn is_scalar_option(&self, name: &str, payload: Primitive) -> bool {
         self.path.name == name
             && self.error_ancestry.is_none()
-            && self.entry_outcome.is_none()
+            && matches!(self.entry_outcome, None | Some(EntryOutcome::Option))
             && matches!(&self.kind, TypeDefKind::Enum { variants }
                 if matches!(&variants[..], [some, none]
                     if some.name == "Some" && some.payload == [Type::Primitive(payload)]
@@ -113,7 +115,7 @@ impl TypeDef {
     fn borrow_option_referent(&self) -> Option<&Type> {
         if !(self.path.name.starts_with("(borrow ") && self.path.name.ends_with(")?"))
             || self.error_ancestry.is_some()
-            || self.entry_outcome.is_some()
+            || !matches!(self.entry_outcome, None | Some(EntryOutcome::Option))
         {
             return None;
         }
@@ -1082,11 +1084,14 @@ impl Program {
                                 .zip(names)
                                 .all(|(variant, name)| variant.name == *name)
                             && variants[0].payload.len() == 1
-                            && matches!(
-                                variants[names.len() - 1].payload.as_slice(),
-                                [Type::Struct(id)] if self.types.get(id.0 as usize)
-                                    .is_some_and(|ty| ty.error_ancestry.is_some())
-                            )
+                            && match outcome {
+                                EntryOutcome::Result => matches!(
+                                    variants[1].payload.as_slice(),
+                                    [Type::Struct(id)] if self.types.get(id.0 as usize)
+                                        .is_some_and(|ty| ty.error_ancestry.is_some())
+                                ),
+                                EntryOutcome::Option => variants[1].payload.is_empty(),
+                            }
                     }
                     _ => false,
                 };
@@ -1429,7 +1434,7 @@ fn option_matches(program: &Program, element: Option<&Type>, output: Option<&Typ
             .is_some_and(|definition| {
                 definition.path.name.ends_with('?')
                     && definition.error_ancestry.is_none()
-                    && definition.entry_outcome.is_none()
+                    && matches!(definition.entry_outcome, None | Some(EntryOutcome::Option))
                     && matches!(&definition.kind, TypeDefKind::Enum { variants }
                         if matches!(&variants[..], [some, none]
                             if some.name == "Some" && some.payload == [element.clone()]

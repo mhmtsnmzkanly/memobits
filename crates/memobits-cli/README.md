@@ -359,8 +359,8 @@ direct concat, or a direct internal String-returning call. See the
 and its [Wasm limits](../../docs/design/owned-heap-foundation.md#local-structs-with-string-fields).
 
 Application builds export the manifest entry as
-`main`. A zero-argument application entry can return `T ! E` or `T ?! E`
-(that is, `T? ! E`) with `bool`, an integer, or a float as `T`.
+`main`. A zero-argument application entry can return `T?`, `T ! E` or `T ?! E`
+(that is, `T? ! E`) with `bool`, `char`, an integer, or a float as `T`.
 The private adapter applies to `main` and uses the `memobits.entry` custom
 section. Library builds preserve export aliases and support scalar function
 signatures.
@@ -394,7 +394,8 @@ print `Result: ...` to stdout and exit 0. Source runs label scalar results with
 their Memobits type. Standalone scalar artifacts display the Wasm scalar type.
 Unit functions print `Result: Unit`.
 
-Outcome entries display the same result in both modes, such as
+Option and outcome entries display the same result in both modes, such as
+`Result: Some(i32(42))` or `Result: None` for `T?`,
 `Result: Ok(u32(7))` for `T ! E`, and `Result: Ok(Some(bool(true)))`,
 `Result: Ok(None)` or `Result: Err(pkg::parser::ParseError, code=5)` for
 `T ?! E`. `Err` returns the concrete error type and its `u32` code. The builtin root is printed

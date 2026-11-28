@@ -181,7 +181,9 @@ pub fn encode(
     if let Some(adapter) = root_outcome {
         component.custom_section(&wasm_encoder::CustomSection {
             name: "memobits.component.outcome".into(),
-            data: if adapter.optional {
+            data: if adapter.standalone {
+                (&b"root-option-v1"[..]).into()
+            } else if adapter.optional {
                 (&b"root-optional-error-v1"[..]).into()
             } else {
                 (&b"root-error-v1"[..]).into()
@@ -235,21 +237,28 @@ pub fn encode(
                 component.core_instantiate(None, shim, [("inner", ModuleArg::Instance(imports))]);
             let shim_func =
                 component.core_alias_export(None, shim_instance, "main", ExportKind::Func);
-            let (error, definition) = component.type_defined(None);
-            definition.record([("code", PrimitiveValType::U32)]);
-            let types =
-                component.instantiate_exports(None, [("error", ComponentExportKind::Type, error)]);
-            component.export("types", ComponentExportKind::Instance, types, None);
-            let error = component.alias_export(types, "error", ComponentExportKind::Type);
-            let success = if adapter.optional {
+            let result = if adapter.standalone {
                 let (option, definition) = component.type_defined(None);
                 definition.option(ComponentValType::Primitive(adapter.success));
-                ComponentValType::Type(option)
+                option
             } else {
-                ComponentValType::Primitive(adapter.success)
+                let (error, definition) = component.type_defined(None);
+                definition.record([("code", PrimitiveValType::U32)]);
+                let types = component
+                    .instantiate_exports(None, [("error", ComponentExportKind::Type, error)]);
+                component.export("types", ComponentExportKind::Instance, types, None);
+                let error = component.alias_export(types, "error", ComponentExportKind::Type);
+                let success = if adapter.optional {
+                    let (option, definition) = component.type_defined(None);
+                    definition.option(ComponentValType::Primitive(adapter.success));
+                    ComponentValType::Type(option)
+                } else {
+                    ComponentValType::Primitive(adapter.success)
+                };
+                let (result, definition) = component.type_defined(None);
+                definition.result(Some(success), Some(ComponentValType::Type(error)));
+                result
             };
-            let (result, definition) = component.type_defined(None);
-            definition.result(Some(success), Some(ComponentValType::Type(error)));
             (
                 shim_func,
                 Some(ComponentValType::Type(result)),

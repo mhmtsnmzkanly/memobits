@@ -15,9 +15,7 @@ test fn trailing_enum_extension() {
     assert(signal.is_active());
 }
 
-// Postfix `T?` is the preferred spelling of an optional type. The legacy
-// `T?` spelling is still accepted silently with identical meaning;
-// this guide uses `T?` throughout. Grouping matters for
+// Postfix `T?` spells an optional type. Grouping matters for
 // references: `(borrow T)?` is an optional borrow, while `borrow T?` borrows
 // an optional value. Contextual Some and None construction keeps the existing
 // Option representation and match behavior.
@@ -34,6 +32,19 @@ test fn optional_sugar() {
     };
     assert(present_value);
     assert(absent_value);
+}
+
+// A zero-argument application entry may return `T?` for a primitive T.
+// For the Component setup, see ../topics/component/README.md and use
+// `mb build --component`; the entry is exposed as WIT `option<T>`. Nested
+// options, aggregate payloads and library option exports remain gated.
+fn component_option_value(present: bool) -> i32? {
+    if present { Some(42) } else { None }
+}
+
+test fn component_option_entry_facts() {
+    assert(match component_option_value(true) { Some(value) => value == 42, None => false });
+    assert(match component_option_value(false) { Some(_) => false, None => true });
 }
 
 // A `string ! E` may be stored in a struct field or a fixed-array element

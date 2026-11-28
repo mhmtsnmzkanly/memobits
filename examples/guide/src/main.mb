@@ -7,8 +7,8 @@
 // For an import-free scalar component, see ../topics/component/README.md:
 // `mb build --component` produces an application component for `mb exec`;
 // `--lib --component` exposes selected scalar library functions. This guide's
-// `i32 ! Error` entry also supports components; `bool ?! Error` is supported
-// for application entries too. Derived errors and Unit outcome payloads
+// `i32 ! Error` entry also supports components; primitive `T?` and
+// `bool ?! Error` are supported for application entries too. Derived errors and Unit outcome payloads
 // remain gated. The console host
 // import is supported via WIT; see ../topics/host-capability/README.md.
 //
@@ -56,15 +56,15 @@ use text::byte_length;
 //   The runner calls zero-argument exports. Library exports use scalar
 //   signatures. Source host linking is limited to the CLI profile's typed
 //   memobits:console.write_i32(i32) -> unit import; see the host-capability
-//   example. Type exports and mb check are unsupported.
+//   example. Type exports are unsupported.
 // - docs/design/proposed-language-guide.mb (a historical proposal) explores target syntax. String slicing,
 //   scalar iteration, lists, try, defaults and
 //   aggregate .copy() are gated. Generic function calls and interface evidence
 //   forwarding are limited to the examples above; generic nominal structs are
 //   demonstrated above.
 
-// A zero-argument application entry can return `T ! E` or `T ?! E` with a
-// primitive success payload. Both runners show the variant and typed value
+// A zero-argument application entry can return primitive `T?`, `T ! E`,
+// or `T ?! E` with a primitive success payload. Both runners show the variant and typed value
 // or the concrete error type and code.
 //
 // This main combines three guide features: a fixed array summed through a

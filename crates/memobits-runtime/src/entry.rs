@@ -1,7 +1,7 @@
 use memobits_entry_abi::{Family, Metadata, Scalar, ERROR_ID_BYTES, RESULT_ALIGNMENT};
 use std::fmt;
 
-use crate::RunError;
+use crate::{RunError, RunValue};
 
 /// A primitive success payload decoded using its source type.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,7 +72,7 @@ pub(crate) fn decode(
     memory: &[u8],
     address: u32,
     size: u32,
-) -> Result<EntryOutcome, RunError> {
+) -> Result<RunValue, RunError> {
     if size != metadata.size {
         return Err(invalid("returned size differs from entry metadata"));
     }
@@ -85,13 +85,22 @@ pub(crate) fn decode(
         .ok_or_else(|| invalid("entry result is outside guest memory"))?;
     let payload = &result[usize::from(metadata.payload_offset)..];
     match (metadata.family, result[0]) {
-        (Family::Result, 0) => Ok(EntryOutcome::Ok(read_success(metadata.success, payload)?)),
+        (Family::Option, 0) => Ok(RunValue::Option(Some(read_success(
+            metadata.success,
+            payload,
+        )?))),
+        (Family::Option, 1) => Ok(RunValue::Option(None)),
+        (Family::Option, _) => Err(invalid("unknown optional tag")),
+        (Family::Result, 0) => Ok(RunValue::Outcome(EntryOutcome::Ok(read_success(
+            metadata.success,
+            payload,
+        )?))),
         (Family::OptionalResult, 0) => match payload[0] {
-            0 => Ok(EntryOutcome::OkSome(read_success(
+            0 => Ok(RunValue::Outcome(EntryOutcome::OkSome(read_success(
                 metadata.success,
                 &payload[usize::from(metadata.inner_offset)..],
-            )?)),
-            1 => Ok(EntryOutcome::OkNone),
+            )?))),
+            1 => Ok(RunValue::Outcome(EntryOutcome::OkNone)),
             _ => Err(invalid("unknown optional tag")),
         },
         (_, 1) => {
@@ -100,10 +109,10 @@ pub(crate) fn decode(
             if identity != metadata.error_id {
                 return Err(invalid("unrecognized concrete error identity"));
             }
-            Ok(EntryOutcome::Err(ReturnedError {
+            Ok(RunValue::Outcome(EntryOutcome::Err(ReturnedError {
                 type_name: metadata.error_name.to_owned(),
                 code: u32::from_le_bytes(code[..4].try_into().expect("validated payload size")),
-            }))
+            })))
         }
         _ => Err(invalid("unknown entry outcome tag")),
     }
@@ -329,6 +338,69 @@ mod tests {
     }
 
     #[test]
+    fn validates_standalone_option_metadata_and_payload() {
+        let metadata = Metadata {
+            family: Family::Option,
+            success: Scalar::Char,
+            payload_offset: 4,
+            inner_offset: 0,
+            size: 12,
+            error_id: 0,
+            error_name: "",
+        }
+        .encode()
+        .unwrap();
+        for (tag, payload, expected) in [
+            (
+                0,
+                0x1F980_u32,
+                Ok(RunValue::Option(Some(EntrySuccess::Char('🦀')))),
+            ),
+            (1, 0xD800, Ok(RunValue::Option(None))),
+            (0, 0xD800, Err(invalid("invalid char success payload"))),
+            (0, 0x110000, Err(invalid("invalid char success payload"))),
+            (2, 42, Err(invalid("unknown optional tag"))),
+        ] {
+            let mut result = [0; 12];
+            result[0] = tag;
+            result[4..8].copy_from_slice(&payload.to_le_bytes());
+            let bytes = with_custom_section(&guest(16, 12, result, true), SECTION, &metadata);
+            assert_eq!(run(&bytes, ENTRY_EXPORT), expected);
+            #[cfg(feature = "wasmtime")]
+            assert_eq!(
+                crate::exec_with_capabilities(
+                    &bytes,
+                    ENTRY_EXPORT,
+                    &crate::RunOptions::default(),
+                    &[]
+                ),
+                expected
+            );
+        }
+        let mut bool_metadata = Metadata::decode(&metadata).unwrap();
+        bool_metadata.success = Scalar::Bool;
+        bool_metadata.payload_offset = 1;
+        let bool_metadata = bool_metadata.encode().unwrap();
+        let mut result = [0; 12];
+        result[1] = 2;
+        let bytes = with_custom_section(&guest(16, 12, result, true), SECTION, &bool_metadata);
+        assert_eq!(
+            run(&bytes, ENTRY_EXPORT),
+            Err(invalid("invalid bool success payload"))
+        );
+        #[cfg(feature = "wasmtime")]
+        assert_eq!(
+            crate::exec_with_capabilities(&bytes, ENTRY_EXPORT, &crate::RunOptions::default(), &[]),
+            Err(invalid("invalid bool success payload"))
+        );
+        let bad_size = with_custom_section(&guest(16, 11, [0; 12], true), SECTION, &metadata);
+        assert_eq!(
+            run(&bad_size, ENTRY_EXPORT),
+            Err(invalid("returned size differs from entry metadata"))
+        );
+    }
+
+    #[test]
     fn validates_char_outcome_payloads() {
         for (family, inner) in [(Family::Result, 0), (Family::OptionalResult, 4)] {
             let metadata = Metadata {
@@ -358,6 +430,7 @@ mod tests {
                     Some(value) => Ok(crate::RunValue::Outcome(match family {
                         Family::Result => EntryOutcome::Ok(EntrySuccess::Char(value)),
                         Family::OptionalResult => EntryOutcome::OkSome(EntrySuccess::Char(value)),
+                        Family::Option => unreachable!(),
                     })),
                     None => Err(invalid("invalid char success payload")),
                 };

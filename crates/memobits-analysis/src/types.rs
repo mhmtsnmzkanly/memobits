@@ -1050,6 +1050,7 @@ fn type_facts_once(table: &TypeTable) -> Vec<TypeFact> {
             error_ancestry: table.error_ancestry(id as u32),
             entry_outcome: match table.enum_template(id as u32).map(|template| template.id) {
                 Some(registry::TemplateId::Result) => Some(memobits_ir::EntryOutcome::Result),
+                Some(registry::TemplateId::Option) => Some(memobits_ir::EntryOutcome::Option),
                 _ => None,
             },
             fields: info

@@ -2,8 +2,8 @@
 
 Status: implementation in progress, 2026-11-27. An experimental
 scalar/Unit application component, application components returning
-`T ! Error` or `T ?! Error` for bool, char, integer or float `T` with exact root
-`Error`, and a scalar library component can
+primitive `T?`, or `T ! Error` or `T ?! Error` for bool, char, integer or
+float `T` with exact root `Error`, and a scalar library component can
 be built; this is not yet the complete S5-2b
 contract. Recognized compiler-generated checked traps and stack exhaustion use
 the faulting core module's trap metadata and instruction; ambiguous or nested
@@ -17,7 +17,7 @@ language or package decisions to accepted contracts.
 
 `mb build` emits a core module. Application `main` is a zero-argument export;
 scalar library functions are exported under manifest `[export]` aliases. A
-primitive-success application outcome uses a private entry adapter and metadata.
+primitive application option or outcome uses a private entry adapter and metadata.
 Other aggregate exports are currently gated. That private format is not a WIT
 or canonical ABI contract: a Component Model boundary needs its own validated
 adapter, rather than treating the private entry result as a canonical result.
@@ -37,7 +37,7 @@ implementation slice.
 | Unit function result | No WIT result | Unit parameters or stored Unit values require an explicit representation decision; reject them initially. |
 | `string` | `string` | UTF-8 value with canonical ABI validation and transfer; enable only after allocation and cleanup rules are tested. |
 | `List<T>` | `list<T>` | Element mapping must itself be supported; enable only after ownership and allocation tests. |
-| `T?` | `option<T>` | Preserve `Some`/`None`; do not assume internal tag or payload layout matches the canonical ABI. |
+| `T?` | `option<T>` | Application results support bool, char, integer and float `T` and preserve `Some`/`None`. Nested options, aggregate payloads and library exports remain gated. Internal tags and payloads are converted to the canonical ABI. |
 | `T ! E`, `T ?! E` | `result<T, E>`, `result<option<T>, E>` | Application outcomes with bool, char, integer or float `T` and exact root `Error` are supported. Derived errors, other payloads and library outcomes remain gated. Returned `Err` is not a trap. |
 | Tuple | `tuple<...>` | Preserve element order. Source tuple labels do not create WIT fields. |
 | Struct or structural record | Named WIT `record` | Preserve fields and mapped names. Open only for externally visible fields and types with an agreed identity and complete conversion. |
@@ -68,7 +68,7 @@ world application {
 ```
 
 The experimental executable vertical slice covers zero-argument application
-entries with scalar, Unit or supported `T ! Error` / `T ?! Error` results. A component validator and an
+entries with scalar, Unit, supported primitive `T?`, or supported `T ! Error` / `T ?! Error` results. A component validator and an
 independent WIT decoder check the actual export and type, and `mb exec` invokes
 it for comparison with core Wasm.
 `mb run` and `mb test` continue to use Wasmi; `mb exec` uses Wasmtime. A

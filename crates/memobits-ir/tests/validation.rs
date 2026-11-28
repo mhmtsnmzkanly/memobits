@@ -1721,6 +1721,26 @@ fn enum_def(name: &str, variants: Vec<(&str, Vec<Type>)>) -> TypeDef {
     }
 }
 
+#[test]
+fn compiler_known_option_requires_some_and_none_shape() {
+    let mut option = enum_def("i32?", vec![("Some", vec![i32_ty()]), ("None", vec![])]);
+    option.entry_outcome = Some(EntryOutcome::Option);
+    let mut program = Program {
+        types: vec![option],
+        ..Program::default()
+    };
+    assert_eq!(program.validate(), Ok(()));
+    let TypeDefKind::Enum { variants } = &mut program.types[0].kind else {
+        unreachable!()
+    };
+    variants[1].payload.push(i32_ty());
+    assert!(program.validate().unwrap_err().iter().any(|error| {
+        error
+            .message
+            .contains("invalid compiler-known entry outcome shape")
+    }));
+}
+
 /// `type E [ A, B(i32), C(i32, Bool) ]` (type 0) and a function binding
 /// `E::B(1)` to the local `e`.
 fn enum_program() -> Program {

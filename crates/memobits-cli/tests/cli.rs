@@ -7247,7 +7247,6 @@ fn outcome_entries_gate_aggregate_successes_parameters_and_library_exports() {
             "type Lookalike [ Ok(i32), Err(Error) ] fn main() -> Lookalike { Lookalike::Ok(7) }",
             "cannot return enums",
         ),
-        ("fn main() -> i32? { Some(7) }", "cannot return enums"),
     ] {
         f.write("src/main.mb", source);
         let message = err(f.run(&["build"]), "LE900");
@@ -11057,6 +11056,112 @@ fn component_host_then_trap_preserves_core_output_and_diagnostic() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
+fn component_standalone_options_match_source_and_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-option'\nentry='main::main'\n",
+    );
+    for (source, expected, wit) in [
+        (
+            "fn main() -> bool? { Some(true) }",
+            "Result: Some(bool(true))\n",
+            wit_parser::Type::Bool,
+        ),
+        (
+            "fn main() -> i8? { Some(-128) }",
+            "Result: Some(i8(-128))\n",
+            wit_parser::Type::S8,
+        ),
+        (
+            "fn main() -> u16? { Some(65535) }",
+            "Result: Some(u16(65535))\n",
+            wit_parser::Type::U16,
+        ),
+        (
+            "fn main() -> i32? { Some(42) }",
+            "Result: Some(i32(42))\n",
+            wit_parser::Type::S32,
+        ),
+        (
+            "fn main() -> i64? { Some(-9223372036854775808) }",
+            "Result: Some(i64(-9223372036854775808))\n",
+            wit_parser::Type::S64,
+        ),
+        (
+            "fn main() -> u64? { Some(18446744073709551615) }",
+            "Result: Some(u64(18446744073709551615))\n",
+            wit_parser::Type::U64,
+        ),
+        (
+            "fn main() -> f32? { Some(1.5) }",
+            "Result: Some(f32(1.5))\n",
+            wit_parser::Type::F32,
+        ),
+        (
+            "fn main() -> f64? { Some(2.5) }",
+            "Result: Some(f64(2.5))\n",
+            wit_parser::Type::F64,
+        ),
+        (
+            "fn main() -> char? { Some('🦀') }",
+            "Result: Some(char('🦀'))\n",
+            wit_parser::Type::Char,
+        ),
+        (
+            "fn main() -> bool? { None }",
+            "Result: None\n",
+            wit_parser::Type::Bool,
+        ),
+        (
+            "fn main() -> i64? { None }",
+            "Result: None\n",
+            wit_parser::Type::S64,
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let source_run = f.run(&["run"]);
+        for args in [
+            &["build", "--output", "core.wasm"][..],
+            &["build", "--component", "--output", "component.wasm"][..],
+        ] {
+            let build = f.run(args);
+            assert!(build.status.success(), "{source}: {build:?}");
+            if args.contains(&"--component") {
+                assert!(String::from_utf8_lossy(&build.stdout).contains("1 export(s)"));
+            }
+        }
+        let bytes = fs::read(f.0.join("component.wasm")).unwrap();
+        let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
+            wit_parser::decoding::decode(&bytes).unwrap()
+        else {
+            panic!("expected component")
+        };
+        let main = resolve.worlds[world]
+            .exports
+            .values()
+            .find_map(|item| match item {
+                wit_parser::WorldItem::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let Some(wit_parser::Type::Id(id)) = main.result else {
+            panic!("expected option")
+        };
+        assert!(matches!(resolve.types[id].kind, wit_parser::TypeDefKind::Option(ty) if ty == wit));
+        let core = f.run(&["run", "core.wasm"]);
+        let core_exec = f.run(&["exec", "core.wasm"]);
+        let component = f.run(&["exec", "component.wasm"]);
+        for output in [&source_run, &core, &core_exec, &component] {
+            assert_eq!(output.status.code(), Some(0), "{source}: {output:?}");
+            assert_eq!(output.stdout, expected.as_bytes(), "{source}");
+            assert!(output.stderr.is_empty(), "{source}: {output:?}");
+        }
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
 fn component_root_outcomes_match_source_and_core() {
     let f = Fixture::new();
     f.write(
@@ -11470,4 +11575,61 @@ fn component_root_outcome_reuses_instance_and_rejects_duplicate_metadata() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("duplicate component outcome metadata")
     );
+}
+
+#[test]
+fn component_standalone_option_rejects_unsupported_types_without_replacing_output() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-option-gates'\nentry='main::main'\n",
+    );
+    for source in [
+        "type Pretend [Some(i32), None] fn main() -> Pretend { Pretend::Some(7) }",
+        "type Pretend [Some(i32), None] fn main() -> Pretend ! Error { Ok(Pretend::Some(7)) }",
+        "fn main() -> (i32?)? { Some(Some(7)) }",
+        "fn main() -> array<i32, 1>? { Some([7]) }",
+    ] {
+        f.write("src/main.mb", source);
+        f.write("component.wasm", "preserve this artifact");
+        let result = f.run(&["build", "--component", "--output", "component.wasm"]);
+        assert!(!result.status.success(), "{source}: {result:?}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("LE900"), "{source}: {stderr}");
+        assert!(stderr.contains("src/main.mb:1:"), "{source}: {stderr}");
+        assert_eq!(
+            fs::read(f.0.join("component.wasm")).unwrap(),
+            b"preserve this artifact"
+        );
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_standalone_option_reuses_result_cell_on_one_instance() {
+    use wasmtime::component::Val;
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-option-reuse'\nentry='main::main'\n",
+    );
+    f.write("src/main.mb", "fn main() -> i32? { Some(42) }");
+    let build = f.run(&["build", "--component", "--output", "option.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bytes = fs::read(f.0.join("option.wasm")).unwrap();
+    let engine = wasmtime::Engine::default();
+    let component = wasmtime::component::Component::new(&engine, &bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let linker = wasmtime::component::Linker::new(&engine);
+    let instance = linker.instantiate(&mut store, &component).unwrap();
+    let main = instance.get_func(&mut store, "main").unwrap();
+    for _ in 0..1024 {
+        let mut values = [Val::Bool(false)];
+        main.call(&mut store, &[], &mut values).unwrap();
+        assert!(
+            matches!(&values[0], Val::Option(Some(value)) if matches!(value.as_ref(), Val::S32(42))),
+            "{values:?}"
+        );
+        main.post_return(&mut store).unwrap();
+    }
 }
