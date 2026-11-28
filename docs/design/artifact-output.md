@@ -16,7 +16,8 @@ application signatures and aggregate library exports are rejected with LE900.
 
 The default output is an experimental core Wasm module. `mb build --component`
 can also produce application and library components with scalar
-parameters and scalar or Unit results; see the [component contract](component-model-contract.md) for gates.
+parameters and scalar or Unit results, as well as `T ! Error` with bool, integer or float `T`
+application outcomes; see the [component contract](component-model-contract.md) for gates.
 Neither form carries a stable Memobits ABI, dependency packaging, or a
 compatibility promise. Typed host imports are supported through the current
 experimental `extern` interface and the WIT console import. Other component host imports remain pending.

@@ -113,7 +113,9 @@ The default CLI also runs a built core Wasm artifact with Wasmtime:
 cargo run -p memobits-cli -- exec examples/guide/target/memobits/app.wasm
 ```
 
-`mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts and scalar/Unit components, with
+`mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts,
+scalar/Unit components and application components returning `T ! Error` for
+bool, integer or float `T`, with
 `--entry`, `--project`, and the same fuel options as artifact `run`. Build the
 CLI with `--no-default-features` to omit Wasmtime and `mb exec`. Component
 building and its current limits are demonstrated by the [component example](examples/topics/component/README.md).

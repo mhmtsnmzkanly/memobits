@@ -6,8 +6,9 @@
 //
 // For an import-free scalar component, see ../topics/component/README.md:
 // `mb build --component` produces an application component for `mb exec`;
-// `--lib --component` exposes selected scalar library functions. Outcome
-// entries such as this guide's main are not supported. The console host
+// `--lib --component` exposes selected scalar library functions. This guide's
+// `i32 ! Error` entry also supports components; derived errors and
+// optional outcomes remain gated. The console host
 // import is supported via WIT; see ../topics/host-capability/README.md.
 //
 // The guide is split into topic modules next to this file. Each topic module

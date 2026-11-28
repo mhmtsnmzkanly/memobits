@@ -448,6 +448,7 @@ version = "0.1.0"
 dependencies = [
  "memobits-analysis",
  "memobits-diagnostics",
+ "memobits-entry-abi",
  "memobits-ir",
  "memobits-ownership",
  "memobits-project",

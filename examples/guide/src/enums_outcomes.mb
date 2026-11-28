@@ -171,6 +171,21 @@ test fn optional_borrow() {
 // matches. Aliases, fields, nesting, signatures and branch results are gated.
 // Reference returns, rebinding and loans of primitive projections such as
 // row[0].borrow() are also outside the current subset.
+// Root Error outcomes can also cross an application Component Model boundary.
+// See ../topics/component/README.md and build this guide with `--component`;
+// this first outcome adapter supports bool, integer or float successes and exact root Error.
+// Derived errors and `T ?! E` remain gated at that boundary.
+fn root_error_result(ok: bool) -> i32 ! Error {
+    if ok { Ok(42) } else { Err(Error { code: 9 }) }
+}
+
+test fn root_error_outcome() {
+    let success := match root_error_result(true) { Ok(value) => value == 42, Err(_) => false };
+    let failure := match root_error_result(false) { Ok(_) => false, Err(error) => error.code == 9 };
+    assert(success);
+    assert(failure);
+}
+
 // Owned outcomes and nominal errors.
 type ReadingError: Error {
     pub station_id: u32,

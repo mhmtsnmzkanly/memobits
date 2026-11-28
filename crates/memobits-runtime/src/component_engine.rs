@@ -43,21 +43,57 @@ pub fn run(
         )));
     }
     let results: Vec<_> = function.results().collect();
-    if !matches!(
-        results.as_slice(),
-        [] | [Type::Bool
-            | Type::Char
-            | Type::S8
-            | Type::S16
-            | Type::S32
-            | Type::S64
-            | Type::U8
-            | Type::U16
-            | Type::U32
-            | Type::U64
-            | Type::Float32
-            | Type::Float64]
-    ) {
+    let scalar = |ty: &Type| {
+        matches!(
+            ty,
+            Type::Bool
+                | Type::S8
+                | Type::S16
+                | Type::S32
+                | Type::S64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::Float32
+                | Type::Float64
+        )
+    };
+    let mut outcome_sections = traps::custom_sections(bytes, "memobits.component.outcome");
+    let marker = outcome_sections.next();
+    if outcome_sections.next().is_some() {
+        return Err(entry::invalid("duplicate component outcome metadata"));
+    }
+    if marker.is_some_and(|value| value != b"root-error-v1") {
+        return Err(entry::invalid(
+            "invalid or unsupported component outcome metadata",
+        ));
+    }
+    let root_outcome = match results.as_slice() {
+        [Type::Result(result)] if marker.is_some() => {
+            matches!(result.ok(), Some(ref ty) if scalar(ty))
+                && matches!(result.err(), Some(Type::Record(ref record))
+                    if record.fields().map(|f| (f.name, f.ty)).collect::<Vec<_>>() == [("code", Type::U32)])
+        }
+        _ => false,
+    };
+    if !root_outcome
+        && !matches!(
+            results.as_slice(),
+            [] | [Type::Bool
+                | Type::Char
+                | Type::S8
+                | Type::S16
+                | Type::S32
+                | Type::S64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::Float32
+                | Type::Float64]
+        )
+    {
         return Err(RunError::Signature(format!(
             "'{export}' has an unsupported component result"
         )));
@@ -119,6 +155,39 @@ pub fn run(
         Some(Val::U64(v)) => RunValue::I64(v as i64),
         Some(Val::Float32(v)) => RunValue::F32(v),
         Some(Val::Float64(v)) => RunValue::F64(v),
+        Some(Val::Result(Ok(Some(value)))) if root_outcome => {
+            let success = match *value {
+                Val::Bool(v) => EntrySuccess::Bool(v),
+                Val::S8(v) => EntrySuccess::I8(v),
+                Val::S16(v) => EntrySuccess::I16(v),
+                Val::S32(v) => EntrySuccess::I32(v),
+                Val::S64(v) => EntrySuccess::I64(v),
+                Val::U8(v) => EntrySuccess::U8(v),
+                Val::U16(v) => EntrySuccess::U16(v),
+                Val::U32(v) => EntrySuccess::U32(v),
+                Val::U64(v) => EntrySuccess::U64(v),
+                Val::Float32(v) => EntrySuccess::F32(v),
+                Val::Float64(v) => EntrySuccess::F64(v),
+                _ => return Err(entry::invalid("invalid component outcome success")),
+            };
+            RunValue::Outcome(EntryOutcome::Ok(success))
+        }
+        Some(Val::Result(Err(Some(value)))) if root_outcome => {
+            let Val::Record(fields) = *value else {
+                return Err(entry::invalid("invalid component Error payload"));
+            };
+            let [(name, Val::U32(code))] = fields.as_slice() else {
+                return Err(entry::invalid("invalid component Error fields"));
+            };
+            if name != "code" {
+                return Err(entry::invalid("invalid component Error field name"));
+            }
+            RunValue::Outcome(EntryOutcome::Err(ReturnedError {
+                type_name: "Error".into(),
+                code: *code,
+            }))
+        }
+        _ if root_outcome => return Err(entry::invalid("invalid component outcome")),
         _ => unreachable!("validated scalar component result"),
     })
 }
@@ -135,15 +204,18 @@ fn component_trap(error: &wasmtime::Error, component: &[u8]) -> Option<RunError>
         .frames()
         .first()?
         .module_offset()?;
-    // Only a single unnested core module is unambiguous. Do not guess for
-    // arbitrary multi-module or nested components.
-    let mut core_range = None;
+    // Select only the unnested core module whose byte range contains the
+    // actual Wasmtime fault offset. Never guess when a range is absent or
+    // ambiguous, and reject nested components.
+    let mut selected = None;
     for payload in Parser::new(0).parse_all(component) {
         match payload.ok()? {
             Payload::ModuleSection {
                 unchecked_range, ..
             } => {
-                if core_range.replace(unchecked_range).is_some() {
+                if unchecked_range.contains(&(offset as u64))
+                    && selected.replace(unchecked_range).is_some()
+                {
                     return None;
                 }
             }
@@ -151,7 +223,7 @@ fn component_trap(error: &wasmtime::Error, component: &[u8]) -> Option<RunError>
             _ => {}
         }
     }
-    let range = core_range?;
+    let range = selected?;
     let start = usize::try_from(range.start).ok()?;
     let end = usize::try_from(range.end).ok()?;
     let core = component.get(start..end)?;
@@ -341,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn trap_attribution_requires_an_adjacent_record_and_one_core_module() {
+    fn trap_attribution_requires_an_adjacent_record_in_the_faulting_module() {
         let options = RunOptions::default();
         assert!(matches!(
             run(&trapped_component(false, false), "main", &options, &[]),
@@ -356,7 +428,10 @@ mod tests {
         ));
         assert!(matches!(
             run(&trapped_component(false, true), "main", &options, &[]),
-            Err(RunError::Trap(_))
+            Err(RunError::Checked {
+                reason: TrapReason::AssertionFailed,
+                ..
+            })
         ));
     }
 }

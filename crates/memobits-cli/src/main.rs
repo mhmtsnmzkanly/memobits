@@ -1119,10 +1119,16 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
                 }
             });
             write_atomically(&output_path, &bytes)?;
+            let export_count = exports.len()
+                + usize::from(
+                    component_output
+                        && memobits_runtime::custom_section(&bytes, "memobits.component.outcome")
+                            .is_some(),
+                );
             return Ok(format!(
                 "Built {}: {} export(s), {} bytes\n",
                 output_path.display(),
-                exports.len(),
+                export_count,
                 bytes.len()
             ));
         }

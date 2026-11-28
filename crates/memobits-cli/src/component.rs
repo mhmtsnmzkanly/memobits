@@ -1,4 +1,6 @@
 //! Scalar application and library components with a bounded WIT host import.
+
+mod outcome;
 use memobits_diagnostics::Span;
 use memobits_ir::{Access, FunctionId, Primitive, Program, Type};
 use std::collections::{BTreeMap, HashMap};
@@ -156,16 +158,32 @@ pub fn encode(
                 ),
             ));
         }
+        let outcome = if library {
+            None
+        } else {
+            outcome::prepare(core, program, &function.signature.result)
+                .map_err(|message| at(message, function.span))?
+        };
+        if outcome.is_none() {
+            scalar(&function.signature.result, true)
+                .map_err(|message| at(message, function.span))?;
+        }
         items.push((
             alias,
             name,
             params,
-            scalar(&function.signature.result, true)
-                .map_err(|message| at(message, function.span))?
-                .map(ComponentValType::Primitive),
+            outcome,
+            function.signature.result.as_ref(),
         ));
     }
+    let has_root_outcome = items.iter().any(|item| item.3.is_some());
     let mut component = ComponentBuilder::default();
+    if has_root_outcome {
+        component.custom_section(&wasm_encoder::CustomSection {
+            name: "memobits.component.outcome".into(),
+            data: (&b"root-error-v1"[..]).into(),
+        });
+    }
     let module = component.core_module_raw(None, core);
     let instance = if console_import {
         let mut interface = InstanceType::new();
@@ -192,12 +210,60 @@ pub fn encode(
     } else {
         component.core_instantiate(None, module, [])
     };
-    for (alias, name, params, result) in items {
+    for (alias, name, params, outcome, result) in items {
         let core_func = component.core_alias_export(None, instance, alias, ExportKind::Func);
+        let (core_func, result, memory) = if let Some(adapter) = outcome {
+            let memory = component.core_alias_export(
+                None,
+                instance,
+                memobits_entry_abi::MEMORY_EXPORT,
+                ExportKind::Memory,
+            );
+            let imports = component.core_instantiate_exports(
+                None,
+                [
+                    ("main", ExportKind::Func, core_func),
+                    ("memory", ExportKind::Memory, memory),
+                ],
+            );
+            let shim = component.core_module_raw(None, &adapter.module);
+            let shim_instance =
+                component.core_instantiate(None, shim, [("inner", ModuleArg::Instance(imports))]);
+            let shim_func =
+                component.core_alias_export(None, shim_instance, "main", ExportKind::Func);
+            let (error, definition) = component.type_defined(None);
+            definition.record([("code", PrimitiveValType::U32)]);
+            let types =
+                component.instantiate_exports(None, [("error", ComponentExportKind::Type, error)]);
+            component.export("types", ComponentExportKind::Instance, types, None);
+            let error = component.alias_export(types, "error", ComponentExportKind::Type);
+            let (result, definition) = component.type_defined(None);
+            definition.result(
+                Some(ComponentValType::Primitive(adapter.success)),
+                Some(ComponentValType::Type(error)),
+            );
+            (
+                shim_func,
+                Some(ComponentValType::Type(result)),
+                Some(memory),
+            )
+        } else {
+            (
+                core_func,
+                scalar(result, true)
+                    .map_err(ComponentError::from)?
+                    .map(ComponentValType::Primitive),
+                None,
+            )
+        };
         let (ty, mut func) = component.type_function(None);
         func.params(params.iter().map(|(name, ty)| (name.as_str(), *ty)))
             .result(result);
-        let lifted = component.lift_func(None, core_func, ty, []);
+        let options = memory
+            .map(wasm_encoder::CanonicalOption::Memory)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let lifted = component.lift_func(None, core_func, ty, options);
         component.export(name.as_str(), ComponentExportKind::Func, lifted, None);
     }
     let bytes = component.finish();

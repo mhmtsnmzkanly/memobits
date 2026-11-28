@@ -18,6 +18,8 @@ artifact_dir=$(mktemp -d)
 cargo run -p memobits-cli -- build --project examples/guide/project.toml --output "$artifact_dir/guide.wasm"
 cargo run -p memobits-cli -- run "$artifact_dir/guide.wasm"
 cargo run -p memobits-cli -- exec "$artifact_dir/guide.wasm"
+cargo run -p memobits-cli -- build --component --project examples/guide/project.toml --output "$artifact_dir/guide-component.wasm"
+cargo run -p memobits-cli -- exec "$artifact_dir/guide-component.wasm"
 ```
 
 ## Source-level tests
@@ -41,7 +43,7 @@ The report lists every test as `test <module>::<name> ... ok` and ends with the
 summary line below (checked by `crates/memobits-cli/tests/examples_documented.rs`):
 
 ```text
-test result: ok. 154 passed; 0 failed; 0 filtered out
+test result: ok. 155 passed; 0 failed; 0 filtered out
 ```
 
 `mb test` runs each test in a fresh instance and exits 1 if any fails. Add a
@@ -59,6 +61,7 @@ Source, standalone Wasm, and Wasmtime `exec` runs print exactly the following on
 Result: Ok(i32(42))
 ```
 
-For the currently supported scalar/Unit component setup and its limits, see
-the [component example](../topics/component/README.md). The guide entry returns
-an outcome and therefore cannot yet be built as a component.
+For the currently supported component setup and its limits, see
+the [component example](../topics/component/README.md). The guide's primitive
+`i32 ! Error` entry is supported; derived errors and optional outcomes remain
+gated.

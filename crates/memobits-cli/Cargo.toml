@@ -21,6 +21,7 @@ memobits-ownership = { path = "../memobits-ownership" }
 memobits-wasm = { path = "../memobits-wasm" }
 memobits-ir = { path = "../memobits-ir" }
 memobits-runtime = { path = "../memobits-runtime" }
+memobits-entry-abi = { path = "../memobits-entry-abi" }
 wasm-encoder = "0.263.0"
 wasmparser = "0.263.0"
 

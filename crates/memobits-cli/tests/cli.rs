@@ -10788,10 +10788,13 @@ fn component_build_rejects_unsupported_targets_without_replacing_output() {
         "[package]\nname='component-gates'\nentry='main::main'\n",
     );
     f.write("component.wasm", "preserve this artifact");
-    f.write("src/main.mb", "fn main() -> i32 ! Error { Ok(42) }");
+    f.write(
+        "src/main.mb",
+        "type MyError: Error {} fn main() -> i32 ! MyError { Err(MyError { code: 1 }) }",
+    );
     let result = f.run(&["build", "--component", "--output", "component.wasm"]);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("scalar or Unit"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("exact root Error"));
     assert!(String::from_utf8_lossy(&result.stderr).contains("src/main.mb:1:"));
     assert_eq!(
         fs::read(f.0.join("component.wasm")).unwrap(),
@@ -11026,4 +11029,214 @@ fn component_host_then_trap_preserves_core_output_and_diagnostic() {
     assert_eq!(component.stdout, core.stdout);
     assert_eq!(component.stderr, core.stderr);
     assert!(String::from_utf8_lossy(&component.stderr).contains("assertion failed"));
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_root_outcomes_match_source_and_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-outcome'\nentry='main::main'\n",
+    );
+    for (source, expected) in [
+        (
+            "fn main() -> i32 ! Error { Ok(42) }",
+            "Result: Ok(i32(42))\n",
+        ),
+        (
+            "fn main() -> i32 ! Error { Err(Error { code: 9 }) }",
+            "Result: Err(Error, code=9)\n",
+        ),
+        (
+            "fn main() -> i8 ! Error { Ok(-128) }",
+            "Result: Ok(i8(-128))\n",
+        ),
+        (
+            "fn main() -> i16 ! Error { Ok(-32768) }",
+            "Result: Ok(i16(-32768))\n",
+        ),
+        (
+            "fn main() -> u8 ! Error { Ok(255) }",
+            "Result: Ok(u8(255))\n",
+        ),
+        (
+            "fn main() -> u16 ! Error { Ok(65535) }",
+            "Result: Ok(u16(65535))\n",
+        ),
+        (
+            "fn main() -> u32 ! Error { Ok(4294967295) }",
+            "Result: Ok(u32(4294967295))\n",
+        ),
+        (
+            "fn main() -> i32 ! Error { Err(Error { code: 4294967295 }) }",
+            "Result: Err(Error, code=4294967295)\n",
+        ),
+        (
+            "fn main() -> i64 ! Error { Err(Error { code: 123 }) }",
+            "Result: Err(Error, code=123)\n",
+        ),
+        (
+            "fn main() -> f64 ! Error { Err(Error { code: 321 }) }",
+            "Result: Err(Error, code=321)\n",
+        ),
+        (
+            "fn main() -> i64 ! Error { Ok(-9223372036854775808) }",
+            "Result: Ok(i64(-9223372036854775808))\n",
+        ),
+        (
+            "fn main() -> u64 ! Error { Ok(18446744073709551615) }",
+            "Result: Ok(u64(18446744073709551615))\n",
+        ),
+        (
+            "fn main() -> bool ! Error { Ok(true) }",
+            "Result: Ok(bool(true))\n",
+        ),
+        (
+            "fn main() -> f32 ! Error { Ok(1.5) }",
+            "Result: Ok(f32(1.5))\n",
+        ),
+        (
+            "fn main() -> f64 ! Error { Ok(2.5) }",
+            "Result: Ok(f64(2.5))\n",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let source_run = f.run(&["run"]);
+        assert!(source_run.status.success(), "{source}: {source_run:?}");
+        let build = f.run(&["build", "--component", "--output", "outcome.wasm"]);
+        assert!(build.status.success(), "{source}: {build:?}");
+        let bytes = fs::read(f.0.join("outcome.wasm")).unwrap();
+        let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
+            wit_parser::decoding::decode(&bytes).unwrap()
+        else {
+            panic!("expected component")
+        };
+        let world = &resolve.worlds[world];
+        let main = world
+            .exports
+            .values()
+            .find_map(|item| match item {
+                wit_parser::WorldItem::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let Some(wit_parser::Type::Id(result_id)) = main.result else {
+            panic!("expected WIT result type")
+        };
+        let wit_parser::TypeDefKind::Result(result) = &resolve.types[result_id].kind else {
+            panic!("expected WIT result")
+        };
+        let Some(wit_parser::Type::Id(error_id)) = result.err else {
+            panic!("expected named Error record")
+        };
+        let wit_parser::TypeDefKind::Record(error) = &resolve.types[error_id].kind else {
+            panic!("expected Error record")
+        };
+        assert_eq!(error.fields.len(), 1);
+        assert_eq!(error.fields[0].name, "code");
+        assert_eq!(error.fields[0].ty, wit_parser::Type::U32);
+        let expected_ok = if source.contains("-> i8 !") {
+            wit_parser::Type::S8
+        } else if source.contains("-> i16 !") {
+            wit_parser::Type::S16
+        } else if source.contains("-> i32 !") {
+            wit_parser::Type::S32
+        } else if source.contains("-> i64 !") {
+            wit_parser::Type::S64
+        } else if source.contains("-> u8 !") {
+            wit_parser::Type::U8
+        } else if source.contains("-> u16 !") {
+            wit_parser::Type::U16
+        } else if source.contains("-> u32 !") {
+            wit_parser::Type::U32
+        } else if source.contains("-> u64 !") {
+            wit_parser::Type::U64
+        } else if source.contains("-> bool !") {
+            wit_parser::Type::Bool
+        } else if source.contains("-> f32 !") {
+            wit_parser::Type::F32
+        } else {
+            wit_parser::Type::F64
+        };
+        assert_eq!(result.ok, Some(expected_ok));
+        let exec = f.run(&["exec", "outcome.wasm"]);
+        assert!(exec.status.success(), "{source}: {exec:?}");
+        assert!(exec.stderr.is_empty());
+        assert_eq!(exec.stdout, expected.as_bytes(), "{source}");
+        assert_eq!(exec.stdout, source_run.stdout, "{source}");
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_root_outcome_checked_traps_match_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-outcome-trap'\nentry='main::main'\n",
+    );
+    for (source, message) in [
+        ("fn main() -> i32 ! Error { assert(false); Ok(42) }", "assertion failed"),
+        ("fn main() -> i32 ! Error { var divisor := 0; Ok(7 / divisor) }", "division by zero"),
+        ("fn main() -> i32 ! Error { var index := 3; let values: array<i32, 2> = [1, 2]; Ok(values[index]) }", "array index out of bounds"),
+    ] {
+        f.write("src/main.mb", source);
+        for args in [&["build", "--output", "core.wasm"][..], &["build", "--component", "--output", "component.wasm"][..]] {
+            let out = f.run(args); assert!(out.status.success(), "{source}: {out:?}");
+        }
+        let core = f.run(&["run", "core.wasm"]);
+        let component = f.run(&["exec", "component.wasm"]);
+        assert!(!core.status.success());
+        assert_eq!(component.stderr, core.stderr, "{source}");
+        assert!(String::from_utf8_lossy(&component.stderr).contains(message));
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
+fn component_root_outcome_reuses_instance_and_rejects_duplicate_metadata() {
+    use wasmtime::component::Val;
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-outcome-reuse'\nentry='main::main'\n",
+    );
+    f.write(
+        "src/main.mb",
+        "fn main() -> i32 ! Error { Err(Error { code: 9 }) }",
+    );
+    let build = f.run(&["build", "--component", "--output", "outcome.wasm"]);
+    assert!(build.status.success(), "{build:?}");
+    let bytes = fs::read(f.0.join("outcome.wasm")).unwrap();
+    let engine = wasmtime::Engine::default();
+    let component = wasmtime::component::Component::new(&engine, &bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let linker = wasmtime::component::Linker::new(&engine);
+    let instance = linker.instantiate(&mut store, &component).unwrap();
+    let main = instance.get_func(&mut store, "main").unwrap();
+    for _ in 0..1024 {
+        let mut values = [Val::Bool(false)];
+        main.call(&mut store, &[], &mut values).unwrap();
+        let Val::Result(Err(Some(error))) = &values[0] else {
+            panic!("expected Err: {:?}", values)
+        };
+        let Val::Record(fields) = error.as_ref() else {
+            panic!("expected error record")
+        };
+        assert!(matches!(fields.as_slice(), [(name, Val::U32(9))] if name == "code"));
+        main.post_return(&mut store).unwrap();
+    }
+    let duplicate = memobits_runtime::with_custom_section(
+        &bytes,
+        "memobits.component.outcome",
+        b"root-error-v1",
+    );
+    fs::write(f.0.join("duplicate.wasm"), duplicate).unwrap();
+    let output = f.run(&["exec", "duplicate.wasm"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate component outcome metadata")
+    );
 }
