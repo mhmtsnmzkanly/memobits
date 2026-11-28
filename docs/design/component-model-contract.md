@@ -1,8 +1,9 @@
 # Component Model interface contract for S5-2b
 
 Status: implementation in progress, 2026-11-27. An experimental
-scalar/Unit application component, an application component returning
-`T ! Error` for bool, integer or float `T`, and a scalar library component can
+scalar/Unit application component, application components returning
+`T ! Error` or `T ?! Error` for bool, integer or float `T` with exact root
+`Error`, and a scalar library component can
 be built; this is not yet the complete S5-2b
 contract. Recognized compiler-generated checked traps and stack exhaustion use
 the faulting core module's trap metadata and instruction; ambiguous or nested
@@ -37,7 +38,7 @@ implementation slice.
 | `string` | `string` | UTF-8 value with canonical ABI validation and transfer; enable only after allocation and cleanup rules are tested. |
 | `List<T>` | `list<T>` | Element mapping must itself be supported; enable only after ownership and allocation tests. |
 | `T?` | `option<T>` | Preserve `Some`/`None`; do not assume internal tag or payload layout matches the canonical ABI. |
-| `T ! E`, `T ?! E` | `result<T, E>`, `result<option<T>, E>` | Application `T ! Error` with bool, integer or float `T` is supported using the exact root Error record below. Derived errors, optional outcomes and other payloads remain gated. Returned `Err` is not a trap. |
+| `T ! E`, `T ?! E` | `result<T, E>`, `result<option<T>, E>` | Application outcomes with bool, integer or float `T` and exact root `Error` are supported. Derived errors, other payloads and library outcomes remain gated. Returned `Err` is not a trap. |
 | Tuple | `tuple<...>` | Preserve element order. Source tuple labels do not create WIT fields. |
 | Struct or structural record | Named WIT `record` | Preserve fields and mapped names. Open only for externally visible fields and types with an agreed identity and complete conversion. |
 | Enum | Named WIT `variant` | Preserve case order, case names and payloads; do not infer a host ABI from internal discriminants. |
@@ -67,7 +68,7 @@ world application {
 ```
 
 The experimental executable vertical slice covers zero-argument application
-entries with scalar, Unit or supported `T ! Error` results. A component validator and an
+entries with scalar, Unit or supported `T ! Error` / `T ?! Error` results. A component validator and an
 independent WIT decoder check the actual export and type, and `mb exec` invokes
 it for comparison with core Wasm.
 `mb run` and `mb test` continue to use Wasmi; `mb exec` uses Wasmtime. A
@@ -133,14 +134,16 @@ must not be resumed under the current CLI lifecycle. Do not translate lexical
 `borrow` or `share` to component resource handles without a separate lifetime,
 identity, mutation and reentrancy contract.
 
-For the initial outcome boundary, only bool, integer or float successes and the exact built-in root `Error` are
-accepted. `char` and Unit successes remain gated. It is exposed in the `types` interface as a named `error` record
-with one `code: u32` field. The WIT result is `result<T, error>` for supported
-primitive `T`. The adapter checks the private concrete identity before removing
+For the outcome boundary, bool, integer or float successes and the exact
+built-in root `Error` are accepted for both result forms. The optional form
+preserves `Ok(Some(value))`, `Ok(None)` and `Err(error)`. `char` and Unit
+successes remain gated. The root error is exposed in the `types` interface as a named `error` record
+with one `code: u32` field. The WIT result is `result<T, error>` or
+`result<option<T>, error>` for supported primitive `T`. The adapter checks the private concrete identity before removing
 that internal word and presenting the code; it rejects a mismatched identity.
 It uses the canonical result layout and does not allocate. Repeated calls
-repopulate the private return cell before it is lifted. Derived errors, optional
-outcomes and outcome exports from libraries remain gated: their full fields,
+repopulate the private return cell before it is lifted. Derived errors and
+outcome exports from libraries remain gated: their full fields,
 dynamic identity and stable external names need a separate contract. Do not
 reduce arbitrary derived errors to a code or string.
 

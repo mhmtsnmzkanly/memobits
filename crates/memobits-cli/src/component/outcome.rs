@@ -1,4 +1,4 @@
-//! Bounded canonical adapter for primitive `T ! Error` application entries.
+//! Bounded canonical adapter for primitive root `Error` application outcomes.
 use memobits_entry_abi::{Family, Metadata, Scalar};
 use memobits_ir::{ErrorAncestry, Primitive, Program, Type, TypeDefKind};
 use wasm_encoder::{
@@ -8,6 +8,7 @@ use wasm_encoder::{
 
 pub(super) struct Adapter {
     pub success: wasm_encoder::PrimitiveValType,
+    pub optional: bool,
     pub module: Vec<u8>,
 }
 
@@ -41,9 +42,10 @@ pub(super) fn prepare(
     let data = memobits_runtime::custom_section(core, memobits_entry_abi::SECTION)
         .ok_or("missing outcome metadata")?;
     let meta = Metadata::decode(data).ok_or("invalid outcome metadata")?;
-    if meta.family != Family::Result || meta.error_name != "Error" {
-        return Err("component outcomes currently require primitive T ! Error".into());
+    if meta.error_name != "Error" {
+        return Err("component outcomes currently require the exact root Error type".into());
     }
+    let optional = meta.family == Family::OptionalResult;
     let (success, align) = match meta.success {
         Scalar::Bool => (wasm_encoder::PrimitiveValType::Bool, 4),
         Scalar::I8 => (wasm_encoder::PrimitiveValType::S8, 4),
@@ -152,6 +154,30 @@ pub(super) fn prepare(
         target: wasm_encoder::MemArgTarget::Memory(0),
         ordering: None,
     }));
+    if optional {
+        body.instruction(&Instruction::Else);
+        // Private option tags are Some=0, None=1, the reverse of canonical
+        // option tags. The scalar payload itself is already correctly aligned.
+        let option = MemArg {
+            offset: payload,
+            align: 0,
+            target: wasm_encoder::MemArgTarget::Memory(0),
+            ordering: None,
+        };
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::I32Load8U(option));
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::I32GtU);
+        body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        body.instruction(&Instruction::Unreachable);
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::I32Load8U(option));
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::I32Xor);
+        body.instruction(&Instruction::I32Store8(option));
+    }
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::LocalGet(0));
     body.instruction(&Instruction::End);
@@ -165,6 +191,7 @@ pub(super) fn prepare(
         .section(&code);
     Ok(Some(Adapter {
         success,
+        optional,
         module: module.finish(),
     }))
 }

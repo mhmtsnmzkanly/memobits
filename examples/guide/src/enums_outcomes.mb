@@ -173,8 +173,8 @@ test fn optional_borrow() {
 // row[0].borrow() are also outside the current subset.
 // Root Error outcomes can also cross an application Component Model boundary.
 // See ../topics/component/README.md and build this guide with `--component`;
-// this first outcome adapter supports bool, integer or float successes and exact root Error.
-// Derived errors and `T ?! E` remain gated at that boundary.
+// this outcome adapter supports bool, integer or float successes and exact
+// root Error for both `T ! Error` and `T ?! Error`.
 fn root_error_result(ok: bool) -> i32 ! Error {
     if ok { Ok(42) } else { Err(Error { code: 9 }) }
 }
@@ -184,6 +184,23 @@ test fn root_error_outcome() {
     let failure := match root_error_result(false) { Ok(_) => false, Err(error) => error.code == 9 };
     assert(success);
     assert(failure);
+}
+
+// `T ?! Error` (the same type as `T? ! Error`) crosses the application
+// Component Model boundary for bool, integer and float payloads. Its three
+// outcomes are `Ok(Some(value))`, `Ok(None)` and `Err(Error)`.
+fn component_optional_bool(state: u32) -> bool ?! Error {
+    match state {
+        0 => Ok(Some(true)),
+        1 => Ok(None),
+        _ => Err(Error { code: 11 }),
+    }
+}
+
+test fn component_optional_outcome_facts() {
+    assert(match component_optional_bool(0) { Ok(Some(value)) => value, _ => false });
+    assert(match component_optional_bool(1) { Ok(None) => true, _ => false });
+    assert(match component_optional_bool(2) { Err(error) => error.code == 11, _ => false });
 }
 
 // Owned outcomes and nominal errors.

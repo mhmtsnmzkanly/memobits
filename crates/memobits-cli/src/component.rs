@@ -176,12 +176,16 @@ pub fn encode(
             function.signature.result.as_ref(),
         ));
     }
-    let has_root_outcome = items.iter().any(|item| item.3.is_some());
+    let root_outcome = items.iter().find_map(|item| item.3.as_ref());
     let mut component = ComponentBuilder::default();
-    if has_root_outcome {
+    if let Some(adapter) = root_outcome {
         component.custom_section(&wasm_encoder::CustomSection {
             name: "memobits.component.outcome".into(),
-            data: (&b"root-error-v1"[..]).into(),
+            data: if adapter.optional {
+                (&b"root-optional-error-v1"[..]).into()
+            } else {
+                (&b"root-error-v1"[..]).into()
+            },
         });
     }
     let module = component.core_module_raw(None, core);
@@ -237,11 +241,15 @@ pub fn encode(
                 component.instantiate_exports(None, [("error", ComponentExportKind::Type, error)]);
             component.export("types", ComponentExportKind::Instance, types, None);
             let error = component.alias_export(types, "error", ComponentExportKind::Type);
+            let success = if adapter.optional {
+                let (option, definition) = component.type_defined(None);
+                definition.option(ComponentValType::Primitive(adapter.success));
+                ComponentValType::Type(option)
+            } else {
+                ComponentValType::Primitive(adapter.success)
+            };
             let (result, definition) = component.type_defined(None);
-            definition.result(
-                Some(ComponentValType::Primitive(adapter.success)),
-                Some(ComponentValType::Type(error)),
-            );
+            definition.result(Some(success), Some(ComponentValType::Type(error)));
             (
                 shim_func,
                 Some(ComponentValType::Type(result)),

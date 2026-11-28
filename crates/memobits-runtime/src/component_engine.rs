@@ -64,15 +64,19 @@ pub fn run(
     if outcome_sections.next().is_some() {
         return Err(entry::invalid("duplicate component outcome metadata"));
     }
-    if marker.is_some_and(|value| value != b"root-error-v1") {
+    if marker.is_some_and(|value| value != b"root-error-v1" && value != b"root-optional-error-v1") {
         return Err(entry::invalid(
             "invalid or unsupported component outcome metadata",
         ));
     }
+    let optional_outcome = marker == Some(&b"root-optional-error-v1"[..]);
     let root_outcome = match results.as_slice() {
         [Type::Result(result)] if marker.is_some() => {
-            matches!(result.ok(), Some(ref ty) if scalar(ty))
-                && matches!(result.err(), Some(Type::Record(ref record))
+            (if optional_outcome {
+                matches!(result.ok(), Some(Type::Option(ref option)) if scalar(&option.ty()))
+            } else {
+                matches!(result.ok(), Some(ref ty) if scalar(ty))
+            }) && matches!(result.err(), Some(Type::Record(ref record))
                     if record.fields().map(|f| (f.name, f.ty)).collect::<Vec<_>>() == [("code", Type::U32)])
         }
         _ => false,
@@ -156,21 +160,16 @@ pub fn run(
         Some(Val::Float32(v)) => RunValue::F32(v),
         Some(Val::Float64(v)) => RunValue::F64(v),
         Some(Val::Result(Ok(Some(value)))) if root_outcome => {
-            let success = match *value {
-                Val::Bool(v) => EntrySuccess::Bool(v),
-                Val::S8(v) => EntrySuccess::I8(v),
-                Val::S16(v) => EntrySuccess::I16(v),
-                Val::S32(v) => EntrySuccess::I32(v),
-                Val::S64(v) => EntrySuccess::I64(v),
-                Val::U8(v) => EntrySuccess::U8(v),
-                Val::U16(v) => EntrySuccess::U16(v),
-                Val::U32(v) => EntrySuccess::U32(v),
-                Val::U64(v) => EntrySuccess::U64(v),
-                Val::Float32(v) => EntrySuccess::F32(v),
-                Val::Float64(v) => EntrySuccess::F64(v),
-                _ => return Err(entry::invalid("invalid component outcome success")),
+            let outcome = if optional_outcome {
+                match *value {
+                    Val::Option(Some(value)) => EntryOutcome::OkSome(component_success(*value)?),
+                    Val::Option(None) => EntryOutcome::OkNone,
+                    _ => return Err(entry::invalid("invalid component optional outcome success")),
+                }
+            } else {
+                EntryOutcome::Ok(component_success(*value)?)
             };
-            RunValue::Outcome(EntryOutcome::Ok(success))
+            RunValue::Outcome(outcome)
         }
         Some(Val::Result(Err(Some(value)))) if root_outcome => {
             let Val::Record(fields) = *value else {
@@ -189,6 +188,23 @@ pub fn run(
         }
         _ if root_outcome => return Err(entry::invalid("invalid component outcome")),
         _ => unreachable!("validated scalar component result"),
+    })
+}
+
+fn component_success(value: Val) -> Result<EntrySuccess, RunError> {
+    Ok(match value {
+        Val::Bool(v) => EntrySuccess::Bool(v),
+        Val::S8(v) => EntrySuccess::I8(v),
+        Val::S16(v) => EntrySuccess::I16(v),
+        Val::S32(v) => EntrySuccess::I32(v),
+        Val::S64(v) => EntrySuccess::I64(v),
+        Val::U8(v) => EntrySuccess::U8(v),
+        Val::U16(v) => EntrySuccess::U16(v),
+        Val::U32(v) => EntrySuccess::U32(v),
+        Val::U64(v) => EntrySuccess::U64(v),
+        Val::Float32(v) => EntrySuccess::F32(v),
+        Val::Float64(v) => EntrySuccess::F64(v),
+        _ => return Err(entry::invalid("invalid component outcome success")),
     })
 }
 

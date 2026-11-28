@@ -20,8 +20,13 @@ target/debug/mb exec "$artifact_dir/library.wasm" --entry library-answer
 This component slice accepts application entries and explicitly
 exported library functions with scalar parameters and scalar or Unit results.
 The CLI runner only calls zero-argument exports; other hosts can call functions
-with parameters. Application entries may also return `T ! Error` with bool, integer or float `T`;
-optional outcomes, derived errors and other aggregate signatures remain gated. The CLI console capability
+with parameters. Application entries may return `T ! Error` or `T ?! Error`
+(equivalent to `T? ! Error`) when `T` is bool, integer or float, and the error
+is exactly the root `Error` type. The optional form supports `Ok(Some(value))`,
+`Ok(None)` and `Err(error)`; executable facts are in
+[`enums_outcomes.mb`](../../guide/src/enums_outcomes.mb). Derived errors, Unit
+or char payloads, library functions with either outcome signature, and other
+aggregate signatures remain gated. The CLI console capability
 can also be imported through WIT; see [the host example](../host-capability/README.md). `mb run` and `mb test` continue to use core Wasm.
 Recognized compiler-generated traps retain source diagnostics; unrecognized
 component traps use the generic Wasmtime diagnostic.

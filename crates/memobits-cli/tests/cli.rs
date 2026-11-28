@@ -11170,6 +11170,105 @@ fn component_root_outcomes_match_source_and_core() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
+fn component_optional_root_outcomes_match_source_and_core() {
+    let f = Fixture::new();
+    f.write(
+        "project.toml",
+        "[package]\nname='component-optional-outcome'\nentry='main::main'\n",
+    );
+    for (source, expected) in [
+        (
+            "fn main() -> i32 ?! Error { Ok(Some(42)) }",
+            "Result: Ok(Some(i32(42)))\n",
+        ),
+        (
+            "fn main() -> i32 ?! Error { Ok(None) }",
+            "Result: Ok(None)\n",
+        ),
+        (
+            "fn main() -> i32 ?! Error { Err(Error { code: 9 }) }",
+            "Result: Err(Error, code=9)\n",
+        ),
+        (
+            "fn main() -> bool ?! Error { Ok(Some(true)) }",
+            "Result: Ok(Some(bool(true)))\n",
+        ),
+        (
+            "fn main() -> u8 ?! Error { Ok(Some(255)) }",
+            "Result: Ok(Some(u8(255)))\n",
+        ),
+        (
+            "fn main() -> i64 ?! Error { Ok(Some(-9223372036854775808)) }",
+            "Result: Ok(Some(i64(-9223372036854775808)))\n",
+        ),
+        (
+            "fn main() -> u64 ?! Error { Ok(Some(18446744073709551615)) }",
+            "Result: Ok(Some(u64(18446744073709551615)))\n",
+        ),
+        (
+            "fn main() -> f64 ?! Error { Ok(Some(2.5)) }",
+            "Result: Ok(Some(f64(2.5)))\n",
+        ),
+        (
+            "fn main() -> f64 ?! Error { Ok(None) }",
+            "Result: Ok(None)\n",
+        ),
+        (
+            "fn main() -> i64 ?! Error { Err(Error { code: 4294967295 }) }",
+            "Result: Err(Error, code=4294967295)\n",
+        ),
+    ] {
+        f.write("src/main.mb", source);
+        let source_run = f.run(&["run"]);
+        assert!(source_run.status.success(), "{source}: {source_run:?}");
+        for args in [
+            &["build", "--output", "core.wasm"][..],
+            &["build", "--component", "--output", "optional.wasm"][..],
+        ] {
+            let build = f.run(args);
+            assert!(build.status.success(), "{source}: {build:?}");
+        }
+        let bytes = fs::read(f.0.join("optional.wasm")).unwrap();
+        let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
+            wit_parser::decoding::decode(&bytes).unwrap()
+        else {
+            panic!("expected component")
+        };
+        let main = resolve.worlds[world]
+            .exports
+            .values()
+            .find_map(|item| match item {
+                wit_parser::WorldItem::Function(f) if f.name == "main" => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let Some(wit_parser::Type::Id(result_id)) = main.result else {
+            panic!("expected result")
+        };
+        let wit_parser::TypeDefKind::Result(result) = &resolve.types[result_id].kind else {
+            panic!("expected result")
+        };
+        let Some(wit_parser::Type::Id(option_id)) = result.ok else {
+            panic!("expected option")
+        };
+        assert!(matches!(
+            resolve.types[option_id].kind,
+            wit_parser::TypeDefKind::Option(_)
+        ));
+        let core = f.run(&["run", "core.wasm"]);
+        let component = f.run(&["exec", "optional.wasm"]);
+        assert!(core.status.success(), "{source}: {core:?}");
+        assert!(component.status.success(), "{source}: {component:?}");
+        assert!(source_run.stderr.is_empty());
+        assert_eq!(component.stderr, core.stderr);
+        assert_eq!(component.stdout, expected.as_bytes(), "{source}");
+        assert_eq!(component.stdout, source_run.stdout, "{source}");
+        assert_eq!(component.stdout, core.stdout, "{source}");
+    }
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
 fn component_root_outcome_checked_traps_match_core() {
     let f = Fixture::new();
     f.write(

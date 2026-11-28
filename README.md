@@ -114,8 +114,9 @@ cargo run -p memobits-cli -- exec examples/guide/target/memobits/app.wasm
 ```
 
 `mb run` and `mb test` use Wasmi. `mb exec` accepts core Wasm artifacts,
-scalar/Unit components and application components returning `T ! Error` for
-bool, integer or float `T`, with
+scalar/Unit components and application components returning `T ! Error` or
+`T ?! Error` (equivalently, `T? ! Error`) for bool, integer or float `T` with
+the exact root `Error` type, with
 `--entry`, `--project`, and the same fuel options as artifact `run`. Build the
 CLI with `--no-default-features` to omit Wasmtime and `mb exec`. Component
 building and its current limits are demonstrated by the [component example](examples/topics/component/README.md).
