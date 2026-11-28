@@ -11128,8 +11128,13 @@ fn component_root_outcomes_match_source_and_core() {
         f.write("src/main.mb", source);
         let source_run = f.run(&["run"]);
         assert!(source_run.status.success(), "{source}: {source_run:?}");
-        let build = f.run(&["build", "--component", "--output", "outcome.wasm"]);
-        assert!(build.status.success(), "{source}: {build:?}");
+        for args in [
+            &["build", "--output", "outcome-core.wasm"][..],
+            &["build", "--component", "--output", "outcome.wasm"][..],
+        ] {
+            let build = f.run(args);
+            assert!(build.status.success(), "{source}: {build:?}");
+        }
         let bytes = fs::read(f.0.join("outcome.wasm")).unwrap();
         let wit_parser::decoding::DecodedWasm::Component(resolve, world) =
             wit_parser::decoding::decode(&bytes).unwrap()
@@ -11185,10 +11190,19 @@ fn component_root_outcomes_match_source_and_core() {
         };
         assert_eq!(result.ok, Some(expected_ok));
         let exec = f.run(&["exec", "outcome.wasm"]);
-        assert!(exec.status.success(), "{source}: {exec:?}");
-        assert!(exec.stderr.is_empty());
-        assert_eq!(exec.stdout, expected.as_bytes(), "{source}");
+        let core = f.run(&["run", "outcome-core.wasm"]);
+        for output in [&source_run, &core, &exec] {
+            assert!(output.status.success(), "{source}: {output:?}");
+            assert_eq!(output.status.code(), Some(0), "{source}");
+            assert_eq!(output.stdout, expected.as_bytes(), "{source}");
+            assert!(output.stderr.is_empty(), "{source}: {output:?}");
+        }
+        assert_eq!(core.status.code(), source_run.status.code(), "{source}");
+        assert_eq!(exec.status.code(), source_run.status.code(), "{source}");
+        assert_eq!(core.stdout, source_run.stdout, "{source}");
         assert_eq!(exec.stdout, source_run.stdout, "{source}");
+        assert_eq!(core.stderr, source_run.stderr, "{source}");
+        assert_eq!(exec.stderr, source_run.stderr, "{source}");
     }
 }
 
