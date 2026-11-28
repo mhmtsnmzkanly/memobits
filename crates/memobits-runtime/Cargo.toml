@@ -10,7 +10,7 @@ wasmtime = ["dep:wasmtime", "dep:wasmparser"]
 memobits-entry-abi = { path = "../memobits-entry-abi" }
 wasmi = "2.0.0"
 wasmparser = { version = "0.263.0", optional = true }
-wasmtime = { version = "38.0.4", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "component-model"] }
+wasmtime = { version = "38.0.4", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "component-model", "gc-drc"] }
 
 [dev-dependencies]
 wasm-encoder = "0.263.0"

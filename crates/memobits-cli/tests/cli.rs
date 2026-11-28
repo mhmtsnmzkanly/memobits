@@ -7689,6 +7689,30 @@ fn project_inventory_labels_configured_host_imports() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
+fn exec_matches_run_for_unused_externref_table() {
+    let f = Fixture::new();
+    // (module (table 1 externref) (func (export "main") (result i32) i32.const 42))
+    let bytes: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic and version
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // () -> i32
+        0x03, 0x02, 0x01, 0x00, // one function of that type
+        0x04, 0x04, 0x01, 0x6f, 0x00, 0x01, // one externref table
+        0x07, 0x08, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00, // export
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2a, 0x0b, // return 42
+    ];
+    fs::write(f.0.join("externref.wasm"), bytes).unwrap();
+    let run = f.run(&["run", "externref.wasm"]);
+    let exec = f.run(&["exec", "externref.wasm"]);
+    for output in [&run, &exec] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"Result: i32(42)\n");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+    assert_eq!(run.status.code(), exec.status.code());
+}
+
+#[cfg(feature = "wasmtime")]
+#[test]
 fn exec_matches_run_for_the_same_outcome_artifact() {
     let f = Fixture::new();
     f.write(
