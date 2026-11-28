@@ -3,6 +3,8 @@
 This page records completed work and the next development stages.
 Binding language rules live in [design/decisions.md](design/decisions.md); the
 feature catalog is [design/feature-inventory.md](design/feature-inventory.md).
+For an introduction to the remaining work, priorities, and rough estimates, see
+[remaining work and priorities](remaining-work.md).
 
 ## Completed
 
